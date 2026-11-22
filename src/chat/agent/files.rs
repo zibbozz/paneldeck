@@ -66,6 +66,22 @@ pub fn to_crlf(s: &str) -> String {
     o
 }
 
+/// `read_file` auf eine Bilddatei (#357): abgelegt im Bilderordner des Chats, das Ergebnis nennt den Platzhalter.
+fn read_image(root: &Root, r: &Resolved, sink: &crate::chat::images::ImageSink) -> Result<(Value, Vec<String>), ToolErr> {
+    let f = paths::open_read(root, r)?;
+    let max = crate::chat::images::MAX_FILE_BYTES;
+    let mut bytes = Vec::new();
+    f.take(max + 1).read_to_end(&mut bytes).map_err(|e| paths::io_err(&r.rel, &e))?;
+    if bytes.len() as u64 > max {
+        return Err(err("too_large", format!("“{}” is larger than {} MB; read_file reads images up to {} MB.", r.rel, max >> 20, max >> 20)));
+    }
+    let name = r.rel.rsplit('/').next().unwrap_or(&r.rel).to_string();
+    let e = crate::chat::images::import_bytes(&sink.dir, sink.n, bytes, &name, crate::chat::images::Source::Tool).map_err(|m| err("binary_file", format!("“{}” could not be read as an image: {m}", r.rel)))?;
+    let mut v = json!({ "path": r.rel });
+    crate::chat::images::attach_to_result(&mut v, &e);
+    Ok((v, Vec::new()))
+}
+
 /// `read_file`.
 pub fn read_file(args: &Value, env: &AgentEnv) -> Result<(Value, Vec<String>), ToolErr> {
     let root = paths::root(env)?;
@@ -77,6 +93,10 @@ pub fn read_file(args: &Value, env: &AgentEnv) -> Result<(Value, Vec<String>), T
     }
     if r.is_dir {
         return Err(err("is_a_folder", format!("“{}” is a folder. Use list_dir to see its contents, e.g. {{\"path\":\"{}\"}}.", r.rel, r.rel)));
+    }
+    // Bilddatei für ein Modell mit Bildverständnis (#357): als Bild, nicht als Text.
+    if let Some(sink) = env.images.as_ref().filter(|_| crate::chat::images::is_image_name(&r.rel)) {
+        return read_image(&root, &r, sink);
     }
     let offset = match int_arg(args, "offset") {
         Some(o) if o < 1 => {
@@ -572,6 +592,31 @@ mod tests {
         let small = AgentEnv { max_bytes: 4096, ..env.clone() };
         let (v, _) = read_file(&json!({"path": "wide.txt"}), &small).unwrap();
         assert!(v.to_string().len() <= 4096, "{}", v.to_string().len());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn read_file_reads_images_as_images_for_vision_models() {
+        let (d, env) = tmp_root("read-img");
+        let mut png = Vec::new();
+        image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(6, 4, image::Rgba([1, 2, 3, 255]))).write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
+        std::fs::create_dir_all(d.join("docs")).unwrap();
+        std::fs::write(d.join("docs/shot.png"), &png).unwrap();
+        std::fs::write(d.join("broken.png"), b"not a png").unwrap();
+        // Ohne Bildverständnis: binär wie bisher
+        assert_eq!(read_file(&json!({"path": "docs/shot.png"}), &env).unwrap_err().0, "binary_file");
+        // Mit: abgelegt im Bilderordner, das Ergebnis nennt den Platzhalter
+        let sink = crate::chat::images::ImageSink { dir: d.join("images-out"), n: 5 };
+        let venv = AgentEnv { images: Some(sink.clone()), ..env.clone() };
+        let (mut v, _) = read_file(&json!({"path": "docs/shot.png"}), &venv).unwrap();
+        assert_eq!((v["path"].as_str(), v["image"].as_str()), (Some("docs/shot.png"), Some("[Image#5]")));
+        let e = crate::chat::images::take_from_result(&mut v).unwrap();
+        assert_eq!((e.n, e.name.as_str(), e.width, e.source), (5, "shot.png", 6, crate::chat::images::Source::Tool));
+        assert_eq!(std::fs::read(sink.dir.join("5.png")).unwrap(), png);
+        assert_eq!(read_file(&json!({"path": "broken.png"}), &venv).unwrap_err().0, "binary_file");
+        // Text bleibt Text, auch mit Bildverständnis
+        std::fs::write(d.join("a.txt"), "x\n").unwrap();
+        assert!(read_file(&json!({"path": "a.txt"}), &venv).unwrap().0.get("content").is_some());
         let _ = std::fs::remove_dir_all(&d);
     }
 

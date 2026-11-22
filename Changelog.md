@@ -9,6 +9,10 @@ Deviation: instead of `[Unreleased]`, changes that are not yet released are list
 
 ## [3.1.0] - WIP
 
+### Added
+
+- Local chats: **images and screenshots** in the input – paste with Ctrl+V (also screenshots taken with Win+Shift+S), pick files with the new paperclip button or drop image files from Explorer onto the chat. The input shows `[Image#1]` at the cursor; clicking the token (in the input and in sent messages) opens the image in a popup (Esc closes). Models that can read images get them (Ollama: detected from the model's capabilities; OpenAI-compatible servers: tried, and a rejection is remembered for the model). Images larger than 1568 px or 5 MB are scaled down for the model, the original stays. For models without image support the image stays in the chat but is not sent, and a note names suitable models. For models with image support, `screenshot` and `read_file` (image files in the project folder) return the image itself. Images are stored in `chats/<id>/images/`, deleted with the chat and listed in *Clean up* (*Chat images*); new optional fields `images` in `chats/<id>.json`, `vision` per model and per reported model in `settings.json`, new setting *Images* (Auto/On/Off) per model in *Settings → Models* (#357)
+
 ## [3.0.0] - 2026-11-22
 
 ### Added

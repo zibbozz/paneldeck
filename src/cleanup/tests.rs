@@ -170,6 +170,41 @@ fn live_run_deletes_only_the_selection() {
     let _ = std::fs::remove_dir_all(&d);
 }
 
+/// Bilder in Chats (#357): eigener Eintrag für alle; verwaiste Bilder (Chat zu, beiseitegelegt) zählen zu den
+/// verwaisten Verläufen, alle zu „Chatverläufe – alle“.
+#[test]
+fn chat_images_are_listed_and_orphaned_ones_go_with_orphaned_histories() {
+    let d = tmp("chatimg");
+    sample(&d);
+    put(&d.join("chats").join("2").join("images").join("1.png"), 1000);
+    put(&d.join("chats").join("2").join("images").join("1.send.jpg"), 100);
+    put(&d.join("chats").join("9").join("images").join("1.png"), 50);
+    put(&d.join("chats").join("2.orphan-5-images").join("1.png"), 5);
+    // fremder Ordner ohne Id: gehört nicht dazu
+    put(&d.join("chats").join("misc").join("x.png"), 3);
+    let c = ctx(&d);
+    let s = scan(&c);
+    let now = SystemTime::now();
+    let o = Opts::default();
+    let amt = |i: Item| amount(i, s.found(i).unwrap(), &o, now);
+    assert_eq!(amt(Item::ChatImages), (1155, 4, 0));
+    assert_eq!(amt(Item::ChatsOrphaned), (407 + 55, 4, 0), "9.json, beiseitegelegter Verlauf und deren Bilder");
+    assert_eq!(amt(Item::ChatsAll), (707 + 1155, 7, 0));
+    assert_eq!(Item::from_id("chat_images"), Some(Item::ChatImages));
+    assert!(Item::ChatImages.needs_typing(false) && !Item::ChatImages.preselected() && Item::ChatImages.group() == Group::History);
+    assert_eq!(Item::ChatImages.label(Lang::De), "Bilder in Chats");
+    // Verwaiste löschen: die Bilder des offenen Chats 2 bleiben
+    let r = execute(&c, &s, &sel(&[Item::ChatsOrphaned]), &o, Phase::Live);
+    assert!(r.iter().all(|x| x.ok()), "{r:?}");
+    assert!(!d.join("chats").join("9").join("images").join("1.png").exists() && d.join("chats").join("2").join("images").join("1.png").exists());
+    // Alle Bilder: der Verlauf bleibt
+    let r = execute(&c, &scan(&c), &sel(&[Item::ChatImages]), &o, Phase::Live);
+    assert!(r.iter().all(|x| x.ok()), "{r:?}");
+    assert!(!d.join("chats").join("2").join("images").join("1.png").exists() && d.join("chats").join("2.json").exists());
+    assert!(d.join("chats").join("misc").join("x.png").exists());
+    let _ = std::fs::remove_dir_all(&d);
+}
+
 #[test]
 fn partial_failure_lists_the_file_and_the_rest_continues() {
     let d = tmp("partial");

@@ -16,7 +16,7 @@ impl App {
     /// Projektordner und Einstellungen der Agenten-Werkzeuge für den Chat `chat`.
     pub(in crate::app) fn agent_env(&self, chat: u64) -> AgentEnv {
         let root = self.entries.get(&chat).map(|e| e.meta.cwd.trim().to_string()).filter(|c| !c.is_empty()).map(std::path::PathBuf::from);
-        AgentEnv { root, data_dir: Some(self.dir.clone()), settings: self.settings.agent_tools.clone(), max_bytes: 0 }
+        AgentEnv { root, data_dir: Some(self.dir.clone()), settings: self.settings.agent_tools.clone(), max_bytes: 0, images: None }
     }
 
     /// Agenten-Werkzeug des Chats `chat` ausführen (nach Prüfung und Freigabe in `ChatState::tool_step`). `max_bytes` =
@@ -38,6 +38,8 @@ impl App {
             _ => {
                 let mut env = self.agent_env(chat);
                 env.max_bytes = max_bytes;
+                // `read_file` auf ein Bild für ein Modell mit Bildverständnis (#357).
+                env.images = self.chat_tool_image_sink(chat, call);
                 let (name, args) = (call.name.clone(), call.arguments.clone());
                 let info = chat_agent::log_info(call);
                 let (log_how, model) = self.log_origin("chat", Some(chat));

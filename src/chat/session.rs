@@ -152,6 +152,8 @@ pub struct ChatState {
     fail_count: u32,
     /// Die Runde hielt an, weil derselbe Aufruf [`LOOP_LIMIT`]-mal in Folge fehlschlug (deutlich angezeigt).
     pub loop_stop: bool,
+    /// Bilder zur Laufzeit (#357): Ordner, Bildverständnis des Modells, laufende Aufbereitungen, Ablehnung des Servers.
+    pub img: super::images::ChatImages,
 }
 
 /// So oft in Folge darf derselbe fehlgeschlagene Aufruf (gleiches Werkzeug, gleiche Argumente) kommen, dann hält die
@@ -266,6 +268,7 @@ impl ChatState {
             fail_streak: None,
             fail_count: 0,
             loop_stop: false,
+            img: Default::default(),
         };
         if fixed > 0 {
             c.touch();
@@ -400,9 +403,12 @@ impl ChatState {
     /// gerade eine Antwort läuft.
     pub fn send(&mut self, backend: &dyn ChatBackend, meta: &ChatMeta, cx: &TurnContext, repaint: Repaint) -> bool {
         let text = self.draft.trim().to_string();
-        if text.is_empty() || self.busy() {
+        if text.is_empty() || self.busy() || self.images_pending(&text) {
             return false;
         }
+        // Bilder (#357): die Platzhalter im Text, die es im Chat gibt.
+        let images = super::images::referenced(&text, &self.file.images);
+        self.img.error = None;
         // Eine angehaltene Runde endet: ihre offenen Aufrufe laufen nicht mehr.
         self.cancel_tools();
         self.reset_steps();
@@ -410,12 +416,43 @@ impl ChatState {
         if !(self.editing && logic::apply_edit(&mut self.file.messages, &text)) {
             self.file.messages.push(ChatMsg::new(Role::User, text));
         }
+        if let Some(i) = logic::last_user(&self.file.messages) {
+            self.file.messages[i].images = images;
+        }
         self.changed(at);
         self.editing = false;
         self.draft_before_edit = None;
         self.draft.clear();
         self.start_turn(backend, meta, cx, repaint);
         true
+    }
+
+    /// Wird ein Bild, dessen Platzhalter in `text` steht, noch aufbereitet (#357)? Dann wartet das Senden.
+    pub fn images_pending(&self, text: &str) -> bool {
+        self.img.busy() && super::images::tokens(text).iter().any(|(_, _, n)| self.img.pending(*n))
+    }
+
+    /// Fertig aufbereitete Bilder übernehmen (#357, jedes Bild): ein Eintrag mehr im Chat; schlug es fehl, fällt der
+    /// Platzhalter aus dem Entwurf und der Fehler steht unter dem Eingabefeld. `true`, wenn sich etwas geändert hat.
+    pub fn poll_images(&mut self) -> bool {
+        let done = self.img.poll();
+        let changed = !done.is_empty();
+        for (n, r) in done {
+            match r {
+                Ok(e) => {
+                    self.file.images.retain(|x| x.n != e.n);
+                    self.file.images.push(e);
+                }
+                Err(msg) => {
+                    super::images::remove_token(&mut self.draft, n);
+                    self.img.error = Some(msg);
+                }
+            }
+        }
+        if changed {
+            self.touch();
+        }
+        changed
     }
 
     /// Letzte Antwort verwerfen und neu erzeugen (auch „Wiederholen“ nach einem Fehler).
@@ -634,9 +671,16 @@ impl ChatState {
     /// Ergebnis eines ausgeführten Aufrufs eintragen – so gekürzt, dass die Runde in den Kontext passt. (Vor der
     /// Ausführung wurde schon geprüft, dass Platz ist; reicht er trotzdem nicht, kommt ein Platzhalter und die Runde
     /// hält an – der Systemprompt darf nie abgeschnitten werden.)
-    fn record_result(&mut self, name: &str, r: ToolResult) {
+    fn record_result(&mut self, name: &str, mut r: ToolResult) {
         let call = self.calls.first().map(|p| p.call.clone());
         let failed = r.is_err();
+        // Bild des Werkzeugs (#357, `screenshot`/`read_file` bei Modellen mit Bildverständnis): schon abgelegt, der
+        // Eintrag kommt in den Chat, die Nachricht nennt seine Nummer.
+        let image = r.as_mut().ok().and_then(super::images::take_from_result);
+        if let Some(e) = &image {
+            self.file.images.retain(|x| x.n != e.n);
+            self.file.images.push(e.clone());
+        }
         if !self.room_for_result() {
             let status = if r.is_ok() { ToolStatus::Ok } else { ToolStatus::Error };
             self.finish_first(status, tools::elided());
@@ -645,6 +689,9 @@ impl ChatState {
         }
         let (st, content) = tools::result_message(name, r, self.result_cap_for(name));
         self.finish_first(st, content);
+        if let (Some(e), Some(m)) = (image, self.file.messages.last_mut()) {
+            m.images = vec![e.n];
+        }
         if let Some(c) = call {
             if self.note_outcome(&c, failed) {
                 self.stop_loop(&c.name);
@@ -947,6 +994,7 @@ impl ChatState {
                     }
                 }
                 TurnEvent::Thinking => self.thinking = true,
+                TurnEvent::VisionRejected => self.img.rejected = true,
                 TurnEvent::ToolCall(mut c) => {
                     // Kennungen müssen im ganzen Chat eindeutig sein (Ollama vergibt je Antwort `call_0`, `call_1` …).
                     if c.id.is_empty() || self.file.messages.iter().any(|m| m.tool_calls.iter().any(|x| x.id == c.id)) {
@@ -1083,6 +1131,79 @@ mod tests {
         pump(&mut c);
         assert!(c.has_error(), "Echo meldet bei /error wieder einen Fehler");
         assert_eq!(c.messages().len(), 4, "der alte Fehler wurde ersetzt, nicht angehängt");
+    }
+
+    /// Bilder (#357): Senden nennt die Bilder der Platzhalter, wartet auf noch laufende Aufbereitungen; fertige kommen in
+    /// den Chat, fehlgeschlagene fallen aus dem Entwurf; eine Ablehnung des Servers wird gemerkt.
+    #[test]
+    fn sending_attaches_referenced_images_and_waits_for_pending_ones() {
+        let b = EchoBackend { delay: Duration::ZERO };
+        let meta = crate::chat::default_chat_meta();
+        let rp: Repaint = Arc::new(|| {});
+        let mut c = ChatState::new(ChatFile::default(), None);
+        let entry = |n: u32| crate::chat::images::ImageEntry { n, file: format!("{n}.png"), mime: "image/png".into(), ..Default::default() };
+        // Bild 1 wird noch vorbereitet: Senden wartet
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        let n = c.img.reserve(&c.file);
+        assert_eq!(n, 1);
+        c.img.start(n, move || {
+            let _ = rx.recv();
+            Ok(crate::chat::images::ImageEntry { n: 1, file: "1.png".into(), mime: "image/png".into(), ..Default::default() })
+        }, rp.clone());
+        let n2 = c.img.reserve(&c.file);
+        c.img.start(n2, || Err("kaputt".into()), rp.clone());
+        c.draft = "look [Image#1] and [Image#2] and [Image#7]".into();
+        assert!(c.images_pending(&c.draft));
+        assert!(!c.send(&b, &meta, &TurnContext::default(), rp.clone()), "wartet auf das Bild");
+        tx.send(()).unwrap();
+        let t = Instant::now();
+        while c.img.busy() && t.elapsed() < Duration::from_secs(5) {
+            c.poll_images();
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(c.file.images, [entry(1)]);
+        assert_eq!(c.draft, "look [Image#1] and and [Image#7]", "fehlgeschlagenes Bild fällt aus dem Entwurf");
+        assert_eq!(c.img.error.as_deref(), Some("kaputt"));
+        assert!(c.send(&b, &meta, &TurnContext::default(), rp.clone()));
+        pump(&mut c);
+        assert_eq!(c.messages()[0].images, [1], "nur vorhandene Bilder");
+        assert!(c.img.error.is_none());
+        // Bearbeiten der letzten Nachricht: die Bilder folgen dem neuen Text
+        assert!(c.begin_edit());
+        c.draft = "only text".into();
+        assert!(c.send(&b, &meta, &TurnContext::default(), rp.clone()));
+        pump(&mut c);
+        assert!(c.messages()[0].images.is_empty());
+        // Ablehnung des Servers
+        struct Reject;
+        impl ChatBackend for Reject {
+            fn start(&self, _: &ChatMeta, _: &[ChatMsg], _: &TurnContext, _: Repaint) -> TurnHandle {
+                let (h, tx, _) = TurnHandle::pair();
+                tx.send(TurnEvent::VisionRejected).unwrap();
+                tx.send(TurnEvent::Error("rejected".into())).unwrap();
+                h
+            }
+        }
+        c.draft = "[Image#1]".into();
+        assert!(c.send(&Reject, &meta, &TurnContext::default(), rp.clone()));
+        pump(&mut c);
+        assert!(c.img.rejected && c.has_error());
+    }
+
+    /// Bild eines Werkzeugs (#357): der Eintrag kommt in den Chat, das Ergebnis nennt nur den Platzhalter.
+    #[test]
+    fn a_tool_image_is_attached_to_its_result_message() {
+        let mut c = ChatState::new(ChatFile::default(), None);
+        let call = ToolCall { id: "s1".into(), name: "screenshot".into(), arguments: serde_json::json!({}) };
+        c.calls.push(PendingCall { call: call.clone(), state: CallState::Running, rx: None });
+        let e = crate::chat::images::ImageEntry { n: 4, file: "4.png".into(), mime: "image/png".into(), width: 9, height: 9, source: crate::chat::images::Source::Tool, ..Default::default() };
+        let mut v = serde_json::json!({"width": 9});
+        crate::chat::images::attach_to_result(&mut v, &e);
+        c.record_result("screenshot", Ok(v));
+        let m = c.messages().last().unwrap();
+        assert_eq!(m.images, [4]);
+        assert!(m.content.contains("[Image#4]") && !m.content.contains(crate::chat::images::TOOL_KEY), "{}", m.content);
+        assert_eq!(c.file.images, [e]);
     }
 
     #[test]
