@@ -180,6 +180,44 @@ fn new_buttons_create_entries_and_show_their_details() {
     });
 }
 
+/// Geburtstags-Datum über den Puffer: ungültige Eingaben werden nicht angepasst und nicht gespeichert.
+#[test]
+fn birthday_date_is_saved_only_when_valid_and_never_clamped() {
+    both(|h| {
+        let lang = h.lang;
+        let mut b = Birthday::new("Anna", 11, 20, Some(2000));
+        store::save_birthday(h.conn(), &mut b).unwrap();
+        h.ui.ensure_loaded(Some(&h.db.conn));
+        h.ui.sel_birthday = Some(b.id);
+        h.sub(Sub::Birthdays);
+        // Tag 31 im November eingegeben (Monat folgt erst): bleibt 31, gespeichert bleibt der 20.11.
+        h.ui.bday_edit.as_mut().unwrap().day = 31;
+        h.frames(2);
+        assert_eq!(h.ui.bday_edit.as_ref().unwrap().day, 31, "nicht angepasst");
+        assert!(h.has(lang.t("Dieses Datum gibt es nicht", "This date does not exist")), "{:?}", h.texts());
+        assert_eq!((store::load(h.conn()).unwrap().birthdays[0].day, store::load(h.conn()).unwrap().birthdays[0].month), (20, 11));
+        // jetzt Januar: gültig, gespeichert
+        h.ui.bday_edit.as_mut().unwrap().month = 1;
+        h.frames(2);
+        let s = store::load(h.conn()).unwrap().birthdays[0].clone();
+        assert_eq!((s.day, s.month, s.year), (31, 1, Some(2000)));
+        // 29.02. und das Jahr durch Nicht-Schaltjahre ziehen: der 29. bleibt, gespeichert wird nur in Schaltjahren
+        {
+            let e = h.ui.bday_edit.as_mut().unwrap();
+            e.day = 29;
+            e.month = 2;
+            e.year = 2001;
+        }
+        h.frames(2);
+        assert_eq!(store::load(h.conn()).unwrap().birthdays[0].day, 31, "2001 hat keinen 29.02.");
+        h.ui.bday_edit.as_mut().unwrap().year = 2004;
+        h.frames(2);
+        let s = store::load(h.conn()).unwrap().birthdays[0].clone();
+        assert_eq!((s.day, s.month, s.year), (29, 2, Some(2004)));
+        assert_eq!(h.ui.bday_edit.as_ref().unwrap().day, 29);
+    });
+}
+
 #[test]
 fn delete_asks_first_and_then_removes_the_entry() {
     both(|h| {

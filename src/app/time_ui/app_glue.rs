@@ -237,8 +237,9 @@ impl App {
         match book(conn, &ask, lang) {
             Ok(text) => {
                 if let Some((id, upto)) = ask.stopwatch {
-                    let env = Env { conn, lang, now_ms: crate::time::now_ms() };
-                    self.time.edit_stopwatch(&env, id, |s| s.booked_ms = upto.max(s.booked_ms));
+                    let now = crate::time::now_ms();
+                    let env = Env { conn, lang, now_ms: now };
+                    self.time.edit_stopwatch(&env, id, |s| s.mark_booked(upto, now));
                 }
                 self.time.out.push(Out::Booked);
                 self.toast(text);
@@ -324,9 +325,13 @@ pub(super) fn handle_tick(t: &mut TimeUi, conn: Option<&rusqlite::Connection>, n
                 }
                 start_ring(t, RingKind::Alarm(id), now, title, body, Kind::Alarm, &a.sound);
             }
-            Event::AlarmMissed { id, at } => {
+            Event::AlarmMissed { id, at, snoozed } => {
                 if let Some(a) = t.data.alarm(id) {
-                    missed.push(alarm::missed_text(a, at, &chrono::Local, lang));
+                    let mut text = alarm::missed_text(a, at, &chrono::Local, lang);
+                    if snoozed {
+                        text = format!("{text} – {}", lang.t("Schlummern vorbei", "snooze over"));
+                    }
+                    missed.push(text);
                 }
             }
             Event::TimerDone { id, at } => {

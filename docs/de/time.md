@@ -18,7 +18,7 @@ Jeder Unterreiter ist eine Liste links mit einem Detailbereich rechts. **+ Neu �
 - Wecker gelten in **lokaler Zeit**. In der Nacht der Umstellung auf Sommerzeit klingelt eine Uhrzeit, die es nicht gibt (z. B. 02:30), zur nächsten gültigen Zeit (03:00); in der Nacht der Umstellung auf Winterzeit klingelt die doppelte Stunde nur einmal.
 
 ### Verpasste Wecker
-War Paneldeck geschlossen oder schlief der Rechner, als ein Wecker fällig war, zeigt Paneldeck oben im Reiter einen Hinweis und kurz eine Meldung, z. B. *Verpasst: Wecker „Aufstehen“ 07:00 (Mo)*. Je Wecker erscheinen höchstens die zehn jüngsten verpassten Zeiten. *Ausblenden* entfernt die Hinweise.
+War Paneldeck geschlossen oder schlief der Rechner, als ein Wecker fällig war, zeigt Paneldeck oben im Reiter einen Hinweis und kurz eine Meldung, z. B. *Verpasst: Wecker „Aufstehen“ 07:00 (Mo)* – auch für ein Schlummern, das inzwischen ablief (*… – Schlummern vorbei*). Wird die Systemuhr zurückgestellt, gelten Wecker ab der neuen Zeit, statt zu schweigen. Je Wecker erscheinen höchstens die zehn jüngsten verpassten Zeiten. *Ausblenden* entfernt die Hinweise.
 
 ## Timer
 - Mehrere **benannte Countdowns** laufen gleichzeitig. In den Details: **Starten**, **Anhalten** / **Weiter**, **Neu starten** (mit der vollen Dauer) und **Zurücksetzen**; die Liste hat je Timer einen Knopf Starten/Anhalten.
@@ -44,7 +44,7 @@ Monats-, Wochen- und Tagesansicht mit eigenen Terminen (auch wiederkehrend), den
 ![Weltuhren mit einer analogen Uhr in den Details](../images/de/time-clocks.png)
 
 ## Geburtstage
-- Name und Datum; das **Jahr ist optional**.
+- Name und Datum; das **Jahr ist optional**. Ein Datum, das es nicht gibt (z. B. 31. April oder 29. Februar mit einem Nicht-Schaltjahr), wird markiert und erst gespeichert, wenn es gültig ist.
 - Jeder Eintrag zeigt das aktuelle Alter (mit Jahr) und die Zeit bis zum nächsten Geburtstag in der Form **„37 in 5 Tagen und 2 Monaten“** – die Monate entfallen, wenn keine mehr übrig sind, die Tage sind der Rest nach den vollen Monaten (nie mehr als 31). Ohne Jahr steht nur der Countdown (*in 5 Tagen und 2 Monaten*). Am Tag selbst: **Heute! 🎂**
 - Ein Geburtstag am **29. Februar** erscheint in Nicht-Schaltjahren am 28. Februar.
 - **Erinnerung** je Eintrag (standardmäßig aus): eine Benachrichtigung am Tag selbst, ab 8 Uhr.
@@ -62,7 +62,7 @@ Monats-, Wochen- und Tagesansicht mit eigenen Terminen (auch wiederkehrend), den
 
 - **Toast:** eine Desktop-Benachrichtigung, wenn Paneldeck nicht vorn ist, sonst ein Hinweis unten rechts.
 - **Taskleistenknopf blinken lassen** (standardmäßig aus), **Lautstärke**, wie lange Wecker höchstens klingeln, **Sekunden in Weltuhren**.
-- **Klänge:** Fünf eingebaute Klänge (*Glockenspiel*, *Piepen*, *Digital*, *Glocke*, *Sanft*) erzeugt Paneldeck selbst; eine eigene WAV- oder MP3-Datei (bis 20 MB) lässt sich je Wecker oder Timer wählen. Fehlt die Datei, klingt der Standardklang. Unter Linux und macOS spielt Paneldeck Klänge mit den Programmen des Systems (`paplay`, `pw-play` oder `aplay`; `afplay`) – ohne eines davon bleibt es still.
+- **Klänge:** Fünf eingebaute Klänge (*Glockenspiel*, *Piepen*, *Digital*, *Glocke*, *Sanft*) erzeugt Paneldeck selbst; eine eigene WAV- oder MP3-Datei (bis 20 MB) lässt sich je Wecker oder Timer wählen. Fehlt die Datei, klingt der Standardklang. Unter Linux und macOS spielt Paneldeck Klänge mit den Programmen des Systems (`paplay`, `pw-play` oder – nur für WAV – `aplay`; `afplay`); scheitert eines, kommt das nächste, ohne sie bleibt es still. Höchstens acht Klänge spielen gleichzeitig.
 
 ## Zeiterfassung an Tickets
 Standardmäßig aus. Mit *Optionen → Zeit von Timern und Stoppuhren an Tickets buchen* bekommen Timer und Stoppuhren in den Details ein Feld **Ticket** (z. B. `PAN-12`; leer = keins). Wird eine Stoppuhr mit Ticket gestoppt oder läuft ein Timer mit Ticket ab bzw. wird zurückgesetzt, fragt Paneldeck **„47 min auf PAN-12 buchen?“** – *Buchen* legt einen [Zeiteintrag](todo-and-tickets.md) am Ticket an (Beginn und Dauer des Laufs, der Name des Timers bzw. der Stoppuhr als Kommentar), *Nicht buchen* überspringt es. Eine Stoppuhr bietet nur die noch nicht gebuchte Zeit an. Läufe unter einer Minute werden nicht angeboten.

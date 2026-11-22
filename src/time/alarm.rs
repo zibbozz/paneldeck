@@ -27,6 +27,9 @@ pub const SNOOZE_MAX_RANGE: (u32, u32) = (0, 30);
 pub const DEFAULT_SOUND: &str = "builtin:chime";
 /// Höchstens so viele verpasste Termine je Wecker werden gemeldet (die jüngsten).
 pub const MAX_MISSED: usize = 10;
+/// Liegt `armed_from` (bzw. ein Schlummern) weiter als so viele Sekunden in der Zukunft, wurde die Systemuhr
+/// zurückgestellt: Der Wecker wird ab jetzt neu scharf gemacht, statt stunden- oder tagelang zu schweigen.
+pub const CLOCK_BACK_TOLERANCE: i64 = 300;
 pub const MAX_NAME_CHARS: usize = 100;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -96,6 +99,7 @@ impl Alarm {
     /// Prüft den Wecker zum Zeitpunkt `now` (siehe Moduldoku). Ändert `armed_from`, Schlummern und – bei einmaligen
     /// Weckern – `enabled`; `Some` heißt: etwas ist passiert (der Wecker muss gespeichert werden).
     pub fn check<Tz: TimeZone>(&mut self, now: i64, tz: &Tz, grace: i64) -> Option<Due> {
+        let fixed = self.fix_clock_back(now);
         let mut occ: Vec<i64> = Vec::new();
         if self.enabled {
             let mut t = self.armed_from;
@@ -112,7 +116,7 @@ impl Alarm {
         }
         let snooze_due = self.snoozed_until.filter(|&s| s <= now);
         if occ.is_empty() && snooze_due.is_none() {
-            return None;
+            return fixed.then(Due::default);
         }
         if !occ.is_empty() {
             self.armed_from = now;
@@ -139,12 +143,33 @@ impl Alarm {
             self.snoozed_until = None;
         } else if let Some(s) = snooze_due {
             self.snoozed_until = None;
+            due.snoozed = true;
             if now - s <= grace {
                 due.ring = Some(s);
-                due.snoozed = true;
+            } else {
+                // Schlummern lief ab, während Paneldeck zu war bzw. der Rechner schlief: als verpasst melden
+                due.missed_snooze = Some(s);
             }
         }
         Some(due)
+    }
+
+    /// Systemuhr zurückgestellt (siehe [`CLOCK_BACK_TOLERANCE`]): `armed_from` auf jetzt, ein unplausibel fernes
+    /// Schlummern auf jetzt + Schlummerdauer. `true`, wenn sich etwas geändert hat.
+    pub fn fix_clock_back(&mut self, now: i64) -> bool {
+        let mut changed = false;
+        if self.armed_from > now + CLOCK_BACK_TOLERANCE {
+            self.armed_from = now;
+            changed = true;
+        }
+        let snooze = self.snooze_minutes.clamp(SNOOZE_MINUTES_RANGE.0, SNOOZE_MINUTES_RANGE.1) as i64 * 60;
+        if let Some(s) = self.snoozed_until
+            && s > now + snooze + CLOCK_BACK_TOLERANCE
+        {
+            self.snoozed_until = Some(now + snooze);
+            changed = true;
+        }
+        changed
     }
 
     /// Schlummern ab `now`. `false`, wenn das Limit erreicht ist (dann bleibt alles, wie es ist).
@@ -229,8 +254,10 @@ pub fn days_text(days: u8, lang: Lang) -> String {
 pub struct Due {
     /// Termin, der jetzt klingelt (Unix-Sekunden).
     pub ring: Option<i64>,
-    /// `ring` ist das Ende eines Schlummerns.
+    /// `ring` bzw. `missed_snooze` ist das Ende eines Schlummerns.
     pub snoozed: bool,
+    /// Ende eines Schlummerns, das zu lange zurückliegt, um noch zu klingeln (Unix-Sekunden).
+    pub missed_snooze: Option<i64>,
     /// Verpasste Termine, älteste zuerst (höchstens [`MAX_MISSED`]).
     pub missed: Vec<i64>,
 }
@@ -419,6 +446,38 @@ mod tests {
         assert!(!a.snooze(t0 + 600), "Limit erreicht");
         a.dismiss();
         assert!(a.can_snooze() && a.snoozed_until.is_none());
+    }
+
+    /// Systemuhr zurückgestellt: `armed_from` lag in der „Zukunft“ – der Wecker wird neu scharf und klingelt.
+    #[test]
+    fn clock_set_back_rearms_the_alarm() {
+        let mut a = Alarm::new("", 7, 0, ALL_DAYS, ts(2026, 11, 20, 12, 0));
+        // Uhr zwei Tage zurück: 2026-11-18 06:00
+        let back = ts(2026, 11, 18, 6, 0);
+        assert_eq!(a.check(back, &Berlin, 120), Some(Due::default()), "neu scharf (speichern)");
+        assert_eq!(a.armed_from, back);
+        let due = a.check(ts(2026, 11, 18, 7, 0), &Berlin, 120).unwrap();
+        assert_eq!(due.ring, Some(ts(2026, 11, 18, 7, 0)));
+        // kleine Abweichung (< 5 min) ändert nichts
+        let mut b = Alarm::new("", 7, 0, ALL_DAYS, back + 200);
+        assert_eq!(b.check(back, &Berlin, 120), None);
+        // unplausibel fernes Schlummern wird auf jetzt + 5 min gesetzt
+        let mut c = Alarm::new("", 7, 0, ALL_DAYS, back);
+        c.snoozed_until = Some(back + 86_400);
+        assert!(c.fix_clock_back(back));
+        assert_eq!(c.snoozed_until, Some(back + 300));
+    }
+
+    /// Ein Schlummern, das während des Ruhezustands ablief, wird als verpasst gemeldet.
+    #[test]
+    fn snooze_that_ended_while_away_is_reported_as_missed() {
+        let t0 = ts(2026, 11, 18, 7, 0);
+        let mut a = Alarm::new("", 7, 0, 0, t0 - 3600);
+        assert!(a.check(t0, &Berlin, 120).unwrap().ring.is_some());
+        assert!(a.snooze(t0));
+        let due = a.check(t0 + 3600, &Berlin, 120).unwrap();
+        assert_eq!((due.ring, due.missed_snooze, due.snoozed), (None, Some(t0 + 300), true));
+        assert_eq!(a.snoozed_until, None);
     }
 
     #[test]

@@ -1,7 +1,7 @@
 //! Unterreiter „Geburtstage“: Liste (nächster Geburtstag zuerst) mit Alter und Countdown, Details mit Name, Datum (Jahr
 //! optional) und Erinnerung (Standard aus).
 
-use super::{row, rows, Env, Sub, TimeUi};
+use super::{row, rows, BdayEdit, Env, Sub, TimeUi};
 use crate::style;
 use crate::time::birthday::{self, Birthday};
 use crate::time::store;
@@ -58,8 +58,11 @@ impl TimeUi {
         }
         ui.add_space(8.0);
         let mut e = b.clone();
-        let mut has_year = e.year.is_some();
-        let mut year = e.year.unwrap_or(today.year() - 30);
+        // Datum über einen Bearbeitungspuffer: Eingaben werden nie angepasst; gespeichert wird nur ein gültiges Datum.
+        if self.bday_edit.as_ref().is_none_or(|x| x.id != id) {
+            self.bday_edit = Some(BdayEdit { id, day: b.day, month: b.month, has_year: b.year.is_some(), year: b.year.unwrap_or(today.year() - 30) });
+        }
+        let mut buf = self.bday_edit.clone().expect("gesetzt");
         egui::Grid::new("time_bday_grid").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
             ui.label(lang.t("Name", "Name"));
             ui.add(egui::TextEdit::singleline(&mut e.name).char_limit(birthday::MAX_NAME_CHARS).desired_width(220.0));
@@ -67,19 +70,19 @@ impl TimeUi {
             ui.label(lang.t("Datum", "Date"));
             ui.horizontal(|ui| {
                 if lang == crate::state::Lang::De {
-                    ui.add(egui::DragValue::new(&mut e.day).range(1..=31).suffix("."));
-                    ui.add(egui::DragValue::new(&mut e.month).range(1..=12).suffix("."));
+                    ui.add(egui::DragValue::new(&mut buf.day).range(1..=31).suffix("."));
+                    ui.add(egui::DragValue::new(&mut buf.month).range(1..=12).suffix("."));
                 } else {
-                    ui.add(egui::DragValue::new(&mut e.month).range(1..=12).prefix(lang.t("Monat ", "Month ")));
-                    ui.add(egui::DragValue::new(&mut e.day).range(1..=31).prefix(lang.t("Tag ", "Day ")));
+                    ui.add(egui::DragValue::new(&mut buf.month).range(1..=12).prefix(lang.t("Monat ", "Month ")));
+                    ui.add(egui::DragValue::new(&mut buf.day).range(1..=31).prefix(lang.t("Tag ", "Day ")));
                 }
             });
             ui.end_row();
             ui.label(lang.t("Jahr", "Year"));
             ui.horizontal(|ui| {
-                ui.checkbox(&mut has_year, "");
-                ui.add_enabled(has_year, egui::DragValue::new(&mut year).range(1000..=today.year()));
-                if !has_year {
+                ui.checkbox(&mut buf.has_year, "");
+                ui.add_enabled(buf.has_year, egui::DragValue::new(&mut buf.year).range(1000..=today.year()));
+                if !buf.has_year {
                     ui.label(RichText::new(lang.t("unbekannt (nur Countdown)", "unknown (countdown only)")).color(style::dim(ui)));
                 }
             });
@@ -91,28 +94,28 @@ impl TimeUi {
             });
             ui.end_row();
         });
-        e.year = has_year.then_some(year);
-        // Tag an den Monat anpassen (31. → 30. April, 29. Februar → 28. in Nicht-Schaltjahren)
-        while !birthday::valid(e.month, e.day, e.year) && e.day > 28 {
-            e.day -= 1;
+        let year = buf.has_year.then_some(buf.year);
+        let valid = birthday::valid(buf.month, buf.day, year);
+        if valid {
+            (e.day, e.month, e.year) = (buf.day, buf.month, year);
+        } else {
+            ui.colored_label(style::danger_soft(), lang.t("Dieses Datum gibt es nicht – gespeichert bleibt das vorige.", "This date does not exist – the previous one stays saved."));
         }
-        let valid = birthday::valid(e.month, e.day, e.year);
-        if !valid {
-            ui.colored_label(style::danger_soft(), lang.t("Dieses Datum gibt es nicht.", "This date does not exist."));
-        }
-        if e.month == 2 && e.day == 29 {
+        if buf.month == 2 && buf.day == 29 {
             ui.label(RichText::new(lang.t("In Nicht-Schaltjahren am 28. Februar.", "On 28 February in non-leap years.")).small().color(style::dim(ui)));
         }
-        if e != b && valid {
+        self.bday_edit = Some(buf);
+        if e != b {
             e.name = crate::time::alarm::clean_name(&e.name);
             if e.remind != b.remind || (e.month, e.day) != (b.month, b.day) {
                 e.reminded_year = None;
             }
             if let Some(conn) = env.conn
                 && self.db_result(store::save_birthday(conn, &mut e)).is_some()
-                    && let Some(x) = self.data.birthdays.iter_mut().find(|x| x.id == id) {
-                        *x = e;
-                    }
+                && let Some(x) = self.data.birthdays.iter_mut().find(|x| x.id == id)
+            {
+                *x = e;
+            }
         }
         if self.delete_button(ui, Sub::Birthdays, id, lang)
             && let Some(conn) = env.conn

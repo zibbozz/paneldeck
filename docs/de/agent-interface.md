@@ -149,6 +149,7 @@ Seit 3.0.0 können Agenten mit dem [Editor-Reiter](editor.md) arbeiten. Lesen br
 ## Reiter „Zeit“
 Seit 3.2.0 können Agenten mit dem [Reiter „Zeit“](time.md) arbeiten. Alle elf Werkzeuge sind additive öffentliche API. Zeiten sind die **lokale Zeit** des Nutzers: `HH:MM` für Weckzeiten, `JJJJ-MM-TTTHH:MM:SS` für Zeitpunkte. **Kein Werkzeug löscht etwas**; Weltuhren und Geburtstage sind nur lesbar. Agenten wählen nur die eingebauten Klänge `chime`, `beep`, `digital`, `bell`, `soft` (eine eigene Klangdatei des Nutzers erscheint als `custom`, ohne Pfad). Chats mit lokalen Modellen bekommen diese Werkzeuge nicht. Jede Änderung zeigt Paneldeck dem Nutzer als kurzen Hinweis.
 
+- **Seitenweise:** Jedes `list_*`-Werkzeug des Reiters nimmt optional `limit` (1–500, Standard 100) und `offset` (Standard 0) und antwortet mit `total`, `offset`, `limit` und `more` (es gibt weitere Einträge); `list_stopwatches` nimmt außerdem `laps_limit` (0–1000, Standard 20: die neuesten Runden je Stoppuhr, `laps_total` nennt die Anzahl).
 - **`list_alarms`** (Lesen): `alarms` (nach Uhrzeit) mit `id`, `name`, `time`, `days` (`mon` … `sun`), `once` (klingelt einmal und schaltet sich dann aus), `enabled`, `next` (nächstes Klingeln, `null` wenn aus), `sound`, `snooze_minutes`, `snooze_max`, `snooze_count`, `snoozed_until`, `ringing`.
 - **`list_timers`** (Lesen): `timers` mit `id`, `name`, `duration_seconds`, `state` (`idle`, `running`, `paused`, `expired`), `remaining_seconds`, `ends_at`, `expired_at` (auch wenn er ablief, während Paneldeck geschlossen war), `ringing`, `sound`, `ticket` (Zeiterfassung oder `null`); `presets` mit `id`, `name`, `duration_seconds`.
 - **`list_stopwatches`** (Lesen): `stopwatches` mit `id`, `name`, `running`, `elapsed_ms`, `started_at`, `laps` (neueste zuerst: `lap`, `lap_ms`, `total_ms`), `ticket`.
@@ -160,7 +161,7 @@ Seit 3.2.0 können Agenten mit dem [Reiter „Zeit“](time.md) arbeiten. Alle e
 - **`update_timer`** (Steuern): `timer` (Kennung), optional `name`, `duration` (gilt ab dem nächsten Start), `sound`, `action` (`start`, `pause`, `resume`, `restart`, `reset`; `reset`, `restart` und `start` beenden ein Klingeln) → `timer`.
 - **`create_stopwatch`** (Steuern): optional `name`, `start` (Standard `true`) → `stopwatch`.
 - **`control_stopwatch`** (Steuern): `stopwatch` (Kennung) und `action` (`start`, `stop`, `lap`, `reset`) und/oder `name` → `stopwatch`. `lap` bei angehaltener Stoppuhr ergibt `not_running`.
-- Fehler: `bad_args` (unlesbare Uhrzeit, Wochentag, Dauer, Klang oder Bereich), `not_found` (unbekannte Kennung oder Vorlage), `not_running`, `db_unavailable`, `db_error`. Stoppen oder Zurücksetzen durch Agenten fragt nie nach der [Zeiterfassung](time.md#zeiterfassung-an-tickets).
+- Fehler: `bad_args` (unlesbare Uhrzeit, Wochentag, Dauer, Klang, Bereich, `limit` oder `offset`), `not_found` (unbekannte Kennung oder Vorlage), `not_running`, `db_unavailable`, `db_error`. Stoppen oder Zurücksetzen durch Agenten fragt nie nach der [Zeiterfassung](time.md#zeiterfassung-an-tickets).
 
 ## Sicherheit
 - Der Zugriff läuft nur lokal über die laufende Instanz (`127.0.0.1`, eigener Token). Die Stufe ist standardmäßig **Aus**.

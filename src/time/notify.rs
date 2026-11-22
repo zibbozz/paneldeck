@@ -78,15 +78,34 @@ pub fn stop(key: &str) {
     push(Cmd::Stop(key.to_string()));
 }
 
+/// Höchstzahl wartender Aufträge; darüber fällt die älteste Meldung weg – nie ein `Stop` (sonst klingelte ein
+/// ausgeschalteter Wecker bis zum Programmende weiter).
+pub const MAX_QUEUE: usize = 200;
+
 fn push(c: Cmd) {
     if let Ok(mut q) = QUEUE.lock() {
-        q.push(c);
-        if q.len() > 200 {
-            q.remove(0);
-        }
+        enqueue(&mut q, c);
     }
     if let Some(w) = WAKER.get() {
         w();
+    }
+}
+
+fn enqueue(q: &mut Vec<Cmd>, c: Cmd) {
+    // gleiche Stops zusammenfassen
+    if let Cmd::Stop(k) = &c
+        && q.iter().any(|x| matches!(x, Cmd::Stop(y) if y == k))
+    {
+        return;
+    }
+    q.push(c);
+    while q.len() > MAX_QUEUE {
+        match q.iter().position(|x| matches!(x, Cmd::Fire(_))) {
+            Some(i) => {
+                q.remove(i);
+            }
+            None => break,
+        }
     }
 }
 
@@ -120,5 +139,19 @@ mod tests {
         assert!(matches!(&got[1], Cmd::Fire(n) if n.ring.as_deref() == Some("alarm:1") && n.sound.as_deref() == Some("builtin:bell")));
         assert_eq!(got[2], Cmd::Stop("alarm:1".into()));
         assert!(take().is_empty());
+    }
+
+    #[test]
+    fn a_full_queue_drops_old_fires_but_never_a_stop() {
+        let mut q = Vec::new();
+        enqueue(&mut q, Cmd::Stop("alarm:1".into()));
+        enqueue(&mut q, Cmd::Stop("alarm:1".into()));
+        assert_eq!(q.len(), 1, "gleiche Stops zusammengefasst");
+        for i in 0..(MAX_QUEUE + 50) {
+            enqueue(&mut q, Cmd::Fire(Note::new(Kind::Timer, &i.to_string(), "")));
+        }
+        assert_eq!(q.len(), MAX_QUEUE);
+        assert_eq!(q[0], Cmd::Stop("alarm:1".into()), "der Stop bleibt");
+        assert!(matches!(&q[1], Cmd::Fire(n) if n.title == "51"), "die ältesten Meldungen fielen weg");
     }
 }

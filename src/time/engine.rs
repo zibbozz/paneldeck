@@ -13,8 +13,8 @@ pub const GRACE_SECS: i64 = 120;
 pub enum Event {
     /// Wecker klingelt (`at` = Termin in Unix-Sekunden; `snoozed` = Ende eines Schlummerns).
     AlarmRing { id: i64, at: i64, snoozed: bool },
-    /// Wecker-Termin verpasst (Unix-Sekunden).
-    AlarmMissed { id: i64, at: i64 },
+    /// Wecker-Termin verpasst (Unix-Sekunden; `snoozed` = Ende eines Schlummerns).
+    AlarmMissed { id: i64, at: i64, snoozed: bool },
     /// Timer abgelaufen, klingelt (`at` = Ende in Unix-ms).
     TimerDone { id: i64, at: i64 },
     /// Timer lief ab, während Paneldeck zu war bzw. der Rechner schlief (kein Klingeln).
@@ -46,7 +46,10 @@ pub fn tick<Tz: TimeZone>(data: &mut TimeData, now_ms: i64, tz: &Tz) -> (Vec<Eve
         if let Some(due) = a.check(now_s, tz, GRACE_SECS) {
             ch.alarms.push(a.id);
             for at in due.missed {
-                ev.push(Event::AlarmMissed { id: a.id, at });
+                ev.push(Event::AlarmMissed { id: a.id, at, snoozed: false });
+            }
+            if let Some(at) = due.missed_snooze {
+                ev.push(Event::AlarmMissed { id: a.id, at, snoozed: true });
             }
             if let Some(at) = due.ring {
                 ev.push(Event::AlarmRing { id: a.id, at, snoozed: due.snoozed });
@@ -77,6 +80,9 @@ pub fn tick<Tz: TimeZone>(data: &mut TimeData, now_ms: i64, tz: &Tz) -> (Vec<Eve
 pub fn next_wake<Tz: TimeZone>(data: &TimeData, now_ms: i64, tz: &Tz) -> Option<i64> {
     let now_s = now_ms.div_euclid(1000);
     let alarms = data.alarms.iter().flat_map(|a| {
+        // Systemuhr zurückgestellt: wie `Alarm::fix_clock_back` ab jetzt rechnen
+        let mut a = a.clone();
+        a.fix_clock_back(now_s);
         let reg = if a.enabled { a.next_after(a.armed_from.max(now_s - 1), tz).map(|s| s * 1000) } else { None };
         [reg, a.snoozed_until.map(|s| s * 1000)]
     });
@@ -117,7 +123,7 @@ mod tests {
         let mut d = crate::time::store::load(&conn).unwrap();
         let now = ms(2026, 11, 17, 9, 0);
         let (ev, ch) = tick(&mut d, now, &Berlin);
-        assert_eq!(ev, vec![Event::AlarmMissed { id: a.id, at: ms(2026, 11, 17, 7, 0) / 1000 }, Event::TimerExpiredAway { id: t.id, at: start + 3_600_000 }]);
+        assert_eq!(ev, vec![Event::AlarmMissed { id: a.id, at: ms(2026, 11, 17, 7, 0) / 1000, snoozed: false }, Event::TimerExpiredAway { id: t.id, at: start + 3_600_000 }]);
         assert_eq!((ch.alarms.clone(), ch.timers.clone()), (vec![a.id], vec![t.id]));
         assert_eq!(d.stopwatches[0].elapsed(now), now - start, "die Stoppuhr lief weiter");
         // gespeichert und erneut geladen: nichts doppelt

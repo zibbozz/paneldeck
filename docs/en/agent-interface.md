@@ -149,6 +149,7 @@ Since 3.0.0 agents can work with the [Editor tab](editor.md). Reading needs leve
 ## Time tab
 Since 3.2.0 agents can work with the [Time tab](time.md). All eleven tools are additive public API. Times are the user's **local time**: `HH:MM` for alarm times, `YYYY-MM-DDTHH:MM:SS` for points in time. **No tool deletes anything**; world clocks and birthdays are read-only. Agents can only choose the built-in sounds `chime`, `beep`, `digital`, `bell`, `soft` (an own sound file of the user appears as `custom`, without a path). Chats with local models do not get these tools. Every change is shown to the user as a short notice.
 
+- **Paging:** every `list_*` tool of the Time tab takes optional `limit` (1–500, default 100) and `offset` (default 0) and answers with `total`, `offset`, `limit` and `more` (further entries exist); `list_stopwatches` also takes `laps_limit` (0–1000, default 20: newest laps per stopwatch, `laps_total` gives the count).
 - **`list_alarms`** (Read): `alarms` (sorted by time) with `id`, `name`, `time`, `days` (`mon` … `sun`), `once` (rings once, then switches itself off), `enabled`, `next` (next ring, `null` when off), `sound`, `snooze_minutes`, `snooze_max`, `snooze_count`, `snoozed_until`, `ringing`.
 - **`list_timers`** (Read): `timers` with `id`, `name`, `duration_seconds`, `state` (`idle`, `running`, `paused`, `expired`), `remaining_seconds`, `ends_at`, `expired_at` (also when it ran out while Paneldeck was closed), `ringing`, `sound`, `ticket` (time tracking, or `null`); `presets` with `id`, `name`, `duration_seconds`.
 - **`list_stopwatches`** (Read): `stopwatches` with `id`, `name`, `running`, `elapsed_ms`, `started_at`, `laps` (newest first: `lap`, `lap_ms`, `total_ms`), `ticket`.
@@ -160,7 +161,7 @@ Since 3.2.0 agents can work with the [Time tab](time.md). All eleven tools are a
 - **`update_timer`** (Control): `timer` (id), optional `name`, `duration` (applies from the next start), `sound`, `action` (`start`, `pause`, `resume`, `restart`, `reset`; `reset`, `restart` and `start` silence a ringing timer) → `timer`.
 - **`create_stopwatch`** (Control): optional `name`, `start` (default `true`) → `stopwatch`.
 - **`control_stopwatch`** (Control): `stopwatch` (id) and `action` (`start`, `stop`, `lap`, `reset`) and/or `name` → `stopwatch`. `lap` on a stopped stopwatch gives `not_running`.
-- Errors: `bad_args` (unreadable time, weekday, duration, sound or range), `not_found` (unknown id or preset), `not_running`, `db_unavailable`, `db_error`. A stop or reset by an agent never asks the user about [time tracking](time.md#time-tracking-on-tickets).
+- Errors: `bad_args` (unreadable time, weekday, duration, sound, range, `limit` or `offset`), `not_found` (unknown id or preset), `not_running`, `db_unavailable`, `db_error`. A stop or reset by an agent never asks the user about [time tracking](time.md#time-tracking-on-tickets).
 
 ## Security
 - Access only runs locally through the running instance (`127.0.0.1`, own token). The level is **Off** by default.

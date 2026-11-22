@@ -88,6 +88,14 @@ impl Stopwatch {
         v
     }
 
+    /// Gebucht bis zur Gesamtzeit `upto` (Zeitpunkt der Rückfrage). Wurde die Stoppuhr inzwischen zurückgesetzt (ihre
+    /// Zeit ist kleiner als `upto`), bleibt der neue Lauf ungebucht.
+    pub fn mark_booked(&mut self, upto: i64, now: i64) {
+        if self.elapsed(now) >= upto {
+            self.booked_ms = upto.max(self.booked_ms);
+        }
+    }
+
     /// Noch nicht gebuchte Zeit.
     pub fn unbooked(&self, now: i64) -> i64 {
         (self.elapsed(now) - self.booked_ms).max(0)
@@ -149,5 +157,17 @@ mod tests {
         s.start(50 * 60_000);
         s.stop(60 * 60_000);
         assert_eq!(s.unbooked(0), 10 * 60_000);
+        // Rückfrage offen, dann zurückgesetzt und neu gestartet: Bestätigen bucht den neuen Lauf nicht mit
+        let upto = s.elapsed(0);
+        s.reset();
+        s.start(100 * 60_000);
+        s.mark_booked(upto, 101 * 60_000);
+        assert_eq!(s.booked_ms, 0);
+        assert_eq!(s.unbooked(101 * 60_000), 60_000);
+        // ohne Zurücksetzen gilt die Buchung
+        s.stop(102 * 60_000);
+        let upto = s.elapsed(0);
+        s.mark_booked(upto, 0);
+        assert_eq!(s.unbooked(0), 0);
     }
 }

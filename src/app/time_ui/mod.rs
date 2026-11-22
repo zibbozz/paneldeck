@@ -110,6 +110,16 @@ pub(crate) struct BookAsk {
     pub stopwatch: Option<(i64, i64)>,
 }
 
+/// Bearbeitungspuffer für das Datum eines Geburtstags.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct BdayEdit {
+    pub id: i64,
+    pub day: u32,
+    pub month: u32,
+    pub has_year: bool,
+    pub year: i32,
+}
+
 /// Zustand des Reiters.
 #[derive(Default)]
 pub(crate) struct TimeUi {
@@ -138,6 +148,8 @@ pub(crate) struct TimeUi {
     pub zone_query: String,
     /// Name für „Als Vorlage speichern“.
     pub preset_name: String,
+    /// Datum des gewählten Geburtstags in Bearbeitung (gespeichert wird nur ein gültiges).
+    pub bday_edit: Option<BdayEdit>,
     pub out: Vec<Out>,
     /// Takt: zuletzt (Unix-ms) und Startprüfung erledigt.
     pub last_tick: i64,
@@ -284,7 +296,9 @@ impl TimeUi {
             Sub::Clocks | Sub::Alarms => true,
             _ => false,
         };
-        if live {
+        // Minimiert bzw. im Tray sieht niemand die Anzeige: kein schnelles Neuzeichnen (Wecker und Timer weckt der Takt).
+        let hidden = ctx.input(|i| i.viewport().minimized == Some(true));
+        if live && !hidden {
             let fast = self.sub == Sub::Stopwatches;
             ctx.request_repaint_after(std::time::Duration::from_millis(if fast { 100 } else { 500 }));
         }
