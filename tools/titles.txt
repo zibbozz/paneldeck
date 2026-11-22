@@ -11,3 +11,4 @@
 2.6.0|Paneldeck 2.6.0 – Clean up, process list, project maintenance, theme editor
 2.6.1|Paneldeck 2.6.1 – Reliable tool calls in local chats
 2.7.0|Paneldeck 2.7.0 – Agent tools, context display and prompt switches for local chats
+3.0.0|Paneldeck 3.0.0 – Editor tab and interactive tutorial
