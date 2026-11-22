@@ -94,6 +94,39 @@ pub struct ChatMsg {
     /// `id`). Nur für die Anzeige, wird nicht an das Modell gesendet; Unlesbares ergibt eine leere Liste.
     #[serde(skip_serializing_if = "Vec::is_empty", deserialize_with = "lenient_repairs")]
     pub repairs: Vec<CallRepair>,
+    /// Nur Nachrichten von Paneldeck (Rolle `system`, seit 3.1.0, #355): Ereignis, z. B. „Hintergrund-Befehl beendet“.
+    /// `content` ist der Text für das Modell (geht als Nachricht des Nutzers mit); die Oberfläche zeigt eine eigene Zeile.
+    /// Unlesbares ergibt `None` (ältere Versionen zeigen solche Nachrichten als Systemnachricht und senden sie nicht).
+    #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "lenient_event")]
+    pub event: Option<ChatEvent>,
+}
+
+/// Ereignis von Paneldeck im Verlauf (#355).
+#[derive(Clone, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ChatEvent {
+    /// Art: [`ChatEvent::BACKGROUND_COMMAND`].
+    pub kind: String,
+    /// Kennung des Befehls (`bg1`).
+    pub id: String,
+    pub command: String,
+    /// `exited`, `stopped` oder `failed`.
+    pub state: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i64>,
+    pub duration_ms: u64,
+    /// Fehlercode bei `failed`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+impl ChatEvent {
+    pub const BACKGROUND_COMMAND: &'static str = "background_command";
+}
+
+fn lenient_event<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<ChatEvent>, D::Error> {
+    let v = serde_json::Value::deserialize(d)?;
+    Ok(serde_json::from_value::<ChatEvent>(v).ok().filter(|e| !e.kind.is_empty()))
 }
 
 /// Reparatur an einem Werkzeugaufruf (#340): als Text geschriebener Aufruf erkannt und/oder Argumente normalisiert.
@@ -382,7 +415,8 @@ pub fn save(path: &Path, file: &ChatFile) -> std::io::Result<()> {
 /// nicht, fallen die ältesten Nachrichten nach den Systemnachrichten am Anfang weg (anhand der gemessenen Größen).
 pub fn serialize_capped(file: &ChatFile, cap: usize) -> Vec<u8> {
     let parts: Vec<Vec<u8>> = file.messages.iter().map(|m| serde_json::to_vec(m).unwrap_or_else(|_| b"{}".to_vec())).collect();
-    let keep_from = file.messages.iter().take_while(|m| m.role == Role::System).count();
+    // Ereignisse (#355) sind keine Systemnachrichten am Anfang, die immer bleiben.
+    let keep_from = file.messages.iter().take_while(|m| m.role == Role::System && m.event.is_none()).count();
     let size = |from: usize| -> usize { parts[..keep_from].iter().chain(&parts[from..]).map(|p| p.len() + 1).sum() };
     // Kopf ohne Nachrichten (+ Reserve für context_start): `{"version":1,"context_start":N,"always_allow":[…],"messages":[]}`
     let head_len = 64 + serde_json::to_vec(&file.always_allow).map(|v| v.len()).unwrap_or(0) + serde_json::to_vec(&file.todos).map(|v| v.len() + 10).unwrap_or(0) + 16;
@@ -711,5 +745,30 @@ mod tests {
         assert!(!path(&d, 40).exists() && !dir(&d).join("40.defekt-1.json").exists());
         assert!(b.exists());
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// Nachrichten von Paneldeck (#355): `event` kommt mit, Unlesbares fällt weg, ohne `event` wird nichts geschrieben;
+    /// eine Ereignis-Nachricht am Anfang zählt beim Kürzen nicht als Systemnachricht.
+    #[test]
+    fn events_round_trip_and_are_read_leniently() {
+        let mut m = ChatMsg::new(Role::System, "[Paneldeck] Background command bg1 finished");
+        m.event = Some(ChatEvent { kind: ChatEvent::BACKGROUND_COMMAND.into(), id: "bg1".into(), command: "cargo build".into(), state: "exited".into(), exit_code: Some(0), duration_ms: 1500, error: None });
+        let j = serde_json::to_value(&m).unwrap();
+        assert_eq!(j["event"]["kind"], "background_command");
+        assert!(j["event"].get("error").is_none());
+        let back: ChatMsg = serde_json::from_value(j).unwrap();
+        assert_eq!(back, m);
+        let bad: ChatMsg = serde_json::from_value(serde_json::json!({"role": "system", "content": "x", "event": 5})).unwrap();
+        assert_eq!(bad.event, None);
+        let plain = serde_json::to_value(ChatMsg::new(Role::User, "hi")).unwrap();
+        assert!(plain.get("event").is_none());
+        let mut f = ChatFile::default();
+        f.messages.push(m);
+        for i in 0..50 {
+            f.messages.push(ChatMsg::new(Role::User, format!("message {i} {}", "x".repeat(200))));
+        }
+        let data = serialize_capped(&f, 4000);
+        let back: ChatFile = serde_json::from_slice(&data).unwrap();
+        assert!(back.messages.first().is_some_and(|m| m.event.is_none()), "das alte Ereignis fällt beim Kürzen weg");
     }
 }

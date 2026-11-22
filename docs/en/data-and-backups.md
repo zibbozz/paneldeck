@@ -164,7 +164,7 @@ All fields are optional; older versions ignore them, and missing fields mean the
 - `chats/<id>.json` → `always_allow` can now also hold rules of the agent tools **without a session**: `{"tool": "edit_file", "session": null}` applies to that tool in the whole chat; `{"tool": "run_command", "session": null, "prefix": "cargo test"}` applies to commands in the chat's terminal that start with these words (never to commands with `;`, `&`, `|`, redirections or `$( … )`). A `run_command` rule without `prefix`, a `read_file` rule and session-less rules of other tools (e.g. from pre-releases of 2.2.0) still never apply and are not written. Calls that touch a sensitive file always ask, whatever the rules say.
 - `settings.json` → `agent_tools` (*Settings → Models → Agent tools*), with these defaults:
   - `sensitive`: the patterns of sensitive files (reading, changing or moving them always asks) – default `.env`, `.env.*`, `*.env`, `*.pem`, `*.key`, `*.p12`, `*.pfx`, `*.jks`, `*.keystore`, `*.kdbx`, `*.ppk`, `id_rsa*`, `id_dsa*`, `id_ecdsa*`, `id_ed25519*`, `credentials`, `credentials.*`, `secrets.*`, `*.secret`, `.npmrc`, `.pypirc`, `.htpasswd`, `*.tfstate`, `*.tfstate.*`, `*.tfvars`;
-  - `command_timeout_secs`: timeout of `run_command` in the chat's terminal, default `120` (5–600);
+  - `command_timeout_secs`: timeout of `run_command` in the chat's terminal, default `120` (5–600; since 3.1.0 up to `command_timeout_max_secs`);
   - `web_fetch`: offer `web_fetch`, default `true`;
   - `search`: `off` (default), `searxng`, `brave` or `tavily`; `searxng_url`: address of your SearXNG instance; `search_key`: your Brave/Tavily API key, encrypted like server keys (never plain text). The last two are only written when set.
   An unreadable field falls back to its default; the other fields stay.
@@ -183,6 +183,12 @@ All fields are optional; older versions ignore them, and missing fields mean the
   | `agent_open`, `agent_edit`, `agent_save` | `false` | the [agent switches](editor.md#agents) (only `true` switches one on; only effective at level *Control*) |
 
 - `hot-exit/`: unsaved editor buffers; `editor-state.json`: open folder, tabs, splits and recent files of the Editor tab (both internal formats; in *Clean up* as *Editor: unsaved buffers* and as part of *Sessions and layout*).
+
+## New fields in 3.1.0
+All fields are optional; older versions ignore them, and missing fields mean the defaults below. See [Background commands](chat.md#background-commands).
+- `settings.json` → `agent_tools` → `command_timeout_max_secs`: the largest `timeout_secs` a chat model can ask for in the foreground, default `1800` (30 minutes; 10–14400). `command_timeout_secs` (default `120`) is now at most this value (before 3.1.0: 5–600).
+- `settings.json` → `agent_tools` → `background_limit`: how many background commands may run at the same time per chat, default `3` (1–10).
+- `chats/<id>.json` → messages from Paneldeck: a message with `role: "system"` and an object `event` – `{"kind": "background_command", "id": "bg1", "command": "…", "state": "exited" | "stopped" | "failed", "exit_code": 0, "duration_ms": 1234, "error": "…"}` (`exit_code`/`error` only when known). `content` is the text the model gets (as a message from the user); the chat shows its own line. An unreadable `event` is ignored; older versions show such a message as a system message and do not send it.
 
 ## Backups
 *Settings → Data & backup* controls the automatic backups of `paneldeck.db`: by default one copy every 24 hours, keeping two (plus the database itself). If the computer was off when a backup was due, it is made at the next start; several missed ones result in just one. You can choose another backup folder, open it, press **Back up now** (manual copies are never deleted automatically) and **Restore** any copy from the list – the current state is backed up first, Paneldeck then quits and applies the restore at the next start. Before every database update (migration) Paneldeck makes a copy as well, and it never touches a database created by a newer version.

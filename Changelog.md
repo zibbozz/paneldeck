@@ -9,6 +9,16 @@ Deviation: instead of `[Unreleased]`, changes that are not yet released are list
 
 ## [3.1.0] - WIP
 
+### Added
+
+- Local chats: **background commands**. `run_command` with `background: true` returns an id (`bg1`, `bg2` …) at once and runs the command in its own visible terminal below the chat; new agent tools `command_status`, `command_output` (the last lines, `tail` or pages with `offset`/`limit`, also while it runs) and `stop_command` (Ctrl+C, then the terminal is closed). When a background command ends, a message from Paneldeck appears in the chat, and the model continues if its round is still running. At most 3 background commands per chat run at the same time – adjustable under *Settings → Models → Agent tools* (1–10); new optional `settings.json` field `agent_tools.background_limit` (#355)
+- Local chats: `run_command` can pick one of your **profiles or shells** with `shell` (e.g. Git Bash or WSL; default is the project's profile). Administrator profiles and profiles with their own program, arguments or startup command are never used (#355)
+- Local chats: new agent tool `ask_user` – the model can ask up to 4 **questions with choices** (2–6 options each, single or multiple choice, always *Other …* with free text) in one small form with *Submit*; options the model recommends come first and are marked *(Recommended)*. *Cancel* tells the model you do not want to answer. While the questions are open, the chat shows *waiting for you* and asks for attention like an approval (#356)
+
+### Changed
+
+- Local chats: the foreground time limit of `run_command` (`timeout_secs`) now goes up to 30 minutes (before: 10 minutes); default (2 minutes) and maximum are set under *Settings → Models → Agent tools*. A larger value is lowered to the maximum and noted in the result. New optional `settings.json` field `agent_tools.command_timeout_max_secs` (#355)
+
 ## [3.0.0] - 2026-11-22
 
 ### Added

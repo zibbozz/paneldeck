@@ -176,7 +176,7 @@ fn home(s: Spot) -> Home {
         McpLevel | McpRegister | McpSysprompt | McpLog => Home::Settings(7),
         DataBackups | DataCleanup => Home::Settings(8),
         AboutInfo | AboutUpdates | AboutTutorial => Home::Settings(9),
-        TabModels | ModelsServers => Home::Settings(super::super::models_ui::SETTINGS_TAB),
+        TabModels | ModelsServers | ModelsCommands => Home::Settings(super::super::models_ui::SETTINGS_TAB),
         TodoInput | TodoList | ExpertToggle => Home::Tasks,
         PlanProjects | PlanNewTicket | PlanTabBoards | PlanTabBacklog | PlanTabSearch | QueryBar => Home::Plan,
         Palette => Home::Palette,

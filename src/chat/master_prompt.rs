@@ -953,7 +953,7 @@ const ABOUT: &str = concat!(
     "- **Title bar**: the tabs *Terminal Hub* (Ctrl+1) and *Todo list* (Ctrl+2); Ctrl+click opens a tab in a new window.\n",
     "- **Command palette**: Ctrl+Shift+P (also finds tickets).\n",
     "- **Settings**: *Settings → Models* (chat servers, models, levels), *Settings → Agents* (MCP interface for external agents, call log), *Settings → Claude* (Claude mode, hooks, defaults), *Settings → General* (shell integration, confirm close), *Settings → Appearance*, *Settings → Data & backup* (Clean up window).\n",
-    "- **Chat pane**: Enter sends, Shift+Enter adds a line, Stop ends an answer, ↻ regenerates the last answer, ✎ edits the last message; approval prompts appear in the chat with Allow, Always for this chat and Deny.\n",
+    "- **Chat pane**: Enter sends, Shift+Enter adds a line, Stop ends an answer, ↻ regenerates the last answer, ✎ edits the last message; approval prompts appear in the chat with Allow, Always for this chat and Deny; questions from ask_user appear as a small form with Submit and Cancel. Messages that start with [Paneldeck] come from Paneldeck itself (for example when a background command ended), not from the user.\n",
 );
 
 /// Fehlercodes, die ein Chat-Modell sehen kann, mit Bedeutung und Reaktion (Code, Text). Geprüft per Test gegen die
@@ -1039,6 +1039,8 @@ pub const ERRORS: &[(&str, &str)] = &[
     ("search_key", "web_search: the API key in the settings cannot be used. Tell the user."),
     ("search_setup", "web_search: the search service settings are invalid. Tell the user."),
     ("terminal_failed", "run_command: the chat's terminal could not be started. Tell the user or use run_command with an existing session."),
+    // Hintergrund-Befehle (#355).
+    ("limit_reached", "run_command with background: too many background commands already run in this chat (the user sets the limit). Wait for the message that one ended, or stop one with stop_command."),
 ];
 
 /// Wann ein Fehlercode im Prompt steht: leer = immer; sonst, wenn eines der Werkzeuge verfügbar ist (`@expert` =
@@ -1046,7 +1048,7 @@ pub const ERRORS: &[(&str, &str)] = &[
 fn error_scope(code: &str) -> &'static [&'static str] {
     match code {
         "denied" => &["@control"],
-        "admin_profile" | "spawn_failed" => &["create_session"],
+        "admin_profile" | "spawn_failed" => &["create_session", "run_command"],
         "not_claude" | "claude_mode_off" | "status_unavailable" => &["queue_prompt", "wait_for_status"],
         "claude_session" | "no_shell_integration" | "fullscreen_program" => &["run_command"],
         "no_model" => &["create_session", "send_chat_message"],
@@ -1063,7 +1065,7 @@ fn error_scope(code: &str) -> &'static [&'static str] {
         "not_a_repository" | "git_missing" | "git_failed" => &["git_status"],
         "bad_url" | "bad_redirect" | "too_many_redirects" | "http_status" | "not_text" | "fetch_failed" => &["web_fetch"],
         "search_failed" | "search_key" | "search_setup" => &["web_search"],
-        "terminal_failed" => &["run_command"],
+        "terminal_failed" | "limit_reached" => &["run_command"],
         _ => &[],
     }
 }
@@ -1241,9 +1243,12 @@ pub fn minimal_specs(specs: Vec<crate::llm::ToolSpec>) -> Vec<crate::llm::ToolSp
                 let required: Vec<String> = s.parameters.get("required").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str).map(str::to_string).collect();
                 if let Some(props) = s.parameters.get_mut("properties").and_then(Value::as_object_mut) {
                     props.retain(|k, _| required.contains(k) || keep.contains(&k.as_str()));
-                    // `update_todos`: nur „Liste“ – Text-Einträge nimmt der Hub auch an (als pending).
-                    if let Some(todos) = props.get_mut("todos").and_then(Value::as_object_mut) {
-                        todos.remove("items");
+                    // `update_todos`: nur „Liste“ – Text-Einträge nimmt der Hub auch an (als pending). `ask_user` (#356): die
+                    // Form der Fragen steht in der Kurzbeschreibung (`agent::compact`), der Hub nimmt auch knappe Formen an.
+                    for k in ["todos", "questions"] {
+                        if let Some(list) = props.get_mut(k).and_then(Value::as_object_mut) {
+                            list.remove("items");
+                        }
                     }
                 }
             }
@@ -1337,6 +1342,7 @@ const AGENT_ERRORS: &[&str] = &[
     "search_key",
     "search_setup",
     "terminal_failed",
+    "limit_reached",
 ];
 
 /// Kurzfassung mit allen Teilen (Familie am Namen erkannt). Siehe [`render_compact_with`].
@@ -1482,8 +1488,10 @@ mod tests {
                 validate(&super::super::tools::compact_schema(def.schema.clone()), &v).unwrap();
             }
         }
-        // Agenten-Werkzeuge: gegen ihr Schema und das knappe Schema der Kurzfassung.
-        let min = minimal_specs(policy(McpLevel::Control, true).specs());
+        // Agenten-Werkzeuge: gegen ihr Schema und das knappe Schema der Kurzfassung (mit Hintergrund-Befehlen, #355).
+        let mut env = agent_env();
+        env.background = true;
+        let min = minimal_specs(policy(McpLevel::Control, true).with_agent(env).specs());
         for def in agent::defs() {
             let s = min.iter().find(|s| s.name == def.name).unwrap_or_else(|| panic!("{} fehlt in den Werkzeugen", def.name));
             for (args, what) in agent::doc(def.name).unwrap().examples {
@@ -1527,6 +1535,18 @@ mod tests {
         let min = minimal_specs(pol.specs());
         assert!(min.iter().find(|s| s.name == "grep").unwrap().description.starts_with("Search file contents"));
         assert!(min.iter().find(|s| s.name == "run_command").unwrap().description.contains("chat's own terminal"));
+        // ask_user (#356): die Form der Fragen steht in der knappen Beschreibung.
+        assert!(min.iter().find(|s| s.name == "ask_user").unwrap().description.contains("options"), "{:?}", min.iter().find(|s| s.name == "ask_user"));
+        // Hintergrund-Befehle (#355): nur mit Hintergrund-Befehlen im Chat
+        assert!(!section(&ctl, "command_status"));
+        let mut env = agent_env();
+        env.background = true;
+        let bg = render(&policy(McpLevel::Control, false).with_agent(env), "m");
+        for n in ["command_status", "command_output", "stop_command"] {
+            assert!(section(&bg, n), "{n}");
+        }
+        assert!(bg.contains("Level: Control (runs without approval)."), "command_status braucht keine Freigabe");
+        assert!(section(&read, "ask_user") && read.contains("(Recommended)"));
     }
 
     #[test]
@@ -1730,6 +1750,10 @@ mod tests {
             (include_str!("agent/web.rs"), calls),
             (include_str!("agent/web_http.rs"), calls),
             (include_str!("../app/mcp/agent.rs"), calls),
+            // Hintergrund-Befehle und Fragen (#355, #356)
+            (include_str!("bg_commands.rs"), calls),
+            (include_str!("ask.rs"), calls),
+            (include_str!("../app/mcp/bg.rs"), calls),
         ];
         let documented: Vec<&str> = ERRORS.iter().map(|(c, _)| *c).collect();
         let mut found = Vec::new();
@@ -1788,7 +1812,8 @@ mod tests {
 
     /// Die Kurzfassung samt knappen Werkzeug-Beschreibungen passt bei jeder Stufe und jedem Modus in 8192 Tokens und
     /// lässt dem Gespräch Platz: mindestens ein Fünftel des Platzes nach der Antwort-Reserve (1228 Tokens; Steuern im
-    /// Expertenmodus mit 43 Werkzeugen liegt knapp darüber, die übrigen Stufen haben deutlich mehr).
+    /// Expertenmodus liegt seit `ask_user` (#356) knapp darunter, mindestens ein Sechstel; die übrigen Stufen haben
+    /// deutlich mehr).
     ///
     /// Mit allen Agenten-Werkzeugen (#338, Projektordner und Suchdienst) passt jede Stufe weiter in 8192 Tokens; Steuern im
     /// Expertenmodus (58 Werkzeuge) lässt dann aber nur noch gut 5 % Platz (wer dort ein kleines Modell nutzt, wählt
@@ -1796,7 +1821,8 @@ mod tests {
     ///
     /// Editor (#54): Die Editor-Werkzeuge kommen nur mit offenen Dokumenten bzw. eingeschalteten Schaltern dazu (sonst
     /// unverändert wie oben). Sind alle da, bleibt Steuern ohne Expertenmodus bei einem Fünftel und Lesen bei der Hälfte;
-    /// Steuern im Expertenmodus mit allen Agenten- und Editor-Werkzeugen (63) passt noch, mit nur gut 2 % Platz.
+    /// Steuern im Expertenmodus mit allen Agenten- und Editor-Werkzeugen passt noch, seit `ask_user` (#356, 3.1.0) mit nur
+    /// gut 1 % Platz.
     #[test]
     fn the_compact_prompt_fits_into_8192_with_room_left() {
         let budget = 8192 * 3 / 4;
@@ -1804,7 +1830,9 @@ mod tests {
             for model in ["qwen3:8b", "llama3.1:8b", "m"] {
                 let n = request_tokens(&policy_without_folder(level, expert), model, Variant::Compact);
                 eprintln!("COMPACT {level:?} expert={expert} {model}: {n} tokens, room {}", budget - n.min(budget));
-                assert!(n + budget / 5 <= budget, "{level:?} {expert} {model}: {n} von {budget}");
+                // Steuern im Expertenmodus: seit `ask_user` (#356, 3.1.0) knapp unter einem Fünftel, mindestens ein Sechstel.
+                let room = if level == McpLevel::Control && expert { budget / 6 } else { budget / 5 };
+                assert!(n + room <= budget, "{level:?} {expert} {model}: {n} von {budget}");
                 // ohne Steuern im Expertenmodus mindestens die Hälfte
                 assert!((level == McpLevel::Control && expert) || n <= budget / 2 + 500,"{level:?} {expert} {model}: {n}");
                 // mit allen Agenten-Werkzeugen
@@ -1818,7 +1846,8 @@ mod tests {
                 let all = crate::editor_svc::settings::DOCS_OPEN | 7;
                 let e = request_tokens(&policy(level, expert).with_editor_switches(all), model, Variant::Compact);
                 eprintln!("COMPACT+AGENT+EDITOR {level:?} expert={expert} {model}: {e} tokens, room {}", budget - e.min(budget));
-                let room = if level == McpLevel::Control && expert { budget / 50 } else { budget / 5 };
+                // Steuern im Expertenmodus mit allem: seit `ask_user` (#356) nur noch gut 1 % Platz (passt aber).
+                let room = if level == McpLevel::Control && expert { budget / 100 } else { budget / 5 };
                 assert!(e + room <= budget, "mit Editor-Werkzeugen {level:?} {expert} {model}: {e} von {budget}");
                 assert!(level == McpLevel::Control || e <= budget / 2 + 500, "mit Editor-Werkzeugen {level:?} {expert} {model}: {e}");
             }

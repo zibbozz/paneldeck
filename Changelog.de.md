@@ -9,6 +9,16 @@ Abweichung: Statt `[Unreleased]` stehen noch nicht veröffentlichte Änderungen 
 
 ## [3.1.0] - WIP
 
+### Added
+
+- Lokale Chats: **Befehle im Hintergrund**. `run_command` mit `background: true` gibt sofort eine Kennung (`bg1`, `bg2` …) zurück und führt den Befehl in einem eigenen, sichtbaren Terminal unter dem Chat aus; neue Agenten-Werkzeuge `command_status`, `command_output` (die letzten Zeilen, `tail` oder seitenweise mit `offset`/`limit`, auch während des Laufs) und `stop_command` (Strg+C, danach wird das Terminal geschlossen). Endet ein Hintergrund-Befehl, erscheint eine Nachricht von Paneldeck im Chat, und das Modell macht weiter, wenn seine Runde noch läuft. Höchstens 3 Hintergrund-Befehle je Chat laufen gleichzeitig – einstellbar unter *Einstellungen → Modelle → Agenten-Werkzeuge* (1–10); neues optionales Feld `agent_tools.background_limit` in `settings.json` (#355)
+- Lokale Chats: `run_command` kann mit `shell` eines deiner **Profile bzw. eine deiner Shells** wählen (z. B. Git Bash oder WSL; Standard ist das Profil des Projekts). Administrator-Profile und Profile mit eigenem Programm, eigenen Argumenten oder Startbefehl werden nie genutzt (#355)
+- Lokale Chats: neues Agenten-Werkzeug `ask_user` – das Modell kann bis zu 4 **Fragen mit Auswahl** stellen (je 2–6 Antworten, Einfach- oder Mehrfachauswahl, immer *Andere …* mit freiem Text), in einem kleinen Formular mit *Absenden*; Antworten, die das Modell empfiehlt, stehen zuerst und tragen *(Empfohlen)*. *Abbrechen* sagt dem Modell, dass du nicht antworten möchtest. Solange die Fragen offen sind, zeigt der Chat *wartet auf dich* und bittet wie bei einer Freigabe um Aufmerksamkeit (#356)
+
+### Changed
+
+- Lokale Chats: Das Zeitlimit von `run_command` im Vordergrund (`timeout_secs`) reicht jetzt bis 30 Minuten (bisher 10 Minuten); Standard (2 Minuten) und Höchstwert stellst du unter *Einstellungen → Modelle → Agenten-Werkzeuge* ein. Ein größerer Wert wird auf den Höchstwert gesetzt und im Ergebnis vermerkt. Neues optionales Feld `agent_tools.command_timeout_max_secs` in `settings.json` (#355)
+
 ## [3.0.0] - 2026-11-22
 
 ### Added
