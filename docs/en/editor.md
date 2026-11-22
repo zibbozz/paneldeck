@@ -84,4 +84,4 @@ Agents (Claude Code and others via the [agent interface](agent-interface.md#edit
 - These rules apply to text mode and to the later hex mode alike.
 
 ## Not yet
-Syntax colours, *Go to symbol*, language servers and formatting come with 3.1.0; a hex mode with 3.2.0.
+Syntax colours come with 3.1.0; language servers (*Go to symbol*, formatting, diagnostics) and AI inline completion with 3.3.0, the language pack with 3.4.0, running files and projects with 3.5.0, a hex mode with 3.6.0.

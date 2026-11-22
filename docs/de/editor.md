@@ -84,4 +84,4 @@ Agenten (Claude Code und andere über die [Agenten-Schnittstelle](agent-interfac
 - Diese Regeln gelten für den Textmodus und den späteren Hex-Modus gleichermaßen.
 
 ## Noch nicht
-Syntaxfarben, *Gehe zu Symbol*, Sprachserver und Formatierung kommen mit 3.1.0, ein Hex-Modus mit 3.2.0.
+Syntaxfarben kommen mit 3.1.0; Sprachserver (*Gehe zu Symbol*, Formatierung, Diagnosen) und KI-Vervollständigung mit 3.3.0, das Sprachpaket mit 3.4.0, Ausführen von Dateien und Projekten mit 3.5.0, ein Hex-Modus mit 3.6.0.
