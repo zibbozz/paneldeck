@@ -153,7 +153,11 @@ impl App {
             "card": self.tut.card_shown,
             "hint": self.tut_hint(),
             "lang": if self.settings.language == Lang::De { "de" } else { "en" },
-            "mode": if self.mode == titlebar::Mode::Tasks { "tasks" } else { "terminals" },
+            "mode": match self.mode {
+                titlebar::Mode::Tasks => "tasks",
+                titlebar::Mode::Editor => "editor",
+                titlebar::Mode::Terminals => "terminals",
+            },
             "expert": self.plan.expert,
             "project": {"id": pid, "exists": exists, "sessions": sessions, "active": pid == Some(self.active_project)},
             "todos": self.tut.p.todos,
