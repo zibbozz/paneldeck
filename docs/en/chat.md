@@ -126,7 +126,7 @@ Since 3.1.0 a long chat can be **compacted**: the chat's own model writes a summ
 - **If it fails** (server not reachable, empty answer, *Stop* while the summary is being written), nothing changes and the chat says why ("Compaction failed: … The chat is unchanged."). In automatic mode the request then runs as before, and the chat does not try again until there is something new to compact.
 - **Token count:** the fill level and the automatic threshold use Paneldeck's estimate of the next request (matched to the server's last count), but at least the server's count of the last request plus its answer. Servers with a prompt cache sometimes count only the uncached part – such an implausibly small count is ignored.
 
-<!-- screenshot: chat-compacted – a chat after compacting: header with the "Compact" button, the card "Compacted – N older messages summarised" with "Show original" and two kept rounds below -->
+![A chat after compacting: the card “Compacted – 6 older messages summarised” with Show original, the kept rounds below and the Compact button in the header](../images/chat-compacted.png)
 
 ### Prompt parts (Settings → Models)
 *Settings → Models → Instructions for chat models (master prompt)* decides which parts of the instructions every chat model gets – all are on by default:

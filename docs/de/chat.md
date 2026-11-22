@@ -126,7 +126,7 @@ Seit 3.1.0 lässt sich ein langer Chat **kompaktieren**: Das Modell des Chats sc
 - **Schlägt es fehl** (Server nicht erreichbar, leere Antwort, *Stopp* während die Zusammenfassung entsteht), ändert sich nichts, und der Chat nennt den Grund („Kompaktieren fehlgeschlagen: … Der Chat ist unverändert.“). Im automatischen Modus läuft die Anfrage dann wie bisher, und der Chat versucht es erst wieder, wenn es Neues zu kompaktieren gibt.
 - **Zählung der Tokens:** Füllstand und automatische Schwelle nutzen Paneldecks Schätzung der nächsten Anfrage (an die letzte Zählung des Servers angeglichen), mindestens aber die Zählung des Servers für die letzte Anfrage samt Antwort. Server mit Prompt-Zwischenspeicher zählen manchmal nur den nicht gespeicherten Teil – eine so unplausibel kleine Zahl wird nicht genommen.
 
-<!-- screenshot: chat-compacted – ein Chat nach dem Kompaktieren: Kopfzeile mit dem Knopf „Kompaktieren“, die Karte „Kompaktiert – N ältere Nachrichten zusammengefasst“ mit „Original anzeigen“ und darunter zwei behaltene Runden -->
+![Ein Chat nach dem Kompaktieren: die Karte „Kompaktiert – 6 ältere Nachrichten zusammengefasst“ mit Original anzeigen, darunter die behaltenen Runden und oben der Knopf Kompaktieren](../images/de/chat-compacted.png)
 
 ### Prompt-Teile (Einstellungen → Modelle)
 *Einstellungen → Modelle → Anweisungen für Chat-Modelle (Master-Prompt)* legt fest, welche Teile der Anweisungen jedes Chat-Modell bekommt – alle sind standardmäßig an:
