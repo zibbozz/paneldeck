@@ -9,6 +9,10 @@ Deviation: instead of `[Unreleased]`, changes that are not yet released are list
 
 ## [3.1.0] - WIP
 
+### Added
+
+- Editor: **Syntax mode** with syntax colours for Rust, Python, TypeScript/JavaScript, HTML/CSS/JSON, C#, C/C++, Java, PHP, AutoIt, Batch, CMake, Go, Inno Setup, XML, LaTeX/TeX, Lua, Makefile, NSIS, Pascal/Delphi, Perl, PowerShell, Ruby, Shell, SQL, Visual Basic (VB.NET, VBA, VBScript), YAML, INI, Markdown, TOML, Dockerfile and every other grammar of bat. The language is detected from your own mappings, the file name/extension, a shebang or a modeline and can be changed per file in the status bar; the mode (Text / Syntax) is chosen per file, per language or for all files. **New files stay in Text mode** until you switch Syntax on. Colours come from the theme (new colours `code_*`), only visible lines are coloured and edits recolour from the changed line on; large files stay plain. New optional `settings.json` fields `editor.default_mode`, `editor.language_modes` and `editor.language_map` (#312)
+
 ## [3.0.0] - 2026-11-22
 
 ### Added

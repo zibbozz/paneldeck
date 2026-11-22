@@ -9,6 +9,10 @@ Abweichung: Statt `[Unreleased]` stehen noch nicht veröffentlichte Änderungen 
 
 ## [3.1.0] - WIP
 
+### Added
+
+- Editor: **Syntax-Modus** mit Syntaxfarben für Rust, Python, TypeScript/JavaScript, HTML/CSS/JSON, C#, C/C++, Java, PHP, AutoIt, Batch, CMake, Go, Inno Setup, XML, LaTeX/TeX, Lua, Makefile, NSIS, Pascal/Delphi, Perl, PowerShell, Ruby, Shell, SQL, Visual Basic (VB.NET, VBA, VBScript), YAML, INI, Markdown, TOML, Dockerfile und alle weiteren Grammatiken von bat. Die Sprache wird aus eigenen Zuordnungen, Dateiname/Endung, Shebang oder Modeline erkannt und lässt sich je Datei in der Statusleiste ändern; der Modus (Text / Syntax) gilt je Datei, je Sprache oder für alle Dateien. **Neue Dateien bleiben im Text-Modus**, bis du Syntax einschaltest. Die Farben kommen aus dem Theme (neue Farben `code_*`), eingefärbt werden nur sichtbare Zeilen, Änderungen färben ab der geänderten Zeile neu; große Dateien bleiben ohne Farben. Neue optionale Felder `editor.default_mode`, `editor.language_modes` und `editor.language_map` in `settings.json` (#312)
+
 ## [3.0.0] - 2026-11-22
 
 ### Added

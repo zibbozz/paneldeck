@@ -162,6 +162,21 @@ Die Namen gehören zur öffentlichen Schnittstelle (sie kommen nur dazu, werden 
 | `syntax_function` | Diff und Syntax | Syntax: Funktion | `#e07fb0` |
 | `syntax_predicate` | Diff und Syntax | Syntax: Prädikat | `#4fb8a8` |
 | `syntax_sort` | Diff und Syntax | Syntax: Sortierung | `#d8b94a` |
+| `code_comment` | Editor: Syntaxfarben | Code: Kommentar | `mix(fg, bg, 45%)` |
+| `code_string` | Editor: Syntaxfarben | Code: Zeichenkette | `@ansi2` |
+| `code_number` | Editor: Syntaxfarben | Code: Zahl | `mix(ansi3, ansi1, 45%)` |
+| `code_constant` | Editor: Syntaxfarben | Code: Konstante (true, null, Makros) | `@code_number` |
+| `code_keyword` | Editor: Syntaxfarben | Code: Schlüsselwort | `@ansi5` |
+| `code_type` | Editor: Syntaxfarben | Code: Typ, Klasse | `@ansi3` |
+| `code_function` | Editor: Syntaxfarben | Code: Funktion | `@ansi4` |
+| `code_operator` | Editor: Syntaxfarben | Code: Operator | `@ansi6` |
+| `code_tag` | Editor: Syntaxfarben | Code: Tag (HTML/XML), Schlüssel (YAML) | `@ansi1` |
+| `code_attribute` | Editor: Syntaxfarben | Code: Attribut, Schlüssel (JSON, INI) | `@code_number` |
+| `code_preprocessor` | Editor: Syntaxfarben | Code: Präprozessor, Direktive | `mix(ansi5, ansi4, 50%)` |
+| `code_escape` | Editor: Syntaxfarben | Code: Escape-Sequenz, Platzhalter | `@ansi6` |
+| `code_heading` | Editor: Syntaxfarben | Code: Überschrift, Abschnitt | `@ansi4` |
+| `code_variable` | Editor: Syntaxfarben | Code: Variable, Parameter | `@ansi1` |
+| `code_invalid` | Editor: Syntaxfarben | Code: ungültig | `@error` |
 
 Terminalfarben für Verweise: `fg`, `bg`, `cursor`, `selection`, `ansi0` … `ansi15` (in der Datei: die Felder `fg`, `bg`, `cursor`, `selection` und die Liste `ansi`).
 

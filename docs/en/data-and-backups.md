@@ -184,6 +184,18 @@ All fields are optional; older versions ignore them, and missing fields mean the
 
 - `hot-exit/`: unsaved editor buffers; `editor-state.json`: open folder, tabs, splits and recent files of the Editor tab (both internal formats; in *Clean up* as *Editor: unsaved buffers* and as part of *Sessions and layout*).
 
+## New fields in 3.1.0
+- `settings.json` → `editor` ([Syntax colours](editor.md#syntax-colours)), all optional (missing = default, older files load unchanged):
+
+  | Field | Default | Meaning |
+  |---|---|---|
+  | `default_mode` | `"text"` | mode of files whose language has no own setting: `"text"` or `"syntax"` (unknown values → `"text"`) |
+  | `language_modes` | `{}` | mode per language id, e.g. `{"rust": "syntax"}`; ids as in the language picker (`rust`, `python`, `powershell` …, other bat grammars by their scope such as `source.haskell`) |
+  | `language_map` | `{}` | own mappings pattern → language id, before the built-in detection; a pattern is an extension (`"*.tpl"`, `".tpl"`) or a file name (`"Jenkinsfile"`), case-insensitive (at most 500 entries) |
+
+- Theme colours `code_*` (syntax colours of the editor, [colour names](themes.md#interface-colours)).
+- `editor-state.json` (internal) remembers the language and mode chosen per tab.
+
 ## Backups
 *Settings → Data & backup* controls the automatic backups of `paneldeck.db`: by default one copy every 24 hours, keeping two (plus the database itself). If the computer was off when a backup was due, it is made at the next start; several missed ones result in just one. You can choose another backup folder, open it, press **Back up now** (manual copies are never deleted automatically) and **Restore** any copy from the list – the current state is backed up first, Paneldeck then quits and applies the restore at the next start. Before every database update (migration) Paneldeck makes a copy as well, and it never touches a database created by a newer version.
 

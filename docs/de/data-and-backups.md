@@ -184,6 +184,18 @@ Alle Felder sind optional; ältere Versionen ignorieren sie, fehlende Felder bed
 
 - `hot-exit/`: ungespeicherte Editor-Puffer; `editor-state.json`: offener Ordner, Tabs, Teilungen und zuletzt geöffnete Dateien des Editor-Reiters (beides interne Formate; im *Aufräumen* als *Editor: ungespeicherte Puffer* bzw. als Teil von *Sitzungen und Layout*).
 
+## Neue Felder in 3.1.0
+- `settings.json` → `editor` ([Syntaxfarben](editor.md#syntaxfarben)), alle optional (fehlt = Standard, ältere Dateien laden unverändert):
+
+  | Feld | Standard | Bedeutung |
+  |---|---|---|
+  | `default_mode` | `"text"` | Modus von Dateien, für deren Sprache nichts eingestellt ist: `"text"` oder `"syntax"` (unbekannte Werte → `"text"`) |
+  | `language_modes` | `{}` | Modus je Sprach-Id, z. B. `{"rust": "syntax"}`; Ids wie in der Sprachauswahl (`rust`, `python`, `powershell` …, weitere bat-Grammatiken mit ihrem Scope wie `source.haskell`) |
+  | `language_map` | `{}` | eigene Zuordnungen Muster → Sprach-Id, vor der eingebauten Erkennung; ein Muster ist eine Endung (`"*.tpl"`, `".tpl"`) oder ein Dateiname (`"Jenkinsfile"`), ohne Groß/Klein (höchstens 500 Einträge) |
+
+- Theme-Farben `code_*` (Syntaxfarben des Editors, [Farbnamen](themes.md#oberflächenfarben)).
+- `editor-state.json` (intern) merkt sich die je Tab gewählte Sprache und den Modus.
+
 ## Sicherungen
 *Einstellungen → Daten & Sicherung* steuert die automatischen Sicherungen von `paneldeck.db`: Standard ist eine Kopie alle 24 Stunden, behalten werden zwei (zusätzlich zur Datenbank selbst). War der Rechner zur fälligen Zeit aus, wird die Sicherung beim nächsten Start nachgeholt; mehrere verpasste ergeben nur eine. Du kannst einen anderen Sicherungsordner wählen, ihn öffnen, mit **Jetzt sichern** eine Kopie anlegen (manuelle Kopien werden nie automatisch gelöscht) und jede Kopie aus der Liste **wiederherstellen** – dabei wird zuerst der aktuelle Stand gesichert, danach beendet sich Paneldeck und spielt die Wiederherstellung beim nächsten Start ein. Vor jedem Datenbank-Update (Migration) legt Paneldeck ebenfalls eine Kopie an und fasst eine Datenbank einer neueren Version nie an.
 

@@ -1,0 +1,119 @@
+%YAML 1.2
+---
+# Inno Setup scripts – compact grammar of Paneldeck (MIT, see LICENSE). Sections, comments, preprocessor (ISPP)
+# directives and inline {#…}, constants ({app}, {tmp} …), keys and parameters, strings; the [Code] section as Pascal Script.
+name: Inno Setup
+file_extensions: [iss, isi]
+scope: source.innosetup
+contexts:
+  main:
+    - match: '(?i)^\s*\[Code\]'
+      scope: entity.name.section.innosetup
+      push: code
+    - match: '^\s*\[[^\]\n]*\]'
+      scope: entity.name.section.innosetup
+    - match: '^\s*;.*$'
+      scope: comment.line.semicolon.innosetup
+    - include: preprocessor
+    - match: '"'
+      scope: punctuation.definition.string.begin.innosetup
+      push: string
+    - include: constants
+    - match: '^\s*([A-Za-z_][\w.]*)\s*(=)'
+      captures:
+        1: entity.other.attribute-name.key.innosetup
+        2: keyword.operator.assignment.innosetup
+    - match: '\b([A-Za-z]+)(:)(?=\s)'
+      captures:
+        1: entity.other.attribute-name.parameter.innosetup
+        2: punctuation.separator.innosetup
+    - match: '(?i)\b(?:yes|no|true|false|auto)\b'
+      scope: constant.language.innosetup
+    - match: '\b[0-9]+(?:\.[0-9]+)*\b'
+      scope: constant.numeric.innosetup
+  preprocessor:
+    - match: '^\s*#\s*[A-Za-z]+'
+      scope: keyword.preprocessor.innosetup
+    - match: '\{#'
+      scope: keyword.preprocessor.innosetup
+      push: inline_pp
+  inline_pp:
+    - meta_scope: meta.preprocessor.inline.innosetup
+    - match: '\}'
+      scope: keyword.preprocessor.innosetup
+      pop: true
+    - match: '"[^"\n]*"'
+      scope: string.quoted.double.innosetup
+    - match: '$'
+      pop: true
+  constants:
+    - match: '\{\{'
+      scope: constant.character.escape.innosetup
+    - match: '\{[^{}#\n"][^{}\n"]*\}'
+      scope: constant.language.innosetup
+  string:
+    - meta_scope: string.quoted.double.innosetup
+    - match: '""'
+      scope: constant.character.escape.innosetup
+    - match: '"'
+      scope: punctuation.definition.string.end.innosetup
+      pop: true
+    - match: '\{#'
+      scope: keyword.preprocessor.innosetup
+      push: inline_pp
+    - include: constants
+    - match: '$'
+      pop: true
+  code:
+    - meta_content_scope: source.pascal.innosetup
+    - match: '(?=^\s*\[[A-Za-z][^\]\n]*\]\s*$)'
+      pop: true
+    - match: '//.*$'
+      scope: comment.line.double-slash.innosetup
+    - match: '^\s*#\s*[A-Za-z]+'
+      scope: keyword.preprocessor.innosetup
+    - match: '\{#'
+      scope: keyword.preprocessor.innosetup
+      push: inline_pp
+    - match: '\{'
+      push: brace_comment
+    - match: '\(\*'
+      push: paren_comment
+    - match: ''''
+      push: pascal_string
+    - match: '#\$[0-9A-Fa-f]+|#[0-9]+'
+      scope: constant.character.innosetup
+    - match: '(?i)\b(procedure|function)\s+([A-Za-z_][\w.]*)'
+      captures:
+        1: storage.type.function.innosetup
+        2: entity.name.function.innosetup
+    - match: '(?i)\b(?:and|or|not|xor|shl|shr|div|mod|in|is|as)\b'
+      scope: keyword.operator.word.innosetup
+    - match: '(?i)\b(?:begin|end|if|then|else|case|of|for|to|downto|do|while|repeat|until|with|try|except|finally|raise|exit|break|continue|var|const|type|record|array|set|packed|program|uses|forward|external|out|class|interface|implementation|unit|object|property|inherited|label|goto|procedure|function)\b'
+      scope: keyword.control.innosetup
+    - match: '(?i)\b(?:Integer|Cardinal|Byte|Word|LongInt|LongWord|Int64|ShortInt|SmallInt|Boolean|String|AnsiString|WideString|UnicodeString|Char|AnsiChar|WideChar|Extended|Double|Single|Currency|Variant|PChar|TArrayOfString|TStringList|TNewNotebookPage|TWizardPage|TInputQueryWizardPage|TOutputMsgWizardPage)\b'
+      scope: support.type.innosetup
+    - match: '(?i)\b(?:True|False|nil)\b'
+      scope: constant.language.innosetup
+    - match: '\$[0-9A-Fa-f]+\b|\b[0-9]+(?:\.[0-9]+)?(?:[eE][-+]?[0-9]+)?\b'
+      scope: constant.numeric.innosetup
+    - match: '\b[A-Za-z_]\w*(?=\s*\()'
+      scope: variable.function.innosetup
+    - match: ':=|<>|<=|>=|[-+*/=<>@^]'
+      scope: keyword.operator.innosetup
+  brace_comment:
+    - meta_scope: comment.block.brace.innosetup
+    - match: '\}'
+      pop: true
+  paren_comment:
+    - meta_scope: comment.block.paren.innosetup
+    - match: '\*\)'
+      pop: true
+  pascal_string:
+    - meta_scope: string.quoted.single.innosetup
+    - match: ''''''
+      scope: constant.character.escape.innosetup
+    - match: ''''
+      pop: true
+    - match: '$'
+      pop: true

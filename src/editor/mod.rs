@@ -9,6 +9,7 @@
 //! - [`Search`]: find/replace with regex, case, whole word; ranges for highlighting.
 //! - Files (`file.rs`): open with detection and `.editorconfig`, atomic save, change detection on disk, conflict choice.
 //! - [`HotExitStore`]: unsaved buffers across restarts.
+//! - [`syntax`]: Syntax mode (#312) – language detection and incremental syntax colours behind a small interface.
 //!
 //! Positions are char indices into the text; see `text.rs` for line/column helpers. API overview for the UI and
 //! services: `notes/editor-core-api.md` in the test folder (kept up to date with this module).
@@ -31,6 +32,7 @@ pub mod indent;
 pub mod movement;
 pub mod search;
 pub mod selection;
+pub mod syntax;
 pub mod text;
 
 #[allow(unused_imports)]

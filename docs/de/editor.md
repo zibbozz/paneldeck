@@ -25,6 +25,25 @@ Der Reiter **Editor** ist ein einfacher Texteditor in Paneldeck, unabhängig von
 - **Minimap** und Zeilenumbruch (beides aus bei [großen Dateien](#große-dateien)).
 - Rückgängig/Wiederholen je Dokument; Änderungen eines Agenten sind eigene Rückgängig-Schritte.
 
+## Syntaxfarben
+*(Seit 3.1.0.)* Jedes Dokument hat einen **Modus**, rechts in der Statusleiste neben der **Sprache**:
+- **Text** – der schlichte Editor. **Das ist der Standard für jede Datei**, bis du Syntax einschaltest.
+- **Syntax** – die Sprache wird erkannt und der Text eingefärbt (Kommentare, Zeichenketten, Zahlen, Schlüsselwörter, Typen, Funktionen, Tags, Präprozessor-Zeilen …). Die Farben kommen aus dem aktiven Theme (Farben `code_*`, im [Theme-Editor](themes.md#oberflächenfarben) änderbar), helle und dunkle Themes passen also gleichermaßen.
+- *Smart* (Sprachserver) kommt in einer späteren Version; es steht ausgegraut da.
+
+Einschalten:
+- **Für eine Datei:** Klick auf den Modus in der Statusleiste → *Diese Datei: Syntax*. Die Wahl wird mit dem Tab gemerkt.
+- **Für alle Dateien einer Sprache:** im selben Menü *Alle Dateien: Rust → Syntax* oder unter *Einstellungen → Editor → Sprachen → Modus je Sprache*.
+- **Für alle Dateien:** *Standard für alle übrigen Dateien → Syntax* im Menü oder *Einstellungen → Editor → Standard-Modus*.
+
+**Spracherkennung:** zuerst deine eigenen Zuordnungen (*Einstellungen → Editor → Eigene Zuordnungen*, z. B. `*.tpl` → HTML oder `Jenkinsfile` → Groovy), dann der Dateiname (`Makefile`, `CMakeLists.txt`, `Dockerfile`, `Gemfile` …) und die Endung, dann eine Shebang-Zeile (`#!/usr/bin/env python3`) oder eine Modeline (`vim: ft=yaml`, `-*- mode: ruby -*-`). Ein Klick auf die Sprache in der Statusleiste wählt für diese Datei eine andere (Tippen filtert, Enter nimmt den ersten Treffer; *Automatisch erkennen* stellt zurück). Die Wahl wird mit dem Tab gemerkt.
+
+**Sprachen:** AutoIt, Batch, BibTeX, C, C#, C++, CMake, CSS, Diff, Dockerfile, Go, HTML, INI, Inno Setup, Java, JavaScript, JSON, Kotlin, LaTeX, Less, Lua, Makefile, Markdown, NSIS, Pascal / Delphi, Perl, PHP, PowerShell, Python, Ruby, Rust, SCSS, Shell (Bash), SQL, Swift, TeX, TOML, TypeScript, TSX/JSX, Visual Basic (VB.NET, VBA, VBScript), XML, YAML – dazu alle weiteren Grammatiken aus [bat](https://github.com/sharkdp/bat) (Haskell, Kotlin, Terraform, Zig, …; in der Auswahl unter *Weitere Grammatiken*). AutoIt, Inno Setup, Visual Basic und PowerShell nutzen kleine eigene Grammatiken von Paneldeck.
+
+Das Einfärben arbeitet schrittweise: Nur die sichtbaren Zeilen werden eingefärbt, eine Änderung färbt erst ab der geänderten Zeile neu, und alle Teilungen einer Datei teilen sich die Arbeit. Zeilen über 10 000 Zeichen bleiben ohne Farben. Im [Modus für große Dateien](#große-dateien) bleiben die Farben aus.
+
+<!-- screenshot: editor-syntax – Editor-Reiter mit einer Rust-Datei im Syntax-Modus, Statusleiste mit „Syntax“ und „Rust“, Modus-Menü offen -->
+
 ![Suchleiste mit regulärem Ausdruck und Ersetzen](../images/de/editor-find.png)
 
 ## Kodierung, Zeilenenden, Einrückung
@@ -55,7 +74,7 @@ Paneldeck bemerkt, wenn ein anderes Programm eine offene Datei ändert (z. B. Cl
 ![Suche in Dateien mit den Treffern nach Dateien gruppiert](../images/de/editor-search.png)
 
 ## Große Dateien
-Dateien ab **20 MB** (*Einstellungen → Editor → Große Dateien ab*) öffnen im Modus für große Dateien: Der Editor bleibt auch bei mehreren hundert Megabyte flüssig, aber **Minimap und Zeilenumbruch sind aus** (später auch Syntaxfarben), und eine Infoleiste sagt das. Die Suche in Dateien überspringt sie; Agenten können sie lesen, aber nicht bearbeiten.
+Dateien ab **20 MB** (*Einstellungen → Editor → Große Dateien ab*) öffnen im Modus für große Dateien: Der Editor bleibt auch bei mehreren hundert Megabyte flüssig, aber **Minimap, Zeilenumbruch und Syntaxfarben sind aus**, und eine Infoleiste sagt das. Die Suche in Dateien überspringt sie; Agenten können sie lesen, aber nicht bearbeiten.
 
 ## Einstellungen
 *Einstellungen → Editor*:
@@ -67,9 +86,12 @@ Dateien ab **20 MB** (*Einstellungen → Editor → Große Dateien ab*) öffnen 
 | Automatisch speichern / Verzögerung | aus / 1 s | vorhandene Dateien nach der letzten Änderung automatisch speichern |
 | Ignorierte einbeziehen | aus | Vorgabe des Such-Schalters |
 | Ausschlussmuster | – | eines je Zeile, Syntax wie `.gitignore` |
+| Standard-Modus | Text | Modus von Dateien, für deren Sprache nichts eingestellt ist ([Syntaxfarben](#syntaxfarben)) |
+| Modus je Sprache | Standard | Text oder Syntax für alle Dateien einer Sprache |
+| Eigene Zuordnungen | – | Dateiname oder Endung → Sprache, vor der eingebauten Erkennung |
 | **Agenten** | alle aus | siehe [Agenten](#agenten) |
 
-Gespeichert in `settings.json` als `editor` ([Datenformat](data-and-backups.md#neue-felder-in-300)).
+Gespeichert in `settings.json` als `editor` ([Datenformat](data-and-backups.md#neue-felder-in-300), [neu in 3.1.0](data-and-backups.md#neue-felder-in-310)).
 
 ![Einstellungen, Reiter Editor](../images/de/editor-settings.png)
 
@@ -84,4 +106,4 @@ Agenten (Claude Code und andere über die [Agenten-Schnittstelle](agent-interfac
 - Diese Regeln gelten für den Textmodus und den späteren Hex-Modus gleichermaßen.
 
 ## Noch nicht
-Syntaxfarben kommen mit 3.1.0; Sprachserver (*Gehe zu Symbol*, Formatierung, Diagnosen) und KI-Vervollständigung mit 3.3.0, das Sprachpaket mit 3.4.0, Ausführen von Dateien und Projekten mit 3.5.0, ein Hex-Modus mit 3.6.0.
+Sprachserver (Modus *Smart*: *Gehe zu Symbol*, Formatierung, Diagnosen) und KI-Vervollständigung kommen mit 3.3.0, das Sprachpaket mit 3.4.0, Ausführen von Dateien und Projekten mit 3.5.0, ein Hex-Modus mit 3.6.0.

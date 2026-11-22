@@ -544,3 +544,98 @@ fn info_bar_buttons_shorten_in_narrow_splits() {
     assert!(!view::info_narrow(900.0, 380.0));
     assert!(view::info_narrow(500.0, 380.0));
 }
+
+// ------------------------------------------------------------------------------------------- Syntax-Modus (#312)
+
+/// Wie [`frame`], mit eigenen Einstellungen.
+fn frame_prefs(ctx: &egui::Context, ed: &mut EditorUi, events: Vec<Event>, t: &mut f64, prefs: &EditorPrefs) -> Vec<Cmd> {
+    *t += 0.05;
+    let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1200.0, 800.0))), time: Some(*t), events, ..Default::default() };
+    let mut cmds = Vec::new();
+    let th = theme();
+    let _ = ctx.run(input, |ctx| view::draw(ctx, ed, &th, prefs, crate::state::Lang::En, &mut cmds));
+    cmds
+}
+
+fn click_at(p: Pos2) -> Vec<Event> {
+    vec![
+        Event::PointerMoved(p),
+        Event::PointerButton { pos: p, button: egui::PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE },
+        Event::PointerButton { pos: p, button: egui::PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE },
+    ]
+}
+
+#[test]
+fn status_bar_picks_the_language_and_the_mode_is_text_by_default() {
+    use crate::editor::syntax::Mode;
+    let dir = test_dir("syntax");
+    let data = dir.join("data");
+    std::fs::create_dir_all(&data).unwrap();
+    let p = write(&dir, "main.rs", "fn main() {\n    let s = \"hi\"; // x\n}\n");
+    let ctx = egui::Context::default();
+    let mut t = 0.0;
+    let prefs = EditorPrefs::default();
+    let mut ed = EditorUi::restore(&data);
+    ed.open_path(&p, false);
+    frame(&ctx, &mut ed, vec![], &mut t);
+    frame(&ctx, &mut ed, vec![], &mut t);
+    let id = ed.active_doc().unwrap();
+    let st = ed.docs.get_mut(&id).unwrap().syntax_status(&prefs, crate::state::Lang::En);
+    assert_eq!(st.lang.as_deref(), Some("rust"), "aus der Endung erkannt");
+    assert_eq!((st.mode, st.mode_chosen, st.active), (Mode::Text, false, false), "neue Dateien: Text");
+    assert!(ed.docs[&id].syntax.hl.is_none(), "im Text-Modus keine Syntaxfarben");
+
+    // Sprachknopf der Statusleiste anklicken, suchen, Enter.
+    let r = ed.status_rects.0.expect("Sprachknopf gezeichnet");
+    frame(&ctx, &mut ed, click_at(r.center()), &mut t);
+    frame(&ctx, &mut ed, vec![], &mut t);
+    assert!(ctx.memory(|m| m.focused()) == Some(Id::new("ed_lang_search")), "Suchfeld hat die Tastatur");
+    frame(&ctx, &mut ed, vec![Event::Text("pytho".into())], &mut t);
+    assert_eq!(ed.lang_search, "pytho");
+    let key = Event::Key { key: Key::Enter, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE };
+    let cmds = frame(&ctx, &mut ed, vec![key], &mut t);
+    assert!(cmds.contains(&Cmd::SetLanguage(id, Some("python".into()))), "{cmds:?}");
+    ed.set_doc_language(id, Some("python".into()));
+    let st = ed.docs.get_mut(&id).unwrap().syntax_status(&prefs, crate::state::Lang::En);
+    assert_eq!((st.lang.as_deref(), st.lang_chosen, st.lang_name.as_str()), (Some("python"), true, "Python"));
+    assert!(view::filter_languages(".au3").iter().any(|l| l.id == "autoit"), "Suche nach Endung");
+
+    // Moduswahl: Syntax für diese Datei → Farben, auch in einer zweiten Teilung (ein Zustand je Dokument).
+    let m = ed.status_rects.1.expect("Modusknopf gezeichnet");
+    frame(&ctx, &mut ed, click_at(m.center()), &mut t);
+    frame(&ctx, &mut ed, vec![], &mut t);
+    ed.set_doc_language(id, None);
+    ed.set_doc_mode(id, Some(Mode::Syntax));
+    let g = ed.panes.focused;
+    ed.panes.split(g, Dir::Horizontal).unwrap();
+    frame(&ctx, &mut ed, vec![], &mut t);
+    frame(&ctx, &mut ed, vec![], &mut t);
+    let d = &ed.docs[&id];
+    let hl = d.syntax.hl.as_ref().expect("Syntaxfarben an");
+    assert_eq!(hl.lang, "rust");
+    assert!(hl.spans(0).is_some_and(|s| !s.is_empty()), "sichtbare Zeilen eingefärbt");
+    // Einstellung je Sprache: Syntax für Rust, ohne eigene Wahl im Dokument.
+    ed.set_doc_mode(id, None);
+    let mut p2 = EditorPrefs::default();
+    p2.syntax.language_modes.insert("rust".into(), Mode::Syntax);
+    frame_prefs(&ctx, &mut ed, vec![], &mut t, &p2);
+    assert!(ed.docs[&id].syntax.hl.is_some(), "Einstellung der Sprache gilt");
+    frame(&ctx, &mut ed, vec![], &mut t);
+    assert!(ed.docs[&id].syntax.hl.is_none(), "Standard Text");
+    // Große Datei: auch im Syntax-Modus keine Farben.
+    let mut p3 = p2.clone();
+    p3.large_file_bytes = 10;
+    frame_prefs(&ctx, &mut ed, vec![], &mut t, &p3);
+    assert!(ed.docs[&id].syntax.hl.is_none(), "große Datei: Syntaxfarben aus");
+
+    // Gewählte Sprache und Modus werden mit dem Dokument gemerkt.
+    ed.set_doc_language(id, Some("source.haskell".into()));
+    ed.set_doc_mode(id, Some(Mode::Syntax));
+    ed.save(&data);
+    let mut back = EditorUi::restore(&data);
+    let bid = *back.docs.keys().next().unwrap();
+    assert_eq!(back.docs[&bid].syntax.lang.as_deref(), Some("source.haskell"));
+    assert_eq!(back.docs[&bid].syntax.mode, Some(Mode::Syntax));
+    frame(&ctx, &mut back, vec![], &mut t);
+    let _ = std::fs::remove_dir_all(&dir);
+}
