@@ -156,6 +156,7 @@ impl App {
             "mode": match self.mode {
                 titlebar::Mode::Tasks => "tasks",
                 titlebar::Mode::Editor => "editor",
+                titlebar::Mode::Time => "time",
                 titlebar::Mode::Terminals => "terminals",
             },
             "expert": self.plan.expert,

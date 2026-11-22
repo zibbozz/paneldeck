@@ -49,6 +49,8 @@ A tool above the current level returns `forbidden`. The level is checked in the 
 | `start_process`, `stop_process`, `restart_process` | Control | Start, stop (Ctrl+C, after 5 s the whole tree) and restart an entry or a group of the process list |
 | `editor_list`, `editor_read` | Read | The documents open in the [Editor tab](#editor) and their lines, unsaved changes included (since 3.0.0) |
 | `editor_open`, `editor_edit`, `editor_save` | Control + switch | Open a local file or an untitled tab, change an open document (unsaved, marked "by agent", undoable), save an open existing file – each only with its switch in *Settings → Editor → Agents* (since 3.0.0) |
+| `list_alarms`, `list_timers`, `list_stopwatches`, `list_clocks`, `list_birthdays` | Read | The alarms, timers (with presets), stopwatches, world clocks and birthdays of the [Time tab](#time-tab) (since 3.2.0) |
+| `create_alarm`, `update_alarm`, `create_timer`, `update_timer`, `create_stopwatch`, `control_stopwatch` | Control | Create and change alarms and timers (start, pause, restart, reset), create and control stopwatches – never delete; clocks and birthdays are read-only (since 3.2.0) |
 | `list_todos` | Read | The cards of the simple to-do list (every mode; read-only when expert mode is on) |
 | `add_todo`, `set_todo_done` | Control | **Expert mode off:** add a card, tick it off or reopen it |
 | `list_projects`, `get_project`, `search_tickets`, `get_ticket`, `get_time_entries`, `list_sprints`, `get_sprint`, `list_versions`, `maintenance_report` | Read | **Expert mode on:** projects with their types, fields and workflows, tickets (also by query language), comments, history, time entries, sprints with their report, versions and milestones, the maintenance report |
@@ -144,6 +146,22 @@ Since 3.0.0 agents can work with the [Editor tab](editor.md). Reading needs leve
 - **`editor_save`** (Control + *Agents may save*): `doc` → `saved` (`false` when there was nothing to save), `path`. Only files that are **open and already exist**: an untitled tab, a file deleted on disk and network/UNC paths give `forbidden` – only the user chooses a file name. When the file changed on disk while the document has unsaved changes, the result is `conflict`: the user decides in the editor (*Keep mine* / *Load from disk*). Saving is atomic (temporary file, then replace).
 - The call log records the document id or path of `editor_*` calls, never file content.
 
+## Time tab
+Since 3.2.0 agents can work with the [Time tab](time.md). All eleven tools are additive public API. Times are the user's **local time**: `HH:MM` for alarm times, `YYYY-MM-DDTHH:MM:SS` for points in time. **No tool deletes anything**; world clocks and birthdays are read-only. Agents can only choose the built-in sounds `chime`, `beep`, `digital`, `bell`, `soft` (an own sound file of the user appears as `custom`, without a path). Chats with local models do not get these tools. Every change is shown to the user as a short notice.
+
+- **`list_alarms`** (Read): `alarms` (sorted by time) with `id`, `name`, `time`, `days` (`mon` … `sun`), `once` (rings once, then switches itself off), `enabled`, `next` (next ring, `null` when off), `sound`, `snooze_minutes`, `snooze_max`, `snooze_count`, `snoozed_until`, `ringing`.
+- **`list_timers`** (Read): `timers` with `id`, `name`, `duration_seconds`, `state` (`idle`, `running`, `paused`, `expired`), `remaining_seconds`, `ends_at`, `expired_at` (also when it ran out while Paneldeck was closed), `ringing`, `sound`, `ticket` (time tracking, or `null`); `presets` with `id`, `name`, `duration_seconds`.
+- **`list_stopwatches`** (Read): `stopwatches` with `id`, `name`, `running`, `elapsed_ms`, `started_at`, `laps` (newest first: `lap`, `lap_ms`, `total_ms`), `ticket`.
+- **`list_clocks`** (Read): `clocks` with `id`, `label`, `zone` (IANA name), `city`, `time` and `date` there, `utc_offset` (e.g. `UTC+09:00`), `offset_to_local_minutes` (positive = later there), `analog`.
+- **`list_birthdays`** (Read): `birthdays` (soonest first) with `id`, `name`, `month`, `day`, `year` (`null` when unknown), `age`, `next_age`, `next_date`, `days_until` (0 = today), `countdown` (as in Paneldeck, English, e.g. `37 in 5 days and 2 months`, `Today! 🎂`), `today`, `remind`.
+- **`create_alarm`** (Control): `time` (required, `HH:MM`), optional `name`, `days` (list of `mon` … `sun`; missing or empty = once), `sound`, `snooze_minutes` (1–60, default 5), `snooze_max` (0–30, default 10), `enabled` (default `true`) → `alarm`.
+- **`update_alarm`** (Control): `alarm` (id) and any of the fields of `create_alarm`. A changed time or days, and switching on, count from now – nothing rings retroactively; switching off also stops a ringing alarm and a running snooze → `alarm`.
+- **`create_timer`** (Control): `duration` (seconds as a number, or text such as `4m`, `1h 30m`, `1:30`; at most 100 h) **or** `preset` (id or name), optional `name` (default: the preset's name), `sound`, `start` (default `true`) → `timer`.
+- **`update_timer`** (Control): `timer` (id), optional `name`, `duration` (applies from the next start), `sound`, `action` (`start`, `pause`, `resume`, `restart`, `reset`; `reset`, `restart` and `start` silence a ringing timer) → `timer`.
+- **`create_stopwatch`** (Control): optional `name`, `start` (default `true`) → `stopwatch`.
+- **`control_stopwatch`** (Control): `stopwatch` (id) and `action` (`start`, `stop`, `lap`, `reset`) and/or `name` → `stopwatch`. `lap` on a stopped stopwatch gives `not_running`.
+- Errors: `bad_args` (unreadable time, weekday, duration, sound or range), `not_found` (unknown id or preset), `not_running`, `db_unavailable`, `db_error`. A stop or reset by an agent never asks the user about [time tracking](time.md#time-tracking-on-tickets).
+
 ## Security
 - Access only runs locally through the running instance (`127.0.0.1`, own token). The level is **Off** by default.
 - "Control" lets the agent type into your real terminals – use it only with agents you trust. Terminal content can contain instructions that an agent might wrongly follow; Paneldeck marks terminal content in its answers as untrusted.
@@ -179,6 +197,7 @@ A failed call returns `isError` with a code at the start of the text (`code: mes
 - `bad_args`, `too_large`, `timeout`, `busy`, `internal`. `busy` from a write tool while a maintenance action writes carries `details.retry_after_ms` (since 2.6.0).
 - Chats: `not_a_terminal`, `not_a_chat`, `busy`, `no_model`, `permission_pending`.
 - Editor: `forbidden` (level, switch off, path not local, untitled tab or deleted file on save), `not_found` (document not open, file or `old_text` not found), `bad_args`, `too_large`, `conflict` (file changed on disk while unsaved).
+- Time tab: `bad_args`, `not_found`, `not_running` (lap on a stopped stopwatch), `db_unavailable`, `db_error`.
 - Sessions: `admin_profile`, `spawn_failed`, `session_not_running`, `session_exited`, `session_closed`, `not_claude`, `claude_session`, `claude_mode_off`, `status_unavailable`, `no_shell_integration`, `fullscreen_program`.
 - Screenshots: `window_hidden`, `not_visible`, `screenshot_timeout`, `empty_image`.
 - Tickets and to-do list: `invalid_value`, `required_missing`, `transition_needs_fields`, `transition_not_allowed`, `conditions_not_met`, `hierarchy_violation`, `link_not_allowed`, `already_exists`, `invalid_query`, `feature_disabled`, `no_workflow`, `status_not_in_workflow`, `conflict`, `db_error`, `db_unavailable`.

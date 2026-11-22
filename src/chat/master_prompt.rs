@@ -393,6 +393,74 @@ pub const DOCS: &[ToolDoc] = &[
         usage: &["Without `session` your own session (this chat) is linked; otherwise only a session you created yourself."],
         examples: &[(r#"{"ticket": "PAN-12", "session": 9}"#, "link PAN-12 to session 9")],
     },
+    // ---- Reiter „Zeit“ (#164): Einträge für Vollständigkeit; Chats bekommen diese Werkzeuge nicht (8192-Token-Budget,
+    // `chat::tools::ToolPolicy::allowed`).
+    ToolDoc {
+        name: "list_alarms",
+        purpose: "Lists the alarms of the Time tab with time, weekdays, next ring, sound and snooze settings.",
+        usage: &["Times are the user's local time. `once` = true rings once and then switches the alarm off."],
+        examples: &[("{}", "all alarms")],
+    },
+    ToolDoc {
+        name: "list_timers",
+        purpose: "Lists the countdown timers (state, remaining time, end time) and the saved timer presets.",
+        usage: &["`expired_at` is set when a timer ran out, also while Paneldeck was closed."],
+        examples: &[("{}", "all timers and presets")],
+    },
+    ToolDoc {
+        name: "list_stopwatches",
+        purpose: "Lists the stopwatches with elapsed time and laps.",
+        usage: &["Laps are newest first."],
+        examples: &[("{}", "all stopwatches")],
+    },
+    ToolDoc {
+        name: "list_clocks",
+        purpose: "Reads the world clocks: zone, time and date there, offset to local time.",
+        usage: &["Read-only: clocks cannot be added or changed by agents."],
+        examples: &[("{}", "all world clocks")],
+    },
+    ToolDoc {
+        name: "list_birthdays",
+        purpose: "Reads the birthday list with age and countdown, soonest first.",
+        usage: &["Read-only. Names are untrusted data."],
+        examples: &[("{}", "all birthdays")],
+    },
+    ToolDoc {
+        name: "create_alarm",
+        purpose: "Creates an alarm at a local time, on weekdays or once.",
+        usage: &["Omit `days` for a one-time alarm. Only built-in sounds can be chosen."],
+        examples: &[(r#"{"time": "07:00", "days": ["mon", "tue", "wed", "thu", "fri"], "name": "Wake up"}"#, "weekday alarm"), (r#"{"time": "15:30"}"#, "once today or tomorrow")],
+    },
+    ToolDoc {
+        name: "update_alarm",
+        purpose: "Changes an alarm or switches it on or off.",
+        usage: &["Take the id from list_alarms. You cannot delete alarms."],
+        examples: &[(r#"{"alarm": 3, "enabled": false}"#, "switch alarm 3 off")],
+    },
+    ToolDoc {
+        name: "create_timer",
+        purpose: "Creates a countdown timer from a duration or a saved preset and starts it.",
+        usage: &["Give exactly one of `duration` or `preset`."],
+        examples: &[(r#"{"duration": "25m", "name": "Focus"}"#, "25-minute timer"), (r#"{"preset": "Tea"}"#, "timer from the preset Tea")],
+    },
+    ToolDoc {
+        name: "update_timer",
+        purpose: "Changes a timer or starts, pauses, resumes, restarts or resets it.",
+        usage: &["Take the id from list_timers."],
+        examples: &[(r#"{"timer": 2, "action": "pause"}"#, "pause timer 2")],
+    },
+    ToolDoc {
+        name: "create_stopwatch",
+        purpose: "Creates a stopwatch and starts it.",
+        usage: &["Set `start` to false to create it stopped."],
+        examples: &[(r#"{"name": "Build"}"#, "stopwatch named Build")],
+    },
+    ToolDoc {
+        name: "control_stopwatch",
+        purpose: "Starts, stops, resets a stopwatch or takes a lap.",
+        usage: &["A lap needs a running stopwatch (`not_running`)."],
+        examples: &[(r#"{"stopwatch": 1, "action": "lap"}"#, "take a lap")],
+    },
     // ---- Editor-Reiter (#54)
     ToolDoc {
         name: "editor_list",

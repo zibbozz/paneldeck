@@ -898,6 +898,7 @@ impl App {
             (_, t) if agent::TOOLS.contains(&t) => planning_log_info(t, args),
             // Editor (#54): Dokument bzw. Pfad, nie Dateiinhalt.
             (_, t) if crate::editor_svc::tools::TOOLS.contains(&t) => crate::editor_svc::tools::log_info(t, args),
+            (_, t) if crate::time::agent::TOOLS.contains(&t) => crate::time::agent::log_info(t, args),
             _ => String::new(),
         };
         let (log_how, model) = self.log_origin(how, caller);
@@ -1037,6 +1038,8 @@ impl App {
             "theme_get" => Out::Now(theme_get_json(&self.themes, &self.settings.theme, args)),
             // Editor-Reiter (#54): Schalter und Pfadregeln in `editor_svc::tools`.
             t if crate::editor_svc::tools::TOOLS.contains(&t) => Out::Now(self.mcp_editor(ctx, t, args)),
+            // Reiter „Zeit“ (#164): Wecker, Timer, Stoppuhren (lesen/steuern), Weltuhren und Geburtstage (nur lesen).
+            t if crate::time::agent::TOOLS.contains(&t) => Out::Now(self.mcp_time(t, args, caller)),
             "send_text" => Out::Now(self.mcp_send_text(args, caller)),
             "send_keys" => Out::Now(self.mcp_send_keys(args, caller)),
             "run_command" => self.mcp_run(args, caller, reply, tool, how),

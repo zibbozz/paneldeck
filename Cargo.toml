@@ -30,6 +30,8 @@ unicode-segmentation = "1"
 unicode-width = "0.2"
 # Editor (#54): Suche in Dateien – Ordner durchlaufen mit .gitignore-Regeln (ignore, MIT/Unlicense, aus ripgrep).
 ignore = "0.4"
+# Reiter „Zeit“ (#164, `src/time/`): Weltuhren mit der IANA-Zeitzonen-Datenbank (reines Rust, MIT/Apache-2.0).
+chrono-tz = "0.10"
 
 [features]
 # Nur für die README- und Doku-Screenshots (tools/docs-shots.ps1): Startansicht per Umgebungsvariable PANELDECK_SHOT. Nie im Release.
@@ -81,6 +83,9 @@ tray-icon = { version = "0.21", default-features = false }
 raw-window-handle = "0.6"
 windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_System_Diagnostics_ToolHelp", "Win32_NetworkManagement_IpHelper", "Win32_Graphics_Dwm", "Win32_Graphics_Gdi", "Win32_System_Console", "Win32_System_Environment", "Win32_System_Registry", "Win32_Security", "Win32_Security_Cryptography", "Win32_Networking_WinHttp", "Win32_System_Threading", "Win32_System_JobObjects", "Win32_UI_Shell", "Win32_System_LibraryLoader", "Win32_System_Com", "Win32_Storage_FileSystem"] }
 rfd = { version = "0.17", default-features = false }
+# Klänge des Reiters „Zeit“ (#164, `platform::sound`): Wiedergabe über WASAPI (cpal), WAV über hound, MP3 über symphonia
+# (reines Rust). Nur unter Windows – Linux/macOS spielen über die Programme des Systems (kein ALSA-Bauzwang).
+rodio = { version = "0.21", default-features = false, features = ["playback", "hound", "mp3"] }
 
 [profile.release]
 opt-level = 3

@@ -55,6 +55,8 @@ mod undo;
 mod vtkeys;
 mod termview;
 mod theme;
+// Reiter „Zeit“ (#164): Wecker, Timer, Stoppuhren, Weltuhren, Geburtstage, Benachrichtigungen, Klänge (ohne egui).
+mod time;
 mod usage;
 mod vtnotify;
 mod wsl;

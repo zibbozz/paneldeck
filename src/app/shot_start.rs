@@ -301,6 +301,14 @@ impl App {
                 self.settings_open = true;
                 self.settings_tab = editor_services::SETTINGS_TAB;
             }
+            // ---- Reiter „Zeit“ (#164): Beispieldaten in der Datenbank der Aufnahme
+            "time-alarms" | "time-timers" | "time-clocks" => {
+                self.set_mode(titlebar::Mode::Time);
+                let lang = self.settings.language;
+                if let Some(db) = self.db.as_ref() {
+                    self.time.shot_demo(&db.conn, view, lang);
+                }
+            }
             // ---- Themes
             "theme-appearance" => {
                 let bad = self.themes_dir().join("ocean-night.json");

@@ -75,6 +75,8 @@ mod tasks_ui;
 mod terminal_links;
 mod theme_editor;
 mod theme_preview;
+// Reiter „Zeit“ (#164): Wecker, Timer, Kalender-Platz, Stoppuhren, Weltuhren, Geburtstage.
+mod time_ui;
 mod titlebar;
 mod toasts;
 mod tpl_lib;
@@ -967,6 +969,8 @@ pub struct App {
     editor: Option<Editor>,
     /// Reiter „Editor“ (#54): Ordnerbaum, Dokumente, Teilungen. Für alle Fenster gemeinsam (nicht in `view_fields!`).
     ed: editor_ui::EditorUi,
+    /// Reiter „Zeit“ (#164): Daten, Auswahl, Klingeln, Hinweise. Für alle Fenster gemeinsam (nicht in `view_fields!`).
+    time: time_ui::TimeUi,
     applied_font: String,
     /// Weitere Fenster (`multiwin.rs`, #110).
     wins: multiwin::Wins,
@@ -1329,6 +1333,7 @@ impl App {
             in_tray: false,
             editor: None,
             ed: Default::default(),
+            time: Default::default(),
             applied_font: String::new(),
             wins: Default::default(),
             // `--no-update-check`: keine automatische Prüfung für diesen Start (die manuelle geht weiter).
@@ -2716,6 +2721,8 @@ impl App {
             ("mode_tasks_alt", titlebar::Mode::Tasks),
             ("mode_editor", titlebar::Mode::Editor),
             ("mode_editor_alt", titlebar::Mode::Editor),
+            ("mode_time", titlebar::Mode::Time),
+            ("mode_time_alt", titlebar::Mode::Time),
         ] {
             if let Some((m, k)) = self.binding(id) {
                 if ctx.input_mut(|i| consume_key_exact(i, m, k, true)) {
@@ -4432,6 +4439,8 @@ impl eframe::App for App {
         self.poll_history();
         self.poll_picks(ctx);
         self.check_budget(ctx);
+        // Reiter „Zeit“ (#164): Wecker, Timer, Geburtstage und Benachrichtigungen – auch minimiert und im Tray.
+        self.time_tick(ctx);
         self.handle_drops(ctx);
         let mut actions: Vec<Action> = self.main_frame_begin(ctx);
         // Reiter der Sitzungsdialoge (#292): Standards zum Zählen/Zurücksetzen; Tasten zum Wechseln der Reiter gehören
@@ -4460,12 +4469,15 @@ impl eframe::App for App {
             self.handle_drag(ctx);
         } else if self.mode == titlebar::Mode::Editor {
             self.editor_view(ctx);
+        } else if self.mode == titlebar::Mode::Time {
+            self.time_view(ctx);
         } else {
             self.tasks_view(ctx);
         }
         if self.main_overlay() {
             self.notice_ui(ctx);
             self.toasts_ui(ctx);
+            self.time_overlay(ctx);
         }
         self.detached_windows(ctx, &mut actions);
         self.text_prompt_ui(ctx, &mut actions);
@@ -4507,6 +4519,8 @@ impl eframe::App for App {
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         crate::platform::chrome::shutdown();
+        // Reiter „Zeit“ (#164): ein klingelnder Wecker verstummt mit dem Programm.
+        crate::platform::sound::stop_all();
         self.save_for_exit();
         // Editor (#54) unabhängig von „Sitzungen merken“: Reiter und ungespeicherte Puffer (Hot Exit) immer sichern.
         self.ed.save(&self.dir);

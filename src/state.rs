@@ -306,6 +306,10 @@ pub struct Settings {
     /// in der Seitenleiste).
     #[serde(deserialize_with = "lenient_false")]
     pub tutorial_whats_new: bool,
+    /// Reiter „Zeit“ (seit 3.2.0, #164): Klang/Toast je Art, Blinken, Lautstärke, Klingeldauer, Zeiterfassung an Tickets,
+    /// Sekunden der Weltuhren (`time::settings`). Fehlt in älteren Dateien (dann die Standards); Unlesbares je Wert der Standard.
+    #[serde(deserialize_with = "crate::time::settings::TimeSettings::lenient", skip_serializing_if = "crate::time::settings::TimeSettings::is_default")]
+    pub time: crate::time::settings::TimeSettings,
 }
 
 /// Liste von Texten tolerant lesen: Einträge mit falschem Typ fallen weg, ein falscher Typ insgesamt ergibt eine leere Liste.
@@ -426,6 +430,7 @@ impl Default for Settings {
             chat_prompt_parts: Default::default(),
             editor: Default::default(),
             tutorial_whats_new: false,
+            time: Default::default(),
         }
     }
 }

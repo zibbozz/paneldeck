@@ -49,6 +49,8 @@ Ein Werkzeug oberhalb der aktuellen Stufe liefert `forbidden`. Die Stufe wird im
 | `start_process`, `stop_process`, `restart_process` | Steuern | Einen Eintrag oder eine Gruppe der Prozessliste starten, stoppen (Strg+C, nach 5 s der ganze Baum) und neu starten |
 | `editor_list`, `editor_read` | Lesen | Die im [Editor-Reiter](#editor) offenen Dokumente und ihre Zeilen, auch ungespeicherte Änderungen (seit 3.0.0) |
 | `editor_open`, `editor_edit`, `editor_save` | Steuern + Schalter | Lokale Datei oder unbenannten Tab öffnen, offenes Dokument ändern (ungespeichert, als „vom Agenten“ markiert, rückgängig machbar), offene vorhandene Datei speichern – jeweils nur mit seinem Schalter unter *Einstellungen → Editor → Agenten* (seit 3.0.0) |
+| `list_alarms`, `list_timers`, `list_stopwatches`, `list_clocks`, `list_birthdays` | Lesen | Wecker, Timer (mit Vorlagen), Stoppuhren, Weltuhren und Geburtstage des [Reiters „Zeit“](#reiter-zeit) (seit 3.2.0) |
+| `create_alarm`, `update_alarm`, `create_timer`, `update_timer`, `create_stopwatch`, `control_stopwatch` | Steuern | Wecker und Timer anlegen und ändern (starten, anhalten, neu starten, zurücksetzen), Stoppuhren anlegen und steuern – nie löschen; Weltuhren und Geburtstage nur lesen (seit 3.2.0) |
 | `list_todos` | Lesen | Die Karten der einfachen Todo-Liste (in jedem Modus; bei eingeschaltetem Expertenmodus nur lesbar) |
 | `add_todo`, `set_todo_done` | Steuern | **Expertenmodus aus:** Karte anlegen, abhaken oder wieder öffnen |
 | `list_projects`, `get_project`, `search_tickets`, `get_ticket`, `get_time_entries`, `list_sprints`, `get_sprint`, `list_versions`, `maintenance_report` | Lesen | **Expertenmodus an:** Projekte mit Typen, Feldern und Workflows, Tickets (auch per Abfragesprache), Kommentare, Verlauf, Zeiteinträge, Sprints mit Bericht, Versionen und Meilensteine, der Wartungsbericht |
@@ -144,6 +146,22 @@ Seit 3.0.0 können Agenten mit dem [Editor-Reiter](editor.md) arbeiten. Lesen br
 - **`editor_save`** (Steuern + *Agenten dürfen speichern*): `doc` → `saved` (`false`, wenn nichts zu speichern war), `path`. Nur Dateien, die **offen sind und schon existieren**: ein unbenannter Tab, eine auf der Platte gelöschte Datei und Netzwerk-/UNC-Pfade ergeben `forbidden` – den Dateinamen wählt nur der Nutzer. Wurde die Datei auf der Platte geändert, während das Dokument ungespeicherte Änderungen hat, ist das Ergebnis `conflict`: Der Nutzer entscheidet im Editor (*Meine behalten* / *Von der Platte laden*). Gespeichert wird atomar (temporäre Datei, dann ersetzen).
 - Das Aufrufprotokoll nennt bei `editor_*` die Dokument-Kennung bzw. den Pfad, nie Dateiinhalt.
 
+## Reiter „Zeit“
+Seit 3.2.0 können Agenten mit dem [Reiter „Zeit“](time.md) arbeiten. Alle elf Werkzeuge sind additive öffentliche API. Zeiten sind die **lokale Zeit** des Nutzers: `HH:MM` für Weckzeiten, `JJJJ-MM-TTTHH:MM:SS` für Zeitpunkte. **Kein Werkzeug löscht etwas**; Weltuhren und Geburtstage sind nur lesbar. Agenten wählen nur die eingebauten Klänge `chime`, `beep`, `digital`, `bell`, `soft` (eine eigene Klangdatei des Nutzers erscheint als `custom`, ohne Pfad). Chats mit lokalen Modellen bekommen diese Werkzeuge nicht. Jede Änderung zeigt Paneldeck dem Nutzer als kurzen Hinweis.
+
+- **`list_alarms`** (Lesen): `alarms` (nach Uhrzeit) mit `id`, `name`, `time`, `days` (`mon` … `sun`), `once` (klingelt einmal und schaltet sich dann aus), `enabled`, `next` (nächstes Klingeln, `null` wenn aus), `sound`, `snooze_minutes`, `snooze_max`, `snooze_count`, `snoozed_until`, `ringing`.
+- **`list_timers`** (Lesen): `timers` mit `id`, `name`, `duration_seconds`, `state` (`idle`, `running`, `paused`, `expired`), `remaining_seconds`, `ends_at`, `expired_at` (auch wenn er ablief, während Paneldeck geschlossen war), `ringing`, `sound`, `ticket` (Zeiterfassung oder `null`); `presets` mit `id`, `name`, `duration_seconds`.
+- **`list_stopwatches`** (Lesen): `stopwatches` mit `id`, `name`, `running`, `elapsed_ms`, `started_at`, `laps` (neueste zuerst: `lap`, `lap_ms`, `total_ms`), `ticket`.
+- **`list_clocks`** (Lesen): `clocks` mit `id`, `label`, `zone` (IANA-Name), `city`, `time` und `date` dort, `utc_offset` (z. B. `UTC+09:00`), `offset_to_local_minutes` (positiv = dort später), `analog`.
+- **`list_birthdays`** (Lesen): `birthdays` (der nächste zuerst) mit `id`, `name`, `month`, `day`, `year` (`null`, wenn unbekannt), `age`, `next_age`, `next_date`, `days_until` (0 = heute), `countdown` (wie in Paneldeck, englisch, z. B. `37 in 5 days and 2 months`, `Today! 🎂`), `today`, `remind`.
+- **`create_alarm`** (Steuern): `time` (Pflicht, `HH:MM`), optional `name`, `days` (Liste aus `mon` … `sun`; fehlt oder leer = einmalig), `sound`, `snooze_minutes` (1–60, Standard 5), `snooze_max` (0–30, Standard 10), `enabled` (Standard `true`) → `alarm`.
+- **`update_alarm`** (Steuern): `alarm` (Kennung) und beliebige Felder von `create_alarm`. Eine geänderte Uhrzeit oder geänderte Tage und das Einschalten gelten ab jetzt – nichts klingelt nachträglich; Ausschalten beendet auch ein laufendes Klingeln und Schlummern → `alarm`.
+- **`create_timer`** (Steuern): `duration` (Sekunden als Zahl oder Text wie `4m`, `1h 30m`, `1:30`; höchstens 100 h) **oder** `preset` (Kennung oder Name), optional `name` (Standard: Name der Vorlage), `sound`, `start` (Standard `true`) → `timer`.
+- **`update_timer`** (Steuern): `timer` (Kennung), optional `name`, `duration` (gilt ab dem nächsten Start), `sound`, `action` (`start`, `pause`, `resume`, `restart`, `reset`; `reset`, `restart` und `start` beenden ein Klingeln) → `timer`.
+- **`create_stopwatch`** (Steuern): optional `name`, `start` (Standard `true`) → `stopwatch`.
+- **`control_stopwatch`** (Steuern): `stopwatch` (Kennung) und `action` (`start`, `stop`, `lap`, `reset`) und/oder `name` → `stopwatch`. `lap` bei angehaltener Stoppuhr ergibt `not_running`.
+- Fehler: `bad_args` (unlesbare Uhrzeit, Wochentag, Dauer, Klang oder Bereich), `not_found` (unbekannte Kennung oder Vorlage), `not_running`, `db_unavailable`, `db_error`. Stoppen oder Zurücksetzen durch Agenten fragt nie nach der [Zeiterfassung](time.md#zeiterfassung-an-tickets).
+
 ## Sicherheit
 - Der Zugriff läuft nur lokal über die laufende Instanz (`127.0.0.1`, eigener Token). Die Stufe ist standardmäßig **Aus**.
 - „Steuern“ lässt den Agenten in deine echten Terminals tippen – nutze es nur mit Agenten, denen du vertraust. Terminalinhalt kann Anweisungen enthalten, die ein Agent fälschlich befolgt; Paneldeck kennzeichnet Terminalinhalt in seinen Antworten als nicht vertrauenswürdig.
@@ -179,6 +197,7 @@ Ein fehlgeschlagener Aufruf liefert `isError` mit einem Code am Anfang des Texts
 - `bad_args`, `too_large`, `timeout`, `busy`, `internal`. `busy` bei einem schreibenden Werkzeug, während eine Wartungsaktion schreibt, trägt `details.retry_after_ms` (seit 2.6.0).
 - Chats: `not_a_terminal`, `not_a_chat`, `busy`, `no_model`, `permission_pending`.
 - Editor: `forbidden` (Stufe, Schalter aus, Pfad nicht lokal, unbenannter Tab oder gelöschte Datei beim Speichern), `not_found` (Dokument nicht offen, Datei oder `old_text` nicht gefunden), `bad_args`, `too_large`, `conflict` (Datei auf der Platte geändert, während ungespeichert).
+- Reiter „Zeit“: `bad_args`, `not_found`, `not_running` (Runde bei angehaltener Stoppuhr), `db_unavailable`, `db_error`.
 - Sitzungen: `admin_profile`, `spawn_failed`, `session_not_running`, `session_exited`, `session_closed`, `not_claude`, `claude_session`, `claude_mode_off`, `status_unavailable`, `no_shell_integration`, `fullscreen_program`.
 - Screenshots: `window_hidden`, `not_visible`, `screenshot_timeout`, `empty_image`.
 - Tickets und Todo-Liste: `invalid_value`, `required_missing`, `transition_needs_fields`, `transition_not_allowed`, `conditions_not_met`, `hierarchy_violation`, `link_not_allowed`, `already_exists`, `invalid_query`, `feature_disabled`, `no_workflow`, `status_not_in_workflow`, `conflict`, `db_error`, `db_unavailable`.

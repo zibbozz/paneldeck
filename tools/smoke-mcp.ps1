@@ -2357,6 +2357,53 @@ c.close()
   Check 'Editor: mcp-log.jsonl nennt editor_*, aber keinen Dateiinhalt' ($log -match 'editor_edit' -and $log -notmatch 'BETA' -and $log -notmatch 'draft') ''
   $script:prestart = $null
 
+  Write-Host "== Reiter Zeit (#164): Wecker, Timer, Stoppuhren, Weltuhren, Geburtstage ueber MCP" -ForegroundColor Cyan
+  Set-Level 'Read'
+  [void](Rpc 'initialize' @{ protocolVersion = '2025-06-18'; capabilities = @{}; clientInfo = @{ name = 'smoke'; version = '1' } })
+  Start-Sleep 2
+  $names = @((Rpc 'tools/list').result.tools | ForEach-Object name)
+  $readT = @('list_alarms', 'list_timers', 'list_stopwatches', 'list_clocks', 'list_birthdays')
+  $ctlT = @('create_alarm', 'update_alarm', 'create_timer', 'update_timer', 'create_stopwatch', 'control_stopwatch')
+  Check 'Zeit, Stufe Lesen: Lese-Werkzeuge da, Steuer-Werkzeuge nicht' ((@($readT | Where-Object { $names -notcontains $_ }).Count -eq 0) -and (@($ctlT | Where-Object { $names -contains $_ }).Count -eq 0)) ($names -join ',')
+  Check 'Zeit: kein Werkzeug zum Loeschen, keins zum Aendern von Weltuhren/Geburtstagen' (-not ($names | Where-Object { $_ -match '^(delete|remove)_(alarm|timer|stopwatch|clock|birthday)' -or $_ -match '^(create|update)_(clock|birthday)' })) ''
+  $la = Tool 'list_alarms'
+  Check 'Zeit: list_alarms liefert eine (leere) Liste' (-not $la.err -and $null -ne $la.data.alarms) $la.text
+  Check 'Zeit, Stufe Lesen: create_alarm verboten (forbidden)' ((Code (Tool 'create_alarm' @{ time = '07:00' })) -eq 'forbidden')
+  Set-Level 'Control'
+  [void](Rpc 'initialize' @{ protocolVersion = '2025-06-18'; capabilities = @{}; clientInfo = @{ name = 'smoke'; version = '1' } })
+  Start-Sleep 2
+  $names = @((Rpc 'tools/list').result.tools | ForEach-Object name)
+  Check 'Zeit, Stufe Steuern: alle elf Werkzeuge da' ((@(($readT + $ctlT) | Where-Object { $names -notcontains $_ }).Count -eq 0)) ($names -join ',')
+  $ca = Tool 'create_alarm' @{ time = '07:30'; name = 'Smoke-Wecker'; days = @('mon', 'fri'); sound = 'bell' }
+  Check 'create_alarm: Wecker mit Tagen, Klang und naechstem Termin' (-not $ca.err -and $ca.data.alarm.time -eq '07:30' -and $ca.data.alarm.once -eq $false -and $ca.data.alarm.sound -eq 'bell' -and $null -ne $ca.data.alarm.next) $ca.text
+  Check 'create_alarm: falsche Uhrzeit -> bad_args' ((Code (Tool 'create_alarm' @{ time = '25:00' })) -eq 'bad_args')
+  Check 'create_alarm: eigene Klangdatei nicht erlaubt -> bad_args' ((Code (Tool 'create_alarm' @{ time = '07:00'; sound = 'file:C:\x.wav' })) -eq 'bad_args')
+  $ua = Tool 'update_alarm' @{ alarm = $ca.data.alarm.id; enabled = $false }
+  Check 'update_alarm: ausschalten, kein naechster Termin' (-not $ua.err -and $ua.data.alarm.enabled -eq $false -and $null -eq $ua.data.alarm.next) $ua.text
+  Check 'update_alarm: unbekannte Kennung -> not_found' ((Code (Tool 'update_alarm' @{ alarm = 99999 })) -eq 'not_found')
+  $ct = Tool 'create_timer' @{ duration = '4m'; name = 'Smoke-Tee' }
+  Check 'create_timer: laeuft mit 240 s' (-not $ct.err -and $ct.data.timer.state -eq 'running' -and $ct.data.timer.duration_seconds -eq 240 -and $ct.data.timer.remaining_seconds -le 240) $ct.text
+  $ut = Tool 'update_timer' @{ timer = $ct.data.timer.id; action = 'pause' }
+  Check 'update_timer: pause' (-not $ut.err -and $ut.data.timer.state -eq 'paused') $ut.text
+  $short = Tool 'create_timer' @{ duration = 1; name = 'Smoke-Kurz' }
+  Start-Sleep 3
+  $lt = Tool 'list_timers'
+  $k = @($lt.data.timers) | Where-Object { $_.id -eq $short.data.timer.id }
+  Check 'Timer laeuft ab: expired mit expired_at, klingelt' ($k.state -eq 'expired' -and [string]$k.expired_at -ne '' -and $k.ringing -eq $true) ($k | ConvertTo-Json -Compress)
+  $rs = Tool 'update_timer' @{ timer = $short.data.timer.id; action = 'reset' }
+  Check 'update_timer reset: bereit, klingelt nicht mehr' (-not $rs.err -and $rs.data.timer.state -eq 'idle' -and $rs.data.timer.ringing -eq $false) $rs.text
+  $cs = Tool 'create_stopwatch' @{ name = 'Smoke-Uhr' }
+  Start-Sleep 1
+  $lp = Tool 'control_stopwatch' @{ stopwatch = $cs.data.stopwatch.id; action = 'lap' }
+  $st = Tool 'control_stopwatch' @{ stopwatch = $cs.data.stopwatch.id; action = 'stop' }
+  Check 'Stoppuhr: Runde und Stopp' (-not $lp.err -and @($lp.data.stopwatch.laps).Count -eq 1 -and $st.data.stopwatch.running -eq $false -and $st.data.stopwatch.elapsed_ms -ge 900) $st.text
+  Check 'Stoppuhr steht: Runde -> not_running' ((Code (Tool 'control_stopwatch' @{ stopwatch = $cs.data.stopwatch.id; action = 'lap' })) -eq 'not_running')
+  $lc = Tool 'list_clocks'; $lb = Tool 'list_birthdays'
+  Check 'list_clocks und list_birthdays lesbar' (-not $lc.err -and -not $lb.err -and $null -ne $lc.data.clocks -and $null -ne $lb.data.birthdays) "$($lc.text) / $($lb.text)"
+  $log = if (Test-Path "$data\mcp-log.jsonl") { [IO.File]::ReadAllText("$data\mcp-log.jsonl") } else { '' }
+  Check 'Zeit: Aufrufe im Agenten-Protokoll' ($log -match 'create_timer' -and $log -match 'control_stopwatch') ''
+  $script:prestart = $null
+
   Write-Host "== Shell-Integration: Hilfsdateien beim Beenden geloescht (#57)" -ForegroundColor Cyan
   # Eigener Hub ohne Sitzungen (keine Rueckfrage beim Schliessen); Fenster normal schliessen statt Prozess beenden.
   Set-Level 'Control' -Empty

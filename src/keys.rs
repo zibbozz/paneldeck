@@ -32,6 +32,9 @@ pub const DEFAULTS: &[(&str, &str)] = &[
     ("mode_tasks_alt", "Ctrl+2"),
     // Editor (#54): zweite Belegung standardmäßig leer – Strg+3 gehört dem Terminal (#183).
     ("mode_editor_alt", ""),
+    // Reiter „Zeit“ (#164): Alt+Shift+4; zweite Belegung leer (Strg+4 gehört dem Terminal, #183).
+    ("mode_time", "Alt+Shift+4"),
+    ("mode_time_alt", ""),
     // Alle Sitzungen schließen (#156): standardmäßig ohne Kürzel (leer = keins)
     ("close_all", ""),
     // Sitzung neu laden (#169): standardmäßig ohne Kürzel
@@ -70,6 +73,8 @@ pub fn label(id: &str, de: bool) -> &'static str {
         "mode_tasks_alt" => ("Reiter „Todo-Liste“ (zweite Belegung)", "“Todo list” tab (alternative)"),
         "mode_editor" => ("Reiter „Editor“", "“Editor” tab"),
         "mode_editor_alt" => ("Reiter „Editor“ (zweite Belegung)", "“Editor” tab (alternative)"),
+        "mode_time" => ("Reiter „Zeit“", "“Time” tab"),
+        "mode_time_alt" => ("Reiter „Zeit“ (zweite Belegung)", "“Time” tab (alternative)"),
         "close_all" => ("Alle Sitzungen schließen", "Close all sessions"),
         "reload" => ("Sitzung neu laden", "Reload session"),
         _ => ("?", "?"),

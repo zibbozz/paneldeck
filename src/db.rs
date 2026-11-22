@@ -56,6 +56,8 @@ const MIGRATIONS: &[&str] = &[
     // 10: Wartung (Issue #308): Archiv-Markierung der Tickets, Wartungs-Einstellungen, ignorierte Befunde, eigene Regeln,
     // Wartungsprotokoll, SQL in `planning/maintenance/schema.rs`
     crate::planning::maintenance::schema::MIGRATION,
+    // 11: Reiter „Zeit“ (Issue #164): Wecker, Timer und Timer-Vorlagen, Stoppuhren, Weltuhren, Geburtstage, SQL in `time/store.rs`
+    crate::time::store::MIGRATION,
 ];
 
 /// Schema-Version dieser Programmversion (auch für die Rettung einer beschädigten Datenbank in eine neue Datei).
@@ -320,6 +322,57 @@ mod tests {
         let db = open(&d, &bdir).unwrap();
         assert_eq!(user_version(&db.conn), latest_version());
         assert!(backup::list(&bdir).is_empty());
+        drop(db);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// Reiter „Zeit“ (#164): Eine Datenbank von 3.0/3.1 (Schema 10, mit Projekt und Ticket) bekommt die Tabellen der
+    /// Migration 11, vorher eine Sicherung; die alten Daten bleiben, die neuen Tabellen sind leer und nutzbar. Eine
+    /// Sicherung (`VACUUM INTO`) enthält danach auch die Einträge des Reiters, und die Wiederherstellung bringt sie zurück.
+    #[test]
+    fn a_3_0_database_gets_the_time_tables_and_backups_include_them() {
+        use crate::planning::projects::{create_project, NewProject};
+        use crate::planning::tickets::{create_ticket, NewTicket};
+        use crate::time::{store, Alarm, Birthday};
+        let d = tmp("db-v10-time");
+        let bdir = d.join("backups");
+        let ten = MIGRATIONS.iter().position(|m| *m == crate::time::store::MIGRATION).expect("Zeit-Migration vorhanden");
+        let (pid, tid) = {
+            let db = open_with(&d, &bdir, &MIGRATIONS[..ten]).unwrap();
+            assert_eq!(user_version(&db.conn), ten as u32);
+            assert!(!store::available(&db.conn), "vorher keine Zeit-Tabellen");
+            let mut np = NewProject::new("PAN", "Paneldeck", "#112233");
+            np.with_defaults = true;
+            let pid = create_project(&db.conn, &np).unwrap();
+            let ty = crate::planning::types::list_types(&db.conn, pid).unwrap()[0].id;
+            let (t, _) = create_ticket(&db.conn, &NewTicket::new(pid, ty, "Alt"), &crate::planning::history::Source::ui()).unwrap();
+            (pid, t.id)
+        };
+        let db = open(&d, &bdir).unwrap();
+        assert_eq!(user_version(&db.conn), latest_version());
+        assert!(store::available(&db.conn));
+        assert_healthy(&db.conn);
+        assert_eq!(crate::planning::tickets::get_ticket(&db.conn, tid).unwrap().title, "Alt");
+        assert_eq!(crate::planning::projects::get_project(&db.conn, pid).unwrap().key, "PAN");
+        let l = backup::list(&bdir);
+        assert!(l.iter().any(|b| matches!(b.kind, backup::Kind::PreMigration { from, .. } if from == ten as u32)), "Sicherung vor der Migration");
+        let empty = store::load(&db.conn).unwrap();
+        assert!(empty.alarms.is_empty() && empty.timers.is_empty() && empty.birthdays.is_empty());
+        store::save_alarm(&db.conn, &mut Alarm::new("Aufstehen", 7, 0, 0x1f, 0)).unwrap();
+        store::save_birthday(&db.conn, &mut Birthday::new("Anna", 2, 29, None)).unwrap();
+        // Sicherung enthält die Einträge
+        let b = backup::create(&db.path, &bdir, backup::Kind::Manual).unwrap();
+        let copy = Connection::open(&b.path).unwrap();
+        let data = store::load(&copy).unwrap();
+        assert_eq!((data.alarms[0].name.as_str(), data.birthdays[0].name.as_str()), ("Aufstehen", "Anna"));
+        drop(copy);
+        // Wiederherstellen nach dem Löschen bringt den Wecker zurück
+        store::delete(&db.conn, store::Table::Alarms, data.alarms[0].id).unwrap();
+        drop(db);
+        backup::schedule_restore(&d, &b.path).unwrap();
+        assert!(backup::apply_pending_restore(&d, FILE).unwrap().is_ok());
+        let db = open(&d, &bdir).unwrap();
+        assert_eq!(store::load(&db.conn).unwrap().alarms.len(), 1, "wiederhergestellt");
         drop(db);
         let _ = std::fs::remove_dir_all(&d);
     }

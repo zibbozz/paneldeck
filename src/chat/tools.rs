@@ -121,6 +121,9 @@ impl ToolPolicy {
             && !self.cfg.disabled_tools.iter().any(|t| t == def.name)
             // Editor (#54): schreibende Werkzeuge nur, wenn ihr Schalter an ist (geprüft wird beim Ausführen ohnehin).
             && crate::editor_svc::tools::offered_to_chats(def.name, self.editor_switches)
+            // Reiter „Zeit“ (#164): nur für externe Agenten – die Kurzfassung des Chat-Prompts hätte sonst bei Steuern im
+            // Expertenmodus keinen Platz mehr in 8192 Tokens.
+            && !crate::time::agent::TOOLS.contains(&def.name)
     }
 
     /// Werkzeuge für die Anfrage: alle, die Stufe und Modus erlauben und die nicht einzeln gesperrt sind.
@@ -149,7 +152,7 @@ impl ToolPolicy {
         let Some(def) = mcp::tools().into_iter().find(|d| d.name == call.name) else {
             return Err((ToolStatus::Error, error_json("unknown_tool", &self.unknown_tool_message(&call.name))));
         };
-        if !self.enabled() || def.level > self.cfg.level || self.cfg.disabled_tools.iter().any(|t| t == def.name) {
+        if !self.enabled() || def.level > self.cfg.level || self.cfg.disabled_tools.iter().any(|t| t == def.name) || crate::time::agent::TOOLS.contains(&def.name) {
             return Err((ToolStatus::Denied, error_json("forbidden", "This tool is not allowed for this model (Settings → Models).")));
         }
         if !def.group.available(self.expert) {
@@ -628,6 +631,17 @@ mod tests {
         let all = size(&policy(McpLevel::Control, &[], true));
         eprintln!("tool spec tokens: read {read}, control+expert {all}");
         assert!(read < crate::llm::config::DEFAULT_CONTEXT as usize / 2, "{read}");
+    }
+
+    /// Reiter „Zeit“ (#164): die Werkzeuge gibt es nur für externe Agenten, Chats bekommen sie nie (auch nicht beim Ausführen).
+    #[test]
+    fn time_tools_are_never_offered_to_chats() {
+        let all = names(&policy(McpLevel::Control, &[], true));
+        for t in crate::time::agent::TOOLS {
+            assert!(!all.contains(&t.to_string()), "{t}");
+            let r = policy(McpLevel::Control, &[], false).check(&call(t, json!({})));
+            assert!(matches!(r, Err((ToolStatus::Denied, _))), "{t}: {r:?}");
+        }
     }
 
     #[test]

@@ -137,6 +137,7 @@ Alle Kürzel lassen sich unter *Einstellungen → Tastenkürzel* ändern.
 | `Strg+Umschalt+Pfeil hoch` / `Strg+Umschalt+Pfeil runter` | Zum vorherigen / nächsten Befehl springen |
 | `Strg+Tab` / `Strg+Umschalt+Tab` | Nächste / vorherige Sitzung (auch minimierte) |
 | `Strg+1` / `Strg+2` (auch `Alt+Umschalt+1` / `Alt+Umschalt+2`) | Reiter *Terminal Hub* / *Todo-Liste* |
+| `Alt+Umschalt+3` / `Alt+Umschalt+4` | Reiter *Editor* / *Zeit* |
 | `Strg`+Klick auf einen Reiter der Fensterleiste | Reiter in einem neuen Fenster öffnen |
 | (keins) | *Sitzung neu laden*, *Alle Sitzungen schließen* – Taste unter *Einstellungen → Tastenkürzel* zuweisen |
 | `Strg+Umschalt+1`…`9` (fest) | Zu Projekt 1–9 wechseln |

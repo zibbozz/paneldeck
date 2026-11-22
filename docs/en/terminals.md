@@ -137,6 +137,7 @@ All shortcuts can be changed under *Settings → Shortcuts*.
 | `Ctrl+Shift+Up` / `Ctrl+Shift+Down` | Jump to previous / next command |
 | `Ctrl+Tab` / `Ctrl+Shift+Tab` | Next / previous session (also minimized ones) |
 | `Ctrl+1` / `Ctrl+2` (also `Alt+Shift+1` / `Alt+Shift+2`) | *Terminal Hub* / *Todo list* tab |
+| `Alt+Shift+3` / `Alt+Shift+4` | *Editor* / *Time* tab |
 | `Ctrl`+click on a title bar tab | Open the tab in a new window |
 | (none) | *Reload session*, *Close all sessions* – assign a key under *Settings → Shortcuts* |
 | `Ctrl+Shift+1`…`9` (fixed) | Switch to project 1–9 |

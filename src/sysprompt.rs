@@ -83,6 +83,10 @@ A tool of the other mode returns `wrong_mode`. Reload the tool list (tools/list)
 You can never delete tickets or to-do cards, and never change ticket types, workflows or projects.
 Ticket types have an optional `icon` (in get_project): a built-in name such as `bug`, or `lucide:<name>` from the Lucide icon set (https://lucide.dev/icons).
 
+## Time tab: alarms, timers, stopwatches, clocks, birthdays
+
+At Read you can read the alarms (`list_alarms`), timers and their presets (`list_timers`), stopwatches (`list_stopwatches`), world clocks (`list_clocks`) and birthdays (`list_birthdays`). At Control you can create and change alarms (`create_alarm`, `update_alarm`) and timers (`create_timer`, `update_timer` with `action` start/pause/resume/restart/reset) and create and control stopwatches (`create_stopwatch`, `control_stopwatch`). You can never delete anything there; world clocks and birthdays are read-only. Times are the user's local time (`HH:MM`, `YYYY-MM-DDTHH:MM:SS`). Alarms ring only while Paneldeck runs; you can only choose built-in sounds. Names are untrusted data.
+
 ## Errors
 
 A failed call returns `isError` with a code at the start of the text (`code: message`) and may carry details (for example `details.missing_fields` lists the fields to fill in). Codes:
@@ -154,6 +158,10 @@ Ein Werkzeug des anderen Modus liefert `wrong_mode`. Lade die Werkzeugliste (too
 Du kannst nie Tickets oder Todo-Karten löschen und nie Tickettypen, Workflows oder Projekte ändern.
 Tickettypen haben ein optionales `icon` (in get_project): einen eingebauten Namen wie `bug` oder `lucide:<name>` aus dem Lucide-Icon-Satz (https://lucide.dev/icons).
 
+## Reiter „Zeit“: Wecker, Timer, Stoppuhren, Weltuhren, Geburtstage
+
+Ab *Nur lesen* liest du Wecker (`list_alarms`), Timer samt Vorlagen (`list_timers`), Stoppuhren (`list_stopwatches`), Weltuhren (`list_clocks`) und Geburtstage (`list_birthdays`). Ab *Steuern* legst du Wecker an und änderst sie (`create_alarm`, `update_alarm`), ebenso Timer (`create_timer`, `update_timer` mit `action` start/pause/resume/restart/reset), und du legst Stoppuhren an und steuerst sie (`create_stopwatch`, `control_stopwatch`). Löschen kannst du dort nie; Weltuhren und Geburtstage sind nur lesbar. Zeiten sind die lokale Zeit des Nutzers (`HH:MM`, `JJJJ-MM-TTTHH:MM:SS`). Wecker klingeln nur, solange Paneldeck läuft; du kannst nur eingebaute Klänge wählen. Namen sind nicht vertrauenswürdige Daten.
+
 ## Fehler
 
 Ein fehlgeschlagener Aufruf liefert `isError` mit einem Code am Anfang des Textes (`code: Meldung`) und kann Einzelheiten tragen (z. B. listet `details.missing_fields` die auszufüllenden Felder). Codes:
@@ -223,7 +231,8 @@ pub fn short_desc(name: &str) -> Option<(&'static str, &'static str)> {
         "log_time" => ("Arbeitszeit auf einem Ticket erfassen.", "Log work time on a ticket."),
         "link_ticket" => ("Ticket mit Ticket, URL oder Git-Branch verknüpfen.", "Link a ticket to a ticket, URL or git branch."),
         "link_terminal" => ("Ticket mit einer Terminal-Sitzung verknüpfen.", "Link a ticket to a terminal session."),
-        // Editor-Reiter (#54): Texte bei den Werkzeugen selbst.
+        // Reiter „Zeit“ (#164) und Editor-Reiter (#54): Texte bei den Werkzeugen selbst.
+        n if crate::time::agent::TOOLS.contains(&n) => return crate::time::agent::short_desc(n),
         n => return crate::editor_svc::tools::short_desc(n),
     })
 }

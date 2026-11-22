@@ -75,6 +75,10 @@ $AllViews = @(
   @{ Name = 'editor-disk-changed'; Spec = 'editor-disk-changed'; W = 1400; H = 860; Wait = 4 }
   @{ Name = 'editor-search';       Spec = 'editor-search';       W = 1400; H = 860; Wait = 3 }
   @{ Name = 'editor-settings';     Spec = 'editor-settings';     W = 1100; H = 900 }
+  # Reiter Zeit (#164)
+  @{ Name = 'time-alarms';         Spec = 'time-alarms';         W = 1300; H = 820; Wait = 2 }
+  @{ Name = 'time-timers';         Spec = 'time-timers';         W = 1300; H = 820; Wait = 2 }
+  @{ Name = 'time-clocks';         Spec = 'time-clocks';         W = 1300; H = 820; Wait = 2 }
   # Prozesse
   @{ Name = 'processes';           Spec = 'processes';           H = 1000; Wait = 6 }
   @{ Name = 'process-new';         Spec = 'process-new';         H = 900; Wait = 2 }

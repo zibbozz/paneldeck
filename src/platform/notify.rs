@@ -123,6 +123,17 @@ pub fn pick_file(_start: &str) -> Option<std::path::PathBuf> {
     None
 }
 
+/// Klangdatei wählen (Reiter „Zeit“, #164): WAV oder MP3.
+#[cfg(any(windows, unix))]
+pub fn pick_sound() -> Option<std::path::PathBuf> {
+    rfd::FileDialog::new().add_filter("WAV/MP3", &["wav", "mp3"]).pick_file()
+}
+
+#[cfg(not(any(windows, unix)))]
+pub fn pick_sound() -> Option<std::path::PathBuf> {
+    None
+}
+
 /// „Speichern unter“ für beliebige Dateien (Editor, #54): Startordner `dir` (wenn lokal vorhanden), Vorschlag `name`.
 #[cfg(any(windows, unix))]
 pub fn save_any(dir: Option<&std::path::Path>, name: &str) -> Option<std::path::PathBuf> {

@@ -23,6 +23,17 @@ fn ui_sources() -> Vec<PathBuf> {
             }
         }
     }
+    // Reiter „Zeit“ (#164): Oberfläche und die Texte aus `src/time/` (Countdown „Heute! 🎂“, Wochentage, Abstände).
+    for dir in [root.join("time_ui"), root.parent().unwrap().join("time")] {
+        if let Ok(rd) = std::fs::read_dir(dir) {
+            for e in rd.flatten() {
+                let p = e.path();
+                if p.extension().is_some_and(|x| x == "rs") && !p.ends_with("tests.rs") {
+                    files.push(p);
+                }
+            }
+        }
+    }
     for f in ["chat_ui.rs", "terminal_links.rs", "titlebar.rs", "toasts.rs"] {
         files.push(root.join(f));
     }

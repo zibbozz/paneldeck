@@ -28,6 +28,7 @@
 //!   `claude` is started.
 //! - `registry`: per-user settings store of the system (HKCU) – autostart, Explorer context menu, install location.
 //! - `secret`: encryption of API keys for the current user (DPAPI; Linux: Secret Service or master password).
+//! - `sound`: play the sounds of the Time tab (#164; Windows: rodio, Linux/macOS: the system's players).
 //! - `taskbar`: progress and attention state on the taskbar button (`ITaskbarList3`).
 //! - `tray`: tray icon with menu.
 //! - `window`: native window handle, hide to tray, find own windows, monitor work areas.
@@ -80,6 +81,7 @@ pub mod open;
 pub mod process;
 pub mod registry;
 pub mod secret;
+pub mod sound;
 pub mod taskbar;
 #[cfg(unix)]
 pub mod tls;
