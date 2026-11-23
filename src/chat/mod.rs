@@ -11,6 +11,7 @@
 //! * [`driver`]: führt die Werkzeug-Schleife je Bild weiter, über [`driver::ChatToolHost`] (umgesetzt von der App).
 //! * [`context`]: Füllstand des Kontexts (`4342/8192 (53%)`, #339) aus Schätzung und Zählung des Servers.
 //! * [`agent`]: Agenten-Werkzeuge nur für Chats (#338): Dateien, Suche, Befehle im Terminal des Chats, Git, Web, To-dos.
+//! * [`plan`]: Plan-Modus (#358) – nur lesend recherchieren, Plan mit Stufe low … max, Freigabe über die Plan-Karte.
 //! * [`compact`]: Kompaktieren (#359) – ältere Nachrichten durch eine Zusammenfassung des Modells ersetzen, Sicherheitsfenster.
 //! * [`images`]: Bilder in Chats (#357): Platzhalter `[Image#n]`, Ablage in `chats/<id>/images/`, Aufbereitung,
 //!   Modelle ohne Bildverständnis, Bilder aus Werkzeug-Ergebnissen.
@@ -28,6 +29,7 @@ pub mod images;
 pub mod llm_backend;
 pub mod logic;
 pub mod master_prompt;
+pub mod plan;
 pub mod repair;
 pub mod session;
 pub mod store;

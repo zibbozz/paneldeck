@@ -1726,6 +1726,7 @@ impl App {
         if c.awaiting_level_choice() {
             return Err(level_question());
         }
+        let plan_blocked = c.plan_blocks_agents();
         // `/compact` (#359): kompaktiert statt zu senden – eigenes Ergebnis, kein Hinweis „Von Agent gesendet“.
         if chatmod::compact::is_command(text) {
             return match self.chat_send(ctx, id, Some(text), super::ChatSendOrigin::Agent { caller, note: None }) {
@@ -1743,6 +1744,16 @@ impl App {
                 super::ChatSendResult::NotAChat => Err(not_a_chat()),
                 super::ChatSendResult::LevelQuestion | super::ChatSendResult::Empty => Err(er("bad_args", tr("text ist leer", "text is empty"))),
             };
+        }
+        // Plan-Modus (#358): Über einen Plan entscheidet nur der Nutzer – ein Agent schreibt so lange nicht in den Chat.
+        if plan_blocked {
+            return Err(er(
+                "plan_pending",
+                tr(
+                    "Der Chat ist im Plan-Modus bzw. ein Plan wartet auf die Entscheidung des Nutzers (Ausführen/Änderungen anfragen/Verwerfen) – bis dahin wird nichts gesendet.",
+                    "The chat is in plan mode or a plan is waiting for the user's decision (Execute/Request changes/Discard) – nothing is sent until then.",
+                ),
+            ));
         }
         match self.chat_send(ctx, id, Some(text), super::ChatSendOrigin::Agent { caller, note: Some(note.clone()) }) {
             super::ChatSendResult::Sent => {

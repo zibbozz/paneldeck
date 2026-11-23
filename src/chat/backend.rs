@@ -96,6 +96,9 @@ pub struct TurnContext {
     pub prompt_parts: crate::llm::prompt_parts::PromptParts,
     /// Projektordner und Einstellungen der Agenten-Werkzeuge (#338; bestimmt, welche Werkzeuge die Anfrage anbietet).
     pub agent: super::agent::AgentEnv,
+    /// Plan-Modus (#358): Plan-Runde oder Ausführung eines freigegebenen Plans – ergänzt den Systemprompt um die
+    /// Anweisungen aus `plan::instructions`. Für eine Anfrage setzt es `ChatState::start_turn` selbst.
+    pub plan: Option<super::plan::PlanPhase>,
     /// Kompaktieren (#359): automatischer Modus, Schwelle, Sicherheitsfenster (`Settings::chat_compact`).
     pub compact: super::compact::CompactSettings,
     /// Bilder des Chats (#357): Ordner und Einträge, auf die die Nachrichten verweisen.
@@ -104,7 +107,7 @@ pub struct TurnContext {
 
 impl Default for TurnContext {
     fn default() -> Self {
-        TurnContext { project: String::new(), folder: String::new(), servers: Vec::new(), lang: Lang::En, expert: false, token_scale: 1.0, prompt_parts: Default::default(), agent: Default::default(), compact: Default::default(), images: Default::default() }
+        TurnContext { project: String::new(), folder: String::new(), servers: Vec::new(), lang: Lang::En, expert: false, token_scale: 1.0, prompt_parts: Default::default(), agent: Default::default(), compact: Default::default(), images: Default::default(), plan: None }
     }
 }
 

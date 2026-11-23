@@ -12,6 +12,7 @@
 use super::backend::{ChatBackend, Repaint, TurnContext, TurnEvent, TurnHandle};
 use super::context::ContextParts;
 use super::logic;
+use super::plan::{self, PlanLevel, PlanMode};
 use super::repair;
 use super::store::{AllowRule, CallRepair, ChatFile, ChatMsg, Role, ToolCall, ToolStatus};
 use super::tools::{self, ToolPolicy, ToolResult};
@@ -152,6 +153,9 @@ pub struct ChatState {
     fail_count: u32,
     /// Die Runde hielt an, weil derselbe Aufruf [`LOOP_LIMIT`]-mal in Folge fehlschlug (deutlich angezeigt).
     pub loop_stop: bool,
+    /// Plan-Modus (#358): Schalter für die nächste Nachricht, Stufe, laufende Plan-Runde. Der Plan selbst steht in
+    /// `file.plan` (siehe `super::plan`).
+    pub planning: PlanMode,
     /// Kompaktieren (#359): laufende Zusammenfassung, letzte Fehlermeldung (siehe `chat::compact`).
     pub compact: super::compact::CompactState,
     /// Bilder zur Laufzeit (#357): Ordner, Bildverständnis des Modells, laufende Aufbereitungen, Ablehnung des Servers.
@@ -286,6 +290,7 @@ impl ChatState {
             fail_streak: None,
             fail_count: 0,
             loop_stop: false,
+            planning: PlanMode::default(),
             compact: Default::default(),
             img: Default::default(),
             ask: None,
@@ -345,6 +350,13 @@ impl ChatState {
     /// Wie [`ChatState::busy`], aber ohne eine Zusammenfassung (#359): läuft eine Runde des Modells?
     fn round_busy(&self) -> bool {
         self.streaming() || (!self.paused && (!self.calls.is_empty() || self.next_request || self.text_check))
+    }
+
+    /// Ist die Runde noch nicht ganz zu Ende – läuft sie oder ist sie angehalten mit wartenden Aufrufen bzw. einer
+    /// ausstehenden Anfrage (*Weiter*), oder kommt gleich noch eine Anfrage wegen einer Nachricht von Paneldeck (#355)?
+    /// Anders als [`ChatState::busy`] zählt eine angehaltene Runde mit.
+    pub(super) fn round_open(&self) -> bool {
+        self.streaming() || self.paused || !self.calls.is_empty() || self.next_request || self.text_check || !self.events.is_empty() || self.events_resume
     }
 
     /// Ein schreibender Aufruf wartet auf die Entscheidung des Nutzers.
@@ -460,8 +472,16 @@ impl ChatState {
             return false;
         }
         self.file.messages.clear();
-        // Die To-do-Liste gehört zum Gespräch (#338).
+        // Die To-do-Liste gehört zum Gespräch (#338), ebenso der Plan (#358).
         self.file.todos.clear();
+        self.file.plan = None;
+        self.planning.round = None;
+        // Eine angehaltene Runde endet ganz: ihre wartenden Aufrufe dürfen danach nie (ohne Sperre, ohne Klick) laufen.
+        self.calls.clear();
+        self.next_request = false;
+        self.reset_steps();
+        self.approval_target = None;
+        self.approval_preview = None;
         self.ui = UiCache::default();
         self.usage = None;
         self.context = None;
@@ -489,11 +509,18 @@ impl ChatState {
 
     /// Diesen Text als neue Nachricht senden (externer Agent): Entwurf und Bearbeiten im Eingabefeld bleiben unberührt.
     /// `false`, wenn nichts zu senden ist oder die Runde noch läuft.
+    /// Nachrichten externer Agenten sind nie Plan-Runden (der Plan-Modus ist ein Schalter des Nutzers, #358).
     pub fn send_text(&mut self, text: &str, backend: &dyn ChatBackend, meta: &ChatMeta, cx: &TurnContext, repaint: Repaint) -> bool {
+        self.send_message(text, None, backend, meta, cx, repaint)
+    }
+
+    /// Diesen Text als neue Nachricht senden, als Plan-Runde der Stufe `plan` (oder normal); Entwurf und Bearbeiten im
+    /// Eingabefeld bleiben unberührt (Agenten, Knöpfe der Plan-Karte).
+    pub(super) fn send_message(&mut self, text: &str, plan: Option<PlanLevel>, backend: &dyn ChatBackend, meta: &ChatMeta, cx: &TurnContext, repaint: Repaint) -> bool {
         let draft = std::mem::replace(&mut self.draft, text.to_string());
         let editing = std::mem::replace(&mut self.editing, false);
         let before = self.draft_before_edit.take();
-        let sent = self.send(backend, meta, cx, repaint);
+        let sent = self.send_with(plan, backend, meta, cx, repaint);
         self.draft = draft;
         self.editing = editing;
         self.draft_before_edit = before;
@@ -501,8 +528,13 @@ impl ChatState {
     }
 
     /// Eingabe senden (oder als Bearbeitung der letzten Nachricht übernehmen). `false`, wenn nichts zu senden ist oder
-    /// gerade eine Antwort läuft.
+    /// gerade eine Antwort läuft. Mit eingeschaltetem Schalter *Plan* (#358) ist es eine Plan-Runde.
     pub fn send(&mut self, backend: &dyn ChatBackend, meta: &ChatMeta, cx: &TurnContext, repaint: Repaint) -> bool {
+        let plan = self.planning.on.then_some(self.planning.level);
+        self.send_with(plan, backend, meta, cx, repaint)
+    }
+
+    fn send_with(&mut self, plan: Option<PlanLevel>, backend: &dyn ChatBackend, meta: &ChatMeta, cx: &TurnContext, repaint: Repaint) -> bool {
         let text = self.draft.trim().to_string();
         if text.is_empty() || self.busy() || self.images_pending(&text) {
             return false;
@@ -536,6 +568,7 @@ impl ChatState {
         self.editing = false;
         self.draft_before_edit = None;
         self.draft.clear();
+        self.plan_round_started(plan);
         self.start_turn(backend, meta, cx, repaint);
         true
     }
@@ -591,6 +624,7 @@ impl ChatState {
         self.next_request = false;
         self.paused = false;
         self.reset_steps();
+        self.plan_regenerate();
         self.changed(self.file.messages.len());
         self.start_turn(backend, meta, cx, repaint);
         true
@@ -629,9 +663,15 @@ impl ChatState {
         self.fail_streak = None;
         self.fail_count = 0;
         self.loop_stop = false;
+        self.planning.research = 0;
     }
 
     fn start_turn(&mut self, backend: &dyn ChatBackend, meta: &ChatMeta, cx: &TurnContext, repaint: Repaint) {
+        // Plan-Teil des Systemprompts (#358) bestimmt der Chat selbst (laufende Plan-Runde bzw. Ausführung) – auch für die
+        // Schätzung vor dem automatischen Kompaktieren.
+        let mut cx = cx.clone();
+        cx.plan = self.plan_phase();
+        let cx = &cx;
         // Automatisch kompaktieren (#359, nur mit Schalter): dann folgt die Anfrage nach der Zusammenfassung.
         if self.compact_before_turn(backend, meta, cx, &repaint) {
             return;
@@ -691,6 +731,10 @@ impl ChatState {
             self.changed(self.turn_msg);
         }
         self.cancel_tools();
+        // Plan-Runde (#358): ein Plan „in Überarbeitung“ wartet wieder auf die Entscheidung.
+        if self.planning.round.is_some() {
+            self.plan_round_ended(false);
+        }
     }
 
     /// Alle offenen Aufrufe beenden (Ergebnis „abgebrochen“) und die Runde schließen.
@@ -964,10 +1008,14 @@ impl ChatState {
         if self.streaming() || self.paused || self.compact.running() {
             return ToolStep::Idle;
         }
-        if std::mem::take(&mut self.text_check) {
-            self.adopt_text_calls(policy);
+        if std::mem::take(&mut self.text_check) && !self.adopt_text_calls(policy) {
+            // Nur Text: die Runde ist zu Ende (Plan-Runde: steht darin ein Plan?).
+            self.plan_round_ended(true);
         }
         let max = policy.cfg.max_steps.max(1);
+        // Plan-Runde (#358): nur lesende Werkzeuge, Recherche-Budget der Stufe statt der Höchstzahl des Modells.
+        let plan_round = self.planning.round;
+        let limit = plan_round.map_or(max, PlanLevel::step_limit);
         loop {
             let Some(p) = self.calls.first() else {
                 // Nachrichten von Paneldeck (#355) kommen vor die nächste Anfrage; kam eine während der Runde, fragt der
@@ -1004,11 +1052,15 @@ impl ChatState {
             }
             let approved = p.state == CallState::Approved;
             // Erster Blick auf diesen Aufruf: Höchstzahl (gezählt wird unten, auch wenn er abgewiesen wird).
-            if !approved && self.steps >= max.saturating_mul(self.grants) {
+            if !approved && self.steps >= limit.saturating_mul(self.grants) {
                 self.pause(None);
                 return ToolStep::Idle;
             }
-            let ask = match policy.check(&p.call) {
+            let checked = policy.check(&p.call).and_then(|ask| match plan_round.filter(|_| !approved) {
+                Some(level) => plan::gate(level, &p.call, self.planning.research, self.grants).map(|()| ask),
+                None => Ok(ask),
+            });
+            let ask = match checked {
                 Ok(w) => w,
                 Err((st, content)) => {
                     if !approved {
@@ -1030,6 +1082,9 @@ impl ChatState {
             }
             if !approved {
                 self.steps += 1;
+                if plan_round.is_some() && !plan::QUESTION_TOOLS.contains(&self.calls[0].call.name.as_str()) {
+                    self.planning.research += 1;
+                }
                 if policy.needs_approval(ask, &self.calls[0].call, &self.file.always_allow) {
                     self.calls[0].state = CallState::Approval;
                     self.touch();
@@ -1241,6 +1296,7 @@ impl ChatState {
                     // Argumente werden vorher gegen das Schema normalisiert (#340; gespeichert wird die korrigierte Fassung,
                     // die Korrekturen stehen in `repairs`). Nur Text: vielleicht ein als Text geschriebener Aufruf – das
                     // prüft der nächste `tool_step`.
+                    let mut ended = true;
                     if let Some(m) = self.file.messages.get_mut(i).filter(|m| m.error.is_none()) {
                         if !m.tool_calls.is_empty() {
                             for c in &mut m.tool_calls {
@@ -1251,9 +1307,15 @@ impl ChatState {
                             }
                             self.calls = m.tool_calls.iter().map(|c| PendingCall { call: c.clone(), state: CallState::Queued, rx: None }).collect();
                             self.next_request = true;
+                            ended = false;
                         } else if repair::may_contain_call(&m.content) {
                             self.text_check = true;
+                            ended = false;
                         }
+                    }
+                    // Die Runde ist zu Ende (Plan-Runde, #358: steht in der Antwort ein Plan?).
+                    if ended {
+                        self.plan_round_ended(true);
                     }
                 }
                 TurnEvent::Error(e) => {
@@ -1262,6 +1324,7 @@ impl ChatState {
                     }
                     self.turn = None;
                     p.finished = true;
+                    self.plan_round_ended(false);
                 }
             }
         }

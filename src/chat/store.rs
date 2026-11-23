@@ -252,6 +252,9 @@ pub struct ChatFile {
     /// Liste.
     #[serde(skip_serializing_if = "Vec::is_empty", deserialize_with = "lenient_todos")]
     pub todos: Vec<ChatTodo>,
+    /// Aktueller Plan des Plan-Modus (seit 3.1.0, #358): Markdown, Stufe, Stand. Unlesbares ergibt keinen Plan.
+    #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "super::plan::lenient_plan")]
+    pub plan: Option<super::plan::Plan>,
     /// Bilder des Chats (#357, seit 3.1.0): Verweise auf die Dateien in `chats/<id>/images/`; die Nachrichten nennen
     /// nur die Nummern (`ChatMsg::images`). Unlesbares und unsichere Dateinamen fallen weg.
     #[serde(skip_serializing_if = "Vec::is_empty", deserialize_with = "super::images::lenient_entries")]
@@ -261,7 +264,7 @@ pub struct ChatFile {
 
 impl Default for ChatFile {
     fn default() -> Self {
-        ChatFile { version: VERSION, context_start: None, always_allow: Vec::new(), todos: Vec::new(), images: Vec::new(), messages: Vec::new() }
+        ChatFile { version: VERSION, context_start: None, always_allow: Vec::new(), todos: Vec::new(), images: Vec::new(), plan: None, messages: Vec::new() }
     }
 }
 
@@ -528,7 +531,7 @@ pub fn serialize_capped(file: &ChatFile, cap: usize) -> Vec<u8> {
     let keep_from = file.messages.iter().take_while(|m| m.role == Role::System && m.event.is_none()).count();
     let size = |from: usize| -> usize { parts[..keep_from].iter().chain(&parts[from..]).map(|p| p.len() + 1).sum() };
     // Kopf ohne Nachrichten (+ Reserve für context_start): `{"version":1,"context_start":N,"always_allow":[…],"messages":[]}`
-    let head_len = 64 + serde_json::to_vec(&file.always_allow).map(|v| v.len()).unwrap_or(0) + serde_json::to_vec(&file.todos).map(|v| v.len() + 10).unwrap_or(0) + serde_json::to_vec(&file.images).map(|v| v.len() + 12).unwrap_or(0) + 16;
+    let head_len = 64 + serde_json::to_vec(&file.always_allow).map(|v| v.len()).unwrap_or(0) + serde_json::to_vec(&file.todos).map(|v| v.len() + 10).unwrap_or(0) + serde_json::to_vec(&file.images).map(|v| v.len() + 12).unwrap_or(0) + serde_json::to_vec(&file.plan).map(|v| v.len() + 10).unwrap_or(0) + 16;
     let mut drop_to = keep_from;
     if head_len + size(keep_from) > cap {
         let mut total = size(keep_from);
@@ -540,7 +543,7 @@ pub fn serialize_capped(file: &ChatFile, cap: usize) -> Vec<u8> {
     let dropped = drop_to - keep_from;
     // Gekürzt: der Index rückt nach; lag er im weggefallenen Teil, sieht das Modell ohnehin alles Übrige.
     let context_start = if dropped == 0 { file.context_start } else { file.context_start.and_then(|c| (c >= drop_to).then(|| c - dropped)).filter(|c| *c > keep_from) };
-    let head = ChatFile { version: file.version, context_start, always_allow: file.always_allow.clone(), todos: file.todos.clone(), images: file.images.clone(), messages: Vec::new() };
+    let head = ChatFile { version: file.version, context_start, always_allow: file.always_allow.clone(), todos: file.todos.clone(), images: file.images.clone(), plan: file.plan.clone(), messages: Vec::new() };
     let mut data = serde_json::to_vec(&head).unwrap_or_default();
     // `messages` ist das letzte Feld: `…"messages":[]}` → Nachrichten zwischen die Klammern setzen.
     data.truncate(data.len().saturating_sub(2));
@@ -639,7 +642,7 @@ mod tests {
         t.status = Some(ToolStatus::Ok);
         let mut e = ChatMsg::new(Role::Assistant, "");
         e.error = Some("connection refused".into());
-        ChatFile { version: VERSION, context_start: Some(1), always_allow: vec![rule("send_text", Some(4))], todos: Vec::new(), images: Vec::new(), messages: vec![ChatMsg::new(Role::User, "Hi ä 😀"), a, t, ChatMsg::new(Role::Assistant, "**done**"), e] }
+        ChatFile { version: VERSION, context_start: Some(1), always_allow: vec![rule("send_text", Some(4))], todos: Vec::new(), images: Vec::new(), plan: None, messages: vec![ChatMsg::new(Role::User, "Hi ä 😀"), a, t, ChatMsg::new(Role::Assistant, "**done**"), e] }
     }
 
     #[test]

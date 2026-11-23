@@ -31,6 +31,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+mod chat_plan_ui;
 mod chat_images;
 mod chat_images_ui;
 mod chat_ask_ui;
@@ -476,6 +477,8 @@ enum Action {
     ChatRevoke(u64, chatmod::AllowRule),
     /// Antwort auf die einmalige Frage nach der Stufe des Modells.
     ChatLevel(u64, crate::mcp::McpLevel),
+    /// Knopf der Plan-Karte (#358): Ausführen, Änderungen anfragen, Verwerfen, Exportieren.
+    ChatPlan(u64, chatmod::plan::PlanAction),
     /// Chat jetzt kompaktieren (#359, Knopf „Kompaktieren“).
     ChatCompact(u64),
     /// Bild in den Chat (#357): Strg+V oder Büroklammer.
@@ -3384,6 +3387,9 @@ impl App {
             token_scale: e.and_then(|e| e.chat.as_ref()).map_or(1.0, |c| c.token_scale),
             prompt_parts: self.settings.chat_prompt_parts,
             agent: self.agent_env(id),
+            // Für die Schätzung des Füllstands: so, wie die nächste Nachricht ginge (Schalter *Plan*, #358). Die Anfrage
+            // selbst setzt `ChatState::start_turn`.
+            plan: e.and_then(|e| e.chat.as_ref()).and_then(|c| c.next_plan_phase()),
             compact: self.settings.chat_compact,
             images: self.chat_turn_images(id),
         }
@@ -4346,6 +4352,7 @@ impl App {
                 self.new_chat = Some(models_ui::NewChatDlg::new(&self.settings, cwd, Some(path)));
             }
             Action::ChatSend(id) | Action::ChatStop(id) | Action::ChatRegenerate(id) | Action::ChatEdit(id) | Action::ChatDecide(id, ..) | Action::ChatContinue(id) | Action::ChatRevoke(id, _) | Action::ChatLevel(id, _) | Action::ChatCompact(id) => self.chat_action(ctx, id, &a),
+            Action::ChatPlan(id, act) => self.chat_plan_action(ctx, id, &act),
             Action::ChatImage(id, req) => self.chat_image(ctx, id, req),
             Action::Tutorial(c) => self.tut_cmd(ctx, c),
         }
@@ -4977,6 +4984,9 @@ fn show_pane(ui: &mut Ui, id: u64, rect: Rect, cx: &mut PaneCx) {
         }
         if let Some(level) = o.level {
             cx.actions.push(Action::ChatLevel(id, level));
+        }
+        if let Some(act) = o.plan {
+            cx.actions.push(Action::ChatPlan(id, act));
         }
         if let Some(req) = o.image {
             cx.actions.push(Action::ChatImage(id, req));

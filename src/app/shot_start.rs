@@ -260,6 +260,57 @@ impl App {
         }
     }
 
+    /// Chat mit einer Plan-Karte (#358): eingeschalteter Schalter *Plan* (Stufe „hoch“) neben *Senden* und ein
+    /// vorgeschlagener Plan mit *Ausführen* / *Änderungen anfragen* / *Verwerfen* / *Exportieren*. Server und Modell
+    /// stehen nur in den Einstellungen der Aufnahme; es wird nichts gesendet.
+    fn shot_chat_plan(&mut self, ctx: &egui::Context) {
+        use crate::chat::plan::{Plan, PlanLevel, PlanStatus};
+        use crate::llm::config::{LlmModel, LlmServer, OLLAMA_LOCAL};
+        const SERVER: &str = "shot-ollama";
+        const MODEL: &str = "qwen3:14b";
+        let demo = demo_dir(&self.dir);
+        write_demo_project(&demo);
+        self.set_mode(titlebar::Mode::Terminals);
+        let pid = self.active_project;
+        if let Some(p) = self.projects.iter_mut().find(|p| p.id == pid) {
+            p.name = "Acme Shop".into();
+            p.folder = demo.to_string_lossy().to_string();
+        }
+        if !self.settings.llm_servers.list.iter().any(|s| s.id == SERVER) {
+            let mut s = LlmServer {
+                id: SERVER.into(),
+                name: "Ollama".into(),
+                url: OLLAMA_LOCAL.into(),
+                last_models: vec![crate::llm::ModelInfo { name: MODEL.into(), tools: Some(true), context_length: Some(32768), vision: Some(false) }],
+                ..LlmServer::default()
+            };
+            s.set_model_cfg(LlmModel { level: crate::mcp::McpLevel::Control, level_chosen: true, ..LlmModel::named(MODEL) });
+            self.settings.llm_servers.list.push(s);
+        }
+        let lang = self.settings.language;
+        let chat = state::ChatMeta { server: SERVER.into(), model: MODEL.into() };
+        let id = self.new_session(ctx, NewOpts { project: Some(pid), cwd: Some(demo.to_string_lossy().to_string()), chat: Some(chat), ..NewOpts::default() });
+        self.shot_name(id, lang.t("Bestellungen stornieren", "Cancel orders"));
+        let question = lang.t(
+            "Stornierte Bestellungen sollen eine Erstattung auslösen. Plane das bitte zuerst.",
+            "Cancelled orders should trigger a refund. Please plan this first.",
+        );
+        let plan = lang.t(
+            "# Plan: Erstattung beim Stornieren\n\n## Ziel\n`cancel_order` löst für bezahlte Bestellungen eine Erstattung aus; doppelte Stornos erstatten nichts.\n\n## Befunde\n- `src/orders.rs`: `cancel_order` setzt nur `cancelled = true`.\n- `src/payments.rs`: `charge` gibt eine Zahlungs-Kennung zurück, eine Erstattung gibt es noch nicht.\n\n## Schritte\n1. `src/payments.rs`: `refund(charge_id)` mit eigenem Fehlertyp ergänzen\n2. `src/orders.rs`: Zahlungs-Kennung in `Order` speichern\n3. `src/orders.rs`: `cancel_order` ruft `refund` nur beim ersten Storno auf\n4. `tests/orders.rs`: Tests für Erstattung und doppeltes Storno\n5. `cargo test` ausführen\n\n## Risiken\n- Bestellungen ohne Zahlung: keine Erstattung versuchen.\n\n## Tests\n- `cargo test`",
+            "# Plan: Refund on cancel\n\n## Goal\n`cancel_order` triggers a refund for paid orders; cancelling twice refunds nothing.\n\n## Findings\n- `src/orders.rs`: `cancel_order` only sets `cancelled = true`.\n- `src/payments.rs`: `charge` returns a charge id; there is no refund yet.\n\n## Steps\n1. `src/payments.rs`: add `refund(charge_id)` with its own error type\n2. `src/orders.rs`: store the charge id in `Order`\n3. `src/orders.rs`: `cancel_order` calls `refund` only on the first cancel\n4. `tests/orders.rs`: tests for the refund and a double cancel\n5. Run `cargo test`\n\n## Risks\n- Orders without a payment: do not try a refund.\n\n## Tests\n- `cargo test`",
+        );
+        if let Some(c) = self.entries.get_mut(&id).and_then(|e| e.chat.as_mut()) {
+            use crate::chat::{ChatMsg, Role};
+            c.file.messages = vec![ChatMsg::new(Role::User, question), ChatMsg::new(Role::Assistant, plan)];
+            c.file.plan = Some(Plan { level: PlanLevel::High, status: PlanStatus::Proposed, markdown: plan.trim().to_string(), revision: 1, created: crate::chat::now_secs(), ..Plan::default() });
+            c.planning.on = true;
+            c.planning.level = PlanLevel::High;
+            c.focus_input = false;
+            c.touch();
+        }
+        self.activate(id);
+    }
+
     /// Chat nach dem Kompaktieren (#359): ein Beispielserver (ohne Verbindung), ein Chat mit zwei kompaktierten Runden,
     /// der Zusammenfassung (zugeklappt, „Original anzeigen“) und zwei behaltenen Runden – alles im Speicher.
     fn shot_chat_compacted(&mut self, ctx: &egui::Context) {
@@ -459,6 +510,7 @@ impl App {
             "theme-color" => self.shot_theme_editor("selection", false),
             "theme-checks" => self.shot_theme_editor("ansi8", true),
             // ---- Chats
+            "chat-plan" => self.shot_chat_plan(ctx),
             "chat-compacted" => self.shot_chat_compacted(ctx),
             // ---- Tutorial
             "chat-images" => self.shot_chat_images(ctx),
@@ -493,7 +545,7 @@ impl App {
             name: "Ollama".into(),
             url: "http://localhost:11434".into(),
             models: vec![crate::llm::config::LlmModel { level: crate::mcp::McpLevel::Control, level_chosen: true, ..crate::llm::config::LlmModel::named(model) }],
-            last_models: vec![crate::llm::ModelInfo { name: model.into(), tools: Some(true), context_length: Some(40960) }],
+            last_models: vec![crate::llm::ModelInfo { name: model.into(), tools: Some(true), context_length: Some(40960), vision: None }],
             ..Default::default()
         };
         self.settings.llm_servers.list.retain(|s| s.id != server.id);

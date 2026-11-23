@@ -647,20 +647,25 @@ impl CompactState {
 }
 
 impl ChatState {
-    /// Haken für den Planmodus (#358): der aktuelle Plan des Chats, der beim Kompaktieren wörtlich erhalten bleibt. Nach
-    /// dem Zusammenführen hier `self.current_plan_markdown()` zurückgeben.
+    /// Planmodus (#358): der aktuelle Plan des Chats (vorgeschlagen, in Überarbeitung oder freigegeben), der beim
+    /// Kompaktieren wörtlich in die Zusammenfassung kommt („## Current plan“).
     fn compact_plan(&self) -> Option<String> {
-        None
+        self.current_plan_markdown().map(str::to_owned)
+    }
+
+    /// Läuft gerade eine Runde (auch eine angehaltene Plan-Runde, #358: ihre wartenden Aufrufe gehören zur Runde)?
+    fn compact_blocked(&self) -> bool {
+        self.busy() || self.editing || (self.planning.round.is_some() && self.round_open())
     }
 
     /// Kann jetzt kompaktiert werden (Knopf aktiv)?
     pub fn can_compact(&self) -> bool {
-        !self.busy() && !self.editing && cut_index(&self.file.messages).is_some()
+        !self.compact_blocked() && cut_index(&self.file.messages).is_some()
     }
 
     /// Kompaktieren auf Wunsch (Knopf, `/compact`). Fehler stehen danach auch in `compact.failure`.
     pub fn compact_now(&mut self, backend: &dyn ChatBackend, meta: &ChatMeta, cx: &TurnContext, repaint: Repaint) -> Result<(), CompactError> {
-        let r = if self.busy() || self.editing { Err(CompactError::Busy) } else { self.start_compaction(backend, meta, cx, repaint, false) };
+        let r = if self.compact_blocked() { Err(CompactError::Busy) } else { self.start_compaction(backend, meta, cx, repaint, false) };
         if let Err(e) = &r {
             self.compact.failure = Some(failure_text(e, false, cx.lang));
             self.touch();

@@ -29,6 +29,8 @@ pub(super) struct ChatOut {
     pub revoke: Option<AllowRule>,
     /// Antwort auf die einmalige Frage nach der Stufe des Modells.
     pub level: Option<McpLevel>,
+    /// Knopf der Plan-Karte (#358).
+    pub plan: Option<crate::chat::plan::PlanAction>,
     /// Jetzt kompaktieren (#359, Knopf in der Kopfzeile).
     pub compact: bool,
     /// Bild einfügen (#357): Strg+V mit Bild in der Zwischenablage oder die Büroklammer.
@@ -79,6 +81,7 @@ pub(super) fn chat_body(ui: &mut Ui, body: Rect, session: u64, chat: &mut ChatSt
             if !chat.file.always_allow.is_empty() {
                 approvals_menu(ui, session, &chat.file.always_allow, lang, &mut out);
             }
+            super::chat_plan_ui::plan_chip(ui, chat, lang);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 context_gauge(ui, session, chat, lang);
                 if !chat.messages().is_empty() {
@@ -152,6 +155,11 @@ struct RowCx<'a> {
     preview: Option<(String, Preview)>,
     /// Text unter einer noch leeren Antwort („…“, „Denkt nach …“, „Warte auf das Modell … 12 s“).
     waiting: String,
+    /// Aktueller Plan (#358): seine Nachricht wird als Plan-Karte gezeichnet; `plan_decidable` = Knöpfe aktiv.
+    plan: Option<&'a crate::chat::plan::Plan>,
+    /// Index der Nachricht mit dem Plan (bei gleichem Text nur die neueste).
+    plan_msg: Option<usize>,
+    plan_decidable: bool,
     /// Kompaktierte Originale werden gezeigt (#359, „Original anzeigen“), Schalter dafür in den egui-Daten.
     show_original: bool,
     show_id: Id,
@@ -211,6 +219,8 @@ fn messages(ui: &mut Ui, session: u64, chat: &mut ChatState, model: &str, lang: 
     let level_question = chat.level_question.is_some();
     let target = chat.approval_target.clone();
     let preview = chat.approval_preview.clone().filter(|(id, _)| pending_has(&chat.calls, id));
+    let plan_decidable = chat.plan_decidable();
+    let plan_msg = chat.plan_message_index();
     let compacting = chat.compact.elapsed();
     if compacting.is_some() {
         ui.ctx().request_repaint_after(std::time::Duration::from_secs(1));
@@ -255,6 +265,9 @@ fn messages(ui: &mut Ui, session: u64, chat: &mut ChatState, model: &str, lang: 
         pending,
         target,
         preview,
+        plan: file.plan.as_ref(),
+        plan_msg,
+        plan_decidable,
         show_original,
         show_id,
         first_compacted: msgs.iter().position(|m| m.compacted),
@@ -298,9 +311,12 @@ fn messages(ui: &mut Ui, session: u64, chat: &mut ChatState, model: &str, lang: 
         let width = ui.available_width();
         let mut y = 0.0;
         let mut remeasured = false;
+        // Plan-Karte (#358), deren Nachricht kompaktiert ist: sie bleibt auch zugeklappt an ihrer Stelle sichtbar (samt
+        // Knöpfen); das Modell sieht den Plan über die Zusammenfassung („## Current plan“).
+        let pinned_plan = rc.plan_msg.filter(|i| msgs[*i].compacted && !rc.show_original);
         for (i, m) in msgs.iter().enumerate() {
             // Kompaktierte Originale (#359) nur aufgeklappt; sonst belegen sie keinen Platz.
-            if m.compacted && !rc.show_original {
+            if m.compacted && !rc.show_original && Some(i) != pinned_plan {
                 continue;
             }
             let known = cache.heights[i];
@@ -376,7 +392,7 @@ fn row(ui: &mut Ui, i: usize, m: &ChatMsg, msgs: &[ChatMsg], cache: &mut UiCache
     if rc.context_start == Some(i) {
         context_marker(ui, lang);
     }
-    if rc.first_compacted == Some(i) {
+    if rc.first_compacted == Some(i) && rc.show_original {
         original_marker(ui, lang);
     }
     match m.role {
@@ -627,10 +643,15 @@ fn assistant(ui: &mut Ui, i: usize, m: &ChatMsg, msgs: &[ChatMsg], cache: &mut U
     ui.label(RichText::new(rc.model).small().color(style::dim(ui)));
     if !m.content.is_empty() {
         let doc = cache.md.entry(i).or_insert_with(|| markdown::parse_plain(&m.content));
-        let opts = RenderOpts { soft_breaks_as_newlines: true, copy_button: Some(lang.t("Kopieren", "Copy")) };
-        let o = markdown::render(ui, doc, &opts);
-        if let Some(u) = o.clicked_url {
-            ui.ctx().open_url(egui::OpenUrl::new_tab(u));
+        // Die Antwort mit dem aktuellen Plan ist eine Plan-Karte (#358).
+        if let Some(p) = rc.plan.filter(|_| rc.plan_msg == Some(i)) {
+            super::chat_plan_ui::plan_card(ui, session, p, doc, rc.plan_decidable, lang, out);
+        } else {
+            let opts = RenderOpts { soft_breaks_as_newlines: true, copy_button: Some(lang.t("Kopieren", "Copy")) };
+            let o = markdown::render(ui, doc, &opts);
+            if let Some(u) = o.clicked_url {
+                ui.ctx().open_url(egui::OpenUrl::new_tab(u));
+            }
         }
     }
     for (k, c) in m.tool_calls.iter().enumerate() {
@@ -1098,6 +1119,10 @@ fn input_bar(ui: &mut Ui, session: u64, chat: &mut ChatState, lang: Lang, input_
         ui.label(RichText::new(note).small().color(if warn { crate::style::ui().warning } else { style::dim(ui) }));
     }
     let focused = ui.memory(|m| m.has_focus(tid));
+    // Umschalt+Tab schaltet den Plan-Modus um (#358), statt den Fokus zu verschieben.
+    if focused {
+        super::chat_plan_ui::shift_tab(ui, chat);
+    }
     // Bild einfügen (#357): Strg+V ohne Text in der Zwischenablage.
     if focused && super::chat_images_ui::paste_requested(ui) {
         out.image = Some(super::chat_images_ui::ImageReq::Paste);
@@ -1112,10 +1137,14 @@ fn input_bar(ui: &mut Ui, session: u64, chat: &mut ChatState, lang: Lang, input_
         chat.cancel_edit();
     }
     let avail = ui.available_rect_before_wrap();
+    // Rechts: Schalter *Plan* mit Stufe (#358), Büroklammer (#357), dann *Senden*.
+    let plan_w = super::chat_plan_ui::PLAN_W;
     let clip_w = super::chat_images_ui::CLIP_W;
-    let field = Rect::from_min_max(avail.min, Pos2::new(avail.max.x - BTN_W - S2 - clip_w - S1, avail.min.y + input_h));
+    let field = Rect::from_min_max(avail.min, Pos2::new((avail.max.x - BTN_W - S2 - clip_w - S1 - plan_w - S2).max(avail.min.x + 40.0), avail.min.y + input_h));
     let btn = Rect::from_min_max(Pos2::new(avail.max.x - BTN_W, field.max.y - 30.0), Pos2::new(avail.max.x, field.max.y));
     let clip = Rect::from_min_max(Pos2::new(btn.min.x - S1 - clip_w, btn.min.y), Pos2::new(btn.min.x - S1, btn.max.y));
+    let plan_rect = Rect::from_min_max(Pos2::new(clip.min.x - S2 - plan_w, btn.min.y), Pos2::new(clip.min.x - S2, btn.max.y));
+    let hint = if chat.planning.on { super::chat_plan_ui::input_hint(lang) } else { lang.t("Nachricht … (Enter sendet, Umschalt+Enter: neue Zeile)", "Message … (Enter sends, Shift+Enter: new line)") };
     let has_tokens = !crate::chat::images::tokens(&chat.draft).is_empty();
     let before = has_tokens.then(|| chat.draft.clone());
     let output = ui
@@ -1126,7 +1155,7 @@ fn input_bar(ui: &mut Ui, session: u64, chat: &mut ChatState, lang: Lang, input_
                     .id(tid)
                     .desired_rows(1)
                     .desired_width(f32::INFINITY)
-                    .hint_text(lang.t("Nachricht … (Enter sendet, Umschalt+Enter: neue Zeile)", "Message … (Enter sends, Shift+Enter: new line)"));
+                    .hint_text(hint);
                 // Platzhalter von Bildern hervorheben (#357); ohne Platzhalter zeichnet egui wie bisher.
                 if has_tokens {
                     te = te.layouter(&mut layouter);
@@ -1169,6 +1198,7 @@ fn input_bar(ui: &mut Ui, session: u64, chat: &mut ChatState, lang: Lang, input_
             out.send = true;
         }
     }
+    super::chat_plan_ui::plan_toggle(ui, plan_rect, session, chat, lang);
 }
 
 #[cfg(test)]
