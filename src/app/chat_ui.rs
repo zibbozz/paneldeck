@@ -31,6 +31,10 @@ pub(super) struct ChatOut {
     pub level: Option<McpLevel>,
     /// Knopf der Plan-Karte (#358).
     pub plan: Option<crate::chat::plan::PlanAction>,
+    /// Bild einfügen (#357): Strg+V mit Bild in der Zwischenablage oder die Büroklammer.
+    pub image: Option<super::chat_images_ui::ImageReq>,
+    /// Antwort auf die Fragen des Modells (`ask_user`, #356): schon an den Aufruf geschickt (`ChatState::answer_ask`).
+    pub ask: Option<crate::chat::ask::AskReply>,
 }
 
 /// Höhe der Kopfzeile (Füllstand des Kontexts, dauerhafte Freigaben).
@@ -56,7 +60,8 @@ pub(super) fn chat_body(ui: &mut Ui, body: Rect, session: u64, chat: &mut ChatSt
     let lines = (chat.draft.split('\n').count()).clamp(1, MAX_INPUT_ROWS);
     let input_h = lines as f32 * row_h + 12.0;
     let edit_h = if chat.editing { 22.0 } else { 0.0 };
-    let bottom_h = input_h + 2.0 * PAD + edit_h;
+    let img_h = if image_note(chat, lang).is_some() { super::chat_images_ui::NOTE_H } else { 0.0 };
+    let bottom_h = input_h + 2.0 * PAD + edit_h + img_h;
     // Kopfzeile: immer da (Füllstand des Kontexts, #339), links ggf. die To-dos des Modells (#338) und die dauerhaften
     // Freigaben. Die Zeile hat ihren eigenen Platz: so hoch wie ein Knopf (der To-do-Chip ist ein Menüknopf), der
     // Verlauf beginnt darunter und nichts aus der Kopfzeile ragt in ihn hinein (sonst lag der Chip beim Scrollen über
@@ -92,6 +97,10 @@ pub(super) fn chat_body(ui: &mut Ui, body: Rect, session: u64, chat: &mut ChatSt
     ui.scope_builder(UiBuilder::new().max_rect(list_rect.shrink2(Vec2::new(PAD, 0.0))), |ui| {
         messages(ui, session, chat, model, lang, &mut out);
     });
+    // Fragen des Modells beantwortet (#356): das Ergebnis geht gleich an den wartenden Aufruf.
+    if let Some(r) = out.ask {
+        chat.answer_ask(r);
+    }
     // Nach einer Entscheidung zurück ins Eingabefeld: der Knopf an derselben Stelle gehört sonst gleich der nächsten
     // Frage, und Enter würde sie freigeben.
     if out.decide.is_some() || out.level.is_some() {
@@ -100,7 +109,14 @@ pub(super) fn chat_body(ui: &mut Ui, body: Rect, session: u64, chat: &mut ChatSt
     ui.scope_builder(UiBuilder::new().max_rect(bar_rect.shrink(PAD)), |ui| {
         input_bar(ui, session, chat, lang, input_h, grab_focus, &mut out);
     });
+    // Bild im Popup (#357), über allem.
+    super::chat_images_ui::popup(ui.ctx(), session, &chat.file.images, chat.img.dir.as_deref(), lang);
     out
+}
+
+/// Hinweis zu Bildern unter dem Eingabefeld (#357).
+fn image_note(chat: &ChatState, lang: Lang) -> Option<(String, bool)> {
+    super::chat_images_ui::input_note(&chat.draft, chat.img.busy(), chat.img.error.as_deref(), chat.img.vision, lang)
 }
 
 /// Höhe der Kopfzeile: mindestens [`HEAD_H`], sonst ein Knopf (Mindesthöhe der Bedienelemente) plus Rand.
@@ -139,6 +155,8 @@ struct RowCx<'a> {
     /// Index der Nachricht mit dem Plan (bei gleichem Text nur die neueste).
     plan_msg: Option<usize>,
     plan_decidable: bool,
+    /// Bilder des Chats (#357; für die Platzhalter an Werkzeug-Ergebnissen).
+    images: &'a [crate::chat::images::ImageEntry],
 }
 
 /// Ab so vielen Sekunden ohne Daten zeigt eine leere Antwort, wie lange schon gewartet wird (#299).
@@ -192,7 +210,7 @@ fn messages(ui: &mut Ui, session: u64, chat: &mut ChatState, model: &str, lang: 
     let preview = chat.approval_preview.clone().filter(|(id, _)| pending_has(&chat.calls, id));
     let plan_decidable = chat.plan_decidable();
     let plan_msg = chat.plan_message_index();
-    let ChatState { file, ui: cache, warning, follow, notice, usage, .. } = chat;
+    let ChatState { file, ui: cache, warning, follow, notice, usage, ask, .. } = chat;
     let msgs = &file.messages;
     let n = msgs.len();
     // Zwischenspeicher nur für Geändertes erneuern (nicht jedes Bild den ganzen Verlauf).
@@ -233,6 +251,7 @@ fn messages(ui: &mut Ui, session: u64, chat: &mut ChatState, model: &str, lang: 
         plan: file.plan.as_ref(),
         plan_msg,
         plan_decidable,
+        images: &file.images,
     };
     // Am Ende kleben, solange der Nutzer nicht hochscrollt; nach dem Öffnen und nach dem Senden einmal ganz nach unten.
     let jump = std::mem::take(follow);
@@ -304,6 +323,15 @@ fn messages(ui: &mut Ui, session: u64, chat: &mut ChatState, model: &str, lang: 
             level_bar(&mut bar, lang, out);
             y += bar.min_rect().height() + S1;
         }
+        // Fragen des Modells (`ask_user`, #356): ein Formular mit „Absenden“ unter der letzten Nachricht.
+        if let Some(form) = ask.as_mut() {
+            let rect = Rect::from_min_size(Pos2::new(origin.x, origin.y + y), Vec2::new(width, 1.0e6));
+            let mut bar = ui.new_child(UiBuilder::new().id_salt(("chat_ask", session)).max_rect(rect).layout(egui::Layout::top_down(egui::Align::Min)));
+            if let Some(r) = super::chat_ask_ui::ask_form(&mut bar, session, form, lang) {
+                out.ask = Some(r);
+            }
+            y += bar.min_rect().height() + S1;
+        }
         let total = Rect::from_min_size(origin, Vec2::new(width, y + S1));
         ui.allocate_rect(total, Sense::hover());
         if jump {
@@ -322,7 +350,7 @@ fn row(ui: &mut Ui, i: usize, m: &ChatMsg, msgs: &[ChatMsg], cache: &mut UiCache
         context_marker(ui, lang);
     }
     match m.role {
-        Role::User => user_bubble(ui, m, Some(i) == rc.last_user && !rc.streaming, lang, out),
+        Role::User => user_bubble(ui, rc.session, i, m, Some(i) == rc.last_user && !rc.streaming, lang, out),
         Role::Assistant => {
             let is_last = Some(i) == rc.last;
             assistant(ui, i, m, msgs, cache, rc, out);
@@ -349,7 +377,15 @@ fn row(ui: &mut Ui, i: usize, m: &ChatMsg, msgs: &[ChatMsg], cache: &mut UiCache
         }
         // Ergebnisse mit passendem Aufruf stehen in dessen Zeile.
         Role::Tool if cache.matched.contains(&i) => {}
-        Role::Tool => tool_line(ui, Id::new(("chat_tool_r", rc.session, i)), m.tool_name.as_deref().unwrap_or("?"), None, Some(m), None, (None, None), None, lang, out),
+        Role::Tool => {
+            tool_line(ui, Id::new(("chat_tool_r", rc.session, i)), m.tool_name.as_deref().unwrap_or("?"), None, Some(m), None, (None, None), None, lang, out);
+            super::chat_images_ui::links(ui, rc.session, &m.images, rc.images, lang);
+        }
+        Role::System if m.event.is_some() => {
+            if let Some(ev) = &m.event {
+                event_line(ui, ev, lang);
+            }
+        }
         Role::System => {
             egui::CollapsingHeader::new(RichText::new(lang.t("Systemprompt", "System prompt")).small().color(style::dim(ui))).id_salt(("chat_sys", rc.session, i)).show(ui, |ui| {
                 ui.label(RichText::new(&m.content).small().monospace());
@@ -359,6 +395,47 @@ fn row(ui: &mut Ui, i: usize, m: &ChatMsg, msgs: &[ChatMsg], cache: &mut UiCache
     if !(m.role == Role::Tool && cache.matched.contains(&i)) {
         ui.add_space(S2 + 2.0);
     }
+}
+
+/// Nachricht von Paneldeck im Verlauf (#355): „Hintergrund-Befehl bg1 beendet · Exit-Code 0 · 2 min 5 s“ und der
+/// Befehl. Das Modell bekommt den englischen Text der Nachricht; hier steht er in der Sprache der Oberfläche.
+pub(super) fn event_text(e: &crate::chat::store::ChatEvent, lang: Lang) -> String {
+    let what = match (e.state.as_str(), lang) {
+        ("failed", Lang::De) => format!("Hintergrund-Befehl {} fehlgeschlagen", e.id),
+        ("failed", _) => format!("Background command {} failed", e.id),
+        ("stopped", Lang::De) => format!("Hintergrund-Befehl {} angehalten", e.id),
+        ("stopped", _) => format!("Background command {} stopped", e.id),
+        (_, Lang::De) => format!("Hintergrund-Befehl {} beendet", e.id),
+        _ => format!("Background command {} finished", e.id),
+    };
+    let mut parts = vec![what];
+    match (&e.error, e.exit_code) {
+        (Some(code), _) => parts.push(code.clone()),
+        (None, Some(c)) => parts.push(format!("{} {c}", lang.t("Exit-Code", "exit code"))),
+        (None, None) => {}
+    }
+    parts.push(crate::chat::bg_commands::human_duration(e.duration_ms));
+    parts.join(" · ")
+}
+
+fn event_line(ui: &mut Ui, e: &crate::chat::store::ChatEvent, lang: Lang) {
+    let t = crate::style::ui();
+    let col = match (e.state.as_str(), e.exit_code) {
+        ("failed", _) => error_col(),
+        (_, Some(c)) if c != 0 => t.warning,
+        ("stopped", _) => style::dim(ui),
+        _ => t.success,
+    };
+    egui::Frame::new().fill(ui.visuals().faint_bg_color).corner_radius(CornerRadius::same(style::RADIUS)).inner_margin(Margin::symmetric(8, 4)).show(ui, |ui| {
+        ui.set_min_width(ui.available_width());
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new("⏺").color(col).size(11.0));
+            ui.label(RichText::new(event_text(e, lang)).small());
+            ui.label(RichText::new(crate::mcp::short(&e.command, 120)).small().monospace().color(style::dim(ui)));
+        });
+    })
+    .response
+    .on_hover_text(lang.t("Nachricht von Paneldeck – das Modell hat sie bekommen und kann die Ausgabe mit command_output lesen.", "Message from Paneldeck – the model received it and can read the output with command_output."));
 }
 
 /// „Tokens: 120 Eingabe · 45 Antwort“ (nur, was der Server gemeldet hat).
@@ -393,17 +470,21 @@ fn context_marker(ui: &mut Ui, lang: Lang) {
     ui.add_space(S2);
 }
 
-/// Eigene Nachricht: rechtsbündige Blase; an der letzten ein Knopf zum Bearbeiten.
-fn user_bubble(ui: &mut Ui, m: &ChatMsg, editable: bool, lang: Lang, out: &mut ChatOut) {
+/// Eigene Nachricht: rechtsbündige Blase; an der letzten ein Knopf zum Bearbeiten. Platzhalter von Bildern (#357) sind
+/// hervorgehoben, ein Klick zeigt das Bild.
+#[allow(clippy::too_many_arguments)]
+fn user_bubble(ui: &mut Ui, session: u64, i: usize, m: &ChatMsg, editable: bool, lang: Lang, out: &mut ChatOut) {
     let full = ui.available_width();
     let maxw = (full * 0.78).max(120.0);
     let text_col = ui.visuals().strong_text_color();
-    let galley = ui.painter().layout(m.content.clone(), FontId::proportional(14.0), text_col, maxw - 20.0);
+    let galley = super::chat_images_ui::bubble_galley(ui, &m.content, text_col, maxw - 20.0);
     let size = galley.size() + Vec2::new(20.0, 14.0);
     let (row, _) = ui.allocate_exact_size(Vec2::new(full, size.y), Sense::hover());
     let bubble = Rect::from_min_size(Pos2::new(row.max.x - size.x, row.min.y), size);
     ui.painter().rect_filled(bubble, 10.0, crate::style::ui().chat_user_bg);
-    ui.painter().galley(bubble.min + Vec2::new(10.0, 7.0), galley, text_col);
+    let origin = bubble.min + Vec2::new(10.0, 7.0);
+    super::chat_images_ui::bubble_clicks(ui, session, Id::new(("chat_user_img", session, i)), bubble, &galley, origin, &m.content);
+    ui.painter().galley(origin, galley, text_col);
     if editable {
         let br = Rect::from_center_size(Pos2::new(bubble.min.x - 16.0, bubble.min.y + 12.0), Vec2::splat(22.0));
         let resp = ui.put(br, egui::Button::new("✎").small().frame(false)).on_hover_text(lang.t("Letzte Nachricht bearbeiten", "Edit last message"));
@@ -437,6 +518,9 @@ fn assistant(ui: &mut Ui, i: usize, m: &ChatMsg, msgs: &[ChatMsg], cache: &mut U
         let preview = rc.preview.as_ref().filter(|(id, _)| state == Some(CallState::Approval) && *id == c.id).map(|(_, p)| p);
         let note = m.repairs.iter().find(|r| r.id == c.id).and_then(|r| repair_note(r, lang));
         tool_line(ui, Id::new(("chat_tool", session, i, k)), &c.name, Some((c.id.as_str(), &c.arguments)), result, state, (target, preview), note.as_deref(), lang, out);
+        if let Some(r) = result {
+            super::chat_images_ui::links(ui, session, &r.images, rc.images, lang);
+        }
     }
 }
 
@@ -616,13 +700,11 @@ fn approval(ui: &mut Ui, id: Id, call_id: &str, name: &str, args: &serde_json::V
             // Agenten-Werkzeuge (#338): je Werkzeug für den Chat, Befehle nur für denselben Anfang (`cargo test`).
             // Sensible Dateien (#338): jedes Mal fragen.
             let always = (AllowRule::eligible(&call) && !sensitive).then(|| {
-                let scope = match AllowRule::for_call(&call) {
+                let rule = AllowRule::for_call(&call);
+                let scope = match &rule {
                     AllowRule { prefix: Some(p), .. } => {
-                        if lang == Lang::De {
-                            format!("Befehle, die mit „{p}“ beginnen")
-                        } else {
-                            format!("commands starting with “{p}”")
-                        }
+                        let base = if lang == Lang::De { format!("Befehle, die mit „{p}“ beginnen") } else { format!("commands starting with “{p}”") };
+                        format!("{base}{}", rule_scope(&rule, lang))
                     }
                     _ if local => {
                         let web = name.starts_with("web_");
@@ -686,6 +768,18 @@ fn paused_bar(ui: &mut Ui, steps: u32, note: Option<&str>, loop_stop: bool, lang
             }
         });
     });
+}
+
+/// Geltungsbereich einer Befehlsregel (#355): „ · Shell gitbash · im Hintergrund“ (leer für Vordergrund mit Projektprofil).
+fn rule_scope(r: &AllowRule, lang: Lang) -> String {
+    let mut s = String::new();
+    if let Some(sh) = &r.shell {
+        s.push_str(&format!(" · {} {sh}", lang.t("Shell", "shell")));
+    }
+    if r.background {
+        s.push_str(&format!(" · {}", lang.t("im Hintergrund", "in the background")));
+    }
+    s
 }
 
 /// Einmalige Frage vor dem ersten Senden: Darf dieses Modell Paneldeck nutzen? (Aus / Lesen / Steuern.)
@@ -756,7 +850,7 @@ fn approvals_menu(ui: &mut Ui, session: u64, rules: &[AllowRule], lang: Lang, ou
                     ui.horizontal(|ui| {
                         let what = match (r.session, &r.prefix) {
                             (Some(s), _) => format!("{} → {} {s}", r.tool, lang.t("Sitzung", "session")),
-                            (None, Some(p)) => format!("{}: {p} …", r.tool),
+                            (None, Some(p)) => format!("{}: {p} …{}", r.tool, rule_scope(r, lang)),
                             (None, None) => r.tool.clone(),
                         };
                         ui.label(RichText::new(what).monospace().size(12.0));
@@ -878,39 +972,70 @@ fn input_bar(ui: &mut Ui, session: u64, chat: &mut ChatState, lang: Lang, input_
             }
         });
     }
+    if let Some((note, warn)) = image_note(chat, lang) {
+        ui.label(RichText::new(note).small().color(if warn { crate::style::ui().warning } else { style::dim(ui) }));
+    }
     let focused = ui.memory(|m| m.has_focus(tid));
     // Umschalt+Tab schaltet den Plan-Modus um (#358), statt den Fokus zu verschieben.
     if focused {
         super::chat_plan_ui::shift_tab(ui, chat);
     }
+    // Bild einfügen (#357): Strg+V ohne Text in der Zwischenablage.
+    if focused && super::chat_images_ui::paste_requested(ui) {
+        out.image = Some(super::chat_images_ui::ImageReq::Paste);
+    }
+    // Bilder werden noch vorbereitet: Senden wartet.
+    let images_pending = chat.images_pending(&chat.draft);
     // Enter sendet; während einer Antwort tut es nichts (auch keinen Zeilenumbruch). Nicht während einer IME-Eingabe.
-    if focused && !ime_composing(ui, tid) && take_plain_enter(ui) && !streaming {
+    if focused && !ime_composing(ui, tid) && take_plain_enter(ui) && !streaming && !images_pending {
         out.send = true;
     }
     if focused && chat.editing && ui.input(|i| i.key_pressed(Key::Escape)) {
         chat.cancel_edit();
     }
     let avail = ui.available_rect_before_wrap();
-    // Rechts: Schalter *Plan* mit Stufe (#358), dann *Senden*.
+    // Rechts: Schalter *Plan* mit Stufe (#358), Büroklammer (#357), dann *Senden*.
     let plan_w = super::chat_plan_ui::PLAN_W;
-    let field = Rect::from_min_max(avail.min, Pos2::new((avail.max.x - BTN_W - plan_w - 2.0 * S2).max(avail.min.x + 40.0), avail.min.y + input_h));
+    let clip_w = super::chat_images_ui::CLIP_W;
+    let field = Rect::from_min_max(avail.min, Pos2::new((avail.max.x - BTN_W - S2 - clip_w - S1 - plan_w - S2).max(avail.min.x + 40.0), avail.min.y + input_h));
     let btn = Rect::from_min_max(Pos2::new(avail.max.x - BTN_W, field.max.y - 30.0), Pos2::new(avail.max.x, field.max.y));
-    let plan_rect = Rect::from_min_max(Pos2::new(btn.min.x - S2 - plan_w, btn.min.y), Pos2::new(btn.min.x - S2, btn.max.y));
+    let clip = Rect::from_min_max(Pos2::new(btn.min.x - S1 - clip_w, btn.min.y), Pos2::new(btn.min.x - S1, btn.max.y));
+    let plan_rect = Rect::from_min_max(Pos2::new(clip.min.x - S2 - plan_w, btn.min.y), Pos2::new(clip.min.x - S2, btn.max.y));
     let hint = if chat.planning.on { super::chat_plan_ui::input_hint(lang) } else { lang.t("Nachricht … (Enter sendet, Umschalt+Enter: neue Zeile)", "Message … (Enter sends, Shift+Enter: new line)") };
-    let resp = ui
+    let has_tokens = !crate::chat::images::tokens(&chat.draft).is_empty();
+    let before = has_tokens.then(|| chat.draft.clone());
+    let output = ui
         .scope_builder(UiBuilder::new().max_rect(field), |ui| {
             egui::ScrollArea::vertical().id_salt(("chat_input_scroll", session)).max_height(input_h).auto_shrink([false, true]).show(ui, |ui| {
-                ui.add(
-                    egui::TextEdit::multiline(&mut chat.draft)
-                        .id(tid)
-                        .desired_rows(1)
-                        .desired_width(f32::INFINITY)
-                        .hint_text(hint),
-                )
+                let mut layouter = super::chat_images_ui::input_layouter(ui);
+                let mut te = egui::TextEdit::multiline(&mut chat.draft)
+                    .id(tid)
+                    .desired_rows(1)
+                    .desired_width(f32::INFINITY)
+                    .hint_text(hint);
+                // Platzhalter von Bildern hervorheben (#357); ohne Platzhalter zeichnet egui wie bisher.
+                if has_tokens {
+                    te = te.layouter(&mut layouter);
+                }
+                te.show(ui)
             })
             .inner
         })
         .inner;
+    let resp = output.response.clone();
+    // Klick auf einen Platzhalter im Eingabefeld: Bild im Popup.
+    if has_tokens {
+        super::chat_images_ui::hover(ui, &output.galley, output.galley_pos, &chat.draft);
+        if resp.clicked()
+            && let Some(n) = resp.interact_pointer_pos().and_then(|p| super::chat_images_ui::hit(&output.galley, output.galley_pos, &chat.draft, p))
+        {
+            super::chat_images_ui::open(ui.ctx(), session, n);
+        }
+    }
+    // Platzhalter bleiben ganz (#357): Rücktaste/Tippen mitten darin löscht den ganzen.
+    if let Some(before) = before.filter(|b| *b != chat.draft) {
+        super::chat_images_ui::keep_tokens_whole(ui.ctx(), tid, &before, &mut chat.draft);
+    }
     if grab_focus || chat.focus_input {
         resp.request_focus();
         chat.focus_input = false;
@@ -918,7 +1043,10 @@ fn input_bar(ui: &mut Ui, session: u64, chat: &mut ChatState, lang: Lang, input_
     if resp.has_focus() || resp.clicked() {
         out.focus = true;
     }
-    let (label, enabled) = if streaming { (lang.t("Stopp", "Stop"), true) } else { (lang.t("Senden", "Send"), !chat.draft.trim().is_empty()) };
+    if super::chat_images_ui::attach_button(ui, clip, lang) {
+        out.image = Some(super::chat_images_ui::ImageReq::Pick);
+    }
+    let (label, enabled) = if streaming { (lang.t("Stopp", "Stop"), true) } else { (lang.t("Senden", "Send"), !chat.draft.trim().is_empty() && !images_pending) };
     let b = ui.put(btn, egui::Button::new(RichText::new(label).strong()).fill(if streaming { error_col().gamma_multiply(0.6) } else { crate::style::ui().chat_send }));
     if enabled && b.clicked() {
         if streaming {
@@ -978,6 +1106,7 @@ mod tests {
                 o.stop |= r.stop;
                 o.regenerate |= r.regenerate;
                 o.edit |= r.edit;
+                o.image = o.image.or(r.image);
             }
             o
         }
@@ -1031,6 +1160,119 @@ mod tests {
         assert!(h.click(&mut c, Lang::En, p).regenerate);
         let p = h.pos_of("✎").expect("Bearbeiten-Knopf");
         assert!(h.click(&mut c, Lang::En, p).edit);
+    }
+
+    /// Bilder (#357): Strg+V im Eingabefeld meldet „einfügen“, der Platzhalter landet an der Cursor-Position; ein Klick
+    /// auf den Platzhalter (eigene Nachricht, Eingabefeld, Werkzeug-Ergebnis) öffnet das Popup mit dem Original, Esc
+    /// schließt es.
+    #[test]
+    fn image_tokens_paste_and_open_the_popup() {
+        use super::super::chat_images_ui as ciu;
+        let d = std::env::temp_dir().join(format!("pd-chat-ui-img-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let e = crate::chat::images::import_rgba(&d, 1, image::RgbaImage::from_pixel(40, 30, image::Rgba([9, 99, 199, 255]))).unwrap();
+        for lang in [Lang::En, Lang::De] {
+            let mut c = ChatState::new(ChatFile::default(), None);
+            c.img.dir = Some(d.clone());
+            c.file.images = vec![e.clone()];
+            let mut h = H::new();
+            h.frame(&mut c, lang, true, vec![]);
+            // Strg+V ohne Text → Bild einfügen; mit Text (Event::Paste) nicht
+            let o = h.frame(&mut c, lang, false, vec![key(Key::V, Modifiers::COMMAND)]);
+            assert_eq!(o.image, Some(ciu::ImageReq::Paste));
+            let o = h.frame(&mut c, lang, false, vec![key(Key::V, Modifiers::COMMAND), Event::Paste("text".into())]);
+            assert_eq!(o.image, None);
+            assert_eq!(c.draft, "text", "Text fügt egui selbst ein");
+            c.draft.clear();
+            // Platzhalter an der Cursor-Position (Cursor nach dem Tippen am Ende)
+            h.frame(&mut c, lang, false, vec![Event::Text("see ".into())]);
+            ciu::insert_token(&h.ctx, input_id(1), &mut c.draft, 2);
+            assert_eq!(c.draft, "see [Image#2] ");
+            h.frame(&mut c, lang, false, vec![Event::Text("x".into())]);
+            assert_eq!(c.draft, "see [Image#2] x", "Cursor steht hinter dem Platzhalter");
+            // Rücktaste mitten im Platzhalter löscht ihn ganz (aus [Image#2] wird nie etwas anderes)
+            let mut st = egui::text_edit::TextEditState::load(&h.ctx, input_id(1)).unwrap();
+            st.cursor.set_char_range(Some(egui::text::CCursorRange::one(egui::text::CCursor::new(12))));
+            st.store(&h.ctx, input_id(1));
+            h.frame(&mut c, lang, false, vec![key(Key::Backspace, Modifiers::NONE)]);
+            assert_eq!(c.draft, "see  x");
+            // Einfügen mit Auswahl ersetzt die Auswahl
+            let mut st = egui::text_edit::TextEditState::load(&h.ctx, input_id(1)).unwrap();
+            st.cursor.set_char_range(Some(egui::text::CCursorRange::two(egui::text::CCursor::new(0), egui::text::CCursor::new(3))));
+            st.store(&h.ctx, input_id(1));
+            ciu::insert_token(&h.ctx, input_id(1), &mut c.draft, 3);
+            assert_eq!(c.draft, "[Image#3]  x");
+            // Büroklammer
+            let clip = h.shapes.iter().find_map(|s| match &s.shape {
+                egui::Shape::Path(p) if p.points.len() > 20 => Some(egui::Rect::from_points(&p.points).center()),
+                _ => None,
+            });
+            assert_eq!(h.click(&mut c, lang, clip.expect("Büroklammer")).image, Some(ciu::ImageReq::Pick));
+            // Eigene Nachricht mit Platzhalter: Klick öffnet das Popup
+            let mut m = ChatMsg::new(Role::User, "[Image#1] what is this");
+            m.images = vec![1];
+            c.file.messages.push(m);
+            c.draft.clear();
+            c.touch();
+            h.frame(&mut c, lang, false, vec![]);
+            let r = h
+                .shapes
+                .iter()
+                .find_map(|s| match &s.shape {
+                    egui::Shape::Text(t) if t.galley.text() == "[Image#1] what is this" => Some(t.visual_bounding_rect()),
+                    _ => None,
+                })
+                .expect("Nachricht");
+            h.click(&mut c, lang, Pos2::new(r.min.x + 12.0, r.center().y));
+            assert_eq!(ciu::open_image(&h.ctx, 1), Some(1));
+            // Das Original wird im Hintergrund dekodiert („Lädt …“), dann gezeigt
+            let t0 = Instant::now();
+            loop {
+                h.frame(&mut c, lang, false, vec![]);
+                if matches!(ciu::view(&h.ctx, 1, 1, c.file.images.first(), Some(&d), lang), ciu::View::Ready(_)) || t0.elapsed() > Duration::from_secs(5) {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            assert!(matches!(ciu::view(&h.ctx, 1, 1, c.file.images.first(), Some(&d), lang), ciu::View::Ready(_)));
+            h.frame(&mut c, lang, false, vec![]);
+            assert!(!h.texts.iter().any(|t| t == lang.t("Lädt …", "Loading …")));
+            assert!(h.texts.iter().any(|t| t == "[Image#1] · 40 × 30"), "{:?}", h.texts);
+            assert!(h.texts.iter().any(|t| t == lang.t("Schließen", "Close")));
+            // Esc schließt
+            h.frame(&mut c, lang, false, vec![key(Key::Escape, Modifiers::NONE)]);
+            h.frame(&mut c, lang, false, vec![]);
+            assert_eq!(ciu::open_image(&h.ctx, 1), None);
+            assert!(!h.texts.iter().any(|t| t == "[Image#1] · 40 × 30"));
+            // Klick daneben auf den Text öffnet nichts
+            h.click(&mut c, lang, Pos2::new(r.max.x - 5.0, r.center().y));
+            assert_eq!(ciu::open_image(&h.ctx, 1), None);
+            // Unbekanntes Bild: Popup mit Hinweis
+            ciu::open(&h.ctx, 1, 9);
+            h.frame(&mut c, lang, false, vec![]);
+            h.frame(&mut c, lang, false, vec![]);
+            assert!(h.texts.iter().any(|t| t == lang.t("Bild nicht gefunden", "Image not found")), "{:?}", h.texts);
+            ciu::close(&h.ctx, 1);
+            // Modell ohne Bildverständnis: Hinweis unter dem Eingabefeld
+            c.img.vision = Some(false);
+            c.draft = "[Image#1]".into();
+            h.frame(&mut c, lang, false, vec![]);
+            assert!(h.texts.iter().any(|t| t == lang.t("Dieses Modell kann keine Bilder lesen – Bilder werden nicht gesendet.", "This model cannot read images – images are not sent.")));
+            // Werkzeug-Ergebnis mit Bild: anklickbarer Platzhalter
+            let mut a = ChatMsg::new(Role::Assistant, "");
+            a.tool_calls.push(ToolCall { id: "s".into(), name: "screenshot".into(), arguments: serde_json::json!({}) });
+            let mut t = crate::chat::logic::tool_result(&a.tool_calls[0], ToolStatus::Ok, "{\"image\":\"[Image#1]\"}".into());
+            t.images = vec![1];
+            c.file.messages.push(a);
+            c.file.messages.push(t);
+            c.draft.clear();
+            c.touch();
+            h.frame(&mut c, lang, false, vec![]);
+            let p = h.pos_of("[Image#1]").expect("Platzhalter am Werkzeug-Ergebnis");
+            h.click(&mut c, lang, p);
+            assert_eq!(ciu::open_image(&h.ctx, 1), Some(1));
+        }
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     /// Eine noch leere Antwort zeigt, was los ist (#299): „…“, nach ein paar Sekunden die Wartezeit, bei Denk-Ausgabe
@@ -1376,7 +1618,7 @@ mod tests {
         }
         // Dauerhafte Freigaben: Menü in der Kopfzeile, „Widerrufen“ je Eintrag
         for (lang, title, revoke) in [(Lang::En, "Permanent approvals (2)", "Revoke"), (Lang::De, "Dauerhafte Freigaben (2)", "Widerrufen")] {
-            let rules = vec![AllowRule { tool: "send_text".into(), session: Some(4), prefix: None }, AllowRule { tool: "add_todo".into(), session: None, prefix: None }];
+            let rules = vec![AllowRule { tool: "send_text".into(), session: Some(4), prefix: None, ..AllowRule::default() }, AllowRule { tool: "add_todo".into(), session: None, prefix: None, ..AllowRule::default() }];
             let mut c = ChatState::new(ChatFile { always_allow: rules.clone(), ..ChatFile::default() }, None);
             let mut h = H::new();
             h.frame(&mut c, lang, false, vec![]);
@@ -1489,7 +1731,7 @@ mod tests {
         for (lang, notice, tokens) in [(Lang::En, "This model cannot use tools – chat only.", "Tokens: 120 in · 45 out"), (Lang::De, "Dieses Modell kann keine Werkzeuge nutzen – nur Chat.", "Tokens: 120 Eingabe · 45 Antwort")] {
             let mut c = ChatState::new(file.clone(), None);
             c.notice = crate::chat::llm_backend::chat_notice(
-                &[crate::llm::config::LlmServer { id: "s".into(), last_models: vec![crate::llm::ModelInfo { name: "m".into(), tools: Some(false), context_length: None }], ..Default::default() }],
+                &[crate::llm::config::LlmServer { id: "s".into(), last_models: vec![crate::llm::ModelInfo { name: "m".into(), tools: Some(false), context_length: None, vision: None }], ..Default::default() }],
                 &crate::state::ChatMeta { server: "s".into(), model: "m".into() },
                 lang,
             );
@@ -1542,5 +1784,67 @@ mod tests {
         c.file.context_start = Some(0);
         h.frame(&mut c, Lang::De, false, vec![]);
         assert!(h.texts.iter().any(|t| t == "alte Nachrichten fallen heraus"), "{:?}", h.texts);
+    }
+
+    /// #355: Nachricht von Paneldeck als eigene Zeile in der Sprache der Oberfläche (nicht als Systemprompt).
+    #[test]
+    fn background_command_messages_show_as_a_line() {
+        let ev = |state: &str, code: Option<i64>, err: Option<&str>| {
+            let mut m = ChatMsg::new(Role::System, "[Paneldeck] …");
+            m.event = Some(crate::chat::store::ChatEvent { kind: "background_command".into(), id: "bg1".into(), command: "cargo build".into(), state: state.into(), exit_code: code, duration_ms: 2400, error: err.map(str::to_string) });
+            m
+        };
+        let file = ChatFile { messages: vec![ChatMsg::new(Role::User, "build"), ev("exited", Some(0), None), ev("failed", None, Some("session_closed"))], ..ChatFile::default() };
+        for (lang, ok, fail, sys) in [
+            (Lang::En, "Background command bg1 finished · exit code 0 · 2 s", "Background command bg1 failed · session_closed · 2 s", "System prompt"),
+            (Lang::De, "Hintergrund-Befehl bg1 beendet · Exit-Code 0 · 2 s", "Hintergrund-Befehl bg1 fehlgeschlagen · session_closed · 2 s", "Systemprompt"),
+        ] {
+            let mut c = ChatState::new(file.clone(), None);
+            let mut h = H::new();
+            h.frame(&mut c, lang, false, vec![]);
+            h.frame(&mut c, lang, false, vec![]);
+            assert!(h.texts.iter().any(|t| t == ok) && h.texts.iter().any(|t| t == fail), "{:?}", h.texts);
+            assert!(h.texts.iter().any(|t| t == "cargo build"));
+            assert!(!h.texts.iter().any(|t| t == sys), "keine Systemprompt-Zeile");
+        }
+    }
+
+    /// #356: Das Formular steht im Chat; Absenden schickt die Antwort an den wartenden Aufruf.
+    #[test]
+    fn the_question_form_answers_the_waiting_call() {
+        struct Ask;
+        impl crate::chat::ChatBackend for Ask {
+            fn start(&self, _: &crate::state::ChatMeta, _: &[ChatMsg], _: &crate::chat::TurnContext, _: crate::chat::Repaint) -> crate::chat::backend::TurnHandle {
+                let (h, tx, _) = crate::chat::backend::TurnHandle::pair();
+                let args = serde_json::json!({"questions": [{"question": "Which one?", "options": ["Plain", {"label": "Fancy", "recommended": true}]}]});
+                tx.send(crate::chat::backend::TurnEvent::ToolCall(ToolCall { id: "q1".into(), name: "ask_user".into(), arguments: args })).unwrap();
+                tx.send(crate::chat::backend::TurnEvent::Done).unwrap();
+                h
+            }
+        }
+        let read = crate::chat::tools::ToolPolicy::new(crate::llm::config::LlmModel { level: McpLevel::Read, level_chosen: true, ..crate::llm::config::LlmModel::named("m") }, None, false);
+        let mut c = ChatState::new(ChatFile::default(), None);
+        c.draft = "choose".into();
+        assert!(c.send(&Ask, &crate::state::ChatMeta::default(), &crate::chat::TurnContext::default(), Arc::new(|| {})));
+        c.poll();
+        let crate::chat::ToolStep::Execute(call) = c.tool_step(&read) else { panic!("ask_user läuft") };
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        let (qs, fixes) = crate::chat::ask::parse(&call.arguments).unwrap();
+        c.open_ask(crate::chat::ask::AskForm::new(call.id.clone(), qs, fixes, Some(tx)));
+        c.tool_started(rx);
+        let mut h = H::new();
+        h.frame(&mut c, Lang::En, false, vec![]);
+        h.frame(&mut c, Lang::En, false, vec![]);
+        assert!(h.texts.iter().any(|t| t == "The model has a question for you") && h.texts.iter().any(|t| t == "Which one?"), "{:?}", h.texts);
+        let fancy = h.texts.iter().find(|t| t.starts_with("Fancy")).cloned().unwrap();
+        assert!(fancy.contains("(Recommended)"));
+        let p = h.pos_of(&fancy).unwrap();
+        h.click(&mut c, Lang::En, p);
+        let p = h.pos_of("Submit").unwrap();
+        h.click(&mut c, Lang::En, p);
+        assert!(c.ask.is_none(), "beantwortet");
+        assert!(c.poll_tools());
+        let res = c.messages().iter().find(|m| m.role == Role::Tool).unwrap();
+        assert!(res.content.contains("Fancy") && res.content.contains("\"answered\":true"), "{}", res.content);
     }
 }

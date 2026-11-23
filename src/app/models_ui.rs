@@ -267,7 +267,8 @@ pub(super) struct ModelsUi {
 }
 
 /// Abschnitt „Agenten-Werkzeuge“ unter den Servern (#338): sensible Dateien, Zeitlimit für Befehle im Terminal des
-/// Chats, `web_fetch` und der eigene Suchdienst für `web_search`. `true` = geändert (speichern).
+/// Chats (Standard und Höchstwert, #355), Befehle im Hintergrund je Chat (#355), `web_fetch` und der eigene Suchdienst
+/// für `web_search`. `true` = geändert (speichern).
 pub(super) fn agent_tools_section(ui: &mut Ui, lang: Lang, s: &mut crate::chat::agent::AgentToolSettings, st: &mut ModelsUi) -> bool {
     use crate::chat::agent::{SearchProvider, DEFAULT_COMMAND_TIMEOUT};
     let before = s.clone();
@@ -278,12 +279,34 @@ pub(super) fn agent_tools_section(ui: &mut Ui, lang: Lang, s: &mut crate::chat::
         "Read and edit files, search, git, commands in the chat's terminal and web – only inside the chat's project folder. Writing, deleting, commands and web ask first; single tools can be unchecked per model.",
     )).small().color(style::dim(ui)));
     ui.add_space(S1);
+    use crate::chat::bg_commands as bg;
+    let spot_top = ui.cursor().min.y;
     row(ui, lang.t("Zeitlimit für Befehle", "Command timeout"), |ui| {
-        ui.add(egui::DragValue::new(&mut s.command_timeout_secs).range(5..=crate::mcp::MAX_WAIT_SECS).suffix(" s"));
-        if s.command_timeout_secs != DEFAULT_COMMAND_TIMEOUT && ui.small_button(lang.t("Standard", "Default")).clicked() {
+        ui.add(egui::DragValue::new(&mut s.command_timeout_secs).range(bg::TIMEOUT_MIN..=s.command_timeout_max_secs.max(bg::TIMEOUT_MIN)).suffix(" s"))
+            .on_hover_text(lang.t("Gilt, wenn das Modell kein eigenes Zeitlimit (timeout_secs) nennt.", "Applies when the model gives no time limit of its own (timeout_secs)."));
+        ui.label(lang.t("höchstens", "at most"));
+        ui.add(egui::DragValue::new(&mut s.command_timeout_max_secs).range(bg::TIMEOUT_MAX_MIN..=bg::TIMEOUT_MAX_LIMIT).suffix(" s"))
+            .on_hover_text(lang.t("Größtes Zeitlimit, das ein Modell verlangen kann (Standard 1800 s = 30 min). Längere Befehle laufen im Hintergrund.", "The largest time limit a model can ask for (default 1800 s = 30 min). Longer commands run in the background."));
+        let def = crate::chat::agent::AgentToolSettings::default();
+        if (s.command_timeout_secs, s.command_timeout_max_secs) != (DEFAULT_COMMAND_TIMEOUT, def.command_timeout_max_secs) && ui.small_button(lang.t("Standard", "Default")).clicked() {
             s.command_timeout_secs = DEFAULT_COMMAND_TIMEOUT;
+            s.command_timeout_max_secs = def.command_timeout_max_secs;
         }
     });
+    // Der Standard liegt nie über dem Höchstwert.
+    s.command_timeout_secs = s.command_timeout_secs.min(s.command_timeout_max_secs).max(bg::TIMEOUT_MIN);
+    row(ui, lang.t("Befehle im Hintergrund", "Background commands"), |ui| {
+        ui.add(egui::DragValue::new(&mut s.background_limit).range(bg::MIN_LIMIT..=bg::MAX_LIMIT));
+        ui.label(lang.t("gleichzeitig je Chat", "at the same time per chat"));
+        if s.background_limit != bg::DEFAULT_LIMIT && ui.small_button(lang.t("Standard", "Default")).clicked() {
+            s.background_limit = bg::DEFAULT_LIMIT;
+        }
+    });
+    ui.label(RichText::new(lang.t(
+        "Lange Befehle (Builds, Tests, Server) kann ein Modell im Hintergrund starten: jeder läuft in einem eigenen Terminal unter dem Chat, am Ende kommt eine Nachricht in den Chat.",
+        "A model can start long commands (builds, tests, servers) in the background: each runs in its own terminal below the chat, and a message comes into the chat when it ends.",
+    )).small().color(style::dim(ui)));
+    super::tutorial::spot_since(ui, super::tutorial::Spot::ModelsCommands, spot_top);
     row(ui, lang.t("Webseiten abrufen", "Fetch web pages"), |ui| {
         ui.checkbox(&mut s.web_fetch, lang.t("web_fetch anbieten (nur öffentliche https-Seiten, mit Freigabe)", "offer web_fetch (public https pages only, with approval)"));
     });
@@ -616,7 +639,13 @@ pub(super) fn model_summary(s: &LlmServer, name: &str, lang: Lang) -> String {
     let ctx = s.context_length(name);
     let ctx = if ctx >= 1024 && ctx % 1024 == 0 { format!("{}k", ctx / 1024) } else { ctx.to_string() };
     let missing = if !s.last_models.is_empty() && s.info(name).is_none() { lang.t(" · vom Server nicht mehr gemeldet", " · no longer reported by the server") } else { "" };
-    format!("{tools} · {} {ctx}{missing}", lang.t("Kontext", "context"))
+    // Bildverständnis nur nennen, wenn es bekannt ist (#357).
+    let vision = match s.vision_supported(name) {
+        Some(true) => lang.t(" · Bilder ✓", " · images ✓"),
+        Some(false) => lang.t(" · keine Bilder", " · no images"),
+        None => "",
+    };
+    format!("{tools} · {} {ctx}{vision}{missing}", lang.t("Kontext", "context"))
 }
 
 fn model_row(ui: &mut Ui, lang: Lang, s: &mut LlmServer, name: &str, expert: bool, out: &mut ModelsOut, prompt: &mut super::prompt_ui::PromptUi) {
@@ -656,6 +685,18 @@ fn model_row(ui: &mut Ui, lang: Lang, s: &mut LlmServer, name: &str, expert: boo
             crate::afford::choice_value(ui, &mut cfg.tools, None, auto, 0.0);
             crate::afford::choice_value(ui, &mut cfg.tools, Some(true), lang.t("An", "On"), 0.0);
             crate::afford::choice_value(ui, &mut cfg.tools, Some(false), lang.t("Aus", "Off"), 0.0);
+        });
+        // Bilder (#357): automatisch nach dem Server; lehnt er ein Bild ab, steht hier „Aus“.
+        row(ui, lang.t("Bilder", "Images"), |ui| {
+            let detected = s.info(name).and_then(|i| i.vision);
+            let auto = format!("{} ({})", lang.t("Automatisch", "Auto"), match detected {
+                Some(true) => lang.t("erkannt: ja", "detected: yes"),
+                Some(false) => lang.t("erkannt: nein", "detected: no"),
+                None => lang.t("unbekannt – wird versucht", "unknown – will be tried"),
+            });
+            crate::afford::choice_value(ui, &mut cfg.vision, None, auto, 0.0);
+            crate::afford::choice_value(ui, &mut cfg.vision, Some(true), lang.t("An", "On"), 0.0);
+            crate::afford::choice_value(ui, &mut cfg.vision, Some(false), lang.t("Aus", "Off"), 0.0);
         });
         row(ui, lang.t("Kontextlänge", "Context length"), |ui| {
             let mut own = cfg.context_length.is_some();
@@ -984,7 +1025,7 @@ mod tests {
     use super::*;
 
     fn info(name: &str, tools: Option<bool>) -> ModelInfo {
-        ModelInfo { name: name.into(), tools, context_length: Some(4096) }
+        ModelInfo { name: name.into(), tools, context_length: Some(4096), vision: None }
     }
     use crate::llm::http::fake::{Canned, Fake};
     use crate::llm::http::Method;
@@ -1347,7 +1388,7 @@ mod tests {
             std::thread::sleep(Duration::from_millis(2));
         }
         assert!(changed);
-        assert_eq!(servers[0].last_models, vec![ModelInfo { name: "llama3".into(), tools: Some(true), context_length: Some(8192) }, ModelInfo { name: "phi".into(), tools: Some(true), context_length: Some(8192) }]);
+        assert_eq!(servers[0].last_models, vec![ModelInfo { name: "llama3".into(), tools: Some(true), context_length: Some(8192), vision: Some(false) }, ModelInfo { name: "phi".into(), tools: Some(true), context_length: Some(8192), vision: Some(false) }]);
         assert!(servers[1].last_models.is_empty());
         assert!(c.errors.contains_key("b"), "unbekannte Adresse der Attrappe: Fehler");
     }
@@ -1464,6 +1505,37 @@ mod tests {
             assert!(h.run(vec![enter()], |ui| new_chat_body(ui, &mut d, &full, &conn, lang)).create);
             let o = h.click(lang.t("Chat beginnen", "Start chat"), |ui| new_chat_body(ui, &mut d, &full, &conn, lang), merge_dlg);
             assert!(o.create);
+        }
+    }
+
+    /// Einstellungen der Befehle (#355): Standard und Höchstwert des Zeitlimits, Befehle im Hintergrund je Chat.
+    #[test]
+    fn agent_tools_section_has_timeout_maximum_and_background_limit() {
+        use crate::chat::agent::AgentToolSettings;
+        for lang in [Lang::En, Lang::De] {
+            let mut s = AgentToolSettings::default();
+            let mut st = ModelsUi::default();
+            let mut h = H::new();
+            assert!(!h.run(vec![], |ui| agent_tools_section(ui, lang, &mut s, &mut st)), "nichts geändert");
+            for want in [lang.t("Zeitlimit für Befehle", "Command timeout"), lang.t("höchstens", "at most"), lang.t("Befehle im Hintergrund", "Background commands"), lang.t("gleichzeitig je Chat", "at the same time per chat")] {
+                assert!(h.has(want), "{want}: {:?}", h.texts);
+            }
+            assert!(h.has("1800 s") && h.has("120 s"), "{:?}", h.texts);
+            assert!(!h.texts.iter().any(|t| t == lang.t("Standard", "Default")), "Standardwerte: kein Knopf");
+            // Grenze geändert → „Standard“ setzt sie zurück
+            s.background_limit = 7;
+            h.run(vec![], |ui| agent_tools_section(ui, lang, &mut s, &mut st));
+            assert!(h.texts.iter().any(|t| t == "7"), "{:?}", h.texts);
+            let changed = h.click(lang.t("Standard", "Default"), |ui| agent_tools_section(ui, lang, &mut s, &mut st), |a, b| *a |= b);
+            assert!(changed);
+            assert_eq!(s.background_limit, 3);
+            // Standard über dem Höchstwert wird angepasst; „Standard“ stellt beide zurück
+            s.command_timeout_max_secs = 60;
+            s.command_timeout_secs = 120;
+            assert!(h.run(vec![], |ui| agent_tools_section(ui, lang, &mut s, &mut st)));
+            assert_eq!(s.command_timeout_secs, 60);
+            h.click(lang.t("Standard", "Default"), |ui| agent_tools_section(ui, lang, &mut s, &mut st), |a, b| *a |= b);
+            assert_eq!((s.command_timeout_secs, s.command_timeout_max_secs), (120, 1800));
         }
     }
 }

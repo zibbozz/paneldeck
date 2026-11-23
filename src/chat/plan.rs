@@ -195,8 +195,12 @@ pub enum PlanPhase {
 
 /// Werkzeuge, die nur lesen oder fragen und in einer Plan-Runde laufen dürfen, obwohl sie keine Paneldeck-Werkzeuge der
 /// Stufe „Lesen“ sind: die lesenden Agenten-Werkzeuge (#338), Webseiten/Websuche (fragen ohnehin), `wait_for_status`
-/// (wartet nur) und die Rückfrage `ask_user` (#356).
-pub const READ_ONLY_TOOLS: &[&str] = &["read_file", "list_dir", "glob", "grep", "git_status", "git_diff", "git_log", "web_fetch", "web_search", "wait_for_status", "ask_user"];
+/// (wartet nur), die Rückfrage `ask_user` (#356) und Stand bzw. Ausgabe von Hintergrund-Befehlen (`command_status`,
+/// `command_output`, #355 – starten und anhalten (`run_command`, `stop_command`) gilt als schreibend).
+pub const READ_ONLY_TOOLS: &[&str] = &["read_file", "list_dir", "glob", "grep", "git_status", "git_diff", "git_log", "web_fetch", "web_search", "wait_for_status", "ask_user", "command_status", "command_output"];
+
+/// Rückfragen an den Nutzer: in einer Plan-Runde erlaubt, zählen aber nicht gegen das Recherche-Budget.
+pub const QUESTION_TOOLS: &[&str] = &["ask_user"];
 
 /// Werkzeuge, die in einer Plan-Runde immer gesperrt sind, auch wenn ihre Stufe „Lesen“ ist: `update_todos` (die
 /// To-do-Liste füllt der freigegebene Plan).
@@ -227,6 +231,10 @@ pub fn gate(level: PlanLevel, call: &ToolCall, research: u32, grants: u32) -> Re
         );
         return Err((ToolStatus::Denied, super::tools::error_json("plan_mode", &msg)));
     }
+    // Rückfragen an den Nutzer sind keine Recherche: sie gehen auch nach dem Budget.
+    if QUESTION_TOOLS.contains(&call.name.as_str()) {
+        return Ok(());
+    }
     if let Some(b) = level.research_budget().filter(|b| research >= b.saturating_mul(grants.max(1))) {
         let msg = format!("Plan mode: the research budget of level {} ({b} tool calls) is used up. Write the plan now from what you found.", level.as_str());
         return Err((ToolStatus::Denied, super::tools::error_json("plan_budget", &msg)));
@@ -243,6 +251,52 @@ pub fn instructions(phase: &PlanPhase, tools: &[String]) -> String {
     match phase {
         PlanPhase::Research { level, revision } => research(*level, *revision, tools),
         PlanPhase::Execute { steps } => execute(steps, tools),
+    }
+}
+
+/// Kurzfassung von [`instructions`] für kleine Kontexte (zur Kurzfassung des Master-Prompts, `Variant::Compact`):
+/// dieselben Regeln in wenigen Zeilen.
+pub fn instructions_compact(phase: &PlanPhase, tools: &[String]) -> String {
+    match phase {
+        PlanPhase::Research { level, revision } => {
+            let has_read = tools.iter().any(|t| is_read_only(t));
+            let budget = match level.research_budget() {
+                Some(n) => format!("at most {n} tool calls"),
+                None => "no limit".to_string(),
+            };
+            let mut s = format!("## Plan mode ({})\nChange nothing now. ", level.as_str());
+            if has_read {
+                s.push_str(&format!("Research with read-only tools ({budget}); all other tools are locked (error plan_mode). "));
+            }
+            let depth = match level {
+                PlanLevel::Low => "a short plan: goal, 3–7 steps, how to test",
+                PlanLevel::Medium => "goal, findings, steps naming the files, risks, tests",
+                PlanLevel::High => "goal, findings, steps file by file, risks and edge cases, tests, assumptions",
+                PlanLevel::XHigh => "like high plus alternatives and compatibility; steps per file and function",
+                PlanLevel::Max => "extremely detailed: scope, current state, changes file by file, risks, tests, alternatives, open questions, small steps",
+            };
+            s.push_str(&format!("Then write {depth}.\n"));
+            let ask = tools.iter().any(|t| t == "ask_user");
+            let how = if ask { "with ask_user" } else { "as numbered choice questions without the plan heading" };
+            s.push_str(&match level {
+                PlanLevel::Low | PlanLevel::Medium => format!("Ask only if something essential is unclear ({how}).\n"),
+                PlanLevel::High | PlanLevel::XHigh => format!("Clarify open points first ({how}).\n"),
+                PlanLevel::Max => format!("You must clarify open points first ({how}).\n"),
+            });
+            s.push_str("Format: first line `# Plan: <title>`, a section `## Steps` with a numbered list (fixed English markers; the rest in the user's language). Then stop – the user decides: Execute, Request changes or Discard.\n");
+            if *revision {
+                s.push_str("The user requested changes (last message): write the complete revised plan.\n");
+            }
+            s
+        }
+        PlanPhase::Execute { steps } => {
+            let mut s = String::from("## Approved plan\nWork through the approved plan's steps in order");
+            s.push_str(if tools.iter().any(|t| t == "update_todos") { "; keep update_todos current.\n" } else { ".\n" });
+            for (i, st) in steps.iter().enumerate() {
+                s.push_str(&format!("{}. {}\n", i + 1, crate::mcp::short(st, 100)));
+            }
+            s
+        }
     }
 }
 
@@ -785,6 +839,17 @@ mod tests {
         executed
     }
 
+    impl ChatState {
+        /// Antwort abholen, bis sie fertig ist (ohne die Werkzeug-Schleife).
+        fn poll_until_done_for_tests(&mut self) {
+            let t = Instant::now();
+            while self.streaming() && t.elapsed() < Duration::from_secs(5) {
+                self.poll();
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        }
+    }
+
     fn send(c: &mut ChatState, b: &Script, text: &str) {
         c.draft = text.into();
         assert!(c.send(b, &ChatMeta::default(), &TurnContext::default(), rp()));
@@ -839,10 +904,10 @@ mod tests {
 
     #[test]
     fn read_write_classification_is_in_one_place() {
-        for t in ["read_file", "list_dir", "glob", "grep", "git_status", "git_diff", "git_log", "web_fetch", "web_search", "ask_user", "wait_for_status", "list_sessions", "read_terminal", "read_chat", "screenshot", "editor_read"] {
+        for t in ["read_file", "list_dir", "glob", "grep", "git_status", "git_diff", "git_log", "web_fetch", "web_search", "ask_user", "wait_for_status", "list_sessions", "read_terminal", "read_chat", "screenshot", "editor_read", "command_status", "command_output"] {
             assert!(is_read_only(t), "{t} liest nur");
         }
-        for t in ["edit_file", "write_file", "move_file", "delete_file", "run_command", "update_todos", "send_text", "send_keys", "create_session", "close_session", "focus_session", "editor_open", "editor_edit", "start_process", "stop_process", "no_such_tool", "run_command_stop"] {
+        for t in ["edit_file", "write_file", "move_file", "delete_file", "run_command", "update_todos", "send_text", "send_keys", "create_session", "close_session", "focus_session", "editor_open", "editor_edit", "start_process", "stop_process", "no_such_tool", "run_command_stop", "stop_command"] {
             assert!(!is_read_only(t), "{t} gilt als schreibend");
         }
         // Jedes Paneldeck-Werkzeug: Stufe Lesen = lesend, sonst schreibend (außer wait_for_status).
@@ -1065,6 +1130,79 @@ mod tests {
         c.toggle_plan();
         assert!(c.file.plan.as_ref().is_some_and(|p| p.status == PlanStatus::Approved && p.finished));
         assert_eq!(c.next_plan_phase(), None, "eine neue Plan-Runde beendete die Ausführung");
+    }
+
+    #[test]
+    fn background_commands_questions_and_events_in_a_plan_round() {
+        // Hintergrund-Befehl starten und anhalten: gesperrt; Stand/Ausgabe lesen: erlaubt; Rückfrage: auch nach dem Budget
+        let mut calls = vec![
+            tc("bg", "run_command", json!({"command": "npm run dev", "background": true})),
+            tc("st", "stop_command", json!({"id": "bg1"})),
+        ];
+        calls.extend((0..5).map(|i| tc(&format!("r{i}"), "list_sessions", json!({"include_exited": i % 2 == 0}))));
+        calls.push(tc("q", "ask_user", json!({"questions": [{"question": "Which database?", "options": [{"label": "SQLite"}, {"label": "Postgres"}]}]})));
+        calls.push(TurnEvent::Done);
+        let b = Script::new(vec![calls, vec![TurnEvent::Delta(PLAN_TEXT.into()), TurnEvent::Done]]);
+        let pol = policy(McpLevel::Control);
+        let mut c = ChatState::new(ChatFile::default(), None);
+        c.set_plan_level(PlanLevel::Low);
+        send(&mut c, &b, "plan");
+        // Ein früherer Hintergrund-Befehl meldet sich mitten in der Plan-Runde
+        c.push_event(crate::chat::store::ChatEvent { kind: "background_command".into(), id: "bg9".into(), command: "cargo build".into(), state: "exited".into(), exit_code: Some(0), ..Default::default() }, "bg9 finished".into());
+        let ran = run(&mut c, &b, &pol);
+        assert!(!ran.iter().any(|n| n == "run_command" || n == "stop_command"), "{ran:?}");
+        assert!(ran.contains(&"ask_user".to_string()), "Rückfrage läuft auch nach 5 Lesezugriffen: {ran:?}");
+        assert_eq!(ran.iter().filter(|n| *n == "list_sessions").count(), 5);
+        let res = tool_results(&c);
+        // `stop_command` ohne laufende Hintergrund-Befehle: schon vor der Sperre `not_available` – gelaufen ist es nie.
+        assert!(res.iter().any(|(n, r)| n == "run_command" && r.contains("plan_mode")) && res.iter().any(|(n, r)| n == "stop_command" && r.contains("\"error\"")), "{res:?}");
+        assert!(c.messages().iter().any(|m| m.event.is_some()), "die Nachricht steht im Verlauf");
+        assert!(b.phases().iter().all(|p| matches!(p, Some(PlanPhase::Research { .. }))), "auch die Anfrage nach der Nachricht ist eine Plan-Runde");
+        assert_eq!(c.current_plan_markdown(), Some(PLAN_TEXT), "der Plan kam trotz der Nachricht an");
+        assert!(c.plan_decidable());
+        // Eine Nachricht, die erst nach der Runde zur Anfrage führt, sperrt die Knöpfe, bis die Runde wirklich zu Ende ist
+        let b = Script::new(vec![vec![TurnEvent::Delta(PLAN_TEXT.into()), TurnEvent::Done], vec![TurnEvent::Delta("ok".into()), TurnEvent::Done]]);
+        let mut c = ChatState::new(ChatFile::default(), None);
+        c.toggle_plan();
+        send(&mut c, &b, "plan");
+        c.push_event(crate::chat::store::ChatEvent { kind: "background_command".into(), id: "bg1".into(), ..Default::default() }, "bg1 finished".into());
+        c.poll_until_done_for_tests();
+        assert!(c.file.plan.is_some() && c.events_pending());
+        assert!(!c.plan_decidable(), "solange die Nachricht noch eine Anfrage auslöst, keine Entscheidung");
+        run(&mut c, &b, &pol);
+        assert!(c.plan_decidable());
+    }
+
+    /// Größe der Plan-Anweisungen: die volle Fassung bleibt unter 1000 Tokens, die Kurzfassung (für kleine Kontexte)
+    /// unter 300. Mit der Kurzfassung des Master-Prompts passt eine Plan-Runde bei Lesen und bei Steuern ohne
+    /// Expertenmodus samt allen Werkzeugen weiter in 8192 Tokens mit einem Fünftel Platz; Steuern im Expertenmodus mit
+    /// allen Werkzeugen war schon vorher randvoll (siehe `master_prompt`) – dort zeigt der Test nur die Zahlen.
+    #[test]
+    fn plan_instructions_fit_into_small_contexts() {
+        use crate::chat::master_prompt::{minimal_specs, Variant};
+        let tok = crate::llm::tokens::estimate_tokens;
+        let all: Vec<String> = ["read_file", "grep", "list_sessions", "edit_file", "run_command", "ask_user", "update_todos"].iter().map(|s| s.to_string()).collect();
+        for level in PlanLevel::ALL {
+            let full = tok(&instructions(&PlanPhase::Research { level, revision: true }, &all));
+            let short = tok(&instructions_compact(&PlanPhase::Research { level, revision: true }, &all));
+            eprintln!("PLAN {level:?}: full {full}, compact {short}");
+            assert!(full < 1000 && short < 300 && short < full, "{level:?}: {full} / {short}");
+        }
+        let budget = 8192 * 3 / 4;
+        let root = std::path::PathBuf::from(if cfg!(windows) { "C:\\work\\demo" } else { "/work/demo" });
+        let env = crate::chat::agent::AgentEnv { root: Some(root), background: true, ..Default::default() };
+        for (level, expert) in [(McpLevel::Read, false), (McpLevel::Read, true), (McpLevel::Control, false), (McpLevel::Control, true)] {
+            let p = ToolPolicy::new(LlmModel { level, level_chosen: true, ..LlmModel::named("m") }, None, expert).with_agent(env.clone()).with_editor_switches(crate::editor_svc::settings::DOCS_OPEN | 7);
+            for phase in [None, Some(PlanPhase::Research { level: PlanLevel::Max, revision: true })] {
+                let cx = TurnContext { plan: phase.clone(), ..TurnContext::default() };
+                let sys = tok(&crate::chat::llm_backend::system_prompt_variant(&p, "qwen3:8b", &cx, Variant::Compact)) + 4;
+                let n = sys + tok(&serde_json::to_string(&minimal_specs(p.specs())).unwrap());
+                eprintln!("COMPACT+PLAN {level:?} expert={expert} plan={}: {n} of {budget}, room {}", phase.is_some(), budget as i64 - n as i64);
+                if !(level == McpLevel::Control && expert) {
+                    assert!(n + budget / 5 <= budget, "{level:?} {expert}: {n} von {budget}");
+                }
+            }
+        }
     }
 
     #[test]

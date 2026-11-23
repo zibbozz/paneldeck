@@ -29,6 +29,8 @@ pub(super) struct EditorServices {
     pub edit_context: crate::integration::Status,
     /// Text des Feldes „Ausschlussmuster“, solange der Tab offen ist (gespeichert wird bereinigt).
     excludes_buf: Option<String>,
+    /// Zeilen der eigenen Sprach-Zuordnungen (Muster, Sprache), solange sie bearbeitet werden (#312).
+    map_buf: Option<Vec<(String, String)>>,
     /// Fenster „In Dateien suchen“ offen und seine Eingaben.
     pub search_open: bool,
     pub search: super::editor_search_ui::SearchInput,
@@ -36,7 +38,7 @@ pub(super) struct EditorServices {
 
 impl Default for EditorServices {
     fn default() -> Self {
-        EditorServices { watch: DiskWatch::new(), find: find::Results::default(), open_queue: Vec::new(), edit_context: crate::integration::Status::Off, excludes_buf: None, search_open: false, search: Default::default() }
+        EditorServices { watch: DiskWatch::new(), find: find::Results::default(), open_queue: Vec::new(), edit_context: crate::integration::Status::Off, excludes_buf: None, map_buf: None, search_open: false, search: Default::default() }
     }
 }
 
@@ -67,6 +69,13 @@ fn row(ui: &mut Ui, label: &str, hint: &str, add: impl FnOnce(&mut Ui)) {
         add(ui);
     });
     ui.add_space(4.0);
+}
+
+/// Zeilen der eigenen Sprach-Zuordnungen bereinigt als Einstellung (leere/ungültige Muster fallen weg; bei doppelten
+/// Mustern gilt die letzte Zeile).
+fn clean_map(rows: &[(String, String)]) -> std::collections::BTreeMap<String, String> {
+    use crate::editor_svc::settings::{clean_id, clean_pattern};
+    rows.iter().filter_map(|(p, l)| Some((clean_pattern(p)?, clean_id(l)?))).collect()
 }
 
 /// Schriftfamilie des Editors für egui (`FontFamily::Name("editor")`); immer vorhanden.
@@ -163,7 +172,7 @@ impl App {
         row(
             ui,
             lang.t("Große Dateien ab", "Large files from"),
-            lang.t("Ohne Minimap, Umbruch und (später) Syntaxfarben; die Suche in Dateien überspringt sie", "Without minimap, wrapping and (later) syntax colours; search in files skips them"),
+            lang.t("Ohne Minimap, Umbruch und Syntaxfarben; die Suche in Dateien überspringt sie", "Without minimap, wrapping and syntax colours; search in files skips them"),
             |ui| {
                 ui.add(egui::DragValue::new(&mut self.settings.editor.large_file_mb).range(crate::editor_svc::settings::LARGE_FILE_MB_RANGE.0..=crate::editor_svc::settings::LARGE_FILE_MB_RANGE.1).speed(1.0).suffix(" MB"));
             },
@@ -179,6 +188,8 @@ impl App {
                 self.settings.editor.autosave_delay_ms = ((secs * 1000.0).round() as u32).clamp(lo, hi);
             }
         });
+        ui.add_space(S2);
+        self.editor_languages_ui(ui);
         ui.add_space(S2);
         let top = ui.cursor().min.y;
         ui.label(RichText::new(lang.t("Suche in Dateien", "Search in files")).strong());
@@ -210,6 +221,120 @@ impl App {
         super::tutorial::spot_since(ui, Spot::EditorSearchSettings, top);
         ui.add_space(S2);
         self.editor_agents_ui(ui);
+    }
+
+    /// Abschnitt „Sprachen“ der Editor-Einstellungen (#312): Standard-Modus, Modus je Sprache, eigene Zuordnungen.
+    fn editor_languages_ui(&mut self, ui: &mut Ui) {
+        use crate::editor::syntax::{self, Mode};
+        let lang = self.settings.language;
+        let mode_name = |m: Mode| match m {
+            Mode::Text => lang.t("Text", "Text"),
+            Mode::Syntax => lang.t("Syntax (Farben)", "Syntax (colours)"),
+        };
+        ui.label(RichText::new(lang.t("Sprachen", "Languages")).strong());
+        ui.label(
+            RichText::new(lang.t(
+                "Text = schlichter Editor, Syntax = Sprache erkennen und einfärben (Farben aus dem Theme). Die Statusleiste zeigt Modus und Sprache; beides lässt sich dort je Datei ändern. Smart (Sprachserver) kommt in einer späteren Version.",
+                "Text = plain editor, Syntax = detect the language and colour it (colours from the theme). The status bar shows mode and language; both can be changed there per file. Smart (language server) comes in a later version.",
+            ))
+            .small()
+            .color(style::dim(ui)),
+        );
+        row(ui, lang.t("Standard-Modus", "Default mode"), lang.t("Für Sprachen ohne eigene Einstellung; Standard: Text", "For languages without their own setting; default: Text"), |ui| {
+            let ed = &mut self.settings.editor;
+            egui::ComboBox::from_id_salt("editor_default_mode").selected_text(mode_name(ed.default_mode)).show_ui(ui, |ui| {
+                for m in [Mode::Text, Mode::Syntax] {
+                    ui.selectable_value(&mut ed.default_mode, m, mode_name(m));
+                }
+            });
+        });
+        egui::CollapsingHeader::new(lang.t("Modus je Sprache", "Mode per language")).id_salt("editor_lang_modes").show(ui, |ui| {
+            let ed = &mut self.settings.editor;
+            let dflt = format!("{} ({})", lang.t("Standard", "Default"), mode_name(ed.default_mode));
+            egui::Grid::new("editor_lang_mode_grid").num_columns(3).spacing([12.0, 4.0]).striped(true).show(ui, |ui| {
+                for l in syntax::languages::LANGUAGES.iter().filter(|l| l.id != "plaintext") {
+                    ui.label(l.name);
+                    let cur = ed.language_modes.get(l.id).copied();
+                    let mut sel = cur;
+                    egui::ComboBox::from_id_salt(("editor_lang_mode", l.id)).width(150.0).selected_text(cur.map(|m| mode_name(m).to_string()).unwrap_or_else(|| dflt.clone())).show_ui(ui, |ui| {
+                        ui.selectable_value(&mut sel, None, dflt.as_str());
+                        for m in [Mode::Text, Mode::Syntax] {
+                            ui.selectable_value(&mut sel, Some(m), mode_name(m));
+                        }
+                    });
+                    if sel != cur {
+                        match sel {
+                            Some(m) => {
+                                ed.language_modes.insert(l.id.to_string(), m);
+                            }
+                            None => {
+                                ed.language_modes.remove(l.id);
+                            }
+                        }
+                    }
+                    let exts: Vec<String> = l.exts.iter().take(6).map(|e| format!(".{e}")).chain(l.names.iter().take(2).map(|n| n.to_string())).collect();
+                    ui.label(RichText::new(exts.join(" ")).small().color(style::dim(ui)));
+                    ui.end_row();
+                }
+            });
+            let others: Vec<String> = ed.language_modes.keys().filter(|k| syntax::languages::language(k).is_none()).cloned().collect();
+            for k in others {
+                ui.horizontal(|ui| {
+                    let name = syntax::language_name(&k).unwrap_or(&k).to_string();
+                    ui.label(format!("{name}: {}", ed.language_modes.get(&k).map(|m| mode_name(*m)).unwrap_or("")));
+                    if ui.small_button("✕").on_hover_text(lang.t("Einstellung entfernen", "Remove setting")).clicked() {
+                        ed.language_modes.remove(&k);
+                    }
+                });
+            }
+        });
+        egui::CollapsingHeader::new(lang.t("Eigene Zuordnungen", "Own mappings")).id_salt("editor_lang_map").show(ui, |ui| {
+            ui.label(
+                RichText::new(lang.t(
+                    "Gehen vor der eingebauten Erkennung. Muster: eine Endung (*.tpl oder .tpl) oder ein Dateiname (Jenkinsfile), ohne Groß/Klein.",
+                    "Take precedence over the built-in detection. Pattern: an extension (*.tpl or .tpl) or a file name (Jenkinsfile), case-insensitive.",
+                ))
+                .small()
+                .color(style::dim(ui)),
+            );
+            let settings_rows: Vec<(String, String)> = self.settings.editor.language_map.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+            let buf = self.editor_svc.map_buf.get_or_insert_with(|| settings_rows.clone());
+            if clean_map(buf) != self.settings.editor.language_map {
+                *buf = settings_rows;
+            }
+            let mut changed = false;
+            let mut remove = None;
+            for (i, (pat, id)) in buf.iter_mut().enumerate() {
+                ui.horizontal(|ui| {
+                    changed |= ui.add(egui::TextEdit::singleline(pat).desired_width(170.0).hint_text("*.tpl")).changed();
+                    let shown = syntax::language_name(id).map(|n| super::editor_ui::lang_label(id, n, lang)).unwrap_or_else(|| id.clone());
+                    egui::ComboBox::from_id_salt(("editor_lang_map_lang", i)).width(220.0).height(320.0).selected_text(shown).show_ui(ui, |ui| {
+                        for l in syntax::all_languages() {
+                            if ui.selectable_label(*id == l.id, super::editor_ui::lang_label(&l.id, &l.name, lang)).clicked() {
+                                *id = l.id.clone();
+                                changed = true;
+                            }
+                        }
+                    });
+                    if !syntax::languages::is_known(id) {
+                        ui.label(RichText::new(lang.t("unbekannte Sprache", "unknown language")).small().color(style::ui().warning));
+                    }
+                    if ui.small_button("✕").on_hover_text(lang.t("Zuordnung entfernen", "Remove mapping")).clicked() {
+                        remove = Some(i);
+                    }
+                });
+            }
+            if let Some(i) = remove {
+                buf.remove(i);
+                changed = true;
+            }
+            if buf.len() < crate::editor_svc::settings::MAX_LANGUAGE_ENTRIES && ui.button(lang.t("+ Zuordnung", "+ Mapping")).clicked() {
+                buf.push((String::new(), "plaintext".to_string()));
+            }
+            if changed {
+                self.settings.editor.language_map = clean_map(buf);
+            }
+        });
     }
 
     /// Abschnitt „Agenten“ der Editor-Einstellungen: die drei Schalter (Standard aus, nur bei Stufe Steuern wirksam).
@@ -310,6 +435,7 @@ impl App {
             font_size: self.settings.font_size,
             large_file_bytes: e.large_file_bytes(),
             autosave: e.autosave.then(|| Duration::from_millis(e.autosave_delay_ms as u64)),
+            syntax: super::editor_ui::SyntaxPrefs::from_settings(e),
         }
     }
 

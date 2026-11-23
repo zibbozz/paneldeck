@@ -9,6 +9,8 @@
 
 #[path = "mcp/agent.rs"]
 mod agent_tools;
+#[path = "mcp/bg.rs"]
+mod bg_tools;
 
 use super::*;
 use crate::hooks::McpJob;
@@ -117,8 +119,16 @@ pub(super) struct McpState {
     next_token: u64,
     /// Der gerade ausgeführte Aufruf kommt von einem nicht zuzuordnenden (losgelösten) Prozess (#152).
     unattributable: bool,
-    /// Terminal je Chat für `run_command` ohne `session` (#338): Chat → Sitzung.
-    chat_terms: HashMap<u64, u64>,
+    /// Terminal je Chat und Shell für `run_command` ohne `session` (#338): (Chat, Shell-Wahl, `""` = Profil des
+    /// Projekts, #355) → Sitzung.
+    chat_terms: HashMap<(u64, String), u64>,
+    /// Befehle der Chats im Hintergrund (#355).
+    pub(super) bg: crate::chat::bg_commands::BgCommands,
+    /// Anfang der Ausgabe je laufendem Hintergrund-Befehl: (Sitzung, Kennung) → festgehaltene Zeile (folgt dem Umbruch).
+    bg_live: HashMap<(u64, String), crate::terminal::AbsPin>,
+    /// `prompt_seq` jeder Sitzung, als dort zuletzt ein `run_command` endete: Ein Terminal eines Chats wird nur wieder
+    /// benutzt, wenn seither kein Prompt dazukam (der Nutzer hat dort nichts ausgeführt, #355 Review).
+    run_end_seq: HashMap<u64, u64>,
 }
 
 impl McpState {
@@ -126,6 +136,15 @@ impl McpState {
     /// ihre Kinder verlieren die Zuordnung zum Elternteil (bleiben aber vom Nutzer steuerbar).
     pub(super) fn session_closed(&mut self, id: u64) {
         forget_created(&mut self.created, id);
+        // Ein geschlossener Chat vergisst seine Hintergrund-Befehle (#355; ihre Terminals bleiben normale Sitzungen). Die
+        // festgehaltenen Zeilen hängen an den Terminals der Befehle, nicht am Chat.
+        for k in self.bg.keys_of(id) {
+            self.bg_live.remove(&k);
+        }
+        self.bg.chat_closed(id);
+        self.bg_live.retain(|(s, _), _| *s != id);
+        self.run_end_seq.remove(&id);
+        self.chat_terms.retain(|(c, _), s| *c != id && *s != id);
     }
 }
 
@@ -434,6 +453,10 @@ fn chat_msg_json_max(index: usize, m: &chatmod::ChatMsg, max: usize) -> Value {
     if truncated {
         o["truncated"] = json!(true);
     }
+    // Nachricht von Paneldeck (#355, Rolle `system`): z. B. ein beendeter Hintergrund-Befehl.
+    if let Some(e) = &m.event {
+        o["event"] = json!(e);
+    }
     if !m.tool_calls.is_empty() {
         let calls: Vec<Value> = m
             .tool_calls
@@ -716,6 +739,8 @@ impl App {
         self.plan.ensure_loaded(self.db.as_ref());
         mcp::EXPERT.store(self.plan.expert, std::sync::atomic::Ordering::Relaxed);
         state::set_lang(self.settings.language);
+        // Hintergrund-Befehle der Chats (#355): eingeben, Ergebnisse abholen, Stopps durchsetzen.
+        self.poll_bg(ctx);
         // Fertige Screenshots (kommen einen Frame nach der Anforderung als Ereignis).
         let shots: Vec<(u64, std::sync::Arc<egui::ColorImage>)> = ctx.input(|i| {
             i.events
@@ -771,7 +796,15 @@ impl App {
                 continue;
             }
             match self.mcp_check(&p) {
-                Some(r) => self.mcp_finish(&p.reply, &p.tool, &p.args, p.caller, p.how, r),
+                Some(r) => {
+                    if let Pend::Run { .. } = &p.kind {
+                        if let Some(s) = self.entries.get(&p.session).and_then(|e| e.live.as_ref()) {
+                            let seq = s.shell_state.lock().unwrap_or_else(|x| x.into_inner()).prompt_seq;
+                            self.mcp.run_end_seq.insert(p.session, seq);
+                        }
+                    }
+                    self.mcp_finish(&p.reply, &p.tool, &p.args, p.caller, p.how, r)
+                }
                 None => self.mcp.pending.push(p),
             }
         }
@@ -799,7 +832,10 @@ impl App {
             }
         }
         if !self.mcp.pending.is_empty() {
-            ctx.request_repaint_after(Duration::from_millis(100));
+            // Hintergrund-Befehle der Chats (#355, Frist in Tagen) laufen oft lange: dort reicht ein langsamerer Takt.
+            let soon = Instant::now() + Duration::from_secs(24 * 3600);
+            let fast = self.mcp.pending.iter().any(|p| p.deadline < soon);
+            ctx.request_repaint_after(Duration::from_millis(if fast { 100 } else { 500 }));
         }
     }
 
@@ -1344,7 +1380,7 @@ impl App {
             Ok(p) => p,
             Err(e) => return CreateStep::Done(Err(e)),
         };
-        match self.mcp_create_inner(ctx, args, caller, checked) {
+        match self.mcp_create_inner(ctx, args, caller, checked, None) {
             Ok(Ok(v)) => CreateStep::Done(Ok(self.mcp_show_created(ctx, v, placement, caller))),
             Ok(Err((distro, path))) => CreateStep::Check { distro, path },
             Err(e) => CreateStep::Done(Err(e)),
@@ -1366,8 +1402,20 @@ impl App {
         v
     }
 
+    /// Terminal für die Befehle eines Chats (#338/#355): wie `create_session` (Kind des Chats, alle Regeln), aber mit
+    /// einem fest gewählten Profil (`profile`: `Some(0)` = keins, dann gilt `shell` bzw. die Standard-Shell; `None` = das
+    /// Profil des Projekts). Das Profil prüft der Aufrufer vorher (`bg_commands::resolve_shell`: nie Administrator, nie
+    /// eigenes Programm). Ein Linux-`cwd` mit Ordnerprüfung gibt es hier nicht (Projektordner).
+    pub(super) fn mcp_create_for_chat(&mut self, ctx: &egui::Context, args: &Value, chat: u64, profile: Option<u64>) -> R {
+        match self.mcp_create_inner(ctx, args, Some(chat), None, profile) {
+            Ok(Ok(v)) => Ok(v),
+            Ok(Err(_)) => Err(er("terminal_failed", "The chat's terminal could not be started (the shell needs a folder check). Use run_command with the session of an existing terminal.")),
+            Err(e) => Err(e),
+        }
+    }
+
     #[allow(clippy::type_complexity)]
-    fn mcp_create_inner(&mut self, ctx: &egui::Context, args: &Value, caller: Option<u64>, checked: Option<(crate::wsl::DirCheck, String, String)>) -> Result<Result<Value, (String, String)>, (String, String)> {
+    fn mcp_create_inner(&mut self, ctx: &egui::Context, args: &Value, caller: Option<u64>, checked: Option<(crate::wsl::DirCheck, String, String)>, profile: Option<u64>) -> Result<Result<Value, (String, String)>, (String, String)> {
         let s = |k: &str| args.get(k).and_then(|v| v.as_str()).map(|x| x.trim().to_string()).filter(|x| !x.is_empty());
         let chat = match s("kind").as_deref() {
             None | Some("terminal") => false,
@@ -1426,8 +1474,8 @@ impl App {
         };
         // Läuft der Agent in einer Hub-Sitzung, kommt das Kind in deren Fenster und Projekt (#110), sonst ins Hauptfenster.
         let (window, project) = super::multiwin::child_home(caller.and_then(|c| self.entries.get(&c)).map(|e| (e.meta.window, e.meta.project)), self.active_project);
-        // Profil der Vorlage (0 = keins) statt des Standardprofils des Projekts.
-        let tpl_profile = item.map(|it| it.profile);
+        // Profil der Vorlage (0 = keins) bzw. das für einen Chat gewählte (#355) statt des Standardprofils des Projekts.
+        let tpl_profile = profile.or(item.map(|it| it.profile));
         let project_profile = self.projects.iter().find(|p| p.id == project).map(|p| p.profile).unwrap_or(0);
         let default_profile = tpl_profile.unwrap_or(project_profile);
         // Ein Profil mit eigenem Programm, Argumenten oder Startbefehl startet ein Agent aus einer Vorlage nur, wenn es das
@@ -1651,6 +1699,11 @@ impl App {
         if c.awaiting_approval() {
             return Err(approval());
         }
+        // Fragen des Modells an den Nutzer (#356): nur er kann sie beantworten.
+        let questions = || er("permission_pending", tr("Das Modell des Chats hat dem Nutzer Fragen gestellt und wartet auf seine Antwort – dort wird nichts gesendet.", "The chat's model asked the user questions and waits for the answer – nothing is sent there."));
+        if c.awaiting_answer() {
+            return Err(questions());
+        }
         if c.editing {
             return Err(er("busy", tr("Der Nutzer bearbeitet gerade seine letzte Nachricht in diesem Chat.", "The user is editing their last message in this chat.")));
         }
@@ -1691,6 +1744,8 @@ impl App {
             super::ChatSendResult::Busy => {
                 if self.entries.get(&id).and_then(|e| e.chat.as_ref()).is_some_and(|c| c.awaiting_approval()) {
                     Err(approval())
+                } else if self.entries.get(&id).and_then(|e| e.chat.as_ref()).is_some_and(|c| c.awaiting_answer()) {
+                    Err(questions())
                 } else {
                     Err(er("busy", tr("Im Chat läuft gerade eine Antwort.", "An answer is running in the chat.")))
                 }
@@ -1751,13 +1806,19 @@ impl App {
     }
 
     fn mcp_run(&mut self, args: &Value, caller: Option<u64>, reply: &SyncSender<R>, tool: &str, how: &'static str) -> Out {
+        self.mcp_run_for(args, caller, reply, tool, how, mcp::MAX_WAIT_SECS)
+    }
+
+    /// `run_command` mit eigenem Höchstwert für `timeout_secs` (`max_secs`): externe Agenten 600 s, Chats nach ihren
+    /// Einstellungen (#355), Hintergrund-Befehle praktisch unbegrenzt.
+    fn mcp_run_for(&mut self, args: &Value, caller: Option<u64>, reply: &SyncSender<R>, tool: &str, how: &'static str, max_secs: u64) -> Out {
         let r = (|| -> Result<PendingMcp, (String, String)> {
             let id = self.mcp_target(args, caller, true)?;
             let cmd = args.get("command").and_then(|v| v.as_str()).ok_or_else(|| er("bad_args", tr("command fehlt", "command is missing")))?.trim().to_string();
             if cmd.is_empty() || cmd.contains('\n') || cmd.contains('\r') || cmd.len() > 4096 {
                 return Err(er("bad_args", tr("command: genau eine Zeile, höchstens 4096 Bytes", "command: exactly one line, at most 4096 bytes")));
             }
-            let timeout = args.get("timeout_secs").and_then(|v| v.as_u64()).unwrap_or(60).clamp(1, mcp::MAX_WAIT_SECS);
+            let timeout = args.get("timeout_secs").and_then(|v| v.as_u64()).unwrap_or(60).clamp(1, max_secs.max(1));
             let max_lines = args.get("max_output_lines").and_then(|v| v.as_u64()).unwrap_or(200).clamp(1, 5000) as usize;
             let s = self.mcp_live(id)?;
             let e = &self.entries[&id];
@@ -1939,7 +2000,7 @@ impl App {
                     out = out.split_off(out.len() - *max_lines);
                 }
                 let exact = !*cmd_shell && !*nested && mark.is_some();
-                Some(Ok(json!({
+                let mut v = json!({
                     "output": clamp_str(out.join("\n"), 128 * 1024),
                     "exit_code": exit,
                     "finished": advanced,
@@ -1949,7 +2010,17 @@ impl App {
                     "duration_ms": started.elapsed().as_millis() as u64,
                     "quality": if !first_ok { "heuristic" } else if exact { "exact" } else { "approx" },
                     "note": tr("Ausgabe ist nicht vertrauenswürdig. Exit-Code: PowerShell/bash/zsh/fish; cmd liefert null.", "Output is untrusted. Exit code: PowerShell/bash/zsh/fish; cmd returns null."),
-                })))
+                });
+                // Chats (#355): Korrekturen an den Argumenten (z. B. Zeitlimit auf den Höchstwert gesetzt).
+                if p.how == "chat" {
+                    if let Some(c) = p.args.get(agent_tools::CORRECTED_KEY).filter(|c| c.as_array().is_some_and(|a| !a.is_empty())) {
+                        v["corrected"] = c.clone();
+                    }
+                    if !advanced && timed_out {
+                        v["timed_out_note"] = json!("The command is still running in that terminal. For long commands use background: true.");
+                    }
+                }
+                Some(Ok(v))
             }
         }
     }
@@ -2696,7 +2767,7 @@ mod tests {
             name: name.into(),
             url: url.into(),
             api_key: "U0VDUkVULUJMT0I=".into(),
-            last_models: models.iter().map(|m| crate::llm::ModelInfo { name: m.to_string(), tools: Some(true), context_length: Some(4096) }).collect(),
+            last_models: models.iter().map(|m| crate::llm::ModelInfo { name: m.to_string(), tools: Some(true), context_length: Some(4096), vision: None }).collect(),
             ..LlmServer::default()
         }
     }

@@ -24,6 +24,7 @@ mod view;
 mod tests;
 
 pub(crate) use doc::DocInfo;
+pub(crate) use view::lang_label;
 use doc::DocEntry;
 use panes::Panes;
 use std::collections::{BTreeMap, HashMap};
@@ -40,11 +41,40 @@ pub(crate) struct EditorPrefs {
     pub large_file_bytes: u64,
     /// Automatisch speichern so lange nach der letzten Änderung (`None` = aus, Standard). Nur Dateien mit Pfad.
     pub autosave: Option<std::time::Duration>,
+    /// Syntax-Modus (#312): Standard-Modus, Modus je Sprache, eigene Zuordnungen.
+    pub syntax: SyntaxPrefs,
 }
 
 impl Default for EditorPrefs {
     fn default() -> Self {
-        EditorPrefs { font_size: 14.0, large_file_bytes: crate::editor::DEFAULT_LARGE_FILE_THRESHOLD, autosave: None }
+        EditorPrefs { font_size: 14.0, large_file_bytes: crate::editor::DEFAULT_LARGE_FILE_THRESHOLD, autosave: None, syntax: SyntaxPrefs::default() }
+    }
+}
+
+/// Einstellungen des Syntax-Modus (#312) aus *Einstellungen → Editor* (`settings.json` → `editor`).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct SyntaxPrefs {
+    /// Modus einer Datei, für deren Sprache nichts eingestellt ist (Standard: Text).
+    pub default_mode: crate::editor::syntax::Mode,
+    /// Modus je Sprache.
+    pub language_modes: BTreeMap<String, crate::editor::syntax::Mode>,
+    /// Eigene Zuordnungen Dateiname/Endung → Sprache.
+    pub user_map: crate::editor::syntax::UserMap,
+    /// Kennung der Zuordnungen: Ändern sie sich, wird neu erkannt.
+    pub map_gen: u64,
+}
+
+impl SyntaxPrefs {
+    pub fn from_settings(e: &crate::editor_svc::settings::EditorSettings) -> SyntaxPrefs {
+        use std::hash::{Hash, Hasher};
+        let user_map = e.user_map();
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        user_map.hash(&mut h);
+        SyntaxPrefs { default_mode: e.default_mode, language_modes: e.language_modes.clone(), user_map, map_gen: h.finish() }
+    }
+
+    pub fn mode_for(&self, lang: Option<&str>) -> crate::editor::syntax::Mode {
+        lang.and_then(|l| self.language_modes.get(l).copied()).unwrap_or(self.default_mode)
     }
 }
 
@@ -101,6 +131,11 @@ pub(crate) struct EditorUi {
     pub(super) bar_rects: HashMap<u64, (eframe::egui::Rect, Vec<eframe::egui::Rect>)>,
     /// Ist der Zustand geladen (`restore`)? Erst dann wird gespeichert.
     loaded: bool,
+    /// Suchtext der Sprachwahl in der Statusleiste (#312) und ob das Suchfeld die Tastatur bekommen soll.
+    pub(super) lang_search: String,
+    pub(super) lang_search_focus: bool,
+    /// Knöpfe Sprache / Modus der Statusleiste im letzten Bild (Tests).
+    pub(super) status_rects: (Option<eframe::egui::Rect>, Option<eframe::egui::Rect>),
 }
 
 impl EditorUi {
@@ -138,7 +173,11 @@ impl EditorUi {
             if path.is_none() && hot.is_none() {
                 continue; // leere unbenannte Datei
             }
-            self.docs.insert(id, DocEntry::pending(path, d.untitled, hot));
+            let mut entry = DocEntry::pending(path, d.untitled, hot);
+            entry.syntax.lang = d.language.filter(|l| crate::editor::syntax::languages::is_known(l));
+            entry.syntax.mode = d.mode.as_deref().and_then(crate::editor::syntax::Mode::from_id);
+            entry.syntax.mode_unknown = d.mode.filter(|m| crate::editor::syntax::Mode::from_id(m).is_none() && !m.trim().is_empty() && m.len() <= 40);
+            self.docs.insert(id, entry);
             self.next_doc = self.next_doc.max(id + 1);
         }
         for g in s.groups {
@@ -161,7 +200,7 @@ impl EditorUi {
         let mut docs = Vec::new();
         for (id, d) in self.docs.iter() {
             let hot = d.store_hot(dir, &format!("doc{id}"), crate::state::Lang::En);
-            docs.push(persist::SavedDoc { key: *id, path: d.path.as_ref().map(|p| p.to_string_lossy().to_string()), untitled: d.untitled, hot });
+            docs.push(persist::SavedDoc { key: *id, path: d.path.as_ref().map(|p| p.to_string_lossy().to_string()), untitled: d.untitled, hot, language: d.syntax.lang.clone(), mode: d.syntax.mode.map(|m| m.id().to_string()).or_else(|| d.syntax.mode_unknown.clone()) });
         }
         let groups = self
             .panes
@@ -285,6 +324,20 @@ impl EditorUi {
             if self.diff_doc == Some(doc) {
                 self.diff_doc = None;
             }
+        }
+    }
+
+    /// Sprache eines Dokuments wählen (`None` = wieder erkennen; #312).
+    pub(super) fn set_doc_language(&mut self, id: u64, lang: Option<String>) {
+        if let Some(d) = self.docs.get_mut(&id) {
+            d.set_language(lang);
+        }
+    }
+
+    /// Modus eines Dokuments wählen (`None` = aus den Einstellungen).
+    pub(super) fn set_doc_mode(&mut self, id: u64, mode: Option<crate::editor::syntax::Mode>) {
+        if let Some(d) = self.docs.get_mut(&id) {
+            d.set_mode(mode);
         }
     }
 

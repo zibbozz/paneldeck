@@ -24,12 +24,17 @@ pub fn list_models(t: &dyn Transport, ep: &Endpoint, cancel: &Arc<AtomicBool>) -
             return Err(LlmError::Cancelled);
         }
         // Einzelheiten sind ein Zusatz: scheitert /api/show für ein Modell, bleibt es mit „unbekannt“ in der Liste.
-        let (tools, context_length) = match get_json(t, ep, Method::Post, "/api/show", Some(json!({ "model": name })), cancel) {
-            Ok(s) => show_info(&s),
+        let show = get_json(t, ep, Method::Post, "/api/show", Some(json!({ "model": name })), cancel);
+        let (tools, context_length) = match &show {
+            Ok(s) => show_info(s),
             Err(LlmError::Cancelled) => return Err(LlmError::Cancelled),
             Err(_) => (None, None),
         };
-        out.push(ModelInfo { name: name.to_string(), tools, context_length });
+        let vision = match &show {
+            Ok(s) => show_vision(s),
+            Err(_) => None,
+        };
+        out.push(ModelInfo { name: name.to_string(), tools, context_length, vision });
     }
     Ok(out)
 }
@@ -39,6 +44,11 @@ pub(super) fn show_info(s: &Value) -> (Option<bool>, Option<u32>) {
     let tools = s.get("capabilities").and_then(|c| c.as_array()).map(|c| c.iter().any(|x| x.as_str() == Some("tools")));
     let ctx = s.get("model_info").and_then(|m| m.as_object()).and_then(|m| m.iter().find(|(k, _)| k.ends_with(".context_length")).and_then(|(_, v)| as_u32(Some(v))));
     (tools, ctx)
+}
+
+/// Aus `/api/show`: `capabilities` enthält „vision“ (#357); ohne `capabilities` (ältere Ollama-Versionen) unbekannt.
+pub(super) fn show_vision(s: &Value) -> Option<bool> {
+    s.get("capabilities").and_then(|c| c.as_array()).map(|c| c.iter().any(|x| x.as_str() == Some("vision")))
 }
 
 fn role(r: Role) -> &'static str {
@@ -63,6 +73,11 @@ pub fn request_json(req: &ChatRequest) -> Value {
                 && let Some(n) = &m.tool_name
             {
                 o["tool_name"] = json!(n);
+            }
+            // Bilder (#357): Base64 ohne `data:`-Vorsatz.
+            let imgs: Vec<&str> = m.images.iter().filter(|i| !i.data.is_empty()).map(|i| i.data.as_str()).collect();
+            if !imgs.is_empty() {
+                o["images"] = json!(imgs);
             }
             o
         })

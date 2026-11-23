@@ -32,6 +32,9 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 mod chat_plan_ui;
+mod chat_images;
+mod chat_images_ui;
+mod chat_ask_ui;
 mod chat_ui;
 mod cleanup_ui;
 mod claude_status;
@@ -251,7 +254,10 @@ impl Entry {
     }
     fn status_label(&self, lang: Lang) -> &'static str {
         if let Some(c) = &self.chat {
-            return if c.status() == chatmod::ChatStatus::Approval {
+            // Fragen des Modells (#356) warten auf den Nutzer – wie eine Freigabe, aber mit eigenem Text.
+            return if c.awaiting_answer() {
+                lang.t("wartet auf dich", "waiting for you")
+            } else if c.status() == chatmod::ChatStatus::Approval {
                 lang.t("Freigabe?", "approval?")
             } else if c.streaming() {
                 lang.t("schreibt", "streaming")
@@ -473,6 +479,8 @@ enum Action {
     ChatLevel(u64, crate::mcp::McpLevel),
     /// Knopf der Plan-Karte (#358): Ausführen, Änderungen anfragen, Verwerfen, Exportieren.
     ChatPlan(u64, chatmod::plan::PlanAction),
+    /// Bild in den Chat (#357): Strg+V oder Büroklammer.
+    ChatImage(u64, chat_images_ui::ImageReq),
     /// Tutorial (#143): Tour starten, fortsetzen, „Was ist neu“, Hinweis ausblenden.
     Tutorial(tutorial::Cmd),
 }
@@ -3255,7 +3263,8 @@ impl App {
             }
             let Some(e) = self.entries.get_mut(&id) else { continue };
             let Some(c) = e.chat.as_ref() else { continue };
-            tools_running |= c.tool_running();
+            // Offene Fragen an den Nutzer (#356) haben kein Zeitlimit: dafür nicht ständig neu zeichnen.
+            tools_running |= c.tool_running() && !c.awaiting_answer();
             e.status = chat_claude_status(c.status());
             let waiting = e.status == ClaudeStatus::Permission;
             // Markierung: Runde zu Ende (fertig, Fehler, angehalten) oder eine Freigabe-Frage erscheint.
@@ -3274,6 +3283,7 @@ impl App {
         if tools_running {
             ctx.request_repaint_after(Duration::from_millis(100));
         }
+        self.poll_chat_images(ctx);
         self.refresh_chat_context();
     }
 
@@ -3378,6 +3388,7 @@ impl App {
             // Für die Schätzung des Füllstands: so, wie die nächste Nachricht ginge (Schalter *Plan*, #358). Die Anfrage
             // selbst setzt `ChatState::start_turn`.
             plan: e.and_then(|e| e.chat.as_ref()).and_then(|c| c.next_plan_phase()),
+            images: self.chat_turn_images(id),
         }
     }
 
@@ -4335,6 +4346,7 @@ impl App {
             }
             Action::ChatSend(id) | Action::ChatStop(id) | Action::ChatRegenerate(id) | Action::ChatEdit(id) | Action::ChatDecide(id, ..) | Action::ChatContinue(id) | Action::ChatRevoke(id, _) | Action::ChatLevel(id, _) => self.chat_action(ctx, id, &a),
             Action::ChatPlan(id, act) => self.chat_plan_action(ctx, id, &act),
+            Action::ChatImage(id, req) => self.chat_image(ctx, id, req),
             Action::Tutorial(c) => self.tut_cmd(ctx, c),
         }
     }
@@ -4968,6 +4980,9 @@ fn show_pane(ui: &mut Ui, id: u64, rect: Rect, cx: &mut PaneCx) {
         }
         if let Some(act) = o.plan {
             cx.actions.push(Action::ChatPlan(id, act));
+        }
+        if let Some(req) = o.image {
+            cx.actions.push(Action::ChatImage(id, req));
         }
         if !cx.detached {
             edge_buttons(ui, id, body, cx, false);
@@ -6012,7 +6027,13 @@ impl chatmod::driver::ChatToolHost for ChatHost<'_> {
             let max = self.app.entries.get(&chat).and_then(|e| e.chat.as_ref()).map_or(0, |c| c.result_cap_for(&call.name));
             return self.app.agent_call(self.ctx, chat, call, max);
         }
-        self.app.mcp_call_chat(self.ctx, chat, &call.name, &call.arguments)
+        // `screenshot` für ein Modell mit Bildverständnis (#357): das Bild kommt in den Chat.
+        let sink = if call.name == "screenshot" { self.app.chat_tool_image_sink(chat, call) } else { None };
+        let rx = self.app.mcp_call_chat(self.ctx, chat, &call.name, &call.arguments);
+        match sink {
+            Some(s) => chatmod::images::forward_screenshot(rx, s),
+            None => rx,
+        }
     }
     fn request(&mut self, id: u64) {
         self.app.chat_next_request(self.ctx, id);

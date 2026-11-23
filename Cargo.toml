@@ -11,7 +11,8 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 getrandom = "0.3"
 ttf-parser = "0.25"
-image = { version = "0.25", default-features = false, features = ["png"] }
+# Bilder in Chats (#357): PNG, JPEG (zune-jpeg steckt über tiff ohnehin im Baum) und BMP (ohne eigene Crate).
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "bmp"] }
 rusqlite = { version = "0.42.0", features = ["bundled"] }
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
 # Deflate zum Entpacken des portablen Release-ZIPs beim Selbst-Update (über `png` ohnehin schon im Baum, keine neue Crate).
@@ -30,6 +31,10 @@ unicode-segmentation = "1"
 unicode-width = "0.2"
 # Editor (#54): Suche in Dateien – Ordner durchlaufen mit .gitignore-Regeln (ignore, MIT/Unlicense, aus ripgrep).
 ignore = "0.4"
+# Editor, Syntax-Modus (#312): Syntaxfarben mit syntect (Sublime-Grammatiken, reines Rust über fancy-regex, kein Oniguruma)
+# und den Grammatiken von bat (two-face). Eigene Grammatiken für AutoIt, Inno Setup, Visual Basic, PowerShell: src/editor/syntax/grammars/.
+syntect = { version = "5.3", default-features = false, features = ["parsing", "yaml-load", "regex-fancy"] }
+two-face = { version = "0.5", default-features = false, features = ["syntect-fancy"] }
 
 [features]
 # Nur für die README- und Doku-Screenshots (tools/docs-shots.ps1): Startansicht per Umgebungsvariable PANELDECK_SHOT. Nie im Release.

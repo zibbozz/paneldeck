@@ -41,6 +41,9 @@ pub enum TurnEvent {
     /// Hinweis „Kontext zu klein für die Werkzeug-Stufe“ (eigene Kontextlänge des Nutzers): landet wie `Note` an der
     /// Antwort, aber nur einmal je Chat.
     ContextNotice(String),
+    /// Der Server hat ein Bild der Anfrage abgelehnt (#357; kommt direkt vor `Error`): Das Modell kann vermutlich keine
+    /// Bilder lesen – die App merkt sich das am Modell und wiederholt die Antwort ohne Bilder.
+    VisionRejected,
     /// Antwort fertig.
     Done,
     /// Abbruch mit Fehlermeldung (für den Nutzer, ein Satz).
@@ -96,11 +99,13 @@ pub struct TurnContext {
     /// Plan-Modus (#358): Plan-Runde oder Ausführung eines freigegebenen Plans – ergänzt den Systemprompt um die
     /// Anweisungen aus `plan::instructions`. Für eine Anfrage setzt es `ChatState::start_turn` selbst.
     pub plan: Option<super::plan::PlanPhase>,
+    /// Bilder des Chats (#357): Ordner und Einträge, auf die die Nachrichten verweisen.
+    pub images: super::images::TurnImages,
 }
 
 impl Default for TurnContext {
     fn default() -> Self {
-        TurnContext { project: String::new(), folder: String::new(), servers: Vec::new(), lang: Lang::En, expert: false, token_scale: 1.0, prompt_parts: Default::default(), agent: Default::default(), plan: None }
+        TurnContext { project: String::new(), folder: String::new(), servers: Vec::new(), lang: Lang::En, expert: false, token_scale: 1.0, prompt_parts: Default::default(), agent: Default::default(), images: Default::default(), plan: None }
     }
 }
 

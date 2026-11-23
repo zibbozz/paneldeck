@@ -1,10 +1,12 @@
 //! *Einstellungen → Editor* (#54): Feld `editor` in `settings.json` (öffentliches Datenformat ab 3.0.0, nur additiv
 //! ändern). Fehlt das Feld (ältere Dateien), gelten die Standards; ein falscher Typ eines einzelnen Werts ergibt nur für
 //! diesen Wert den Standard, unbekannte Werte werden ignoriert. Die drei Agenten-Schalter sind immer aus, wenn sie nicht
-//! ausdrücklich `true` sind.
+//! ausdrücklich `true` sind. Ab 3.1.0 (#312, Syntax-Modus): `default_mode`, `language_modes`, `language_map`.
 
+use crate::editor::syntax::{Mode, UserMap};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::BTreeMap;
 
 /// Standard für [`EditorSettings::large_file_mb`] (Entscheidung im Issue: ab 20 MB).
 pub const DEFAULT_LARGE_FILE_MB: u32 = 20;
@@ -17,6 +19,10 @@ pub const AUTOSAVE_MS_RANGE: (u32, u32) = (200, 600_000);
 /// Höchstzahl eigener Ausschlussmuster und deren Länge.
 pub const MAX_EXCLUDES: usize = 100;
 pub const MAX_EXCLUDE_LEN: usize = 260;
+/// Höchstzahl der Einträge in `language_modes` bzw. `language_map`, Länge einer Sprach-Id bzw. eines Musters.
+pub const MAX_LANGUAGE_ENTRIES: usize = 500;
+pub const MAX_LANGUAGE_ID_LEN: usize = 100;
+pub const MAX_PATTERN_LEN: usize = 260;
 
 /// Einstellungen des Editors (`settings.json` → `editor`).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -40,6 +46,13 @@ pub struct EditorSettings {
     pub agent_edit: bool,
     /// Agenten dürfen geöffnete, schon vorhandene Dateien speichern (MCP `editor_save`). Standard aus.
     pub agent_save: bool,
+    /// Modus einer Datei, für deren Sprache nichts eingestellt ist (#312): `text` (Standard) oder `syntax`.
+    pub default_mode: Mode,
+    /// Modus je Sprache (Sprach-Id → `text`/`syntax`), geht vor `default_mode`.
+    pub language_modes: BTreeMap<String, Mode>,
+    /// Eigene Zuordnungen (Muster → Sprach-Id), vor der eingebauten Erkennung: Dateiname (`Jenkinsfile`) oder Endung
+    /// (`*.tpl`, `.tpl`).
+    pub language_map: BTreeMap<String, String>,
 }
 
 impl Default for EditorSettings {
@@ -54,6 +67,9 @@ impl Default for EditorSettings {
             agent_open: false,
             agent_edit: false,
             agent_save: false,
+            default_mode: Mode::Text,
+            language_modes: BTreeMap::new(),
+            language_map: BTreeMap::new(),
         }
     }
 }
@@ -102,7 +118,28 @@ impl EditorSettings {
             agent_open: flag("agent_open"),
             agent_edit: flag("agent_edit"),
             agent_save: flag("agent_save"),
+            default_mode: o.get("default_mode").and_then(Value::as_str).and_then(Mode::from_id).unwrap_or_default(),
+            language_modes: o
+                .get("language_modes")
+                .and_then(Value::as_object)
+                .map(|m| {
+                    m.iter()
+                        .filter_map(|(k, v)| Some((clean_id(k)?, v.as_str().and_then(Mode::from_id)?)))
+                        .take(MAX_LANGUAGE_ENTRIES)
+                        .collect()
+                })
+                .unwrap_or_default(),
+            language_map: o
+                .get("language_map")
+                .and_then(Value::as_object)
+                .map(|m| m.iter().filter_map(|(k, v)| Some((clean_pattern(k)?, clean_id(v.as_str()?)?))).take(MAX_LANGUAGE_ENTRIES).collect())
+                .unwrap_or_default(),
         }
+    }
+
+    /// Eigene Zuordnungen für die Erkennung.
+    pub fn user_map(&self) -> UserMap {
+        UserMap { entries: self.language_map.iter().map(|(k, v)| (k.clone(), v.clone())).collect() }
     }
 
     /// `deserialize_with` für `Settings::editor`.
@@ -134,6 +171,18 @@ impl EditorSettings {
     pub fn excludes_text(&self) -> String {
         self.search_exclude.join("\n")
     }
+}
+
+/// Sprach-Id bereinigen: getrimmt, nicht leer, begrenzt.
+pub fn clean_id(s: &str) -> Option<String> {
+    let s = s.trim();
+    (!s.is_empty() && s.len() <= MAX_LANGUAGE_ID_LEN).then(|| s.to_string())
+}
+
+/// Muster einer eigenen Zuordnung bereinigen (getrimmt, nicht leer, ohne Pfadtrenner, begrenzt).
+pub fn clean_pattern(s: &str) -> Option<String> {
+    let s = s.trim();
+    (!s.is_empty() && s.len() <= MAX_PATTERN_LEN && !s.contains(['/', '\\']) && s != "*" && s != "." && s != "*.").then(|| s.to_string())
 }
 
 /// Muster bereinigen: getrimmt, ohne leere und doppelte, gekürzt und begrenzt.
@@ -172,7 +221,39 @@ mod tests {
         let v = serde_json::to_value(&d).unwrap();
         let mut keys: Vec<&str> = v.as_object().unwrap().keys().map(String::as_str).collect();
         keys.sort();
-        assert_eq!(keys, ["agent_edit", "agent_open", "agent_save", "autosave", "autosave_delay_ms", "font", "large_file_mb", "search_exclude", "search_include_ignored"]);
+        assert_eq!(keys, ["agent_edit", "agent_open", "agent_save", "autosave", "autosave_delay_ms", "default_mode", "font", "language_map", "language_modes", "large_file_mb", "search_exclude", "search_include_ignored"]);
+        assert_eq!(v["default_mode"], "text", "neue Dateien: Text");
+        assert!(d.language_modes.is_empty() && d.language_map.is_empty());
+    }
+
+    #[test]
+    fn language_settings_round_trip_and_old_files_load() {
+        // Datei von 3.0.0 ohne die neuen Felder.
+        let old = EditorSettings::from_value(&json!({"font": "", "large_file_mb": 20, "agent_open": false}));
+        assert_eq!(old.default_mode, Mode::Text);
+        assert!(old.language_modes.is_empty() && old.language_map.is_empty());
+        let s = EditorSettings::from_value(&json!({
+            "default_mode": "SYNTAX",
+            "language_modes": {"rust": "text", "python": "syntax", "go": "smart", "": "syntax", "lua": 3},
+            "language_map": {"*.tpl": "html", " Jenkinsfile ": "source.groovy", "a/b": "rust", "*": "rust", "x": 5}
+        }));
+        assert_eq!(s.default_mode, Mode::Syntax);
+        assert_eq!(s.language_modes.len(), 2, "{:?}", s.language_modes);
+        let p = crate::app::editor_ui::SyntaxPrefs::from_settings(&s);
+        assert_eq!(p.mode_for(Some("rust")), Mode::Text);
+        assert_eq!(p.mode_for(Some("python")), Mode::Syntax);
+        assert_eq!(p.mode_for(Some("go")), Mode::Syntax, "unbekannter Modus (smart) → Standard");
+        assert_eq!(p.mode_for(None), Mode::Syntax);
+        assert_eq!(s.language_map.len(), 2, "{:?}", s.language_map);
+        assert_eq!(s.language_map.get("Jenkinsfile").map(String::as_str), Some("source.groovy"));
+        let um = s.user_map();
+        assert_eq!(um.lookup("page.tpl"), Some("html"));
+        // Rundweg über JSON, auch als ganzes settings.json.
+        let back = EditorSettings::from_value(&serde_json::to_value(&s).unwrap());
+        assert_eq!(back, s);
+        let v = serde_json::to_value(&s).unwrap();
+        assert_eq!(v["language_modes"]["python"], "syntax");
+        assert_eq!(v["language_map"]["*.tpl"], "html");
     }
 
     #[test]
