@@ -1,0 +1,62 @@
+%YAML 1.2
+---
+# Visual Basic (VB.NET, VBA, VBScript, VB6) – compact grammar of Paneldeck (MIT, see LICENSE). Comments (' and Rem),
+# strings, date literals, numbers, preprocessor (#If, #Region, Attribute VB_…), keywords, types, declarations, calls.
+name: Visual Basic
+file_extensions: [vb, vbs, vba, bas, frm, ctl, dsr]
+scope: source.vb
+contexts:
+  main:
+    - match: '''.*$'
+      scope: comment.line.apostrophe.vb
+    - match: '(?i)^\s*Rem\b.*$'
+      scope: comment.line.rem.vb
+    - match: '(?i):\s*Rem\b.*$'
+      scope: comment.line.rem.vb
+    - match: '(?i)^\s*#\s*(?:Else\s*If|End\s+(?:If|Region|ExternalSource)|If|Else|Const|Region|ExternalSource|ExternalChecksum|Disable|Enable)\b'
+      scope: keyword.preprocessor.vb
+    - match: '(?i)^\s*Attribute\s+VB_\w+'
+      scope: keyword.preprocessor.vb
+    - match: '\$?"'
+      scope: punctuation.definition.string.begin.vb
+      push: string
+    - match: '#\s*[0-9][0-9/:.\- ]*(?:[AaPp][Mm])?\s*#'
+      scope: constant.other.date.vb
+    - match: '(?i)&[HOB][0-9A-F_]+[SILU%&]*|\b[0-9][0-9_]*(?:\.[0-9]+)?(?:E[-+]?[0-9]+)?(?:UI|UL|US|[DFRSILUC@!#%&])?(?![\w])'
+      scope: constant.numeric.vb
+    - match: '(?i)\b(Sub|Function|Operator)\s+(?!\()([A-Za-z_]\w*)'
+      captures:
+        1: storage.type.function.vb
+        2: entity.name.function.vb
+    - match: '(?i)\b(Property)\s+(?:(Get|Let|Set)\s+)?([A-Za-z_]\w*)'
+      captures:
+        1: storage.type.function.vb
+        2: storage.type.function.vb
+        3: entity.name.function.vb
+    - match: '(?i)\b(Class|Module|Structure|Interface|Enum|Namespace|Type|Delegate)\s+(?!(?:Function|Sub)\b)([A-Za-z_][\w.]*)'
+      captures:
+        1: storage.type.vb
+        2: entity.name.type.vb
+    - match: '(?i)\b(?:Public|Private|Protected|Friend|Shared|Static|Dim|Const|ByVal|ByRef|Optional|ParamArray|ReadOnly|WriteOnly|Overrides|Overridable|NotOverridable|MustOverride|MustInherit|NotInheritable|Overloads|Shadows|Partial|Default|WithEvents|Global|Async|Iterator|Declare|Widening|Narrowing|Custom)\b'
+      scope: storage.modifier.vb
+    - match: '(?i)\b(?:And|AndAlso|Or|OrElse|Not|Xor|Mod|Like|Is|IsNot|TypeOf|AddressOf|GetType|NameOf|New)\b'
+      scope: keyword.operator.word.vb
+    - match: '(?i)\b(?:True|False|Nothing|Null|Empty|Me|MyBase|MyClass|vbCrLf|vbNewLine|vbCr|vbLf|vbTab|vbNullString|vbNullChar)\b'
+      scope: constant.language.vb
+    - match: '(?i)\b(?:Boolean|Byte|SByte|Char|Date|Decimal|Double|Integer|Long|LongLong|LongPtr|Object|Short|Single|String|UInteger|ULong|UShort|Variant|Currency)\b'
+      scope: support.type.vb
+    - match: '(?i)\b(?:AddHandler|RemoveHandler|RaiseEvent|Call|Case|Catch|Continue|Do|Each|Else|ElseIf|End|EndIf|Erase|Error|Event|Exit|Finally|For|Get|GoSub|GoTo|Handles|If|Implements|Imports|In|Inherits|Let|Loop|Next|Of|On|Option|Explicit|Strict|Compare|Infer|Base|Binary|Text|Out|ReDim|Preserve|Resume|Return|Select|Set|Step|Stop|SyncLock|Then|Throw|To|Try|TryCast|DirectCast|CType|CBool|CByte|CChar|CDate|CDbl|CDec|CInt|CLng|CObj|CSng|CStr|Using|Wend|While|With|Yield|Await|When|Where|Until|Lib|Alias|As|Function|Sub|Property|Class|Module|Structure|Interface|Enum|Namespace|Type|Operator|Delegate)\b'
+      scope: keyword.control.vb
+    - match: '\b[A-Za-z_]\w*(?=\s*\()'
+      scope: variable.function.vb
+    - match: '[-+*/\\^&]=?|<>|<=|>=|<<=?|>>=?|=|<|>'
+      scope: keyword.operator.vb
+  string:
+    - meta_scope: string.quoted.double.vb
+    - match: '""'
+      scope: constant.character.escape.vb
+    - match: '"[cC]?'
+      scope: punctuation.definition.string.end.vb
+      pop: true
+    - match: '$'
+      pop: true

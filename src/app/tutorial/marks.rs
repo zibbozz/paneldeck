@@ -71,6 +71,7 @@ spots! {
     McpSysprompt = "settings.agents.system_prompt",
     McpLog = "settings.agents.log",
     ModelsServers = "settings.models.servers",
+    ModelsCommands = "settings.models.commands",
     DataBackups = "settings.data.backups",
     DataCleanup = "settings.data.cleanup",
     AboutInfo = "settings.about.info",

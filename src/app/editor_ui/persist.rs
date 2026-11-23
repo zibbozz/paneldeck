@@ -54,6 +54,10 @@ pub struct SavedDoc {
     pub untitled: u32,
     /// Schlüssel des Hot-Exit-Speichers, wenn es ungespeicherte Änderungen gab.
     pub hot: Option<String>,
+    /// In der Statusleiste gewählte Sprache (#312; `None` = erkennen).
+    pub language: Option<String>,
+    /// In der Statusleiste gewählter Modus (`text`/`syntax`; `None` = aus den Einstellungen).
+    pub mode: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
@@ -108,7 +112,7 @@ mod tests {
             layout: Some(Node::Split { dir: Dir::Horizontal, ratio: 0.4, a: Box::new(Node::Leaf(1)), b: Box::new(Node::Leaf(2)) }),
             focused: 2,
             groups: vec![SavedGroup { id: 1, active: 0, tabs: vec![SavedTab { doc: 7, line: 3, col: 4, top: 1.5 }] }, SavedGroup { id: 2, active: 0, tabs: vec![SavedTab { doc: 7, ..Default::default() }] }],
-            docs: vec![SavedDoc { key: 7, path: Some("C:\\proj\\a.txt".into()), untitled: 0, hot: Some("h1".into()) }],
+            docs: vec![SavedDoc { key: 7, path: Some("C:\\proj\\a.txt".into()), untitled: 0, hot: Some("h1".into()), language: Some("rust".into()), mode: Some("syntax".into()) }],
             ..Default::default()
         };
         let j = serde_json::to_string(&s).unwrap();

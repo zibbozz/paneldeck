@@ -231,6 +231,8 @@ pub(super) fn page(ui: &mut Ui, t: &Theme, u: &UiColors, lang: Lang, s: &mut Sam
             code(ui, u, m);
         },
     );
+    heading(ui, lang.t("Editor: Syntaxfarben", "Editor: syntax colours"));
+    editor_code(ui, t, u, m);
     ui.add_space(12.0);
 }
 
@@ -445,6 +447,33 @@ fn code(ui: &mut Ui, u: &UiColors, m: &mut Marks) {
         }
     });
     mark(m, r.response.rect, "input_bg");
+}
+
+/// Probe des Editors im Syntax-Modus (#312): jede Farbe `code_*` einmal, auf dem Hintergrund des Editors.
+fn editor_code(ui: &mut Ui, t: &Theme, u: &UiColors, m: &mut Marks) {
+    let fg = t.fg;
+    let r = egui::Frame::new().fill(t.bg).corner_radius(CornerRadius::same(6)).inner_margin(Margin::same(8)).show(ui, |ui| {
+        ui.spacing_mut().item_spacing = Vec2::ZERO;
+        let lines: &[&[(&str, Color32, &'static str)]] = &[
+            &[("#include", u.code_preprocessor, "code_preprocessor"), (" ", fg, "fg"), ("<config.h>", u.code_string, "code_string")],
+            &[("// ", u.code_comment, "code_comment"), ("Konfiguration lesen / read the config", u.code_comment, "code_comment")],
+            &[("fn ", u.code_keyword, "code_keyword"), ("parse", u.code_function, "code_function"), ("(", fg, "fg"), ("path", u.code_variable, "code_variable"), (": &", u.code_operator, "code_operator"), ("Path", u.code_type, "code_type"), (") {", fg, "fg")],
+            &[("    let ", u.code_keyword, "code_keyword"), ("n", fg, "fg"), (" = ", u.code_operator, "code_operator"), ("42", u.code_number, "code_number"), (" + ", u.code_operator, "code_operator"), ("MAX", u.code_constant, "code_constant"), (";", fg, "fg")],
+            &[("    print(", fg, "fg"), ("\"ok", u.code_string, "code_string"), ("\\n", u.code_escape, "code_escape"), ("\"", u.code_string, "code_string"), (");  ", fg, "fg"), ("@@@", u.code_invalid, "code_invalid")],
+            &[("}", fg, "fg")],
+            &[("<div ", u.code_tag, "code_tag"), ("class", u.code_attribute, "code_attribute"), ("=", fg, "fg"), ("\"note\"", u.code_string, "code_string"), (">", u.code_tag, "code_tag")],
+            &[("[Setup]", u.code_heading, "code_heading"), ("  ", fg, "fg"), ("## Kapitel / chapter", u.code_heading, "code_heading")],
+        ];
+        for line in lines {
+            ui.horizontal(|ui| {
+                for (txt, c, tok) in line.iter() {
+                    let r = ui.label(RichText::new(*txt).monospace().color(*c));
+                    mark(m, r.rect, tok);
+                }
+            });
+        }
+    });
+    mark(m, r.response.rect, "bg");
 }
 
 /// Die kleinste markierte Fläche unter `pos` (Klick in der Vorschau).

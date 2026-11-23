@@ -1508,7 +1508,7 @@ c.close()
           if ($hasTools -and $last -match 'loop please') { $first = '{"model":"fake-model","message":{"role":"assistant","content":"","tool_calls":[{"function":{"name":"read_terminal","arguments":{"session":"abc"}}}]},"done":false}' }
           elseif ($toolAfter) { $first = '{"model":"fake-model","message":{"role":"assistant","content":"done"},"done":false}' }
           # #338 Agenten-Werkzeuge: "agent <x> please" -> ein Aufruf des jeweiligen Werkzeugs im Projektordner des Chats.
-          elseif ($hasTools -and $last -match 'agent (read|grep|todos|write|edit|outside|env|cmd) please') {
+          elseif ($hasTools -and $last -match 'agent (read|grep|todos|write|edit|outside|env|cmd|bg|ask) please') {
             $call = switch ($Matches[1]) {
               'read' { '{"name":"read_file","arguments":{"path":"notes.txt"}}' }
               'grep' { '{"name":"grep","arguments":{"pattern":"needle","output_mode":"files_with_matches"}}' }
@@ -1518,6 +1518,9 @@ c.close()
               'outside' { '{"name":"read_file","arguments":{"path":"../outside.txt"}}' }
               'env' { '{"name":"read_file","arguments":{"path":".env"}}' }
               'cmd' { '{"name":"run_command","arguments":{"command":"echo agent-cmd-ok"}}' }
+              # #355/#356: Befehl im Hintergrund, Fragen mit Auswahl
+              'bg' { '{"name":"run_command","arguments":{"command":"echo agent-bg-ok","background":true}}' }
+              'ask' { '{"name":"ask_user","arguments":{"questions":[{"question":"Pick one?","options":[{"label":"A"},{"label":"B","recommended":true}]}]}}' }
             }
             $first = '{"model":"fake-model","message":{"role":"assistant","content":"","tool_calls":[{"function":' + $call + '}]},"done":false}'
           }
@@ -1674,6 +1677,27 @@ c.close()
   $r2 = & $agentStep 'agent cmd please' 'run_command' 60
   $kids2 = @((Tool 'list_sessions').data.sessions) | Where-Object { $_.parent -eq $AG -and $_.kind -eq 'terminal' }
   Check 'Agent run_command: das Terminal des Chats wird wiederverwendet' ($r2.ok -and $r2.tool.status -eq 'ok' -and @($kids2).Count -eq 1) "$($r2.text) /// $($kids2 | ConvertTo-Json -Compress)"
+  # #355: Befehl im Hintergrund - sofort eine Kennung, eigenes Terminal unter dem Chat, am Ende eine Nachricht von Paneldeck.
+  $r = & $agentStep 'agent bg please' 'run_command' 60
+  $kids3 = @((Tool 'list_sessions').data.sessions) | Where-Object { $_.parent -eq $AG -and $_.kind -eq 'terminal' -and $_.name -like '*bg1*' }
+  Check 'Agent run_command background (#355): sofort id bg1 (running), eigenes Terminal "bg1" unter dem Chat' ($r.ok -and $r.tool.status -eq 'ok' -and $r.tool.content -match '"id":"bg1"' -and $r.tool.content -match '"status":"running"' -and @($kids3).Count -eq 1) "$($r.text) /// $($kids3 | ConvertTo-Json -Compress)"
+  $ev = $null
+  for ($i = 0; $i -lt 40 -and -not $ev; $i++) {
+    $rc = Tool 'read_chat' @{ session = $AG; last = 8 }
+    $ev = @($rc.data.messages | Where-Object { $_.role -eq 'system' -and $null -ne $_.event -and $_.event.id -eq 'bg1' }) | Select-Object -Last 1
+    if (-not $ev) { Start-Sleep 1 }
+  }
+  Check 'Hintergrund-Befehl endet (#355): Nachricht von Paneldeck im Chat (event exited, Exit-Code 0, ohne Ausgabe)' ($null -ne $ev -and $ev.event.state -eq 'exited' -and $ev.event.exit_code -eq 0 -and $ev.content -match 'command_output' -and $ev.content -notmatch 'agent-bg-ok') ($rc.text)
+  [void](Tool 'wait_for_status' @{ session = $AG; status = @('ready'); timeout_secs = 30 } 40000)
+  # #356: Fragen mit Auswahl - eigener Chat; er wartet auf den Nutzer (approval), externe Agenten schreiben dann nicht hinein.
+  $AK = (Tool 'create_session' @{ kind = 'chat'; server = 'Fake'; model = 'fake-model'; name = 'Smoke-Ask'; cwd = "$agDir" }).data.id
+  [void](Tool 'send_chat_message' @{ session = $AK; text = 'agent ask please' })
+  $w = Tool 'wait_for_status' @{ session = $AK; status = @('approval'); timeout_secs = 30 } 40000
+  $sk = Tool 'send_chat_message' @{ session = $AK; text = 'x' }
+  $rk = Tool 'read_chat' @{ session = $AK; last = 3 }
+  $ka = @($rk.data.messages | Where-Object { $_.role -eq 'assistant' -and $null -ne $_.tool_calls -and @($_.tool_calls).Count -ge 1 }) | Select-Object -Last 1
+  Check 'Agent ask_user (#356): Chat wartet auf den Nutzer (approval), send_chat_message -> permission_pending' ($w.data.matched -eq $true -and $w.data.needs_you -eq $true -and (Code $sk) -eq 'permission_pending' -and $null -ne $ka -and $ka.tool_calls[0].name -eq 'ask_user') "$($w.text) / $($sk.text) / $($rk.text)"
+  [void](Tool 'close_session' @{ session = $AK })
   # Sensible Datei: fragt auch ohne ask_write; der Chat wartet (approval), der Inhalt erscheint nirgends.
   [void](Tool 'send_chat_message' @{ session = $AG; text = 'agent env please' })
   $w = Tool 'wait_for_status' @{ session = $AG; status = @('approval'); timeout_secs = 30 } 40000

@@ -439,6 +439,20 @@ impl Document {
         self.agent_marks.clear();
     }
 
+    /// Smallest char position changed since revision `rev` (`None` = nothing changed). Positions before it are the
+    /// same text as at `rev`. When the change log no longer reaches back that far (or the text was replaced), `Some(0)`.
+    /// For caches that follow the text, e.g. syntax colours (#312).
+    pub fn changed_since(&self, rev: u64) -> Option<usize> {
+        if rev >= self.revision {
+            return None;
+        }
+        if !self.log.front().is_some_and(|(first, _)| *first <= rev + 1) {
+            return Some(0);
+        }
+        let first = self.log.iter().filter(|(r, _)| *r > rev).filter_map(|(_, cs)| cs.changes().first().map(|c| c.start)).min();
+        Some(first.unwrap_or(0))
+    }
+
     // ---- syncing views ----
 
     /// Selections for a new view: a cursor at `pos`, synced to the current revision.
@@ -704,6 +718,23 @@ mod tests {
         assert_eq!(d.text(), "a\nB\nc\nd\n");
         assert_eq!(s.primary().head, 6);
         assert!(!d.replace_all_text(&mut s, "a\r\nB\r\nc\r\nd\r\n", EditOrigin::User));
+    }
+
+    #[test]
+    fn changed_since_reports_the_first_changed_position() {
+        let mut d = Document::from_text("aaa\nbbb\nccc\n");
+        let r0 = d.revision();
+        assert_eq!(d.changed_since(r0), None);
+        let mut s = d.new_selections(0);
+        d.apply_edits(&mut s, vec![TextEdit::insert(9, "X")], EditOrigin::User).unwrap();
+        let r1 = d.revision();
+        d.apply_edits(&mut s, vec![TextEdit::insert(5, "Y")], EditOrigin::User).unwrap();
+        assert_eq!(d.changed_since(r0), Some(5));
+        assert_eq!(d.changed_since(r1), Some(5));
+        d.undo(&mut s);
+        assert_eq!(d.changed_since(r1), Some(5), "Rückgängig zählt als Änderung");
+        d.reset_text("neu".into());
+        assert_eq!(d.changed_since(r1), Some(0), "ohne Protokoll: alles");
     }
 
     #[test]

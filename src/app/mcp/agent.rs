@@ -1,22 +1,40 @@
 //! Agenten-Werkzeuge der Chats im Hub (#338): Ausführung der Datei-, Such-, Git- und Web-Werkzeuge im Hintergrund,
-//! `update_todos` und `run_command` im eigenen Terminal des Chats.
+//! `update_todos`, `ask_user` (#356) und `run_command` im eigenen Terminal des Chats – im Vordergrund oder (#355) im
+//! Hintergrund (`bg.rs`).
 //!
 //! Das Terminal des Chats ist eine normale, sichtbare Terminal-Sitzung im Projektordner (Kind des Chats in der
-//! Seitenleiste, wie `create_session`); es wird beim ersten Befehl angelegt und danach wiederverwendet. Der Befehl
-//! läuft über denselben Weg wie das Paneldeck-Werkzeug `run_command` (Shell-Integration, Freigabe vorher im Chat).
+//! Seitenleiste, wie `create_session`); es wird beim ersten Befehl angelegt und danach wiederverwendet – je gewählter
+//! Shell eines (#355). Der Befehl läuft über denselben Weg wie das Paneldeck-Werkzeug `run_command`
+//! (Shell-Integration, Freigabe vorher im Chat).
 
 use super::*;
 use crate::chat::agent::{self as chat_agent, AgentEnv};
+use crate::chat::bg_commands::{self, ShellCandidate};
 use crate::chat::store::ToolCall;
 
 /// So lange wartet `run_command` auf die Shell-Integration eines frisch gestarteten Terminals.
 const READY_WAIT: Duration = Duration::from_secs(20);
 
+/// Schlüssel in den Argumenten eines wartenden `run_command` eines Chats: Korrekturen für das Ergebnis (#355).
+pub(super) const CORRECTED_KEY: &str = "_paneldeck_corrected";
+
+/// Welche Shell ein Befehl des Chats bekommt (#355).
+pub(super) struct ShellPick {
+    /// Schlüssel für das Terminal des Chats (`""` = Profil des Projekts).
+    pub key: String,
+    /// Fest gewähltes Profil für `mcp_create_for_chat` (`Some(0)` = keins; `None` = das des Projekts).
+    pub profile: Option<u64>,
+    /// Gewählte erkannte Shell.
+    pub shell: Option<String>,
+    /// Hinweis für das Modell (z. B. „Profil des Projekts nicht nutzbar, Standard-Shell genommen“).
+    pub note: Option<String>,
+}
+
 impl App {
     /// Projektordner und Einstellungen der Agenten-Werkzeuge für den Chat `chat`.
     pub(in crate::app) fn agent_env(&self, chat: u64) -> AgentEnv {
         let root = self.entries.get(&chat).map(|e| e.meta.cwd.trim().to_string()).filter(|c| !c.is_empty()).map(std::path::PathBuf::from);
-        AgentEnv { root, data_dir: Some(self.dir.clone()), settings: self.settings.agent_tools.clone(), max_bytes: 0, images: None }
+        AgentEnv { root, data_dir: Some(self.dir.clone()), settings: self.settings.agent_tools.clone(), max_bytes: 0, images: None, background: self.mcp.bg.any(chat) }
     }
 
     /// Agenten-Werkzeug des Chats `chat` ausführen (nach Prüfung und Freigabe in `ChatState::tool_step`). `max_bytes` =
@@ -34,7 +52,24 @@ impl App {
                 });
                 self.mcp_finish(&tx, &call.name, &json!({}), Some(chat), "chat", r);
             }
+            // Fragen an den Nutzer (#356): das Formular wartet im Chat; das Ergebnis schickt die Oberfläche beim Absenden
+            // bzw. Abbrechen über diesen Kanal. Kein Zeitlimit.
+            "ask_user" => match crate::chat::ask::parse(&call.arguments) {
+                Ok((questions, fixes)) => {
+                    let form = crate::chat::ask::AskForm::new(call.id.clone(), questions, fixes, Some(tx.clone()));
+                    match self.entries.get_mut(&chat).and_then(|e| e.chat.as_mut()) {
+                        Some(c) => c.open_ask(form),
+                        None => self.mcp_finish(&tx, &call.name, &json!({}), Some(chat), "chat", Err(er("not_found", "The chat is gone."))),
+                    }
+                    ctx.request_repaint();
+                }
+                Err(e) => self.mcp_finish(&tx, &call.name, &json!({}), Some(chat), "chat", Err(e)),
+            },
             "run_command" => self.agent_run(ctx, chat, &call.arguments, &tx),
+            "command_status" | "command_output" | "stop_command" => {
+                let r = self.agent_bg_tool(ctx, chat, &call.name, &call.arguments, max_bytes);
+                self.mcp_finish(&tx, &call.name, &call.arguments, Some(chat), "chat", r);
+            }
             _ => {
                 let mut env = self.agent_env(chat);
                 env.max_bytes = max_bytes;
@@ -62,47 +97,133 @@ impl App {
     }
 
     /// Lebt das Terminal `id` noch als Befehlszeile (keine Claude-Sitzung, kein Chat, nicht beendet)?
-    fn agent_term_alive(&self, id: u64) -> bool {
+    pub(super) fn agent_term_alive(&self, id: u64) -> bool {
         self.entries.get(&id).is_some_and(|e| !e.is_chat() && !e.is_claude() && !e.exited() && e.live.as_ref().is_some_and(|s| !s.has_exited()))
     }
 
-    /// `run_command` ohne `session`: im Terminal des Chats (angelegt beim ersten Mal, im Projektordner).
+    /// Ruht die Shell des Terminals `id` an ihrem Prompt, so wie der letzte Befehl eines Chats sie verlassen hat (#355
+    /// Review)? Nur dann darf ein Chat dort wieder tippen: kein Vollbildprogramm, keine verschachtelte Shell, keine
+    /// Eingabe mit Enter seit dem Prompt und seit dem Ende des letzten `run_command` kein neuer Prompt (der Nutzer hat
+    /// dort nichts ausgeführt). Sonst bekommt der Chat ein neues Terminal – er tippt nie in ein Programm des Nutzers.
+    pub(super) fn term_idle(&self, id: u64) -> bool {
+        if !self.agent_term_alive(id) || self.pending_for(id) {
+            return false;
+        }
+        let Some(s) = self.entries.get(&id).and_then(|e| e.live.as_ref()) else { return false };
+        let alt = s.alt_screen();
+        let st = s.shell_state.lock().unwrap_or_else(|x| x.into_inner());
+        st.integration_seen && !alt && st.enters_since_prompt == 0 && !st.nested(alt) && self.mcp.run_end_seq.get(&id) == Some(&st.prompt_seq)
+    }
+
+    /// Profile und erkannte Shells, die ein Befehl eines Chats nennen kann (#355; gesperrte mit Grund).
+    pub(super) fn shell_candidates(&self) -> Vec<ShellCandidate> {
+        let mut v: Vec<ShellCandidate> = self
+            .settings
+            .profiles
+            .iter()
+            .filter(|p| !p.name.trim().is_empty())
+            .map(|p| ShellCandidate::profile(p.id, &p.name, p.admin, crate::templates::agent_profile_issue(&p.program, &p.args, &p.startup, false).is_some()))
+            .collect();
+        v.extend(self.shells.iter().map(|s| ShellCandidate::shell(&s.id, &s.label)));
+        v
+    }
+
+    /// Shell für einen Befehl des Chats `chat` (#355): `name` = Profil oder Shell des Nutzers; ohne Namen das Profil des
+    /// Projekts – außer es startet als Administrator oder hat ein eigenes Programm, eigene Argumente oder einen
+    /// Startbefehl (dann die Standard-Shell, mit Hinweis).
+    pub(super) fn agent_shell(&self, chat: u64, name: Option<&str>) -> Result<ShellPick, (String, String)> {
+        let cands = self.shell_candidates();
+        if let Some(n) = name {
+            let c = &cands[bg_commands::resolve_shell(n, &cands)?];
+            return Ok(match c.key.strip_prefix("profile:").and_then(|p| p.parse::<u64>().ok()) {
+                Some(pid) => ShellPick { key: c.key.clone(), profile: Some(pid), shell: None, note: None },
+                None => ShellPick { key: c.key.clone(), profile: Some(0), shell: Some(c.key.clone()), note: None },
+            });
+        }
+        let project = self.entries.get(&chat).map(|e| e.meta.project).unwrap_or(self.active_project);
+        let pid = self.projects.iter().find(|p| p.id == project).map(|p| p.profile).unwrap_or(0);
+        match self.profile(pid) {
+            Some(p) if p.admin || crate::templates::agent_profile_issue(&p.program, &p.args, &p.startup, false).is_some() => {
+                let shell = self.shell_by_id(&self.settings.default_shell).map(|s| s.label).unwrap_or_else(|| self.settings.default_shell.clone());
+                Ok(ShellPick {
+                    key: String::new(),
+                    profile: Some(0),
+                    shell: None,
+                    note: Some(format!(
+                        "The project's profile “{}” starts as administrator or has its own program, which agents may never use – the default shell “{shell}” was used instead.",
+                        mcp::short(p.name.trim(), 40)
+                    )),
+                })
+            }
+            _ => Ok(ShellPick { key: String::new(), profile: None, shell: None, note: None }),
+        }
+    }
+
+    /// Neues Terminal für Befehle des Chats `chat` im Projektordner mit der Shell `pick` (Kind des Chats).
+    pub(super) fn agent_new_terminal(&mut self, ctx: &egui::Context, chat: u64, pick: &ShellPick, name: &str) -> Result<u64, (String, String)> {
+        let env = self.agent_env(chat);
+        let root = chat_agent::paths::root(&env)?;
+        let cwd = chat_agent::paths::display(&root.canon);
+        let mut args = json!({"cwd": cwd, "name": name});
+        if let Some(s) = &pick.shell {
+            args["shell"] = json!(s);
+        }
+        match self.mcp_create_for_chat(ctx, &args, chat, pick.profile) {
+            Ok(v) => v["id"].as_u64().ok_or_else(|| er("terminal_failed", "The chat's terminal could not be started.")),
+            Err((code, msg)) if code == "terminal_failed" => Err((code, msg)),
+            Err((code, msg)) => Err(er(&code, format!("The chat's terminal could not be started: {msg}"))),
+        }
+    }
+
+    /// `run_command` ohne `session`: im Vordergrund im Terminal des Chats (angelegt beim ersten Mal, im Projektordner,
+    /// je Shell eines), mit `background` in einem eigenen Terminal (#355, `bg.rs`).
     fn agent_run(&mut self, ctx: &egui::Context, chat: u64, args: &Value, tx: &SyncSender<R>) {
-        let r = (|| -> Result<Value, (String, String)> {
+        let parsed = (|| -> Result<(bg_commands::RunRequest, Vec<String>), (String, String)> {
             // Wie bei jedem Aufruf eines Chats: keine MCP-Brücke aus einer von einem Agenten ausgelösten Runde.
             let origins = crate::app::taint::ancestors(&self.entries, Some(chat));
             if let Some(msg) = crate::chat::tools::spawn_forbidden("run_command", args, &origins) {
                 return Err(er("forbidden", msg));
             }
-            let cmd = args.get("command").and_then(|v| v.as_str()).unwrap_or("").trim();
-            if cmd.is_empty() || cmd.contains('\n') || cmd.contains('\r') || cmd.len() > 4096 {
-                return Err(er("bad_args", "command must be exactly one line (at most 4096 bytes). Example: {\"command\":\"cargo test\"}"));
+            let (req, fixes) = bg_commands::parse_run(args, &self.settings.agent_tools)?;
+            if args.get("session").is_some_and(|s| !s.is_null()) {
+                return Err(er("bad_args", "background and shell only work in the chat's own terminals – leave out session (or leave out background and shell to run in that session)."));
             }
             if !self.settings.shell_integration {
                 return Err(er("no_shell_integration", "Shell integration is switched off (Settings → General); without it the end of a command cannot be detected. Ask the user to switch it on."));
             }
-            let env = self.agent_env(chat);
-            let root = chat_agent::paths::root(&env)?;
-            let mut a = args.clone();
-            if a.get("timeout_secs").is_none_or(Value::is_null) {
-                a["timeout_secs"] = json!(self.settings.agent_tools.command_timeout_secs);
-            }
-            let id = match self.mcp.chat_terms.get(&chat).copied().filter(|id| self.agent_term_alive(*id)) {
+            // Ohne Projektordner kein Terminal (wie bisher).
+            chat_agent::paths::root(&self.agent_env(chat))?;
+            Ok((req, fixes))
+        })();
+        let (req, mut fixes) = match parsed {
+            Ok(x) => x,
+            Err(e) => return self.mcp_finish(tx, "run_command", args, Some(chat), "chat", Err(e)),
+        };
+        if req.background {
+            let r = self.agent_bg_start(ctx, chat, &req, &fixes);
+            return self.mcp_finish(tx, "run_command", args, Some(chat), "chat", r);
+        }
+        let r = (|| -> Result<Value, (String, String)> {
+            let pick = self.agent_shell(chat, req.shell.as_deref())?;
+            fixes.extend(pick.note.clone());
+            let key = (chat, pick.key.clone());
+            let id = match self.mcp.chat_terms.get(&key).copied().filter(|id| self.term_idle(*id)) {
                 Some(id) => id,
                 None => {
                     let chat_name = self.entries.get(&chat).map(|e| e.display_name()).unwrap_or_default();
-                    let name = format!("{} – {}", mcp::short(chat_name.trim(), 40), tr("Befehle", "commands"));
-                    let cwd = chat_agent::paths::display(&root.canon);
-                    let id = match self.mcp_create(ctx, &json!({"cwd": cwd, "name": name}), Some(chat), None) {
-                        CreateStep::Done(Ok(v)) => v["id"].as_u64().ok_or_else(|| er("terminal_failed", "The chat's terminal could not be started."))?,
-                        CreateStep::Done(Err((code, msg))) => return Err(er(&code, format!("The chat's terminal could not be started: {msg}"))),
-                        CreateStep::Check { .. } => return Err(er("terminal_failed", "The chat's terminal could not be started (the default shell needs a folder check). Use run_command with the session of an existing terminal.")),
-                    };
-                    self.mcp.chat_terms.insert(chat, id);
+                    let mut name = format!("{} – {}", mcp::short(chat_name.trim(), 40), tr("Befehle", "commands"));
+                    if let Some(n) = req.shell.as_deref() {
+                        name = format!("{name} ({})", mcp::short(n, 20));
+                    }
+                    let id = self.agent_new_terminal(ctx, chat, &pick, &name)?;
+                    self.mcp.chat_terms.insert(key, id);
                     id
                 }
             };
-            a["session"] = json!(id);
+            let mut a = json!({"session": id, "command": req.command, "timeout_secs": req.timeout_secs, "max_output_lines": req.max_output_lines});
+            if !fixes.is_empty() {
+                a[CORRECTED_KEY] = json!(fixes);
+            }
             Ok(a)
         })();
         let args = match r {
@@ -116,14 +237,16 @@ impl App {
     }
 
     /// Wartendes `run_command` im Terminal eines Chats: ist die Shell bereit (oder die Frist um), läuft der Befehl wie
-    /// das Paneldeck-Werkzeug `run_command` (das meldet dann ggf. „keine Shell-Integration“).
+    /// das Paneldeck-Werkzeug `run_command` (das meldet dann ggf. „keine Shell-Integration“) – mit dem Höchstwert für
+    /// `timeout_secs` aus den Einstellungen der Chats (#355).
     pub(super) fn agent_ready(&mut self, p: PendingMcp) {
         let ready = self.entries.get(&p.session).and_then(|e| e.live.as_ref()).map(|s| s.has_exited() || s.shell_state.lock().unwrap_or_else(|x| x.into_inner()).integration_seen);
         match ready {
             None => self.mcp_finish(&p.reply, &p.tool, &p.args, p.caller, p.how, Err(er("session_closed", "The chat's terminal was closed before the command ran."))),
             Some(false) if Instant::now() < p.deadline => self.mcp.pending.push(p),
             _ => {
-                if let Out::Now(r) = self.mcp_run(&p.args, p.caller, &p.reply, &p.tool, p.how) {
+                let max = self.settings.agent_tools.command_timeout_max_secs;
+                if let Out::Now(r) = self.mcp_run_for(&p.args, p.caller, &p.reply, &p.tool, p.how, max) {
                     self.mcp_finish(&p.reply, &p.tool, &p.args, p.caller, p.how, r);
                 }
             }

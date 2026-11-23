@@ -1000,6 +1000,19 @@ const CHAT: &[Step] = &[
         need: None,
     },
     Step {
+        id: "chat.commands",
+        since: "3.1.0",
+        spot: Some(Spot::ModelsCommands),
+        title: tx("Befehle und Fragen", "Commands and questions"),
+        body: tx(
+            "Ein Modell mit der Stufe „Steuern“ kann lange Befehle im Hintergrund starten: Jeder läuft in einem eigenen Terminal unter dem Chat, am Ende kommt eine Nachricht in den Chat. Hier stellst du Zeitlimit und Anzahl ein. Außerdem kann ein Modell dir Fragen mit Auswahl stellen – mit „(Empfohlen)“ und „Andere …“.",
+            "A model with level “Control” can start long commands in the background: each runs in its own terminal below the chat, and a message comes into the chat when it ends. Set the time limit and the number here. A model can also ask you questions with choices – with “(Recommended)” and “Other …”.",
+        ),
+        prep: &[Prep::Terminals, Prep::Settings(S_MODELS)],
+        done: None,
+        need: None,
+    },
+    Step {
         id: "chat.new",
         since: "2.2.0",
         spot: Some(Spot::SidebarChat),

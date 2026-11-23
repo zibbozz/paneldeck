@@ -2,12 +2,16 @@
 //! Auswahlen (mehrere), Zeilennummern, aktuelle Zeile, Minimap, weicher Umbruch; Maus (Klick, Ziehen, Doppel-/Dreifachklick,
 //! Alt+Klick für weitere Cursor, Alt+Ziehen für Spaltenauswahl), Tastatur, Bildlauf, IME und Zwischenablage.
 //!
+//! Im Syntax-Modus (#312) färbt es die sichtbaren Zeilen mit den Syntaxfarben des Dokuments (`crate::editor::syntax`,
+//! Farben `code_*` des Themes); berechnet werden sie in einem Hilfsthread je Dokument, das Zeichnen wartet nie darauf.
+//!
 //! Positionen sind Zeichen-Indizes im Rope des Kerns. Spalten auf dem Bildschirm sind *visuelle* Spalten (Tabs bis zum
 //! nächsten Tabstopp, breite Zeichen doppelt) im Raster der Monospace-Schrift. Sehr lange Zeilen (ab [`LONG_LINE`]
 //! Zeichen) rechnen vereinfacht (ein Zeichen = eine Spalte), damit eine einzelne riesige Zeile nicht jedes Bild durchlaufen
 //! werden muss.
 
 use super::doc::{DocEntry, Op};
+use crate::editor::syntax::{DocHighlight, Span, Tok};
 use crate::editor::text as et;
 use crate::editor::{Document, Selection, Selections};
 use crate::state::Lang;
@@ -21,6 +25,35 @@ const SCROLLBAR_W: f32 = 10.0;
 const MINIMAP_ROW: f32 = 2.0;
 /// Höchstzahl Spalten, die die Minimap je Zeile ansieht.
 const MINIMAP_COLS: usize = 120;
+/// Solange Syntaxfarben im Hilfsthread entstehen: so oft neu zeichnen, um sie abzuholen.
+const SYNTAX_POLL: std::time::Duration = std::time::Duration::from_millis(16);
+
+/// Farben der Syntax-Klassen aus dem Theme (Reihenfolge wie [`Tok::ALL`]).
+pub(super) fn code_palette(u: &crate::theme::tokens::UiColors) -> [Color32; 17] {
+    let mut p = [Color32::PLACEHOLDER; 17];
+    for t in Tok::ALL {
+        p[t.index()] = match t {
+            Tok::Comment => u.code_comment,
+            Tok::String => u.code_string,
+            Tok::Number => u.code_number,
+            Tok::Constant => u.code_constant,
+            Tok::Keyword => u.code_keyword,
+            Tok::Type => u.code_type,
+            Tok::Function => u.code_function,
+            Tok::Operator => u.code_operator,
+            Tok::Tag => u.code_tag,
+            Tok::Attribute => u.code_attribute,
+            Tok::Preprocessor => u.code_preprocessor,
+            Tok::Escape => u.code_escape,
+            Tok::Heading => u.code_heading,
+            Tok::Variable => u.code_variable,
+            Tok::Invalid => u.code_invalid,
+            Tok::Inserted => u.diff_add,
+            Tok::Deleted => u.diff_remove,
+        };
+    }
+    p
+}
 
 /// Ansicht eines Reiters: Cursor/Auswahlen, Bildlauf, Zustand der Maus.
 #[derive(Clone, Debug, Default)]
@@ -263,6 +296,7 @@ pub(super) fn show(ui: &mut Ui, rect: Rect, d: &mut DocEntry, view: &mut View, c
         ui.memory_mut(|m| m.set_focus_lock_filter(cx.id, EventFilter { tab: true, horizontal_arrows: true, vertical_arrows: true, escape: false }));
     }
     let large = d.is_large(cx.prefs);
+    d.ensure_highlight(cx.prefs);
     let Some(doc) = d.doc.as_mut() else {
         if d.is_loading() {
             ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
@@ -314,7 +348,14 @@ pub(super) fn show(ui: &mut Ui, rect: Rect, d: &mut DocEntry, view: &mut View, c
     let rows = visible_rows(doc, view, &geo);
     edited |= mouse(ui, &resp, doc, view, &geo, &rows, cx);
     let rows = if edited { visible_rows(doc, view, &geo) } else { rows };
-    paint(ui, rect, doc, view, &geo, &rows, cx, focused);
+    // Syntaxfarben der sichtbaren Zeilen (gemeinsam für alle Ansichten des Dokuments).
+    let mut hl = d.syntax.hl.as_mut();
+    if let (Some(h), Some(first), Some(last)) = (hl.as_deref_mut(), rows.first(), rows.last())
+        && !h.prepare(doc, first.line..last.line + 1)
+    {
+        ui.ctx().request_repaint_after(SYNTAX_POLL);
+    }
+    paint(ui, rect, doc, view, &geo, &rows, cx, focused, hl.as_deref());
     if let Some(m) = minimap {
         minimap_ui(ui, m, doc, view, &geo, cx);
         crate::app::tutorial::spot_rect(ui, crate::app::tutorial::Spot::EditorMinimap, m);
@@ -946,7 +987,7 @@ fn copy(ui: &Ui, doc: &mut Document, sels: &mut Selections, cut: bool) -> bool {
 
 /// Alles zeichnen: Zeilennummern, aktuelle Zeile, Auswahlen, Treffer, Agenten-Markierungen, Text, Cursor.
 #[allow(clippy::too_many_arguments)]
-fn paint(ui: &Ui, rect: Rect, doc: &Document, view: &View, g: &Geo, rows: &[Row], cx: &TextCx, focused: bool) {
+fn paint(ui: &Ui, rect: Rect, doc: &Document, view: &View, g: &Geo, rows: &[Row], cx: &TextCx, focused: bool, hl: Option<&DocHighlight>) {
     let u = style::ui();
     let painter = ui.painter_at(rect);
     let fg = cx.theme.fg;
@@ -992,9 +1033,11 @@ fn paint(ui: &Ui, rect: Rect, doc: &Document, view: &View, g: &Geo, rows: &[Row]
             paint_range(&text_p, doc, g, rows, sel.range(), scroll, u.selection_bg);
         }
     }
-    // Text
+    // Text (im Syntax-Modus mit den Farben des Themes)
+    let pal = hl.map(|_| code_palette(&u));
     for r in rows {
-        paint_row(&text_p, doc, g, r, scroll, fg, dim, &cx.font);
+        let spans = hl.and_then(|h| h.spans(r.line));
+        paint_row(&text_p, doc, g, r, scroll, fg, dim, &cx.font, spans.zip(pal.as_ref()));
     }
     // Cursor
     let blink_on = !focused || {
@@ -1061,10 +1104,11 @@ fn paint_range(p: &egui::Painter, doc: &Document, g: &Geo, rows: &[Row], range: 
     }
 }
 
-/// Eine Bildschirmzeile zeichnen: Läufe einfacher Zeichen am Stück, Tabs als Lücke, breite/fremde Zeichen einzeln im
-/// Raster, Steuerzeichen als gedämpfter Punkt. Nur der sichtbare Teil (waagerechter Bildlauf).
+/// Eine Bildschirmzeile zeichnen: Läufe einfacher Zeichen gleicher Farbe am Stück, Tabs als Lücke, breite/fremde
+/// Zeichen einzeln im Raster, Steuerzeichen als gedämpfter Punkt. Nur der sichtbare Teil (waagerechter Bildlauf).
+/// `syntax`: Farbbereiche der Zeile (Zeichenspalten) und die Farben der Klassen.
 #[allow(clippy::too_many_arguments)]
-fn paint_row(p: &egui::Painter, doc: &Document, g: &Geo, r: &Row, scroll: f32, fg: Color32, dim: Color32, font: &FontId) {
+fn paint_row(p: &egui::Painter, doc: &Document, g: &Geo, r: &Row, scroll: f32, fg: Color32, dim: Color32, font: &FontId, syntax: Option<(&[Span], &[Color32; 17])>) {
     let line = doc.line(r.line);
     let long = doc.line_len(r.line) >= LONG_LINE;
     let first_v = if g.wrap_cols.is_some() { r.vstart } else { (scroll / g.cw).floor() as usize };
@@ -1072,9 +1116,22 @@ fn paint_row(p: &egui::Painter, doc: &Document, g: &Geo, r: &Row, scroll: f32, f
     let mut v = r.vstart;
     let mut run = String::new();
     let mut run_v = 0usize;
-    let flush = |run: &mut String, run_v: usize| {
+    let mut run_col = fg;
+    let flush = |run: &mut String, run_v: usize, col: Color32| {
         if !run.is_empty() {
-            p.text(Pos2::new(g.x_of(r, run_v, scroll), r.y), Align2::LEFT_TOP, std::mem::take(run), font.clone(), fg);
+            p.text(Pos2::new(g.x_of(r, run_v, scroll), r.y), Align2::LEFT_TOP, std::mem::take(run), font.clone(), col);
+        }
+    };
+    // Farbe der Zeichenspalte `ci` (die Bereiche sind sortiert; `si` wandert mit).
+    let mut si = 0usize;
+    let mut color_at = |ci: usize| -> Color32 {
+        let Some((spans, pal)) = syntax else { return fg };
+        while si < spans.len() && (spans[si].end as usize) <= ci {
+            si += 1;
+        }
+        match spans.get(si) {
+            Some(s) if (s.start as usize) <= ci => pal[s.tok.index()],
+            _ => fg,
         }
     };
     // Sehr lange Zeile: direkt an die sichtbare Spalte springen.
@@ -1084,7 +1141,7 @@ fn paint_row(p: &egui::Painter, doc: &Document, g: &Geo, r: &Row, scroll: f32, f
     if skip >= end {
         return;
     }
-    for c in line.slice(skip..end).chars() {
+    for (k, c) in line.slice(skip..end).chars().enumerate() {
         if v > max_v {
             break;
         }
@@ -1095,28 +1152,34 @@ fn paint_row(p: &egui::Painter, doc: &Document, g: &Geo, r: &Row, scroll: f32, f
         }
         match c {
             '\t' => {
-                flush(&mut run, run_v);
+                flush(&mut run, run_v, run_col);
             }
             '\n' | '\r' => {}
             c if (c as u32) < 0x20 || c == '\u{7f}' => {
-                flush(&mut run, run_v);
+                flush(&mut run, run_v, run_col);
                 p.text(Pos2::new(g.x_of(r, v, scroll) + g.cw * 0.5, r.y), Align2::CENTER_TOP, "·", font.clone(), dim);
             }
             c if c.is_ascii() => {
+                let col = color_at(skip + k);
+                if col != run_col {
+                    flush(&mut run, run_v, run_col);
+                    run_col = col;
+                }
                 if run.is_empty() {
                     run_v = v;
                 }
                 run.push(c);
             }
             c => {
-                flush(&mut run, run_v);
+                flush(&mut run, run_v, run_col);
+                let col = color_at(skip + k);
                 let mut b = [0u8; 4];
-                p.text(Pos2::new(g.x_of(r, v, scroll), r.y), Align2::LEFT_TOP, c.encode_utf8(&mut b).to_string(), font.clone(), fg);
+                p.text(Pos2::new(g.x_of(r, v, scroll), r.y), Align2::LEFT_TOP, c.encode_utf8(&mut b).to_string(), font.clone(), col);
             }
         }
         v += w;
     }
-    flush(&mut run, run_v);
+    flush(&mut run, run_v, run_col);
 }
 
 /// Minimap: jede Zeile als dünne Striche der Nicht-Leerzeichen, der sichtbare Ausschnitt hinterlegt; Klicken/Ziehen rollt.

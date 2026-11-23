@@ -13,9 +13,13 @@
 //! * [`agent`]: Agenten-Werkzeuge nur für Chats (#338): Dateien, Suche, Befehle im Terminal des Chats, Git, Web, To-dos.
 //! * [`images`]: Bilder in Chats (#357): Platzhalter `[Image#n]`, Ablage in `chats/<id>/images/`, Aufbereitung,
 //!   Modelle ohne Bildverständnis, Bilder aus Werkzeug-Ergebnissen.
+//! * [`bg_commands`]: Befehle im Hintergrund (#355), Zeitlimits und Wahl der Shell für `run_command`.
+//! * [`ask`]: `ask_user` (#356) – Fragen mit Auswahl an den Nutzer (Prüfung der Argumente, Zustand des Formulars).
 
 pub mod agent;
+pub mod ask;
 pub mod backend;
+pub mod bg_commands;
 pub mod context;
 pub mod driver;
 pub mod images;

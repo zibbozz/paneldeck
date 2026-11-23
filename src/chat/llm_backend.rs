@@ -187,9 +187,12 @@ pub fn map_history_with(history: &[ChatMsg], imgs: Option<SendImages>) -> (Vec<C
         }
     };
     for (i, m) in history.iter().enumerate() {
-        if !logic::sendable(m) || m.role == store::Role::System || (m.role == store::Role::Assistant && m.content.is_empty() && m.tool_calls.is_empty()) {
+        // Ereignisse von Paneldeck (#355, z. B. „Hintergrund-Befehl beendet“) gehen als Nachricht des Nutzers mit.
+        let event = m.role == store::Role::System && m.event.is_some();
+        if !logic::sendable(m) || (m.role == store::Role::System && !event) || (m.role == store::Role::Assistant && m.content.is_empty() && m.tool_calls.is_empty()) {
             continue;
         }
+        let mrole = if event { store::Role::User } else { m.role };
         if m.role == store::Role::Tool {
             match m.tool_call_id.as_deref().and_then(|id| open.iter().position(|(o, _)| o == id)) {
                 Some(k) => {
@@ -210,14 +213,14 @@ pub fn map_history_with(history: &[ChatMsg], imgs: Option<SendImages>) -> (Vec<C
             tool_imgs.extend(own.iter().cloned());
             tool_imgs_at = i;
         }
-        let own_images: Vec<llm::ImagePart> = if m.role == store::Role::User { own.into_iter().map(|(_, p)| p).collect() } else { Vec::new() };
-        if let Some(prev) = msgs.last_mut().filter(|p: &&mut ChatMessage| p.role == Role::User && m.role == store::Role::User) {
+        let own_images: Vec<llm::ImagePart> = if mrole == store::Role::User { own.into_iter().map(|(_, p)| p).collect() } else { Vec::new() };
+        if let Some(prev) = msgs.last_mut().filter(|p: &&mut ChatMessage| p.role == Role::User && mrole == store::Role::User) {
             prev.content = format!("{}\n\n{}", prev.content.trim_end(), m.content);
             prev.images.extend(own_images);
             continue;
         }
         msgs.push(ChatMessage {
-            role: role(m.role),
+            role: role(mrole),
             content: m.content.clone(),
             tool_calls: m.tool_calls.iter().map(|c| llm::ToolCall { id: c.id.clone(), name: c.name.clone(), arguments: c.arguments.clone() }).collect(),
             tool_call_id: m.tool_call_id.clone(),

@@ -27,6 +27,10 @@ Paneldeck ist aus freier Software aufgebaut. Die wichtigsten Bestandteile und ih
 | similar | Unterschied Datei/Puffer im Editor | Apache-2.0 |
 | unicode-segmentation, unicode-width | Graphem-Grenzen und Spaltenbreiten im Editor | MIT oder Apache-2.0 |
 | ignore (mit globset, walkdir, same-file) | Suche in Dateien im Editor: Ordner durchlaufen mit `.gitignore`-Regeln | Unlicense oder MIT |
+| syntect (mit fancy-regex, yaml-rust, bincode, flate2) | Syntaxfarben im Editor (Sublime-Grammatiken, reines Rust ohne Oniguruma) | MIT (Abhängigkeiten: MIT oder Apache-2.0) |
+| two-face | Grammatiken des Projekts bat für syntect (eingebettet) | MIT oder Apache-2.0; die einzelnen Grammatiken: siehe unten |
+
+**Grammatiken der Syntaxfarben:** Die Grammatiken aus bat (über two-face) stehen unter ihren eigenen Lizenzen (überwiegend MIT, dazu die freie Lizenz von Sublime HQ, BSD, Apache-2.0, Unlicense); die Texte der Lizenzen, die eine Nennung verlangen, stehen in `THIRD_PARTY_LICENSES.txt` (Quelle: `tools/license-extra/two-face-syntaxes.md`, erzeugt aus den Angaben von two-face und per Test aktuell gehalten). Die Grammatiken für AutoIt, Inno Setup, Visual Basic und PowerShell (`src/editor/syntax/grammars/`) sind eigene Arbeit von Paneldeck (MIT).
 
 Alle weiteren transitiven Abhängigkeiten stehen unter MIT, Apache-2.0, BSD, Zlib, ISC, BSL-1.0, Unicode, CC0 oder Unlicense (teils wahlweise); eine Ausnahme ist `option-ext` unter der MPL-2.0 (Copyleft nur für die Datei selbst; Paneldeck bindet sie unverändert ein, der Quelltext liegt bei crates.io). `r-efi` bietet LGPL-2.1 nur als Wahloption neben MIT/Apache an. Die **vollständigen Lizenztexte** aller Pakete stehen in `THIRD_PARTY_LICENSES.txt` (erzeugt mit `python tools/gen_licenses.py`), die genaue Liste ergibt sich aus `Cargo.lock`.
 

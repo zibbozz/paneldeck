@@ -33,6 +33,7 @@ use std::time::{Duration, Instant};
 
 mod chat_images;
 mod chat_images_ui;
+mod chat_ask_ui;
 mod chat_ui;
 mod cleanup_ui;
 mod claude_status;
@@ -252,7 +253,10 @@ impl Entry {
     }
     fn status_label(&self, lang: Lang) -> &'static str {
         if let Some(c) = &self.chat {
-            return if c.status() == chatmod::ChatStatus::Approval {
+            // Fragen des Modells (#356) warten auf den Nutzer – wie eine Freigabe, aber mit eigenem Text.
+            return if c.awaiting_answer() {
+                lang.t("wartet auf dich", "waiting for you")
+            } else if c.status() == chatmod::ChatStatus::Approval {
                 lang.t("Freigabe?", "approval?")
             } else if c.streaming() {
                 lang.t("schreibt", "streaming")
@@ -3256,7 +3260,8 @@ impl App {
             }
             let Some(e) = self.entries.get_mut(&id) else { continue };
             let Some(c) = e.chat.as_ref() else { continue };
-            tools_running |= c.tool_running();
+            // Offene Fragen an den Nutzer (#356) haben kein Zeitlimit: dafür nicht ständig neu zeichnen.
+            tools_running |= c.tool_running() && !c.awaiting_answer();
             e.status = chat_claude_status(c.status());
             let waiting = e.status == ClaudeStatus::Permission;
             // Markierung: Runde zu Ende (fertig, Fehler, angehalten) oder eine Freigabe-Frage erscheint.
