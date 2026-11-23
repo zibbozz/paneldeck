@@ -311,6 +311,75 @@ impl App {
         self.activate(id);
     }
 
+    /// Chat nach dem Kompaktieren (#359): ein Beispielserver (ohne Verbindung), ein Chat mit zwei kompaktierten Runden,
+    /// der Zusammenfassung (zugeklappt, „Original anzeigen“) und zwei behaltenen Runden – alles im Speicher.
+    fn shot_chat_compacted(&mut self, ctx: &egui::Context) {
+        use crate::chat::compact;
+        use crate::chat::store::{ChatTodo, SummaryInfo, TodoStatus, ToolCall, TouchedFile};
+        use crate::llm::config::{LlmModel, LlmServer};
+        let lang = self.settings.language;
+        let demo = demo_dir(&self.dir);
+        write_demo_project(&demo);
+        self.set_mode(titlebar::Mode::Terminals);
+        if let Some(p) = self.projects.iter_mut().find(|p| p.id == self.active_project) {
+            p.name = "Acme Shop".into();
+            p.folder = demo.to_string_lossy().to_string();
+        }
+        let model = "qwen3:8b";
+        if !self.settings.llm_servers.iter().any(|s| s.id == "shot-ollama") {
+            let mut s = LlmServer { id: "shot-ollama".into(), name: "Ollama".into(), kind: crate::llm::ServerKind::Ollama, url: crate::llm::config::OLLAMA_LOCAL.into(), ..LlmServer::default() };
+            s.set_model_cfg(LlmModel { level: crate::mcp::McpLevel::Control, level_chosen: true, context_length: Some(32768), ..LlmModel::named(model) });
+            self.settings.llm_servers.push(s);
+        }
+        let pid = self.active_project;
+        let meta = state::ChatMeta { server: "shot-ollama".into(), model: model.into() };
+        let id = self.new_session(ctx, NewOpts { project: Some(pid), chat: Some(meta), name: Some(lang.t("Bestellungen stornieren", "Cancel orders").into()), ..NewOpts::default() });
+        let msg = |role: chatmod::Role, text: &str| chatmod::ChatMsg::new(role, text);
+        let old = |role: chatmod::Role, text: &str| {
+            let mut m = msg(role, text);
+            m.compacted = true;
+            m
+        };
+        let mut call = old(chatmod::Role::Assistant, "");
+        call.tool_calls.push(ToolCall { id: "c1".into(), name: "read_file".into(), arguments: serde_json::json!({"path": "src/orders.rs"}) });
+        let mut result = old(chatmod::Role::Tool, "{\"path\":\"src/orders.rs\",\"lines\":42}");
+        result.tool_call_id = Some("c1".into());
+        result.tool_name = Some("read_file".into());
+        result.status = Some(chatmod::ToolStatus::Ok);
+        let files = vec![TouchedFile { path: "src/orders.rs".into(), changed: true }, TouchedFile { path: "tests/orders.rs".into(), changed: false }];
+        let todos = vec![
+            ChatTodo { content: lang.t("Stornieren nur einmal erlauben", "Allow cancelling only once").into(), status: TodoStatus::Completed },
+            ChatTodo { content: lang.t("Test für doppeltes Stornieren", "Test for cancelling twice").into(), status: TodoStatus::InProgress },
+        ];
+        let text = lang.t(
+            "Du willst, dass eine Bestellung nur einmal storniert werden kann. `cancel_order` in `src/orders.rs` gibt jetzt `false` zurück, wenn sie schon storniert ist; `cargo test` läuft grün. Offen: ein Test für doppeltes Stornieren.",
+            "You want an order to be cancellable only once. `cancel_order` in `src/orders.rs` now returns `false` when it is already cancelled; `cargo test` passes. Still open: a test for cancelling twice.",
+        );
+        let mut summary = msg(chatmod::Role::System, &compact::summary_content(text, &files, &todos, None));
+        summary.summary = Some(SummaryInfo { messages: 6, files, text: text.into(), omitted: 0 });
+        let messages = vec![
+            old(chatmod::Role::User, lang.t("Wie storniere ich eine Bestellung?", "How do I cancel an order?")),
+            call,
+            result,
+            old(chatmod::Role::Assistant, lang.t("Mit `OrderStore::cancel_order(id)`.", "With `OrderStore::cancel_order(id)`.")),
+            old(chatmod::Role::User, lang.t("Sorge dafür, dass das nur einmal geht.", "Make sure that only works once.")),
+            old(chatmod::Role::Assistant, lang.t("Erledigt – `cancel_order` prüft jetzt `cancelled`.", "Done – `cancel_order` now checks `cancelled`.")),
+            summary,
+            msg(chatmod::Role::User, lang.t("Gibt es schon einen Test dafür?", "Is there a test for it yet?")),
+            msg(chatmod::Role::Assistant, lang.t("Ja: `cancel_order_only_once` in `tests/orders.rs`.", "Yes: `cancel_order_only_once` in `tests/orders.rs`.")),
+            msg(chatmod::Role::User, lang.t("Gut, dann schreib die Doku dazu.", "Good, then write the docs for it.")),
+            msg(chatmod::Role::Assistant, lang.t("Ich ergänze in der README einen Abschnitt „Bestellungen stornieren“.", "I'll add a section “Cancelling orders” to the README.")),
+        ];
+        if let Some(c) = self.entries.get_mut(&id).and_then(|e| e.chat.as_mut()) {
+            c.file.messages = messages;
+            c.file.todos = todos;
+            c.focus_input = false;
+            c.changed_from = 0;
+            c.touch();
+        }
+        self.activate(id);
+    }
+
     /// Chat mit Bildern (#357): ein Beispiel-Server mit einem Vision-Modell, eine eigene Nachricht mit `[Image#1]` (ein
     /// hier erzeugtes Beispielbild) und eine Antwort; das Popup öffnet `shot_keep`. Nur im Speicher und im Datenordner
     /// der Aufnahme.
@@ -442,6 +511,7 @@ impl App {
             "theme-checks" => self.shot_theme_editor("ansi8", true),
             // ---- Chats
             "chat-plan" => self.shot_chat_plan(ctx),
+            "chat-compacted" => self.shot_chat_compacted(ctx),
             // ---- Tutorial
             "chat-images" => self.shot_chat_images(ctx),
             "tutorial-card" => self.set_mode(titlebar::Mode::Terminals),

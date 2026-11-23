@@ -571,8 +571,7 @@ pub fn changes_message(lang: Lang, comment: &str) -> String {
 
 impl ChatState {
     /// Markdown des aktuellen Plans (vorgeschlagen, in Überarbeitung oder freigegeben; nicht verworfen) – die Stelle,
-    /// über die andere Teile (z. B. die Komprimierung des Verlaufs) den Plan wörtlich übernehmen.
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// über die andere Teile (das Kompaktieren, #359) den Plan wörtlich übernehmen.
     pub fn current_plan_markdown(&self) -> Option<&str> {
         self.file.plan.as_ref().filter(|p| p.current()).map(|p| p.markdown.as_str())
     }
@@ -1203,6 +1202,38 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Kompaktieren (#359): Der Plan kommt wörtlich in die Zusammenfassung, seine (kompaktierte) Nachricht bleibt die
+    /// Karte, die Entscheidung bleibt möglich; während einer angehaltenen Plan-Runde wird nicht kompaktiert.
+    #[test]
+    fn compaction_keeps_the_plan_and_waits_for_plan_rounds() {
+        use crate::chat::compact::CompactError;
+        let rounds = || vec![ChatMsg::new(Role::User, "plan it"), ChatMsg::new(Role::Assistant, PLAN_TEXT), ChatMsg::new(Role::User, "q2"), ChatMsg::new(Role::Assistant, "a2"), ChatMsg::new(Role::User, "q3"), ChatMsg::new(Role::Assistant, "a3")];
+        let echo = crate::chat::EchoBackend { delay: Duration::ZERO };
+        let mut c = ChatState::new(ChatFile { messages: rounds(), plan: Some(Plan { markdown: PLAN_TEXT.into(), revision: 1, ..Plan::default() }), ..ChatFile::default() }, None);
+        assert!(c.can_compact(), "ein wartender Plan hindert /compact nicht");
+        c.compact_now(&echo, &ChatMeta::default(), &TurnContext::default(), rp()).unwrap();
+        let t = Instant::now();
+        while c.compact.running() && t.elapsed() < Duration::from_secs(5) {
+            c.poll();
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(!c.compact.running() && c.compact.failure.is_none(), "{:?}", c.compact.failure);
+        let summary = c.messages().iter().find(|m| m.summary.is_some()).expect("Zusammenfassung");
+        assert!(summary.content.contains(&format!("## Current plan\n{PLAN_TEXT}")), "{}", summary.content);
+        let i = c.plan_message_index().expect("die Plan-Nachricht bleibt die Karte");
+        assert!(c.messages()[i].compacted, "sie ist kompaktiert");
+        assert!(c.plan_decidable() && c.current_plan_markdown() == Some(PLAN_TEXT));
+        assert!(c.discard_plan());
+        // Angehaltene Plan-Runde: erst Stopp oder Weiter, dann kompaktieren (eine normale angehaltene Runde wie bisher)
+        let mut c = ChatState::new(ChatFile { messages: rounds(), ..ChatFile::default() }, None);
+        c.planning.round = Some(PlanLevel::Low);
+        c.paused = true;
+        assert!(!c.can_compact());
+        assert_eq!(c.compact_now(&echo, &ChatMeta::default(), &TurnContext::default(), rp()), Err(CompactError::Busy));
+        c.planning.round = None;
+        assert!(c.can_compact());
     }
 
     #[test]

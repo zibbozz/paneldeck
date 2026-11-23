@@ -25,6 +25,11 @@
 //! }
 //! ```
 //!
+//! Nach einer Kompaktierung (seit 3.1.0, #359) tragen die ersetzten Nachrichten `"compacted": true` (sie bleiben in der
+//! Datei, gehen aber nicht mehr an das Modell), und an der Stelle des Schnitts steht die Zusammenfassung:
+//! `{ "role": "system", "content": "[Summary …] …", "summary": { "messages": 12, "files": [ { "path": "src/a.rs",
+//! "changed": true } ], "text": "…" } }`. Ältere Versionen senden Systemnachrichten nicht und sehen weiter alles.
+//!
 //! Lesen ist tolerant: BOM erlaubt, unbekannte Felder werden ignoriert, eine einzelne ungültige Nachricht wird
 //! übersprungen; eine unlesbare oder zu große Datei ergibt einen leeren Chat mit Hinweis (die Datei wird vorher als
 //! `<id>.defekt-<zeit>.json` gesichert). Geschrieben wird atomar (temporäre Datei, dann umbenennen). Seit 3.1.0 (#357)
@@ -99,6 +104,14 @@ pub struct ChatMsg {
     /// `id`). Nur für die Anzeige, wird nicht an das Modell gesendet; Unlesbares ergibt eine leere Liste.
     #[serde(skip_serializing_if = "Vec::is_empty", deserialize_with = "lenient_repairs")]
     pub repairs: Vec<CallRepair>,
+    /// Durch eine Zusammenfassung ersetzt (seit 3.1.0, #359): bleibt in der Datei und lässt sich im Chat aufklappen, wird
+    /// aber nicht mehr an das Modell gesendet. Gilt nur vor einer Zusammenfassung (sonst beim Laden zurückgesetzt).
+    #[serde(skip_serializing_if = "std::ops::Not::not", deserialize_with = "lenient_bool")]
+    pub compacted: bool,
+    /// Nur die Zusammenfassung einer Kompaktierung (seit 3.1.0, #359; `role` ist `system`, damit ältere Versionen sie
+    /// nicht senden): Angaben dazu. `content` ist der Text, den das Modell sieht. Unlesbares ergibt `None`.
+    #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "lenient_summary")]
+    pub summary: Option<SummaryInfo>,
     /// Bilder dieser Nachricht (#357, seit 3.1.0): Nummern aus `ChatFile::images` – bei Nutzer-Nachrichten die
     /// Platzhalter `[Image#n]` im Text, bei Werkzeug-Ergebnissen das Bild von `screenshot`/`read_file`. Unlesbares
     /// ergibt eine leere Liste.
@@ -109,6 +122,50 @@ pub struct ChatMsg {
     /// Unlesbares ergibt `None` (ältere Versionen zeigen solche Nachrichten als Systemnachricht und senden sie nicht).
     #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "lenient_event")]
     pub event: Option<ChatEvent>,
+}
+
+/// Angaben zu einer Zusammenfassung (#359).
+#[derive(Clone, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SummaryInfo {
+    /// So viele Nachrichten ersetzt sie (samt denen früherer Zusammenfassungen).
+    pub messages: usize,
+    /// Berührte Dateien bis zum Schnitt (für die nächste Kompaktierung).
+    #[serde(skip_serializing_if = "Vec::is_empty", deserialize_with = "lenient_files")]
+    pub files: Vec<TouchedFile>,
+    /// Die Zusammenfassung, wie das Modell sie schrieb (ohne Dateien, To-dos und Plan; Stoff der nächsten Kompaktierung).
+    pub text: String,
+    /// So viele der ältesten Nachrichten passten nicht mehr in die Anfrage der Zusammenfassung (fehlt bei 0).
+    #[serde(skip_serializing_if = "is_zero")]
+    pub omitted: usize,
+}
+
+fn is_zero(n: &usize) -> bool {
+    *n == 0
+}
+
+/// Eine berührte Datei: gelesen oder geändert (bearbeitet, geschrieben, verschoben, gelöscht).
+#[derive(Clone, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TouchedFile {
+    pub path: String,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub changed: bool,
+}
+
+/// Tolerant: nur ein echtes `true` gilt.
+fn lenient_bool<'de, D: serde::Deserializer<'de>>(d: D) -> Result<bool, D::Error> {
+    Ok(serde_json::Value::deserialize(d)?.as_bool() == Some(true))
+}
+
+fn lenient_summary<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<SummaryInfo>, D::Error> {
+    let v = serde_json::Value::deserialize(d)?;
+    Ok(v.is_object().then(|| serde_json::from_value::<SummaryInfo>(v).ok()).flatten())
+}
+
+fn lenient_files<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<TouchedFile>, D::Error> {
+    let v = serde_json::Value::deserialize(d)?;
+    Ok(v.as_array().map(|a| a.iter().filter_map(|x| serde_json::from_value::<TouchedFile>(x.clone()).ok()).filter(|f| !f.path.trim().is_empty()).collect()).unwrap_or_default())
 }
 
 /// Bildnummern tolerant lesen: Unlesbares fällt weg, ein falscher Typ ergibt eine leere Liste.
@@ -444,6 +501,8 @@ pub fn parse(text: &str) -> Option<(ChatFile, usize)> {
     if file.context_start.is_some_and(|c| c > file.messages.len()) {
         file.context_start = None;
     }
+    // Kompaktierte Nachrichten ohne Zusammenfassung dahinter wieder normal (#359).
+    super::compact::normalize(&mut file.messages);
     Some((file, skipped))
 }
 
@@ -704,6 +763,46 @@ mod tests {
         assert_eq!(parse(&text).unwrap().0, f);
         let (f, _) = parse(r#"{"todos":"x","messages":[]}"#).unwrap();
         assert!(f.todos.is_empty());
+    }
+
+    /// Kompaktierung (#359): Originale mit `compacted`, Zusammenfassung mit `summary`; ältere Dateien ohne die Felder laden
+    /// wie bisher, Unlesbares fällt weg, ohne Zusammenfassung dahinter gilt nichts als kompaktiert.
+    #[test]
+    fn compaction_fields_are_optional_lenient_and_round_trip() {
+        // Datei älterer Versionen: keine Felder, nichts kompaktiert, und es wird auch nichts davon geschrieben.
+        let (f, skipped) = parse(r#"{"messages":[{"role":"user","content":"a"},{"role":"assistant","content":"b"}]}"#).unwrap();
+        assert_eq!(skipped, 0);
+        assert!(f.messages.iter().all(|m| !m.compacted && m.summary.is_none()));
+        let text = String::from_utf8(serialize_capped(&f, 10_000)).unwrap();
+        assert!(!text.contains("compacted") && !text.contains("summary"), "{text}");
+        // Hin und zurück mit Originalen und Zusammenfassung.
+        let mut a = ChatMsg::new(Role::User, "old question");
+        a.compacted = true;
+        let mut b = ChatMsg::new(Role::Assistant, "old answer");
+        b.compacted = true;
+        let mut s = ChatMsg::new(Role::System, "[Summary …] The user asked X.");
+        s.summary = Some(SummaryInfo { messages: 2, files: vec![TouchedFile { path: "src/a.rs".into(), changed: true }, TouchedFile { path: "b.md".into(), changed: false }], text: "The user asked X.".into(), omitted: 3 });
+        let file = ChatFile { messages: vec![a, b, s, ChatMsg::new(Role::User, "new question")], ..ChatFile::default() };
+        let text = String::from_utf8(serialize_capped(&file, 100_000)).unwrap();
+        assert!(text.contains(r#""content":"old question","ts":"#) && text.contains(r#""compacted":true"#), "{text}");
+        assert!(text.contains(r#""summary":{"messages":2,"files":[{"path":"src/a.rs","changed":true},{"path":"b.md"}],"text":"The user asked X.","omitted":3}"#), "{text}");
+        let (back, _) = parse(&text).unwrap();
+        assert_eq!(back, file);
+        let d = tmp("compact");
+        let p = path(&d, 9);
+        save(&p, &file).unwrap();
+        assert_eq!(load(&p), (file.clone(), None));
+        let _ = std::fs::remove_dir_all(&d);
+        // Unlesbares: falscher Typ → nicht kompaktiert bzw. keine Zusammenfassung; die Nachricht bleibt.
+        let (f, skipped) = parse(r#"{"messages":[{"role":"user","content":"a","compacted":"yes"},{"role":"system","content":"s","summary":"oops"},{"role":"system","content":"t","summary":{"messages":"x","files":[1,{"path":""},{"path":"ok.rs"}]}}]}"#).unwrap();
+        assert_eq!((skipped, f.messages.len()), (0, 3));
+        assert!(!f.messages[0].compacted && f.messages[1].summary.is_none());
+        assert_eq!(f.messages[2].summary, None, "messages kein Zahl: ganze Angabe unlesbar");
+        let (f, _) = parse(r#"{"messages":[{"role":"system","content":"t","summary":{"files":[1,{"path":""},{"path":"ok.rs"}],"future":true}}]}"#).unwrap();
+        assert_eq!(f.messages[0].summary, Some(SummaryInfo { messages: 0, files: vec![TouchedFile { path: "ok.rs".into(), changed: false }], text: String::new(), omitted: 0 }));
+        // Kompaktiert, aber keine Zusammenfassung dahinter (z. B. von Hand gelöscht): wieder normal, damit nichts verloren geht.
+        let (f, _) = parse(r#"{"messages":[{"role":"user","content":"a","compacted":true},{"role":"assistant","content":"b","compacted":true}]}"#).unwrap();
+        assert!(f.messages.iter().all(|m| !m.compacted));
     }
 
     #[test]

@@ -386,6 +386,23 @@ mod tests {
     }
 
     #[test]
+    fn a_compacted_plan_message_still_shows_its_card() {
+        let mut c = with_plan(PlanStatus::Proposed);
+        c.file.messages[0].compacted = true;
+        c.file.messages[1].compacted = true;
+        let mut s = ChatMsg::new(Role::System, "summary");
+        s.summary = Some(crate::chat::store::SummaryInfo { messages: 2, ..Default::default() });
+        c.file.messages.insert(2, s);
+        c.file.messages.extend([ChatMsg::new(Role::User, "next"), ChatMsg::new(Role::Assistant, "ok")]);
+        let mut h = H::new();
+        h.frame(&mut c, Lang::En, false, vec![]);
+        h.frame(&mut c, Lang::En, false, vec![]);
+        assert!(h.has("Execute") && h.has("Read the code"), "Karte trotz Kompaktieren sichtbar: {:?}", h.texts());
+        assert!(!h.has("tidy"), "die übrigen kompaktierten Nachrichten bleiben zugeklappt");
+        assert_eq!(h.click(&mut c, Lang::En, "Execute").plan, Some(PlanAction::Execute));
+    }
+
+    #[test]
     fn shift_tab_toggles_the_plan_mode_and_keeps_the_focus() {
         let mut c = ChatState::new(ChatFile::default(), None);
         let mut h = H::new();
