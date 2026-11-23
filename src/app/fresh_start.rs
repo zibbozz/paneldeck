@@ -89,7 +89,7 @@ pub(super) fn remove_session_files(dir: &Path, ids: impl IntoIterator<Item = u64
 }
 
 /// Start mit „aus“: alle Scrollback- und Chat-Dateien früherer Läufe in diesem Datenordner löschen (`<id>.…` in
-/// `scrollback/` und `chats/`), auch von Sitzungen, die nach der letzten Speicherung vor einem Absturz entstanden und
+/// `scrollback/` und `chats/`, dazu die Bilderordner `chats/<id>/`), auch von Sitzungen, die nach der letzten Speicherung vor einem Absturz entstanden und
 /// deshalb in keiner `state.json` stehen. Beiseitegelegte Verläufe (`.orphan-`) und andere Dateien bleiben. Gibt die
 /// höchste gefundene Id zurück (damit sie nicht neu vergeben wird).
 pub(super) fn sweep_session_files(dir: &Path) -> u64 {
@@ -101,6 +101,12 @@ pub(super) fn sweep_session_files(dir: &Path) -> u64 {
             let digits: String = name.chars().take_while(|c| c.is_ascii_digit()).collect();
             let rest = &name[digits.len()..];
             let Ok(id) = digits.parse::<u64>() else { continue };
+            // Bilder eines Chats (#357): der Ordner `chats/<id>/` (nur ein echter Ordner, kein Link).
+            if sub == "chats" && id > 0 && rest.is_empty() && std::fs::symlink_metadata(e.path()).is_ok_and(|m| m.is_dir() && !m.file_type().is_symlink()) {
+                max = max.max(id);
+                let _ = std::fs::remove_dir_all(e.path());
+                continue;
+            }
             if id == 0 || !rest.starts_with('.') || rest.contains(".orphan-") || !e.file_type().is_ok_and(|t| t.is_file()) {
                 continue;
             }
@@ -332,7 +338,12 @@ mod tests {
             std::fs::write(chats.join(f), "{}").unwrap();
         }
         std::fs::create_dir_all(chats.join("5.dir")).unwrap();
+        // Bilder eines Chats (#357)
+        std::fs::create_dir_all(chats.join("12").join("images")).unwrap();
+        std::fs::write(chats.join("12").join("images").join("1.png"), "x").unwrap();
+        std::fs::create_dir_all(chats.join("4.orphan-7-images")).unwrap();
         assert_eq!(sweep_session_files(&dir), 12);
+        assert!(!chats.join("12").exists() && chats.join("4.orphan-7-images").exists());
         for gone in [sb.join("3.txt"), sb.join("12.txt"), chats.join("3.json"), chats.join("12.json"), chats.join("12.defekt-1.json")] {
             assert!(!gone.exists(), "{}", gone.display());
         }

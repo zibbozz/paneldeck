@@ -507,6 +507,8 @@ impl App {
         let (todos, todos_done, tickets) = self.tut.db_counts;
         let ed = self.editor_probe();
         Probe {
+            time: self.mode == titlebar::Mode::Time,
+            alarms: self.time.data.alarms.len(),
             editor: self.mode == titlebar::Mode::Editor,
             editor_docs: ed.docs,
             editor_groups: ed.groups,
@@ -588,6 +590,10 @@ impl App {
                 Prep::PlanProject => self.tut_plan_project(),
                 Prep::PlanTab(k) => self.plan.set_tab_key(k),
                 Prep::Editor => self.set_mode(titlebar::Mode::Editor),
+                Prep::Time(sub) => {
+                    self.set_mode(titlebar::Mode::Time);
+                    self.time.sub = sub;
+                }
                 Prep::EditorTree => self.editor_show_tree(),
                 Prep::EditorFile => self.tut_editor_sample(),
                 Prep::EditorFind(open) => self.editor_find_bar(open),

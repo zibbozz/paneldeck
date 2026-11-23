@@ -15,6 +15,7 @@ mod stopwatches;
 mod tests;
 mod timers;
 
+use crate::app::tutorial::{Spot, TutMark};
 use crate::state::Lang;
 use crate::style;
 use crate::time::settings::TimeSettings;
@@ -214,14 +215,17 @@ impl TimeUi {
         let lang = env.lang;
         egui::TopBottomPanel::top(style::salted(Id::new("time_tabs"))).frame(egui::Frame::new().inner_margin(egui::Margin::symmetric(12, 8))).show(ctx, |ui| {
             ui.horizontal(|ui| {
+                let left = ui.cursor().min;
                 for s in Sub::ALL {
                     if style::tab(ui, s.label(lang), self.sub == s).clicked() {
                         self.sub = s;
                         self.confirm_delete = None;
                     }
                 }
+                let tabs = egui::Rect::from_min_max(left, egui::pos2(ui.min_rect().right(), left.y + 26.0));
+                crate::app::tutorial::spot_rect(ui, Spot::TimeSubTabs, tabs);
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if ui.button(lang.t("Optionen …", "Options …")).on_hover_text(lang.t("Benachrichtigungen, Klang, Zeiterfassung", "Notifications, sound, time tracking")).clicked() {
+                    if ui.button(lang.t("Optionen …", "Options …")).on_hover_text(lang.t("Benachrichtigungen, Klang, Zeiterfassung", "Notifications, sound, time tracking")).spot(Spot::TimeOptions).clicked() {
                         self.options_open = !self.options_open;
                     }
                     let ringing = self.ringing.len();
@@ -309,7 +313,9 @@ impl TimeUi {
         let mut new = false;
         ui.add_space(6.0);
         ui.horizontal(|ui| {
-            new = ui.button(format!("+ {new_label}")).clicked();
+            let r = ui.button(format!("+ {new_label}"));
+            // Ziel des Tutorials: „+ Neuer Wecker“ (Liste 0)
+            new = if idx == 0 { r.spot(Spot::TimeNewAlarm).clicked() } else { r.clicked() };
             ui.add(egui::TextEdit::singleline(&mut self.filter[idx]).hint_text(lang.t("Suchen …", "Search …")).desired_width(180.0));
             ui.label(RichText::new(count.to_string()).color(style::dim(ui)));
         });

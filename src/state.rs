@@ -297,6 +297,11 @@ pub struct Settings {
     /// Je Modell abweichend in `llm_servers[].models[].prompt_parts`. Tolerant: nur ein echtes `false` schaltet aus.
     #[serde(skip_serializing_if = "crate::llm::prompt_parts::PromptParts::is_default")]
     pub chat_prompt_parts: crate::llm::prompt_parts::PromptParts,
+    /// Kompaktieren der Chats (seit 3.1.0, #359): `auto` (Standard aus), `threshold_percent` (80), Sicherheitsfenster
+    /// `window_percent` (15) und `window_min` (4096). Fehlt das Feld (Standard), gilt alles wie bisher; Unlesbares ergibt
+    /// je Wert den Standard, Zahlen werden auf ihre Grenzen gesetzt.
+    #[serde(skip_serializing_if = "crate::chat::compact::CompactSettings::is_default")]
+    pub chat_compact: crate::chat::compact::CompactSettings,
     /// Editor-Reiter (seit 3.0.0, #54): Schrift, große Dateien, automatisch speichern, Suche in Dateien und die drei
     /// Agenten-Schalter (`editor_svc::settings`). Fehlt in älteren Dateien (dann die Standards, Agenten-Schalter aus);
     /// Unlesbares ergibt je Wert den Standard.
@@ -428,6 +433,7 @@ impl Default for Settings {
             cursor_blink: true,
             theme_checks_off: Vec::new(),
             chat_prompt_parts: Default::default(),
+            chat_compact: Default::default(),
             editor: Default::default(),
             tutorial_whats_new: false,
             time: Default::default(),
@@ -1513,6 +1519,14 @@ mod tests {
         assert!(!s.chat_prompt_parts.get(PromptPart::Safety) && s.chat_prompt_parts.get(PromptPart::Examples));
         assert_eq!(serde_json::to_value(&s).unwrap()["chat_prompt_parts"]["safety"], serde_json::json!(false));
         assert!(serde_json::from_str::<Settings>(r#"{"chat_prompt_parts":7}"#).unwrap().chat_prompt_parts.is_default());
+        // Kompaktieren (#359): fehlt in älteren Dateien (Standard: aus) und wird dann auch nicht geschrieben.
+        let s: Settings = serde_json::from_str("{}").unwrap();
+        assert!(!s.chat_compact.auto && s.chat_compact.is_default());
+        assert!(serde_json::to_value(&s).unwrap().get("chat_compact").is_none());
+        let s: Settings = serde_json::from_str(r#"{"chat_compact":{"auto":true,"threshold_percent":70}}"#).unwrap();
+        assert!(s.chat_compact.auto && s.chat_compact.threshold_percent == 70 && s.chat_compact.window_min == 4096);
+        assert_eq!(serde_json::to_value(&s).unwrap()["chat_compact"], serde_json::json!({"auto": true, "threshold_percent": 70, "window_percent": 15, "window_min": 4096}));
+        assert!(serde_json::from_str::<Settings>(r#"{"chat_compact":"on"}"#).unwrap().chat_compact.is_default());
         // Editor (#54): fehlt = Standards (Agenten-Schalter aus), Unlesbares je Wert, Rundweg über settings.json.
         assert_eq!(s.editor, crate::editor_svc::settings::EditorSettings::default());
         let e: Settings = serde_json::from_str(r#"{"editor":{"agent_open":true,"large_file_mb":"x","search_exclude":["dist/"]},"theme":"Dracula"}"#).unwrap();

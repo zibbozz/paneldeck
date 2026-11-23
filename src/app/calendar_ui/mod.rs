@@ -248,6 +248,7 @@ impl CalUi {
             ui.add_space(style::S2);
             ui.label(RichText::new(self.title(env)).strong().size(15.0));
             ui.add_space(style::S3);
+            let views_left = ui.cursor().min;
             for (v, de, en, key) in [
                 (ViewKind::Month, "Monat", "Month", "view_month"),
                 (ViewKind::Week, "Woche", "Week", "view_week"),
@@ -260,6 +261,9 @@ impl CalUi {
                     self.set_view(env, v);
                 }
             }
+            // Ziel des Tutorials (#164): die vier Ansichten
+            let views = Rect::from_min_max(views_left, egui::pos2(ui.min_rect().right(), views_left.y + 26.0));
+            super::tutorial::spot_rect(ui, super::tutorial::Spot::CalendarViews, views);
             ui.add_space(style::S3);
             let r = ui.button(lang.t("+ Neuer Termin", "+ New event"));
             self.hits.push((Hit::Button("new"), r.rect));

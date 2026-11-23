@@ -17,14 +17,24 @@
 //!       "repairs": [ { "id": "c2", "text_call": true, "fixes": [ "lines: \"50\" → 50" ] } ] },
 //!     { "role": "tool", "content": "{\"text\":\"…\"}", "ts": 1763200005,
 //!       "tool_call_id": "c2", "tool_name": "read_terminal", "status": "ok" },
-//!     { "role": "assistant", "content": "", "ts": 1763200010, "error": "connection refused" }
-//!   ]
+//!     { "role": "assistant", "content": "", "ts": 1763200010, "error": "connection refused" },
+//!     { "role": "user", "content": "What is wrong here? [Image#1]", "ts": 1763200020, "images": [1] }
+//!   ],
+//!   "images": [ { "n": 1, "file": "1.png", "send": "1.send.jpg", "mime": "image/jpeg", "width": 3840, "height": 2160,
+//!                 "send_width": 1568, "send_height": 882, "source": "paste" } ]
 //! }
 //! ```
 //!
+//! Nach einer Kompaktierung (seit 3.1.0, #359) tragen die ersetzten Nachrichten `"compacted": true` (sie bleiben in der
+//! Datei, gehen aber nicht mehr an das Modell), und an der Stelle des Schnitts steht die Zusammenfassung:
+//! `{ "role": "system", "content": "[Summary …] …", "summary": { "messages": 12, "files": [ { "path": "src/a.rs",
+//! "changed": true } ], "text": "…" } }`. Ältere Versionen senden Systemnachrichten nicht und sehen weiter alles.
+//!
 //! Lesen ist tolerant: BOM erlaubt, unbekannte Felder werden ignoriert, eine einzelne ungültige Nachricht wird
 //! übersprungen; eine unlesbare oder zu große Datei ergibt einen leeren Chat mit Hinweis (die Datei wird vorher als
-//! `<id>.defekt-<zeit>.json` gesichert). Geschrieben wird atomar (temporäre Datei, dann umbenennen).
+//! `<id>.defekt-<zeit>.json` gesichert). Geschrieben wird atomar (temporäre Datei, dann umbenennen). Seit 3.1.0 (#357)
+//! liegen Bilder in `chats/<id>/images/` (siehe `images`); die Datei nennt sie nur (`images`, je Nachricht die Nummern).
+//! Beim Speichern steht `images` vor `messages` (wie alle Felder außer den Nachrichten).
 
 use crate::state;
 use serde::{Deserialize, Serialize};
@@ -94,6 +104,108 @@ pub struct ChatMsg {
     /// `id`). Nur für die Anzeige, wird nicht an das Modell gesendet; Unlesbares ergibt eine leere Liste.
     #[serde(skip_serializing_if = "Vec::is_empty", deserialize_with = "lenient_repairs")]
     pub repairs: Vec<CallRepair>,
+    /// Durch eine Zusammenfassung ersetzt (seit 3.1.0, #359): bleibt in der Datei und lässt sich im Chat aufklappen, wird
+    /// aber nicht mehr an das Modell gesendet. Gilt nur vor einer Zusammenfassung (sonst beim Laden zurückgesetzt).
+    #[serde(skip_serializing_if = "std::ops::Not::not", deserialize_with = "lenient_bool")]
+    pub compacted: bool,
+    /// Nur die Zusammenfassung einer Kompaktierung (seit 3.1.0, #359; `role` ist `system`, damit ältere Versionen sie
+    /// nicht senden): Angaben dazu. `content` ist der Text, den das Modell sieht. Unlesbares ergibt `None`.
+    #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "lenient_summary")]
+    pub summary: Option<SummaryInfo>,
+    /// Bilder dieser Nachricht (#357, seit 3.1.0): Nummern aus `ChatFile::images` – bei Nutzer-Nachrichten die
+    /// Platzhalter `[Image#n]` im Text, bei Werkzeug-Ergebnissen das Bild von `screenshot`/`read_file`. Unlesbares
+    /// ergibt eine leere Liste.
+    #[serde(skip_serializing_if = "Vec::is_empty", deserialize_with = "lenient_numbers")]
+    pub images: Vec<u32>,
+    /// Nur Nachrichten von Paneldeck (Rolle `system`, seit 3.1.0, #355): Ereignis, z. B. „Hintergrund-Befehl beendet“.
+    /// `content` ist der Text für das Modell (geht als Nachricht des Nutzers mit); die Oberfläche zeigt eine eigene Zeile.
+    /// Unlesbares ergibt `None` (ältere Versionen zeigen solche Nachrichten als Systemnachricht und senden sie nicht).
+    #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "lenient_event")]
+    pub event: Option<ChatEvent>,
+}
+
+/// Angaben zu einer Zusammenfassung (#359).
+#[derive(Clone, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SummaryInfo {
+    /// So viele Nachrichten ersetzt sie (samt denen früherer Zusammenfassungen).
+    pub messages: usize,
+    /// Berührte Dateien bis zum Schnitt (für die nächste Kompaktierung).
+    #[serde(skip_serializing_if = "Vec::is_empty", deserialize_with = "lenient_files")]
+    pub files: Vec<TouchedFile>,
+    /// Die Zusammenfassung, wie das Modell sie schrieb (ohne Dateien, To-dos und Plan; Stoff der nächsten Kompaktierung).
+    pub text: String,
+    /// So viele der ältesten Nachrichten passten nicht mehr in die Anfrage der Zusammenfassung (fehlt bei 0).
+    #[serde(skip_serializing_if = "is_zero")]
+    pub omitted: usize,
+}
+
+fn is_zero(n: &usize) -> bool {
+    *n == 0
+}
+
+/// Eine berührte Datei: gelesen oder geändert (bearbeitet, geschrieben, verschoben, gelöscht).
+#[derive(Clone, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TouchedFile {
+    pub path: String,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub changed: bool,
+}
+
+/// Tolerant: nur ein echtes `true` gilt.
+fn lenient_bool<'de, D: serde::Deserializer<'de>>(d: D) -> Result<bool, D::Error> {
+    Ok(serde_json::Value::deserialize(d)?.as_bool() == Some(true))
+}
+
+fn lenient_summary<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<SummaryInfo>, D::Error> {
+    let v = serde_json::Value::deserialize(d)?;
+    Ok(v.is_object().then(|| serde_json::from_value::<SummaryInfo>(v).ok()).flatten())
+}
+
+fn lenient_files<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<TouchedFile>, D::Error> {
+    let v = serde_json::Value::deserialize(d)?;
+    Ok(v.as_array().map(|a| a.iter().filter_map(|x| serde_json::from_value::<TouchedFile>(x.clone()).ok()).filter(|f| !f.path.trim().is_empty()).collect()).unwrap_or_default())
+}
+
+/// Bildnummern tolerant lesen: Unlesbares fällt weg, ein falscher Typ ergibt eine leere Liste.
+fn lenient_numbers<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<u32>, D::Error> {
+    let v = serde_json::Value::deserialize(d)?;
+    let mut out: Vec<u32> = Vec::new();
+    for n in v.as_array().map(|a| a.iter().filter_map(|x| x.as_u64()).filter(|n| *n > 0 && *n <= u32::MAX as u64).map(|n| n as u32).collect::<Vec<_>>()).unwrap_or_default() {
+        if !out.contains(&n) {
+            out.push(n);
+        }
+    }
+    Ok(out)
+}
+
+/// Ereignis von Paneldeck im Verlauf (#355).
+#[derive(Clone, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ChatEvent {
+    /// Art: [`ChatEvent::BACKGROUND_COMMAND`].
+    pub kind: String,
+    /// Kennung des Befehls (`bg1`).
+    pub id: String,
+    pub command: String,
+    /// `exited`, `stopped` oder `failed`.
+    pub state: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i64>,
+    pub duration_ms: u64,
+    /// Fehlercode bei `failed`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+impl ChatEvent {
+    pub const BACKGROUND_COMMAND: &'static str = "background_command";
+}
+
+fn lenient_event<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<ChatEvent>, D::Error> {
+    let v = serde_json::Value::deserialize(d)?;
+    Ok(serde_json::from_value::<ChatEvent>(v).ok().filter(|e| !e.kind.is_empty()))
 }
 
 /// Reparatur an einem Werkzeugaufruf (#340): als Text geschriebener Aufruf erkannt und/oder Argumente normalisiert.
@@ -140,12 +252,19 @@ pub struct ChatFile {
     /// Liste.
     #[serde(skip_serializing_if = "Vec::is_empty", deserialize_with = "lenient_todos")]
     pub todos: Vec<ChatTodo>,
+    /// Aktueller Plan des Plan-Modus (seit 3.1.0, #358): Markdown, Stufe, Stand. Unlesbares ergibt keinen Plan.
+    #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "super::plan::lenient_plan")]
+    pub plan: Option<super::plan::Plan>,
+    /// Bilder des Chats (#357, seit 3.1.0): Verweise auf die Dateien in `chats/<id>/images/`; die Nachrichten nennen
+    /// nur die Nummern (`ChatMsg::images`). Unlesbares und unsichere Dateinamen fallen weg.
+    #[serde(skip_serializing_if = "Vec::is_empty", deserialize_with = "super::images::lenient_entries")]
+    pub images: Vec<super::images::ImageEntry>,
     pub messages: Vec<ChatMsg>,
 }
 
 impl Default for ChatFile {
     fn default() -> Self {
-        ChatFile { version: VERSION, context_start: None, always_allow: Vec::new(), todos: Vec::new(), messages: Vec::new() }
+        ChatFile { version: VERSION, context_start: None, always_allow: Vec::new(), todos: Vec::new(), images: Vec::new(), plan: None, messages: Vec::new() }
     }
 }
 
@@ -187,12 +306,20 @@ fn lenient_todos<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<ChatTodo>
 /// wenn beides passt, läuft ein Aufruf ohne Nachfrage. Regeln ohne Sitzung (`null`, aus Vorabständen) gelten nie –
 /// außer für die Agenten-Werkzeuge des Chats (seit 2.7.0, #338): dort gilt eine Regel je Werkzeug für den ganzen
 /// Chat, bei `run_command` im Terminal des Chats nur mit `prefix` (Befehle, die wortweise so beginnen).
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct AllowRule {
     pub tool: String,
     pub session: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prefix: Option<String>,
+    /// Nur `run_command` mit `prefix` (seit 3.1.0, #355): die Regel gilt nur für diese Shell (Vergleichsform des Namens,
+    /// `bg_commands::shell_key`; fehlt = das Profil des Projekts) …
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shell: Option<String>,
+    /// … und nur im Vordergrund bzw. nur im Hintergrund. Ältere Regeln (ohne beides) gelten nur im Vordergrund mit dem
+    /// Profil des Projekts.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub background: bool,
 }
 
 /// Werkzeuge, für die es nie „Immer für diesen Chat“ gibt (auch mit `session`-Argument nicht).
@@ -203,10 +330,12 @@ impl AllowRule {
     /// `run_command` im Terminal des Chats mit dem Präfix des Befehls.
     pub fn for_call(call: &ToolCall) -> Self {
         if super::agent::is_local(call) {
-            let prefix = (call.name == "run_command").then(|| call.arguments.get("command").and_then(|c| c.as_str()).and_then(super::agent::command_prefix)).flatten();
-            return AllowRule { tool: call.name.clone(), session: None, prefix };
+            let rc = call.name == "run_command";
+            let prefix = rc.then(|| call.arguments.get("command").and_then(|c| c.as_str()).and_then(super::agent::command_prefix)).flatten();
+            let (shell, background) = if rc { (super::bg_commands::shell_key(&call.arguments), super::bg_commands::flag_set(call.arguments.get("background"))) } else { (None, false) };
+            return AllowRule { tool: call.name.clone(), session: None, prefix, shell, background };
         }
-        AllowRule { tool: call.name.clone(), session: call.arguments.get("session").and_then(|s| s.as_u64()), prefix: None }
+        AllowRule { tool: call.name.clone(), session: call.arguments.get("session").and_then(|s| s.as_u64()), ..AllowRule::default() }
     }
 
     /// Darf es für diesen Aufruf „Immer für diesen Chat“ geben? Paneldeck-Werkzeuge nur mit einer Ziel-Sitzung (Zahl
@@ -226,7 +355,13 @@ impl AllowRule {
                 return false;
             }
             return match &self.prefix {
-                Some(p) => call.arguments.get("command").and_then(|c| c.as_str()).is_some_and(|c| super::agent::prefix_matches(p, c)),
+                // Befehle: gleicher Anfang, dieselbe Shell und derselbe Modus (Vorder-/Hintergrund, #355 Review).
+                Some(p) => {
+                    let a = &call.arguments;
+                    a.get("command").and_then(|c| c.as_str()).is_some_and(|c| super::agent::prefix_matches(p, c))
+                        && self.shell == super::bg_commands::shell_key(a)
+                        && self.background == super::bg_commands::flag_set(a.get("background"))
+                }
                 None => true,
             };
         }
@@ -242,7 +377,7 @@ impl AllowRule {
         match self.tool.as_str() {
             "run_command" => self.prefix.as_deref().is_some_and(|p| !p.trim().is_empty()),
             "read_file" => false,
-            t => super::agent::is_agent_tool(t) && self.prefix.is_none(),
+            t => super::agent::is_agent_tool(t) && self.prefix.is_none() && self.shell.is_none() && !self.background,
         }
     }
 }
@@ -273,7 +408,7 @@ fn lenient_rules<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<AllowRule
     let v = serde_json::Value::deserialize(d)?;
     let one = |x: &serde_json::Value| -> Option<AllowRule> {
         if let Some(s) = x.as_str() {
-            return Some(AllowRule { tool: s.to_string(), session: None, prefix: None });
+            return Some(AllowRule { tool: s.to_string(), ..AllowRule::default() });
         }
         let tool = x.get("tool")?.as_str()?.to_string();
         let session = match x.get("session") {
@@ -284,7 +419,15 @@ fn lenient_rules<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<AllowRule
             None | Some(serde_json::Value::Null) => None,
             Some(p) => Some(p.as_str()?.to_string()),
         };
-        Some(AllowRule { tool, session, prefix })
+        let shell = match x.get("shell") {
+            None | Some(serde_json::Value::Null) => None,
+            Some(p) => Some(p.as_str()?.to_string()),
+        };
+        let background = match x.get("background") {
+            None | Some(serde_json::Value::Null) => false,
+            Some(b) => b.as_bool()?,
+        };
+        Some(AllowRule { tool, session, prefix, shell, background })
     };
     let mut out: Vec<AllowRule> = Vec::new();
     for r in v.as_array().map(|a| a.iter().filter_map(one).collect::<Vec<_>>()).unwrap_or_default() {
@@ -358,6 +501,8 @@ pub fn parse(text: &str) -> Option<(ChatFile, usize)> {
     if file.context_start.is_some_and(|c| c > file.messages.len()) {
         file.context_start = None;
     }
+    // Kompaktierte Nachrichten ohne Zusammenfassung dahinter wieder normal (#359).
+    super::compact::normalize(&mut file.messages);
     Some((file, skipped))
 }
 
@@ -382,10 +527,11 @@ pub fn save(path: &Path, file: &ChatFile) -> std::io::Result<()> {
 /// nicht, fallen die ältesten Nachrichten nach den Systemnachrichten am Anfang weg (anhand der gemessenen Größen).
 pub fn serialize_capped(file: &ChatFile, cap: usize) -> Vec<u8> {
     let parts: Vec<Vec<u8>> = file.messages.iter().map(|m| serde_json::to_vec(m).unwrap_or_else(|_| b"{}".to_vec())).collect();
-    let keep_from = file.messages.iter().take_while(|m| m.role == Role::System).count();
+    // Ereignisse (#355) sind keine Systemnachrichten am Anfang, die immer bleiben.
+    let keep_from = file.messages.iter().take_while(|m| m.role == Role::System && m.event.is_none()).count();
     let size = |from: usize| -> usize { parts[..keep_from].iter().chain(&parts[from..]).map(|p| p.len() + 1).sum() };
     // Kopf ohne Nachrichten (+ Reserve für context_start): `{"version":1,"context_start":N,"always_allow":[…],"messages":[]}`
-    let head_len = 64 + serde_json::to_vec(&file.always_allow).map(|v| v.len()).unwrap_or(0) + serde_json::to_vec(&file.todos).map(|v| v.len() + 10).unwrap_or(0) + 16;
+    let head_len = 64 + serde_json::to_vec(&file.always_allow).map(|v| v.len()).unwrap_or(0) + serde_json::to_vec(&file.todos).map(|v| v.len() + 10).unwrap_or(0) + serde_json::to_vec(&file.images).map(|v| v.len() + 12).unwrap_or(0) + serde_json::to_vec(&file.plan).map(|v| v.len() + 10).unwrap_or(0) + 16;
     let mut drop_to = keep_from;
     if head_len + size(keep_from) > cap {
         let mut total = size(keep_from);
@@ -397,7 +543,7 @@ pub fn serialize_capped(file: &ChatFile, cap: usize) -> Vec<u8> {
     let dropped = drop_to - keep_from;
     // Gekürzt: der Index rückt nach; lag er im weggefallenen Teil, sieht das Modell ohnehin alles Übrige.
     let context_start = if dropped == 0 { file.context_start } else { file.context_start.and_then(|c| (c >= drop_to).then(|| c - dropped)).filter(|c| *c > keep_from) };
-    let head = ChatFile { version: file.version, context_start, always_allow: file.always_allow.clone(), todos: file.todos.clone(), messages: Vec::new() };
+    let head = ChatFile { version: file.version, context_start, always_allow: file.always_allow.clone(), todos: file.todos.clone(), images: file.images.clone(), plan: file.plan.clone(), messages: Vec::new() };
     let mut data = serde_json::to_vec(&head).unwrap_or_default();
     // `messages` ist das letzte Feld: `…"messages":[]}` → Nachrichten zwischen die Klammern setzen.
     data.truncate(data.len().saturating_sub(2));
@@ -413,8 +559,9 @@ pub fn serialize_capped(file: &ChatFile, cap: usize) -> Vec<u8> {
     data
 }
 
-/// Höchste Sitzungs-Id, zu der es im Datenordner noch Dateien gibt (`chats/<id>…`, `scrollback/<id>…`). Damit vergibt
-/// der Hub nach einem Absturz oder einer zurückgesetzten `state.json` keine Id, deren alter Verlauf noch daliegt.
+/// Höchste Sitzungs-Id, zu der es im Datenordner noch Dateien gibt (`chats/<id>…`, `scrollback/<id>…`, der Ordner
+/// `chats/<id>/` mit den Bildern). Damit vergibt der Hub nach einem Absturz oder einer zurückgesetzten `state.json`
+/// keine Id, deren alter Verlauf noch daliegt.
 pub fn max_used_id(data_dir: &Path) -> u64 {
     let mut max = 0;
     for sub in ["chats", "scrollback"] {
@@ -422,7 +569,8 @@ pub fn max_used_id(data_dir: &Path) -> u64 {
         for e in rd.flatten() {
             let name = e.file_name().to_string_lossy().to_string();
             let digits: String = name.chars().take_while(|c| c.is_ascii_digit()).collect();
-            if digits.len() < name.len() && name[digits.len()..].starts_with('.') {
+            let dir_of_chat = sub == "chats" && !digits.is_empty() && digits.len() == name.len() && e.path().is_dir();
+            if dir_of_chat || (digits.len() < name.len() && name[digits.len()..].starts_with('.')) {
                 if let Ok(n) = digits.parse::<u64>() {
                     max = max.max(n);
                 }
@@ -446,12 +594,25 @@ pub fn set_aside(path: &Path) -> Option<PathBuf> {
         n += 1;
     }
     std::fs::rename(path, &target).ok()?;
+    // Bilder des fremden Verlaufs mit beiseitelegen (#357), sonst gehörten sie dem neuen Chat mit dieser Id.
+    let images = path.with_file_name(&stem);
+    if images.is_dir() {
+        let mut aside = path.with_file_name(format!("{stem}.orphan-{secs}-images"));
+        let mut n = 2;
+        while aside.exists() {
+            aside = path.with_file_name(format!("{stem}.orphan-{secs}-images-{n}"));
+            n += 1;
+        }
+        let _ = std::fs::rename(&images, aside);
+    }
     Some(target)
 }
 
-/// Verlauf eines geschlossenen Chats löschen, samt seiner Sicherungen beschädigter Dateien (`<id>.defekt-*.json`).
+/// Verlauf eines geschlossenen Chats löschen, samt seiner Sicherungen beschädigter Dateien (`<id>.defekt-*.json`) und
+/// seiner Bilder (`chats/<id>/`, #357).
 pub fn remove(data_dir: &Path, id: u64) {
     let _ = std::fs::remove_file(path(data_dir, id));
+    super::images::remove_all(data_dir, id);
     let prefix = format!("{id}.defekt-");
     if let Ok(rd) = std::fs::read_dir(dir(data_dir)) {
         for e in rd.flatten() {
@@ -481,7 +642,7 @@ mod tests {
         t.status = Some(ToolStatus::Ok);
         let mut e = ChatMsg::new(Role::Assistant, "");
         e.error = Some("connection refused".into());
-        ChatFile { version: VERSION, context_start: Some(1), always_allow: vec![rule("send_text", Some(4))], todos: Vec::new(), messages: vec![ChatMsg::new(Role::User, "Hi ä 😀"), a, t, ChatMsg::new(Role::Assistant, "**done**"), e] }
+        ChatFile { version: VERSION, context_start: Some(1), always_allow: vec![rule("send_text", Some(4))], todos: Vec::new(), images: Vec::new(), plan: None, messages: vec![ChatMsg::new(Role::User, "Hi ä 😀"), a, t, ChatMsg::new(Role::Assistant, "**done**"), e] }
     }
 
     #[test]
@@ -532,7 +693,7 @@ mod tests {
     }
 
     fn rule(tool: &str, session: Option<u64>) -> AllowRule {
-        AllowRule { tool: tool.into(), session, prefix: None }
+        AllowRule { tool: tool.into(), session, ..AllowRule::default() }
     }
 
     #[test]
@@ -551,7 +712,7 @@ mod tests {
         // Befehle im Terminal des Chats: nur mit Präfix, wortweise, ohne Verkettung
         let cmd = |c: &str| call("run_command", serde_json::json!({"command": c}));
         let r = AllowRule::for_call(&cmd("cargo test --release"));
-        assert_eq!(r, AllowRule { tool: "run_command".into(), session: None, prefix: Some("cargo test".into()) });
+        assert_eq!(r, AllowRule { tool: "run_command".into(), session: None, prefix: Some("cargo test".into()), ..AllowRule::default() });
         assert!(r.matches(&cmd("cargo test")) && r.matches(&cmd("cargo test -p x")));
         assert!(!r.matches(&cmd("cargo build")) && !r.matches(&cmd("cargo test; del x")));
         assert!(!r.matches(&call("run_command", serde_json::json!({"command": "cargo test", "session": 4}))), "nicht für andere Sitzungen");
@@ -563,7 +724,30 @@ mod tests {
         let text = String::from_utf8(serialize_capped(&f, 10_000)).unwrap();
         assert!(text.contains(r#""always_allow":[{"tool":"edit_file","session":null},{"tool":"run_command","session":null,"prefix":"cargo test"}]"#), "{text}");
         let (back, _) = parse(&text).unwrap();
-        assert_eq!(back.always_allow, [rule("edit_file", None), r]);
+        assert_eq!(back.always_allow, [rule("edit_file", None), r.clone()]);
+        // #355 Review: Befehlsregeln gelten nur für dieselbe Shell und denselben Modus; Ersetzungen fragen immer.
+        let with = |c: &str, extra: serde_json::Value| {
+            let mut a = serde_json::json!({"command": c});
+            for (k, v) in extra.as_object().unwrap() {
+                a[k] = v.clone();
+            }
+            call("run_command", a)
+        };
+        assert!(!r.matches(&with("cargo test", serde_json::json!({"shell": "Git Bash"}))), "andere Shell");
+        assert!(!r.matches(&with("cargo test", serde_json::json!({"background": true}))), "Hintergrund");
+        assert!(r.matches(&with("cargo test", serde_json::json!({"background": "false", "shell": ""}))), "Standard");
+        assert!(!r.matches(&cmd("cargo test (Remove-Item -Recurse -Force src)")), "PowerShell-Ausdruck");
+        let gb = AllowRule::for_call(&with("cargo test", serde_json::json!({"shell": "Git Bash", "background": true})));
+        assert_eq!((gb.shell.as_deref(), gb.background), (Some("gitbash"), true));
+        assert!(gb.matches(&with("cargo test -q", serde_json::json!({"shell": "git-bash", "background": "yes"}))));
+        assert!(!gb.matches(&with("cargo test", serde_json::json!({"shell": "Git Bash"}))), "Vordergrund");
+        assert!(!gb.matches(&cmd("cargo test")));
+        let f = ChatFile { always_allow: vec![gb.clone()], ..ChatFile::default() };
+        let text = String::from_utf8(serialize_capped(&f, 10_000)).unwrap();
+        assert!(text.contains(r#"{"tool":"run_command","session":null,"prefix":"cargo test","shell":"gitbash","background":true}"#), "{text}");
+        assert_eq!(parse(&text).unwrap().0.always_allow, [gb]);
+        // Regeln anderer Werkzeuge mit Shell-Angabe sind ungültig.
+        assert!(!AllowRule { tool: "edit_file".into(), shell: Some("x".into()), ..AllowRule::default() }.valid());
     }
 
     #[test]
@@ -579,6 +763,99 @@ mod tests {
         assert_eq!(parse(&text).unwrap().0, f);
         let (f, _) = parse(r#"{"todos":"x","messages":[]}"#).unwrap();
         assert!(f.todos.is_empty());
+    }
+
+    /// Kompaktierung (#359): Originale mit `compacted`, Zusammenfassung mit `summary`; ältere Dateien ohne die Felder laden
+    /// wie bisher, Unlesbares fällt weg, ohne Zusammenfassung dahinter gilt nichts als kompaktiert.
+    #[test]
+    fn compaction_fields_are_optional_lenient_and_round_trip() {
+        // Datei älterer Versionen: keine Felder, nichts kompaktiert, und es wird auch nichts davon geschrieben.
+        let (f, skipped) = parse(r#"{"messages":[{"role":"user","content":"a"},{"role":"assistant","content":"b"}]}"#).unwrap();
+        assert_eq!(skipped, 0);
+        assert!(f.messages.iter().all(|m| !m.compacted && m.summary.is_none()));
+        let text = String::from_utf8(serialize_capped(&f, 10_000)).unwrap();
+        assert!(!text.contains("compacted") && !text.contains("summary"), "{text}");
+        // Hin und zurück mit Originalen und Zusammenfassung.
+        let mut a = ChatMsg::new(Role::User, "old question");
+        a.compacted = true;
+        let mut b = ChatMsg::new(Role::Assistant, "old answer");
+        b.compacted = true;
+        let mut s = ChatMsg::new(Role::System, "[Summary …] The user asked X.");
+        s.summary = Some(SummaryInfo { messages: 2, files: vec![TouchedFile { path: "src/a.rs".into(), changed: true }, TouchedFile { path: "b.md".into(), changed: false }], text: "The user asked X.".into(), omitted: 3 });
+        let file = ChatFile { messages: vec![a, b, s, ChatMsg::new(Role::User, "new question")], ..ChatFile::default() };
+        let text = String::from_utf8(serialize_capped(&file, 100_000)).unwrap();
+        assert!(text.contains(r#""content":"old question","ts":"#) && text.contains(r#""compacted":true"#), "{text}");
+        assert!(text.contains(r#""summary":{"messages":2,"files":[{"path":"src/a.rs","changed":true},{"path":"b.md"}],"text":"The user asked X.","omitted":3}"#), "{text}");
+        let (back, _) = parse(&text).unwrap();
+        assert_eq!(back, file);
+        let d = tmp("compact");
+        let p = path(&d, 9);
+        save(&p, &file).unwrap();
+        assert_eq!(load(&p), (file.clone(), None));
+        let _ = std::fs::remove_dir_all(&d);
+        // Unlesbares: falscher Typ → nicht kompaktiert bzw. keine Zusammenfassung; die Nachricht bleibt.
+        let (f, skipped) = parse(r#"{"messages":[{"role":"user","content":"a","compacted":"yes"},{"role":"system","content":"s","summary":"oops"},{"role":"system","content":"t","summary":{"messages":"x","files":[1,{"path":""},{"path":"ok.rs"}]}}]}"#).unwrap();
+        assert_eq!((skipped, f.messages.len()), (0, 3));
+        assert!(!f.messages[0].compacted && f.messages[1].summary.is_none());
+        assert_eq!(f.messages[2].summary, None, "messages kein Zahl: ganze Angabe unlesbar");
+        let (f, _) = parse(r#"{"messages":[{"role":"system","content":"t","summary":{"files":[1,{"path":""},{"path":"ok.rs"}],"future":true}}]}"#).unwrap();
+        assert_eq!(f.messages[0].summary, Some(SummaryInfo { messages: 0, files: vec![TouchedFile { path: "ok.rs".into(), changed: false }], text: String::new(), omitted: 0 }));
+        // Kompaktiert, aber keine Zusammenfassung dahinter (z. B. von Hand gelöscht): wieder normal, damit nichts verloren geht.
+        let (f, _) = parse(r#"{"messages":[{"role":"user","content":"a","compacted":true},{"role":"assistant","content":"b","compacted":true}]}"#).unwrap();
+        assert!(f.messages.iter().all(|m| !m.compacted));
+    }
+
+    #[test]
+    fn images_are_optional_lenient_round_trip_and_survive_the_size_cap() {
+        // Datei von 3.0.0 ohne Bilder: geladen, und ohne Bilder werden die Felder nicht geschrieben
+        let (f, skipped) = parse(r#"{"version":1,"messages":[{"role":"user","content":"[Image#1] x"}]}"#).unwrap();
+        assert_eq!((skipped, f.images.len(), f.messages[0].images.len()), (0, 0, 0));
+        let text = String::from_utf8(serialize_capped(&f, 10_000)).unwrap();
+        assert!(!text.contains("images"), "{text}");
+        // Unlesbares fällt weg, die Nachricht bleibt
+        let (f, skipped) = parse(r#"{"images":[{"n":1,"file":"1.png","mime":"image/png","width":4,"height":3,"send_width":4,"send_height":3},{"n":2,"file":"../x","mime":"image/png"}],"messages":[{"role":"user","content":"[Image#1]","images":[1,"2",0,1]},{"role":"user","content":"y","images":"oops"}]}"#).unwrap();
+        assert_eq!(skipped, 0);
+        assert_eq!(f.images.iter().map(|e| e.n).collect::<Vec<_>>(), [1]);
+        assert_eq!(f.messages[0].images, [1]);
+        assert!(f.messages[1].images.is_empty());
+        // Hin und zurück; die Bilder stehen vor den Nachrichten
+        let text = String::from_utf8(serialize_capped(&f, 10_000)).unwrap();
+        assert!(text.contains(r#""images":[{"n":1,"file":"1.png","mime":"image/png","width":4,"height":3,"send_width":4,"send_height":3,"source":"paste"}],"messages""#), "{text}");
+        assert!(text.contains(r#""content":"[Image#1]","ts":0,"images":[1]"#), "{text}");
+        assert_eq!(parse(&text).unwrap().0, f);
+        // Gekürzt gespeichert: die Liste bleibt
+        let mut big = f.clone();
+        for i in 0..100 {
+            big.messages.push(ChatMsg::new(Role::User, format!("{i}{}", "z".repeat(200))));
+        }
+        let data = serialize_capped(&big, 4_000);
+        assert!(data.len() <= 4_000);
+        assert_eq!(parse(std::str::from_utf8(&data).unwrap()).unwrap().0.images, f.images);
+    }
+
+    #[test]
+    fn removing_a_chat_deletes_its_images_and_setting_aside_moves_them() {
+        let d = tmp("imgs");
+        let images = super::super::images::dir(&d, 9);
+        std::fs::create_dir_all(&images).unwrap();
+        std::fs::write(images.join("1.png"), "x").unwrap();
+        std::fs::write(path(&d, 9), "{}").unwrap();
+        assert_eq!(max_used_id(&d), 9);
+        std::fs::remove_file(path(&d, 9)).unwrap();
+        assert_eq!(max_used_id(&d), 9, "der Bilderordner allein hält die Id belegt");
+        std::fs::write(path(&d, 9), "{}").unwrap();
+        // Beiseitelegen: Verlauf und Bilder gehören nicht mehr zur Id
+        let b = set_aside(&path(&d, 9)).unwrap();
+        assert!(b.exists() && !images.exists());
+        let aside: Vec<String> = std::fs::read_dir(dir(&d)).unwrap().flatten().map(|e| e.file_name().to_string_lossy().to_string()).filter(|n| n.ends_with("-images")).collect();
+        assert_eq!(aside.len(), 1, "{aside:?}");
+        // Löschen mit dem Chat
+        std::fs::create_dir_all(&images).unwrap();
+        std::fs::write(images.join("2.png"), "x").unwrap();
+        std::fs::write(path(&d, 9), "{}").unwrap();
+        remove(&d, 9);
+        assert!(!path(&d, 9).exists() && !super::super::images::chat_dir(&d, 9).exists());
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]
@@ -711,5 +988,30 @@ mod tests {
         assert!(!path(&d, 40).exists() && !dir(&d).join("40.defekt-1.json").exists());
         assert!(b.exists());
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// Nachrichten von Paneldeck (#355): `event` kommt mit, Unlesbares fällt weg, ohne `event` wird nichts geschrieben;
+    /// eine Ereignis-Nachricht am Anfang zählt beim Kürzen nicht als Systemnachricht.
+    #[test]
+    fn events_round_trip_and_are_read_leniently() {
+        let mut m = ChatMsg::new(Role::System, "[Paneldeck] Background command bg1 finished");
+        m.event = Some(ChatEvent { kind: ChatEvent::BACKGROUND_COMMAND.into(), id: "bg1".into(), command: "cargo build".into(), state: "exited".into(), exit_code: Some(0), duration_ms: 1500, error: None });
+        let j = serde_json::to_value(&m).unwrap();
+        assert_eq!(j["event"]["kind"], "background_command");
+        assert!(j["event"].get("error").is_none());
+        let back: ChatMsg = serde_json::from_value(j).unwrap();
+        assert_eq!(back, m);
+        let bad: ChatMsg = serde_json::from_value(serde_json::json!({"role": "system", "content": "x", "event": 5})).unwrap();
+        assert_eq!(bad.event, None);
+        let plain = serde_json::to_value(ChatMsg::new(Role::User, "hi")).unwrap();
+        assert!(plain.get("event").is_none());
+        let mut f = ChatFile::default();
+        f.messages.push(m);
+        for i in 0..50 {
+            f.messages.push(ChatMsg::new(Role::User, format!("message {i} {}", "x".repeat(200))));
+        }
+        let data = serialize_capped(&f, 4000);
+        let back: ChatFile = serde_json::from_slice(&data).unwrap();
+        assert!(back.messages.first().is_some_and(|m| m.event.is_none()), "das alte Ereignis fällt beim Kürzen weg");
     }
 }

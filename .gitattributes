@@ -1,3 +1,5 @@
 # Shell-Skripte müssen LF behalten (Git Bash unter Windows scheitert sonst an CRLF).
 *.sh text eol=lf
 tools/git-hooks/* text eol=lf
+# Eigene Grammatiken des Syntax-Modus (#312): YAML mit LF.
+*.sublime-syntax text eol=lf

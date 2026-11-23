@@ -37,13 +37,47 @@ impl Changed {
     }
 }
 
+/// Wie lange ein zwischengespeicherter nächster Termin gilt (Sekunden); danach wird er neu berechnet (z. B. nach einem
+/// Wechsel der Zeitzone des Systems).
+const CACHE_SECS: i64 = 600;
+
+/// Prüfwert der Einstellungen eines Weckers, von denen sein nächster Termin abhängt.
+fn alarm_key(a: &super::Alarm) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    (a.armed_from, a.hour, a.minute, a.days, a.enabled, a.snoozed_until).hash(&mut h);
+    h.finish()
+}
+
+/// Wurde die Systemuhr zurückgestellt (siehe `Alarm::fix_clock_back`)?
+fn clock_set_back(a: &super::Alarm, now_s: i64) -> bool {
+    a.armed_from > now_s + super::alarm::CLOCK_BACK_TOLERANCE || a.snoozed_until.is_some_and(|s| s > now_s + 3600 + super::alarm::CLOCK_BACK_TOLERANCE)
+}
+
 /// Ein Takt zum Zeitpunkt `now_ms` in der Zone `tz`.
 pub fn tick<Tz: TimeZone>(data: &mut TimeData, now_ms: i64, tz: &Tz) -> (Vec<Event>, Changed) {
     let mut ev = Vec::new();
     let mut ch = Changed::default();
     let now_s = now_ms.div_euclid(1000);
-    for a in data.alarms.iter_mut() {
-        if let Some(due) = a.check(now_s, tz, GRACE_SECS) {
+    let TimeData { alarms, next_cache, .. } = data;
+    for a in alarms.iter_mut() {
+        // Zwischenspeicher: steht der nächste Termin fest und liegt in der Zukunft, ist nichts zu tun
+        let k = alarm_key(a);
+        let snooze_due = a.snoozed_until.is_some_and(|s| s <= now_s);
+        if !snooze_due
+            && !clock_set_back(a, now_s)
+            && let Some(&(ck, at, next)) = next_cache.get(&a.id)
+            && ck == k
+            && now_s - at < CACHE_SECS
+            && now_s >= at
+            && next.is_none_or(|n| n > now_s)
+        {
+            continue;
+        }
+        let due = a.check(now_s, tz, GRACE_SECS);
+        let next = if a.enabled { a.next_after(a.armed_from.max(now_s - 1), tz) } else { None };
+        next_cache.insert(a.id, (alarm_key(a), now_s, next));
+        if let Some(due) = due {
             ch.alarms.push(a.id);
             for at in due.missed {
                 ev.push(Event::AlarmMissed { id: a.id, at, snoozed: false });
@@ -56,7 +90,8 @@ pub fn tick<Tz: TimeZone>(data: &mut TimeData, now_ms: i64, tz: &Tz) -> (Vec<Eve
             }
         }
     }
-    for t in data.timers.iter_mut() {
+    let TimeData { timers, birthdays, .. } = data;
+    for t in timers.iter_mut() {
         if let Some(x) = t.check(now_ms, GRACE_SECS * 1000) {
             ch.timers.push(t.id);
             ev.push(if x.ring { Event::TimerDone { id: t.id, at: x.at } } else { Event::TimerExpiredAway { id: t.id, at: x.at } });
@@ -64,7 +99,7 @@ pub fn tick<Tz: TimeZone>(data: &mut TimeData, now_ms: i64, tz: &Tz) -> (Vec<Eve
     }
     if let Some(local) = tz.timestamp_millis_opt(now_ms).single().map(|d| d.naive_local()) {
         let today = local.date();
-        for b in data.birthdays.iter_mut() {
+        for b in birthdays.iter_mut() {
             if b.wants_reminder(today, local.hour()) {
                 b.reminded_year = Some(today.year());
                 ch.birthdays.push(b.id);
@@ -80,11 +115,24 @@ pub fn tick<Tz: TimeZone>(data: &mut TimeData, now_ms: i64, tz: &Tz) -> (Vec<Eve
 pub fn next_wake<Tz: TimeZone>(data: &TimeData, now_ms: i64, tz: &Tz) -> Option<i64> {
     let now_s = now_ms.div_euclid(1000);
     let alarms = data.alarms.iter().flat_map(|a| {
-        // Systemuhr zurückgestellt: wie `Alarm::fix_clock_back` ab jetzt rechnen
-        let mut a = a.clone();
-        a.fix_clock_back(now_s);
-        let reg = if a.enabled { a.next_after(a.armed_from.max(now_s - 1), tz).map(|s| s * 1000) } else { None };
-        [reg, a.snoozed_until.map(|s| s * 1000)]
+        // aus dem Zwischenspeicher des Takts, sonst ausrechnen
+        let cached = data.next_cache.get(&a.id).filter(|(k, at, _)| *k == alarm_key(a) && now_s - at < CACHE_SECS && now_s >= *at && !clock_set_back(a, now_s));
+        let reg = match cached {
+            Some(&(_, _, next)) => next.map(|s| s * 1000),
+            None => {
+                // Systemuhr zurückgestellt: wie `Alarm::fix_clock_back` ab jetzt rechnen
+                let mut a = a.clone();
+                a.fix_clock_back(now_s);
+                if a.enabled { a.next_after(a.armed_from.max(now_s - 1), tz).map(|s| s * 1000) } else { None }
+            }
+        };
+        let mut snooze = a.snoozed_until;
+        if clock_set_back(a, now_s) {
+            let mut b = a.clone();
+            b.fix_clock_back(now_s);
+            snooze = b.snoozed_until;
+        }
+        [reg, snooze.map(|s| s * 1000)]
     });
     let timers = data.timers.iter().filter_map(|t| match t.state {
         super::TimerState::Running { ends_at } => Some(ends_at),

@@ -49,6 +49,33 @@ pub(super) fn templates_closed() -> bool {
     spec().is_some_and(|(v, _)| v == "processes" || v == "process-output")
 }
 
+/// Beispielbild für die Chat-Bilder (#357): eine schlichte Bestellseite, deren Knopf die Summe überdeckt – hier erzeugt,
+/// keine Datei aus dem Netz.
+fn demo_screenshot() -> image::RgbaImage {
+    let (w, h) = (1280u32, 800u32);
+    let mut img = image::RgbaImage::from_pixel(w, h, image::Rgba([243, 244, 246, 255]));
+    let mut rect = |x0: u32, y0: u32, x1: u32, y1: u32, c: [u8; 3]| {
+        for y in y0..y1.min(h) {
+            for x in x0..x1.min(w) {
+                img.put_pixel(x, y, image::Rgba([c[0], c[1], c[2], 255]));
+            }
+        }
+    };
+    rect(0, 0, 1280, 72, [30, 41, 59]); // Kopfzeile
+    rect(40, 22, 220, 50, [148, 163, 184]); // Logo
+    rect(340, 130, 940, 690, [255, 255, 255]); // Karte
+    for (i, y) in [180u32, 250, 320, 390].iter().enumerate() {
+        rect(390, *y, 690 - i as u32 * 40, *y + 26, [203, 213, 225]); // Zeilen
+        rect(780, *y, 890, *y + 26, [148, 163, 184]); // Preise
+    }
+    rect(390, 470, 890, 474, [226, 232, 240]); // Trennlinie
+    rect(390, 500, 600, 540, [71, 85, 105]); // „Gesamt“
+    rect(760, 496, 890, 544, [15, 23, 42]); // Summe
+    rect(560, 510, 900, 580, [234, 88, 12]); // Knopf „Bezahlen“ (überdeckt die Summe)
+    rect(640, 535, 820, 555, [255, 237, 213]);
+    img
+}
+
 /// Ordner des Beispielprojekts neben dem Datenordner der Aufnahme.
 fn demo_dir(data: &Path) -> PathBuf {
     data.parent().unwrap_or(data).join("acme-shop")
@@ -233,6 +260,162 @@ impl App {
         }
     }
 
+    /// Chat mit einer Plan-Karte (#358): eingeschalteter Schalter *Plan* (Stufe „hoch“) neben *Senden* und ein
+    /// vorgeschlagener Plan mit *Ausführen* / *Änderungen anfragen* / *Verwerfen* / *Exportieren*. Server und Modell
+    /// stehen nur in den Einstellungen der Aufnahme; es wird nichts gesendet.
+    fn shot_chat_plan(&mut self, ctx: &egui::Context) {
+        use crate::chat::plan::{Plan, PlanLevel, PlanStatus};
+        use crate::llm::config::{LlmModel, LlmServer, OLLAMA_LOCAL};
+        const SERVER: &str = "shot-ollama";
+        const MODEL: &str = "qwen3:14b";
+        let demo = demo_dir(&self.dir);
+        write_demo_project(&demo);
+        self.set_mode(titlebar::Mode::Terminals);
+        let pid = self.active_project;
+        if let Some(p) = self.projects.iter_mut().find(|p| p.id == pid) {
+            p.name = "Acme Shop".into();
+            p.folder = demo.to_string_lossy().to_string();
+        }
+        if !self.settings.llm_servers.list.iter().any(|s| s.id == SERVER) {
+            let mut s = LlmServer {
+                id: SERVER.into(),
+                name: "Ollama".into(),
+                url: OLLAMA_LOCAL.into(),
+                last_models: vec![crate::llm::ModelInfo { name: MODEL.into(), tools: Some(true), context_length: Some(32768), vision: Some(false) }],
+                ..LlmServer::default()
+            };
+            s.set_model_cfg(LlmModel { level: crate::mcp::McpLevel::Control, level_chosen: true, ..LlmModel::named(MODEL) });
+            self.settings.llm_servers.list.push(s);
+        }
+        let lang = self.settings.language;
+        let chat = state::ChatMeta { server: SERVER.into(), model: MODEL.into() };
+        let id = self.new_session(ctx, NewOpts { project: Some(pid), cwd: Some(demo.to_string_lossy().to_string()), chat: Some(chat), ..NewOpts::default() });
+        self.shot_name(id, lang.t("Bestellungen stornieren", "Cancel orders"));
+        let question = lang.t(
+            "Stornierte Bestellungen sollen eine Erstattung auslösen. Plane das bitte zuerst.",
+            "Cancelled orders should trigger a refund. Please plan this first.",
+        );
+        let plan = lang.t(
+            "# Plan: Erstattung beim Stornieren\n\n## Ziel\n`cancel_order` löst für bezahlte Bestellungen eine Erstattung aus; doppelte Stornos erstatten nichts.\n\n## Befunde\n- `src/orders.rs`: `cancel_order` setzt nur `cancelled = true`.\n- `src/payments.rs`: `charge` gibt eine Zahlungs-Kennung zurück, eine Erstattung gibt es noch nicht.\n\n## Schritte\n1. `src/payments.rs`: `refund(charge_id)` mit eigenem Fehlertyp ergänzen\n2. `src/orders.rs`: Zahlungs-Kennung in `Order` speichern\n3. `src/orders.rs`: `cancel_order` ruft `refund` nur beim ersten Storno auf\n4. `tests/orders.rs`: Tests für Erstattung und doppeltes Storno\n5. `cargo test` ausführen\n\n## Risiken\n- Bestellungen ohne Zahlung: keine Erstattung versuchen.\n\n## Tests\n- `cargo test`",
+            "# Plan: Refund on cancel\n\n## Goal\n`cancel_order` triggers a refund for paid orders; cancelling twice refunds nothing.\n\n## Findings\n- `src/orders.rs`: `cancel_order` only sets `cancelled = true`.\n- `src/payments.rs`: `charge` returns a charge id; there is no refund yet.\n\n## Steps\n1. `src/payments.rs`: add `refund(charge_id)` with its own error type\n2. `src/orders.rs`: store the charge id in `Order`\n3. `src/orders.rs`: `cancel_order` calls `refund` only on the first cancel\n4. `tests/orders.rs`: tests for the refund and a double cancel\n5. Run `cargo test`\n\n## Risks\n- Orders without a payment: do not try a refund.\n\n## Tests\n- `cargo test`",
+        );
+        if let Some(c) = self.entries.get_mut(&id).and_then(|e| e.chat.as_mut()) {
+            use crate::chat::{ChatMsg, Role};
+            c.file.messages = vec![ChatMsg::new(Role::User, question), ChatMsg::new(Role::Assistant, plan)];
+            c.file.plan = Some(Plan { level: PlanLevel::High, status: PlanStatus::Proposed, markdown: plan.trim().to_string(), revision: 1, created: crate::chat::now_secs(), ..Plan::default() });
+            c.planning.on = true;
+            c.planning.level = PlanLevel::High;
+            c.focus_input = false;
+            c.touch();
+        }
+        self.activate(id);
+    }
+
+    /// Chat nach dem Kompaktieren (#359): ein Beispielserver (ohne Verbindung), ein Chat mit zwei kompaktierten Runden,
+    /// der Zusammenfassung (zugeklappt, „Original anzeigen“) und zwei behaltenen Runden – alles im Speicher.
+    fn shot_chat_compacted(&mut self, ctx: &egui::Context) {
+        use crate::chat::compact;
+        use crate::chat::store::{ChatTodo, SummaryInfo, TodoStatus, ToolCall, TouchedFile};
+        use crate::llm::config::{LlmModel, LlmServer};
+        let lang = self.settings.language;
+        let demo = demo_dir(&self.dir);
+        write_demo_project(&demo);
+        self.set_mode(titlebar::Mode::Terminals);
+        if let Some(p) = self.projects.iter_mut().find(|p| p.id == self.active_project) {
+            p.name = "Acme Shop".into();
+            p.folder = demo.to_string_lossy().to_string();
+        }
+        let model = "qwen3:8b";
+        if !self.settings.llm_servers.iter().any(|s| s.id == "shot-ollama") {
+            let mut s = LlmServer { id: "shot-ollama".into(), name: "Ollama".into(), kind: crate::llm::ServerKind::Ollama, url: crate::llm::config::OLLAMA_LOCAL.into(), ..LlmServer::default() };
+            s.set_model_cfg(LlmModel { level: crate::mcp::McpLevel::Control, level_chosen: true, context_length: Some(32768), ..LlmModel::named(model) });
+            self.settings.llm_servers.push(s);
+        }
+        let pid = self.active_project;
+        let meta = state::ChatMeta { server: "shot-ollama".into(), model: model.into() };
+        let id = self.new_session(ctx, NewOpts { project: Some(pid), chat: Some(meta), name: Some(lang.t("Bestellungen stornieren", "Cancel orders").into()), ..NewOpts::default() });
+        let msg = |role: chatmod::Role, text: &str| chatmod::ChatMsg::new(role, text);
+        let old = |role: chatmod::Role, text: &str| {
+            let mut m = msg(role, text);
+            m.compacted = true;
+            m
+        };
+        let mut call = old(chatmod::Role::Assistant, "");
+        call.tool_calls.push(ToolCall { id: "c1".into(), name: "read_file".into(), arguments: serde_json::json!({"path": "src/orders.rs"}) });
+        let mut result = old(chatmod::Role::Tool, "{\"path\":\"src/orders.rs\",\"lines\":42}");
+        result.tool_call_id = Some("c1".into());
+        result.tool_name = Some("read_file".into());
+        result.status = Some(chatmod::ToolStatus::Ok);
+        let files = vec![TouchedFile { path: "src/orders.rs".into(), changed: true }, TouchedFile { path: "tests/orders.rs".into(), changed: false }];
+        let todos = vec![
+            ChatTodo { content: lang.t("Stornieren nur einmal erlauben", "Allow cancelling only once").into(), status: TodoStatus::Completed },
+            ChatTodo { content: lang.t("Test für doppeltes Stornieren", "Test for cancelling twice").into(), status: TodoStatus::InProgress },
+        ];
+        let text = lang.t(
+            "Du willst, dass eine Bestellung nur einmal storniert werden kann. `cancel_order` in `src/orders.rs` gibt jetzt `false` zurück, wenn sie schon storniert ist; `cargo test` läuft grün. Offen: ein Test für doppeltes Stornieren.",
+            "You want an order to be cancellable only once. `cancel_order` in `src/orders.rs` now returns `false` when it is already cancelled; `cargo test` passes. Still open: a test for cancelling twice.",
+        );
+        let mut summary = msg(chatmod::Role::System, &compact::summary_content(text, &files, &todos, None));
+        summary.summary = Some(SummaryInfo { messages: 6, files, text: text.into(), omitted: 0 });
+        let messages = vec![
+            old(chatmod::Role::User, lang.t("Wie storniere ich eine Bestellung?", "How do I cancel an order?")),
+            call,
+            result,
+            old(chatmod::Role::Assistant, lang.t("Mit `OrderStore::cancel_order(id)`.", "With `OrderStore::cancel_order(id)`.")),
+            old(chatmod::Role::User, lang.t("Sorge dafür, dass das nur einmal geht.", "Make sure that only works once.")),
+            old(chatmod::Role::Assistant, lang.t("Erledigt – `cancel_order` prüft jetzt `cancelled`.", "Done – `cancel_order` now checks `cancelled`.")),
+            summary,
+            msg(chatmod::Role::User, lang.t("Gibt es schon einen Test dafür?", "Is there a test for it yet?")),
+            msg(chatmod::Role::Assistant, lang.t("Ja: `cancel_order_only_once` in `tests/orders.rs`.", "Yes: `cancel_order_only_once` in `tests/orders.rs`.")),
+            msg(chatmod::Role::User, lang.t("Gut, dann schreib die Doku dazu.", "Good, then write the docs for it.")),
+            msg(chatmod::Role::Assistant, lang.t("Ich ergänze in der README einen Abschnitt „Bestellungen stornieren“.", "I'll add a section “Cancelling orders” to the README.")),
+        ];
+        if let Some(c) = self.entries.get_mut(&id).and_then(|e| e.chat.as_mut()) {
+            c.file.messages = messages;
+            c.file.todos = todos;
+            c.focus_input = false;
+            c.changed_from = 0;
+            c.touch();
+        }
+        self.activate(id);
+    }
+
+    /// Chat mit Bildern (#357): ein Beispiel-Server mit einem Vision-Modell, eine eigene Nachricht mit `[Image#1]` (ein
+    /// hier erzeugtes Beispielbild) und eine Antwort; das Popup öffnet `shot_keep`. Nur im Speicher und im Datenordner
+    /// der Aufnahme.
+    fn shot_chat_images(&mut self, ctx: &egui::Context) {
+        let lang = self.settings.language;
+        self.set_mode(titlebar::Mode::Terminals);
+        if !self.settings.llm_servers.iter().any(|s| s.id == "shot-ollama") {
+            let model = crate::llm::ModelInfo { name: "gemma3:4b".into(), tools: Some(true), context_length: Some(131_072), vision: Some(true) };
+            self.settings.llm_servers.push(crate::llm::config::LlmServer { id: "shot-ollama".into(), name: "Ollama".into(), url: "http://localhost:11434".into(), last_models: vec![model], ..Default::default() });
+        }
+        let pid = self.active_project;
+        let name = lang.t("Checkout-Fehler", "Checkout bug").to_string();
+        let id = self.new_session(ctx, NewOpts { project: Some(pid), name: Some(name.clone()), chat: Some(state::ChatMeta { server: "shot-ollama".into(), model: "gemma3:4b".into() }), ..NewOpts::default() });
+        self.shot_name(id, &name);
+        let dir = self.chat_images_dir(id);
+        let entry = chatmod::images::import_rgba(&dir, 1, demo_screenshot());
+        if let Some(c) = self.entries.get_mut(&id).and_then(|e| e.chat.as_mut()) {
+            let mut q = chatmod::ChatMsg::new(chatmod::Role::User, lang.t("[Image#1] Warum überdeckt der Knopf „Bezahlen“ den Gesamtbetrag?", "[Image#1] Why does the “Pay now” button cover the order total?"));
+            q.images = vec![1];
+            let a = chatmod::ChatMsg::new(
+                chatmod::Role::Assistant,
+                lang.t(
+                    "Im Bild liegt der Knopf **Bezahlen** über der Zeile *Gesamt*: Der Knopf ist absolut positioniert, die Karte darüber hat aber keine feste Höhe.\n\nAm einfachsten: den Knopf in den normalen Fluss der Karte nehmen (`position: static`) und darüber `margin-top: 16px` geben.",
+                    "In the image the **Pay now** button sits on top of the *Total* row: the button is absolutely positioned, but the card above it has no fixed height.\n\nThe simplest fix: put the button back into the card's normal flow (`position: static`) and give it `margin-top: 16px`.",
+                ),
+            );
+            c.file.messages = vec![q, a];
+            if let Ok(e) = entry {
+                c.file.images = vec![e];
+            }
+            c.img.dir = Some(dir);
+            c.touch();
+        }
+        self.activate(id);
+    }
+
     /// Ansicht aufbauen (einmal).
     fn shot_setup(&mut self, ctx: &egui::Context, view: &str, arg: &str) {
         let demo = demo_dir(&self.dir);
@@ -290,7 +473,7 @@ impl App {
             "cleanup-confirm" => self.shot_cleanup_confirm(ctx),
             "cleanup-result" => self.shot_cleanup_result(),
             // ---- Editor
-            "editor" | "editor-find" | "editor-disk-changed" | "editor-search" => {
+            "editor" | "editor-find" | "editor-disk-changed" | "editor-search" | "editor-syntax" => {
                 write_demo_project(&demo);
                 self.set_mode(titlebar::Mode::Editor);
                 self.ed.set_root(&demo);
@@ -299,6 +482,14 @@ impl App {
                 }
                 if view == "editor" {
                     self.ed.open_path(&demo.join("src/main.rs"), true);
+                }
+                if view == "editor-syntax" {
+                    // Syntax-Modus (#312): Rust links, Markdown rechts, beide mit Farben.
+                    self.ed.open_path(&demo.join("src/main.rs"), true);
+                    let ids: Vec<u64> = self.ed.docs.keys().copied().collect();
+                    for id in ids {
+                        self.ed.set_doc_mode(id, Some(crate::editor::syntax::Mode::Syntax));
+                    }
                 }
                 if view == "editor-search" {
                     self.editor_svc.search_open = true;
@@ -338,14 +529,121 @@ impl App {
             "theme-editor" => self.shot_theme_editor("accent", false),
             "theme-color" => self.shot_theme_editor("selection", false),
             "theme-checks" => self.shot_theme_editor("ansi8", true),
+            // ---- Chats
+            "chat-plan" => self.shot_chat_plan(ctx),
+            "chat-compacted" => self.shot_chat_compacted(ctx),
             // ---- Tutorial
+            "chat-images" => self.shot_chat_images(ctx),
             "tutorial-card" => self.set_mode(titlebar::Mode::Terminals),
             "tutorial-tour" => {
                 let (tour, step) = arg.split_once('/').unwrap_or(("basics", "basics.sidebar"));
                 self.tut_shot(ctx, tour, step);
             }
+            // ---- Chats (#355, #356): Verlauf nur im Speicher, kein Server nötig
+            "chat-background-command" | "chat-ask-form" => self.shot_chat(ctx, view == "chat-ask-form"),
             _ => eprintln!("{SHOT_MARK}: unknown view {view}"),
         }
+    }
+
+    /// Chat mit lokalem Modell (#355/#356): eingerichteter Beispiel-Server (nur in den Einstellungen der Aufnahme), ein Chat
+    /// im Beispielprojekt mit festem Verlauf. `ask`: offenes `ask_user`-Formular mit Empfehlung; sonst ein beendeter
+    /// Hintergrund-Befehl samt Nachricht von Paneldeck und seinem Terminal rechts daneben.
+    fn shot_chat(&mut self, ctx: &egui::Context, ask: bool) {
+        use crate::chat::store::{ChatEvent, ChatMsg, Role, ToolCall, ToolStatus};
+        let lang = self.settings.language;
+        let demo = demo_dir(&self.dir);
+        write_demo_project(&demo);
+        self.set_mode(titlebar::Mode::Terminals);
+        let pid = self.active_project;
+        if let Some(p) = self.projects.iter_mut().find(|p| p.id == pid) {
+            p.name = "Acme Shop".into();
+            p.folder = demo.to_string_lossy().to_string();
+        }
+        let model = "qwen3:8b";
+        let server = crate::llm::config::LlmServer {
+            id: "shot-ollama".into(),
+            name: "Ollama".into(),
+            url: "http://localhost:11434".into(),
+            models: vec![crate::llm::config::LlmModel { level: crate::mcp::McpLevel::Control, level_chosen: true, ..crate::llm::config::LlmModel::named(model) }],
+            last_models: vec![crate::llm::ModelInfo { name: model.into(), tools: Some(true), context_length: Some(40960), vision: None }],
+            ..Default::default()
+        };
+        self.settings.llm_servers.list.retain(|s| s.id != server.id);
+        self.settings.llm_servers.list.push(server);
+        let meta = crate::state::ChatMeta { server: "shot-ollama".into(), model: model.into() };
+        let name = if ask { lang.t("Test-Setup", "Test setup") } else { lang.t("Build-Helfer", "Build helper") };
+        let chat = self.new_session(ctx, NewOpts { project: Some(pid), cwd: Some(demo.to_string_lossy().to_string()), name: Some(name.into()), chat: Some(meta), ..NewOpts::default() });
+        let call = |id: &str, tool: &str, args: serde_json::Value| ToolCall { id: id.into(), name: tool.into(), arguments: args };
+        let answer = |text: &str, calls: Vec<ToolCall>| {
+            let mut m = ChatMsg::new(Role::Assistant, text);
+            m.tool_calls = calls;
+            m
+        };
+        let result = |c: &ToolCall, content: serde_json::Value| crate::chat::logic::tool_result(c, ToolStatus::Ok, content.to_string());
+        let mut msgs = Vec::new();
+        if ask {
+            msgs.push(ChatMsg::new(Role::User, lang.t("Richte Tests für den Shop ein.", "Set up tests for the shop.")));
+            let q = call(
+                "call_1_0",
+                "ask_user",
+                serde_json::json!({"questions": [
+                    {"question": lang.t("Welches Test-Framework soll ich einrichten?", "Which test framework should I set up?"), "header": "Tests", "options": [
+                        {"label": lang.t("Eingebaute Rust-Tests", "Built-in Rust tests"), "description": lang.t("cargo test, keine neue Abhängigkeit", "cargo test, no new dependency"), "recommended": true},
+                        {"label": "nextest", "description": lang.t("schneller, braucht cargo-nextest", "faster, needs cargo-nextest")}
+                    ]},
+                    {"question": lang.t("Was soll zusätzlich geprüft werden?", "What should be checked as well?"), "multi_select": true, "options": [
+                        {"label": "clippy", "recommended": true}, {"label": "rustfmt"}, {"label": lang.t("Abdeckung", "Coverage")}
+                    ]}
+                ]}),
+            );
+            msgs.push(answer(lang.t("Bevor ich anfange, zwei kurze Fragen:", "Before I start, two quick questions:"), vec![q.clone()]));
+            if let Some(c) = self.entries.get_mut(&chat).and_then(|e| e.chat.as_mut()) {
+                c.file.messages = msgs;
+                if let Ok((qs, fixes)) = crate::chat::ask::parse(&q.arguments) {
+                    c.shot_ask(q, crate::chat::ask::AskForm::new("call_1_0", qs, fixes, None));
+                    // Vorauswahl wie von Hand: die empfohlene Antwort der ersten Frage
+                    if let Some(f) = c.ask.as_mut() {
+                        f.toggle(0, 0);
+                    }
+                }
+                c.touch();
+            }
+            self.activate(chat);
+            return;
+        }
+        msgs.push(ChatMsg::new(Role::User, lang.t("Baue den Shop im Release-Modus, im Hintergrund.", "Build the shop in release mode, in the background.")));
+        let rc = call("call_1_0", "run_command", serde_json::json!({"command": "cargo build --release", "background": true}));
+        msgs.push(answer("", vec![rc.clone()]));
+        msgs.push(result(&rc, serde_json::json!({"id": "bg1", "status": "running", "background": true, "shell": "PowerShell 7"})));
+        msgs.push(answer(lang.t("Der Build läuft im Hintergrund als bg1. Ich melde mich, wenn er fertig ist.", "The build runs in the background as bg1. I will report back when it is done."), vec![]));
+        let ev = ChatEvent { kind: ChatEvent::BACKGROUND_COMMAND.into(), id: "bg1".into(), command: "cargo build --release".into(), state: "exited".into(), exit_code: Some(0), duration_ms: 74_000, error: None };
+        let mut m = ChatMsg::new(Role::System, crate::chat::bg_commands::event_text(&ev, 3, None));
+        m.event = Some(ev);
+        msgs.push(m);
+        let out = call("call_5_0", "command_output", serde_json::json!({"id": "bg1", "tail": 3}));
+        msgs.push(answer("", vec![out.clone()]));
+        msgs.push(result(&out, serde_json::json!({"id": "bg1", "status": "exited", "finished": true, "text": "   Compiling acme-shop v0.1.0\n    Finished `release` profile [optimized] target(s) in 1m 14s"})));
+        msgs.push(answer(lang.t("Der Release-Build ist fertig (Exit-Code 0, 1 min 14 s). Die Programmdatei liegt in `target/release/acme-shop`.", "The release build finished (exit code 0, 1 min 14 s). The binary is in `target/release/acme-shop`."), vec![]));
+        if let Some(c) = self.entries.get_mut(&chat).and_then(|e| e.chat.as_mut()) {
+            c.file.messages = msgs;
+            c.touch();
+        }
+        // Terminal des Befehls unter dem Chat (Ordner mit dem Namen des Chats, wie bei Kindern eines Agenten)
+        let chat_name = self.entries.get(&chat).map(|e| e.display_name()).unwrap_or_default();
+        let group = Some(chat_name.clone());
+        let term = self.new_session(ctx, NewOpts { project: Some(pid), cwd: Some(demo.to_string_lossy().to_string()), quiet: true, group, ..NewOpts::default() });
+        self.shot_name(term, &format!("{chat_name} – bg1: cargo build --release"));
+        // Neutraler Prompt wie in `shot_run`, dazu die Ausgabe des Builds (ohne echtes cargo auf dem Aufnahme-Rechner).
+        if let Some(s) = self.entries.get(&term).and_then(|e| e.live.as_ref()) {
+            let line = format!(
+                "function global:prompt {{ 'PS C:\\Dev\\acme-shop> ' }}; Set-Location -LiteralPath '{}'; Clear-Host; Write-Host 'PS C:\\Dev\\acme-shop> cargo build --release'; Write-Host '   Compiling acme-shop v0.1.0'; Write-Host '    Finished release profile [optimized] target(s) in 1m 14s'",
+                demo.display()
+            );
+            s.send_text_agent(&line, true);
+        }
+        self.activate(chat);
+        self.place(term, crate::layout::Placement::SplitRight, None, &[]);
+        self.activate(chat);
     }
 
     /// Schritte nach dem Aufbau (`n` = Bilder seit dem Aufbau, ca. 10 je Sekunde).
@@ -368,6 +666,12 @@ impl App {
             "processes" | "process-output" | "process-new" if n == 40 => {
                 if let Some(id) = self.shot_sessions().first().copied() {
                     self.shot_run(id, &demo, Some("Get-ChildItem -Name"));
+                }
+            }
+            // Bild-Popup über dem Chat (#357)
+            "chat-images" if n == 10 => {
+                if let Some(id) = self.entries.iter().find(|(_, e)| e.is_chat()).map(|(i, _)| *i) {
+                    chat_images_ui::open(ctx, id, 1);
                 }
             }
             "editor-find" if n == 10 => {

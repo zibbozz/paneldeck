@@ -58,6 +58,9 @@ pub struct Prepared {
     pub prompt_estimate: usize,
     /// Aufteilung für die Anzeige des Füllstands (#339), mit `token_scale` hochgerechnet.
     pub parts: ContextParts,
+    /// Ob das Modell Bilder lesen kann, ist unbekannt (nicht erkannt, keine Wahl des Nutzers): Nur dann darf eine
+    /// Ablehnung „keine Bilder“ für das Modell lehren (#357, `TurnEvent::VisionRejected`).
+    pub learn_vision: bool,
 }
 
 /// Höchstlänge von Projektname und Ordner in der Kontextzeile (Zeichen).
@@ -101,7 +104,13 @@ pub fn system_prompt(policy: &ToolPolicy, model: &str, cx: &TurnContext) -> Stri
 /// für die Teile (`cx.prompt_parts`, darüber die des Modells) und die Familie des Modells (#341).
 pub fn system_prompt_variant(policy: &ToolPolicy, model: &str, cx: &TurnContext, v: super::master_prompt::Variant) -> String {
     let spec = super::master_prompt::Spec::for_model(policy, model, cx.prompt_parts);
-    let text = super::master_prompt::render_variant_with(policy, &spec, v);
+    let mut text = super::master_prompt::render_variant_with(policy, &spec, v);
+    // Plan-Modus (#358): Anweisungen der Stufe bzw. der Ausführung; die Rückfrage `ask_user` nur, wenn es sie gibt.
+    if let Some(phase) = &cx.plan {
+        let names = policy.tool_names();
+        let part = if v == super::master_prompt::Variant::Compact { super::plan::instructions_compact(phase, &names) } else { super::plan::instructions(phase, &names) };
+        text = format!("{}\n\n{}", text.trim_end(), part);
+    }
     let line = context_line(cx);
     if line.is_empty() { text } else { format!("{}\n\n{line}", text.trim_end()) }
 }
@@ -139,12 +148,45 @@ fn role(r: store::Role) -> Role {
 /// Werkzeuge: Ein Ergebnis wird nur gesendet, wenn sein Aufruf in der Antwort direkt davor steht (sonst lehnen Server
 /// die Anfrage ab); fehlt zu einem Aufruf das Ergebnis, steht an seiner Stelle „kein Ergebnis“. So passt jede Anfrage
 /// zu den Regeln von Ollama und OpenAI, auch bei einem beschädigten oder alten Verlauf.
+#[cfg(test)]
 pub fn map_history(history: &[ChatMsg]) -> (Vec<ChatMessage>, Vec<usize>) {
+    map_history_with(history, None)
+}
+
+/// Bilder für die Anfrage (#357): Bilderordner und Einträge des Chats – nur, wenn das Modell Bilder bekommt.
+#[derive(Clone, Copy)]
+pub struct SendImages<'a> {
+    pub dir: &'a std::path::Path,
+    pub entries: &'a [super::images::ImageEntry],
+}
+
+/// Wie [`map_history`], mit Bildern (#357): Nutzer-Nachrichten bekommen ihre Bilder; Bilder aus Werkzeug-Ergebnissen
+/// folgen als Nutzer-Nachricht direkt hinter den Ergebnissen ihres Schritts (Werkzeug-Nachrichten dürfen bei
+/// OpenAI-kompatiblen Servern keine Bilder tragen). Ohne `imgs` geht kein Bild mit.
+pub fn map_history_with(history: &[ChatMsg], imgs: Option<SendImages>) -> (Vec<ChatMessage>, Vec<usize>) {
     let mut msgs: Vec<ChatMessage> = Vec::new();
     let mut origin = Vec::new();
+    // Bilder der Werkzeug-Ergebnisse des laufenden Schritts (Nummer, Teil) und Index des Ergebnisses dazu.
+    let mut tool_imgs: Vec<(u32, llm::ImagePart)> = Vec::new();
+    let mut tool_imgs_at = 0;
+    let flush = |msgs: &mut Vec<ChatMessage>, origin: &mut Vec<usize>, tool_imgs: &mut Vec<(u32, llm::ImagePart)>, at: usize| {
+        if tool_imgs.is_empty() {
+            return;
+        }
+        let names: Vec<String> = tool_imgs.iter().map(|(n, _)| super::images::token(*n)).collect();
+        let images = tool_imgs.drain(..).map(|(_, p)| p).collect();
+        msgs.push(ChatMessage { role: Role::User, content: format!("Images from the tool results above: {}", names.join(" ")), images, ..Default::default() });
+        origin.push(at);
+    };
+    let parts = |m: &ChatMsg| -> Vec<(u32, llm::ImagePart)> {
+        let Some(si) = imgs else { return Vec::new() };
+        m.images.iter().filter_map(|n| si.entries.iter().find(|e| e.n == *n)).map(|e| (e.n, super::images::part(si.dir, e))).collect()
+    };
     // Aufrufe der letzten gesendeten Antwort, die noch auf ihr Ergebnis warten (Kennung, Name), und deren Index.
     let mut open: Vec<(String, String)> = Vec::new();
     let mut open_at = 0;
+    // Die zuletzt gesendete Nachricht ist eine Zusammenfassung (#359): die nächste Nutzer-Nachricht kommt klar getrennt dazu.
+    let mut after_summary = false;
     let close = |msgs: &mut Vec<ChatMessage>, origin: &mut Vec<usize>, open: &mut Vec<(String, String)>, at: usize| {
         for (id, name) in open.drain(..) {
             let call = llm::ToolCall { id, name, arguments: serde_json::Value::Null };
@@ -153,9 +195,16 @@ pub fn map_history(history: &[ChatMsg]) -> (Vec<ChatMessage>, Vec<usize>) {
         }
     };
     for (i, m) in history.iter().enumerate() {
-        if !logic::sendable(m) || m.role == store::Role::System || (m.role == store::Role::Assistant && m.content.is_empty() && m.tool_calls.is_empty()) {
+        // Kompaktierte Nachrichten (#359) ersetzt ihre Zusammenfassung; die geht als Nutzer-Nachricht mit (eine zweite
+        // Systemnachricht mitten im Verlauf lehnen manche Chat-Vorlagen ab) und verschmilzt mit der Frage danach.
+        // Ereignisse von Paneldeck (#355, z. B. „Hintergrund-Befehl beendet“) gehen ebenfalls als Nachricht des Nutzers mit.
+        let summary = m.summary.is_some();
+        let event = m.role == store::Role::System && m.event.is_some();
+        if m.compacted || !logic::sendable(m) || (m.role == store::Role::System && !summary && !event) || (m.role == store::Role::Assistant && m.content.is_empty() && m.tool_calls.is_empty()) {
             continue;
         }
+        let mrole = if summary || event { store::Role::User } else { m.role };
+        let r = role(mrole);
         if m.role == store::Role::Tool {
             match m.tool_call_id.as_deref().and_then(|id| open.iter().position(|(o, _)| o == id)) {
                 Some(k) => {
@@ -165,25 +214,40 @@ pub fn map_history(history: &[ChatMsg]) -> (Vec<ChatMessage>, Vec<usize>) {
             }
         } else {
             close(&mut msgs, &mut origin, &mut open, open_at);
+            flush(&mut msgs, &mut origin, &mut tool_imgs, tool_imgs_at);
         }
         if m.role == store::Role::Assistant {
             open = m.tool_calls.iter().map(|c| (c.id.clone(), c.name.clone())).collect();
             open_at = i;
         }
-        if let Some(prev) = msgs.last_mut().filter(|p: &&mut ChatMessage| p.role == Role::User && m.role == store::Role::User) {
-            prev.content = format!("{}\n\n{}", prev.content.trim_end(), m.content);
+        let own = parts(m);
+        if m.role == store::Role::Tool && !own.is_empty() {
+            tool_imgs.extend(own.iter().cloned());
+            tool_imgs_at = i;
+        }
+        let own_images: Vec<llm::ImagePart> = if mrole == store::Role::User { own.into_iter().map(|(_, p)| p).collect() } else { Vec::new() };
+        if let Some(prev) = msgs.last_mut().filter(|p: &&mut ChatMessage| p.role == Role::User && r == Role::User) {
+            prev.content = if std::mem::take(&mut after_summary) {
+                super::compact::with_user_message(&prev.content, &m.content)
+            } else {
+                format!("{}\n\n{}", prev.content.trim_end(), m.content)
+            };
+            prev.images.extend(own_images);
             continue;
         }
+        after_summary = summary;
         msgs.push(ChatMessage {
-            role: role(m.role),
-            content: m.content.clone(),
+            role: r,
+            content: if summary { super::compact::summary_block(&m.content) } else { m.content.clone() },
             tool_calls: m.tool_calls.iter().map(|c| llm::ToolCall { id: c.id.clone(), name: c.name.clone(), arguments: c.arguments.clone() }).collect(),
             tool_call_id: m.tool_call_id.clone(),
             tool_name: m.tool_name.clone(),
+            images: own_images,
         });
         origin.push(i);
     }
     close(&mut msgs, &mut origin, &mut open, open_at);
+    flush(&mut msgs, &mut origin, &mut tool_imgs, tool_imgs_at);
     (msgs, origin)
 }
 
@@ -261,7 +325,15 @@ fn build(meta: &ChatMeta, history: &[ChatMsg], cx: &TurnContext, with_key: bool)
     let cfg = server.model_cfg(model);
     let endpoint = if with_key { server.endpoint(lang)? } else { Endpoint::new(server.kind, &server.url) };
     let policy = ToolPolicy::new(cfg.clone(), server.tools_supported(model), cx.expert).with_agent(cx.agent.clone());
-    let (hist, origin) = map_history(history);
+    // Bilder (#357): an alle Modelle außer denen, die sicher keine lesen (unbekannt = versuchen; lehnt der Server ab,
+    // merkt sich die App „keine Bilder“). Ohne Bildverständnis ein Hinweis, wenn die laufende Runde Bilder hat.
+    let vision = server.vision_supported(model);
+    let send_images = vision != Some(false);
+    let learn_vision = vision.is_none();
+    let send = cx.images.dir.as_deref().filter(|_| send_images).map(|dir| SendImages { dir, entries: &cx.images.entries });
+    let (hist, origin) = map_history_with(history, send);
+    let round = logic::last_user(history).unwrap_or(0);
+    let image_note = (!send_images && history[round.min(history.len())..].iter().any(|m| logic::sendable(m) && !m.images.is_empty())).then(|| super::images::no_vision_note(lang, &super::images::suitable_models(&cx.servers)));
     // Alle Rechnungen in geschätzten Tokens: zählt der Server mehr als geschätzt (Faktor aus der letzten Antwort),
     // ist entsprechend weniger Platz.
     let scale = if cx.token_scale.is_finite() { cx.token_scale.clamp(1.0, 4.0) } else { 1.0 };
@@ -288,18 +360,37 @@ fn build(meta: &ChatMeta, history: &[ChatMsg], cx: &TurnContext, with_key: bool)
         None
     }
     .map(str::to_string);
+    let note = match (note, image_note) {
+        (Some(a), Some(b)) => Some(format!("{a}\n{b}")),
+        (a, b) => a.or(b),
+    };
     let history_budget = budget.saturating_sub(tool_tokens).saturating_sub(sys_tokens);
-    let start = llm::tokens::trim_to_budget(&messages, budget.saturating_sub(tool_tokens));
+    let mut start = llm::tokens::trim_to_budget(&messages, budget.saturating_sub(tool_tokens));
     let first = llm::tokens::first_turn(&messages);
+    // Die Zusammenfassung (#359) bleibt wie der Systemprompt: fällt ihre Runde der Kürzung zum Opfer, kommt sie vor die
+    // erste behaltene Nachricht (die Kürzung macht dafür Platz).
+    let pinned = (start > first)
+        .then(|| origin.first().and_then(|&i| history.get(i)).filter(|m| m.summary.is_some() && !m.compacted))
+        .flatten()
+        .map(|m| super::compact::summary_block(&m.content));
+    if let Some(block) = &pinned {
+        let extra = llm::tokens::estimate_tokens(block) + 16;
+        start = start.max(llm::tokens::trim_to_budget(&messages, budget.saturating_sub(tool_tokens).saturating_sub(extra)));
+    }
     // Index in `messages` → Index im Verlauf (die Systemnachricht steht nicht im Verlauf).
     let context_start = (start > first).then(|| origin.get(start - first).copied()).flatten();
-    let messages = llm::tokens::visible(&messages, start);
+    let mut messages = llm::tokens::visible(&messages, start);
+    if let Some(block) = pinned {
+        if let Some(m) = messages.get_mut(first).filter(|m| m.role == Role::User) {
+            m.content = super::compact::with_user_message(&block, &m.content);
+        }
+    }
     let prompt_estimate = messages.iter().map(llm::tokens::message_tokens).sum::<usize>() + tool_tokens;
     let ollama = server.kind == llm::ServerKind::Ollama;
     let num_ctx = ollama.then_some(ctx_len);
     // Ollama: die Antwort darf nur die Reserve nutzen, sonst schöbe sie den Anfang der Anfrage aus dem Kontext.
     let num_predict = ollama.then_some(ctx_len.saturating_sub(budget_real as u32).max(1));
-    let request = ChatRequest { model: model.to_string(), messages, tools, temperature: cfg.temperature, num_ctx, num_predict };
+    let request = ChatRequest { model: model.to_string(), messages, tools, temperature: cfg.temperature, num_ctx, num_predict, max_tokens: None };
     // Für die Anzeige in echten Tokens (mit dem Abgleich hochgerechnet).
     let parts = ContextParts {
         system: real(sys_tokens),
@@ -310,7 +401,34 @@ fn build(meta: &ChatMeta, history: &[ChatMsg], cx: &TurnContext, with_key: bool)
         dropped: context_start.is_some(),
         scale,
     };
-    Ok(Prepared { endpoint, request, context_start, note, context_notice, history_budget, prompt_estimate, parts })
+    Ok(Prepared { endpoint, request, context_start, note, context_notice, history_budget, prompt_estimate, parts, learn_vision })
+}
+
+/// Zusammenfassungs-Anfrage beim Kompaktieren (#359): dasselbe Modell und dieselbe Kontextlänge wie der Chat (Ollama lädt
+/// es nicht neu), die feste Anweisung als Systemnachricht, der Stoff als Nutzer-Nachricht, keine Werkzeuge. Die Länge der
+/// Antwort ist begrenzt (Ollama `num_predict`, OpenAI-kompatibel `max_tokens`), damit alles in den Kontext passt.
+pub fn prepare_summary(meta: &ChatMeta, req: &super::compact::SummaryRequest, cx: &TurnContext) -> Result<Prepared, String> {
+    let lang = cx.lang;
+    let server = cx.servers.iter().find(|s| s.id == meta.server).ok_or_else(|| unknown_server(lang))?;
+    let model = meta.model.trim();
+    if model.is_empty() {
+        return Err(lang.t("Dieser Chat hat kein Modell – bitte einen neuen Chat beginnen.", "This chat has no model – please start a new chat.").into());
+    }
+    let cfg = server.model_cfg(model);
+    let endpoint = server.endpoint(lang)?;
+    let messages = vec![ChatMessage::new(Role::System, req.system.clone()), ChatMessage::new(Role::User, req.user.clone())];
+    let prompt_estimate = messages.iter().map(llm::tokens::message_tokens).sum();
+    let ollama = server.kind == llm::ServerKind::Ollama;
+    let request = ChatRequest {
+        model: model.to_string(),
+        messages,
+        tools: Vec::new(),
+        temperature: cfg.temperature,
+        num_ctx: ollama.then_some(req.ctx),
+        num_predict: ollama.then_some(req.max_answer),
+        max_tokens: (!ollama).then_some(req.max_answer),
+    };
+    Ok(Prepared { endpoint, request, context_start: None, note: None, context_notice: None, history_budget: 0, prompt_estimate, parts: ContextParts::default(), learn_vision: false })
 }
 
 /// Hinweis: die eigene Kontextlänge reicht nicht für die Werkzeug-Stufe des Modells.
@@ -363,7 +481,10 @@ pub fn empty_answer_text(thought: bool, cut: bool, lang: Lang) -> String {
 }
 
 /// Führt eine vorbereitete Anfrage aus (im eigenen Thread) und übersetzt die Ereignisse.
-fn run(t: Arc<dyn Transport>, p: Prepared, cancel: Arc<AtomicBool>, tx: std::sync::mpsc::Sender<TurnEvent>, repaint: Repaint, lang: Lang) {
+fn run(t: Arc<dyn Transport>, mut p: Prepared, cancel: Arc<AtomicBool>, tx: std::sync::mpsc::Sender<TurnEvent>, repaint: Repaint, lang: Lang) {
+    // Bilder erst hier lesen (#357; Platte und Base64 nicht im Hauptdurchgang). Fehlt eine Datei, geht das Bild nicht mit.
+    super::images::load_parts(&mut p.request.messages);
+    let with_images = p.request.messages.iter().any(|m| !m.images.is_empty());
     let send = |ev: TurnEvent| {
         if tx.send(ev).is_err() {
             cancel.store(true, Ordering::SeqCst);
@@ -425,8 +546,12 @@ fn run(t: Arc<dyn Transport>, p: Prepared, cancel: Arc<AtomicBool>, tx: std::syn
                 // Abgebrochen (Stopp / Chat geschlossen): niemand wartet mehr.
                 if !cancel.load(Ordering::SeqCst) {
                     let mut text = error_text(&e, lang);
-                    // Manche Server lehnen Anfragen mit Werkzeugen ab, wenn das Modell keine kann.
-                    if with_tools && matches!(e, LlmError::Status { code: 400 | 422 | 500, .. }) {
+                    if with_images && p.learn_vision && super::images::is_rejection(&e) {
+                        // Bild abgelehnt (#357): die App merkt sich „keine Bilder“ und wiederholt die Antwort.
+                        send(TurnEvent::VisionRejected);
+                        text = format!("{} ({text})", super::images::rejected_text(lang));
+                    } else if with_tools && matches!(e, LlmError::Status { code: 400 | 422 | 500, .. }) {
+                        // Manche Server lehnen Anfragen mit Werkzeugen ab, wenn das Modell keine kann.
                         text = format!("{text} {}", tools_hint(lang));
                     }
                     send(TurnEvent::Error(text));
@@ -444,6 +569,26 @@ impl ChatBackend for LlmBackend {
         let (handle, tx, cancel) = TurnHandle::pair();
         let lang = cx.lang;
         match prepare(meta, history, cx) {
+            Err(e) => {
+                let _ = tx.send(TurnEvent::Error(e));
+                repaint();
+            }
+            Ok(p) => {
+                let t = self.transport.clone();
+                std::thread::spawn(move || run(t, p, cancel, tx, repaint, lang));
+            }
+        }
+        handle
+    }
+
+    fn estimate(&self, meta: &ChatMeta, history: &[ChatMsg], cx: &TurnContext) -> Option<ContextParts> {
+        context_estimate(meta, history, cx)
+    }
+
+    fn summarize(&self, meta: &ChatMeta, req: &super::compact::SummaryRequest, cx: &TurnContext, repaint: Repaint) -> TurnHandle {
+        let (handle, tx, cancel) = TurnHandle::pair();
+        let lang = cx.lang;
+        match prepare_summary(meta, req, cx) {
             Err(e) => {
                 let _ = tx.send(TurnEvent::Error(e));
                 repaint();
@@ -558,7 +703,7 @@ mod tests {
     #[test]
     fn notice_for_models_without_tools() {
         let mut s = server("http://localhost:11434", ServerKind::Ollama);
-        s.last_models = vec![ModelInfo { name: "m1".into(), tools: Some(false), context_length: None }, ModelInfo { name: "m2".into(), tools: Some(true), context_length: None }];
+        s.last_models = vec![ModelInfo { name: "m1".into(), tools: Some(false), context_length: None, vision: None }, ModelInfo { name: "m2".into(), tools: Some(true), context_length: None, vision: None }];
         let v = vec![s];
         assert_eq!(chat_notice(&v, &meta(), Lang::En).as_deref(), Some("This model cannot use tools – chat only."));
         assert_eq!(chat_notice(&v, &meta(), Lang::De).as_deref(), Some("Dieses Modell kann keine Werkzeuge nutzen – nur Chat."));
@@ -615,10 +760,70 @@ mod tests {
         assert_eq!(run(1_000_000).context_start, None);
     }
 
+    /// #359: Die Zusammenfassung bleibt wie der Systemprompt – fällt die Runde, in der sie steht, der Kürzung zum Opfer,
+    /// kommt sie (in `<summary>` gefasst) vor die erste behaltene Nachricht. Originale gehen nie mit.
+    #[test]
+    fn the_summary_stays_when_older_kept_rounds_are_trimmed() {
+        let long = "y".repeat(3000);
+        let mut old = msg(store::Role::User, "old question");
+        old.compacted = true;
+        let mut sum = msg(store::Role::System, "[Notes …] The user wants X.");
+        sum.summary = Some(store::SummaryInfo { messages: 1, text: "The user wants X.".into(), ..Default::default() });
+        let hist = vec![old, sum, msg(store::Role::User, &long), msg(store::Role::Assistant, &long), msg(store::Role::User, "last")];
+        let off = LlmModel { level: McpLevel::Off, ..LlmModel::named("m1") };
+        let run = |ctx: u32| {
+            let mut s = server("http://localhost:11434", ServerKind::Ollama);
+            s.set_model_cfg(LlmModel { context_length: Some(ctx), ..off.clone() });
+            let mut c = cx(vec![s]);
+            c.project.clear();
+            c.folder.clear();
+            prepare(&meta(), &hist, &c).unwrap()
+        };
+        let compact = system_prompt_variant(&ToolPolicy::new(off.clone(), None, false), "m1", &TurnContext::default(), Variant::Compact);
+        let sys = llm::tokens::message_tokens(&ChatMessage::new(Role::System, compact));
+        let block = super::super::compact::summary_block("[Notes …] The user wants X.");
+        let room = sys + llm::tokens::estimate_tokens(&block) + 200;
+        // Platz für Systemprompt, Zusammenfassung und „last“, nicht für die lange Runde.
+        let p = run((room * 100).div_ceil(75) as u32);
+        assert_eq!(p.context_start, Some(4));
+        let m = &p.request.messages;
+        assert_eq!(m.len(), 2, "{m:#?}");
+        assert!(m[1].content.starts_with("<summary>\n[Notes …] The user wants X.\n</summary>") && m[1].content.ends_with("The user's message:\nlast"), "{}", m[1].content);
+        assert!(!m.iter().any(|m| m.content.contains("old question") || m.content.contains(&long)));
+        // Genug Platz: die Zusammenfassung steht vor der ersten behaltenen Frage.
+        let p = run(1_000_000);
+        assert_eq!(p.context_start, None);
+        assert!(p.request.messages[1].content.starts_with("<summary>") && p.request.messages[1].content.ends_with(&format!("The user's message:\n{long}")));
+        assert!(!p.request.messages.iter().any(|m| m.content.contains("old question")));
+    }
+
+    /// #359 + #357: Bilder kompaktierter Nachrichten gehen nie mit (die Einträge bleiben im Chat); die Bilder der ersten
+    /// behaltenen Frage hängen an der Nachricht mit der Zusammenfassung.
+    #[test]
+    fn images_of_compacted_messages_are_not_sent() {
+        let entry = |n: u32| super::super::images::ImageEntry { n, file: format!("{n}.png"), mime: "image/png".into(), width: 10, height: 10, send_width: 10, send_height: 10, ..Default::default() };
+        let entries = [entry(1), entry(2)];
+        let mut old = msg(store::Role::User, "[Image#1] old");
+        old.images = vec![1];
+        old.compacted = true;
+        let mut sum = msg(store::Role::System, "[Notes …] An image was discussed.");
+        sum.summary = Some(store::SummaryInfo { messages: 1, text: "An image was discussed.".into(), ..Default::default() });
+        let mut q = msg(store::Role::User, "[Image#2] new");
+        q.images = vec![2];
+        let hist = vec![old, sum, q, msg(store::Role::Assistant, "a"), msg(store::Role::User, "last")];
+        let dir = std::path::Path::new("C:\\none");
+        let (m, _) = map_history_with(&hist, Some(SendImages { dir, entries: &entries }));
+        let parts: Vec<&llm::ImagePart> = m.iter().flat_map(|m| m.images.iter()).collect();
+        assert_eq!(parts.len(), 1, "{m:#?}");
+        assert!(parts[0].path.as_ref().is_some_and(|p| p.ends_with("2.png")));
+        assert!(m[0].content.starts_with("<summary>") && m[0].content.ends_with("The user's message:\n[Image#2] new") && m[0].images.len() == 1);
+        assert!(!m.iter().any(|m| m.content.contains("old")));
+    }
+
     #[test]
     fn ollama_num_ctx_follows_the_budget_and_openai_gets_none() {
         let mut s = server("http://localhost:11434", ServerKind::Ollama);
-        s.last_models = vec![ModelInfo { name: "m1".into(), tools: None, context_length: Some(131_072) }];
+        s.last_models = vec![ModelInfo { name: "m1".into(), tools: None, context_length: Some(131_072), vision: None }];
         let p = prepare(&meta(), &[msg(store::Role::User, "q")], &cx(vec![s.clone()])).unwrap();
         assert_eq!(p.request.num_ctx, Some(8192), "ohne eigene Angabe höchstens 8192, wie das Budget");
         s.kind = ServerKind::OpenAi;
@@ -761,7 +966,7 @@ mod tests {
         };
         // Ollama ohne eigene Angabe: der kleinere Prompt braucht weniger Kontext.
         let mut s = server("http://localhost:11434", ServerKind::Ollama);
-        s.last_models = vec![ModelInfo { name: "qwen3:8b".into(), tools: Some(true), context_length: Some(131_072) }];
+        s.last_models = vec![ModelInfo { name: "qwen3:8b".into(), tools: Some(true), context_length: Some(131_072), vision: None }];
         s.set_model_cfg(control.clone());
         let (full, reduced) = (run(&s, PromptParts::default()), run(&s, small));
         assert!(!reduced.request.messages[0].content.contains("## What Paneldeck is") && full.request.messages[0].content.contains("## What Paneldeck is"));
@@ -829,6 +1034,29 @@ mod tests {
         assert_eq!(context_estimate(&ChatMeta { server: "s1".into(), model: " ".into() }, &hist, &cx(vec![s])), None);
     }
 
+    /// Ende zu Ende (#357): Ollama bekommt das Bild als `images`; lehnt der Server es ab, kommt `VisionRejected` vor dem
+    /// Fehler mit dem eigenen Text.
+    #[cfg(windows)] // WinHTTP (andere Systeme haben noch keinen Transport, #149/#150)
+    #[test]
+    fn end_to_end_image_is_sent_and_a_rejection_is_reported() {
+        let d = std::env::temp_dir().join(format!("pd-llm-img-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let e = super::super::images::import_rgba(&d, 1, image::RgbaImage::from_pixel(8, 8, image::Rgba([1, 2, 3, 255]))).unwrap();
+        let raw = std::fs::read(d.join(&e.file)).unwrap();
+        let body = r#"{"error":"image input is not supported - hint: if this is unexpected, you may need to provide the mmproj"}"#;
+        let (base, h) = serve(format!("HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).into_bytes());
+        let mut c = cx(vec![server(&base, ServerKind::Ollama)]);
+        c.images = super::super::images::TurnImages { dir: Some(d.clone()), entries: vec![e] };
+        let mut u = msg(store::Role::User, "[Image#1] what?");
+        u.images = vec![1];
+        let ev = collect(&LlmBackend::new().start(&meta(), &[u], &c, Arc::new(|| {})));
+        let seen = h.join().unwrap();
+        assert!(seen.contains(&format!("\"images\":[\"{}\"]", crate::mcp::base64(&raw))), "{seen}");
+        let k = ev.iter().position(|e| *e == TurnEvent::VisionRejected).expect("VisionRejected");
+        assert!(matches!(&ev[k + 1], TurnEvent::Error(t) if t.starts_with("The server rejected the image")), "{ev:?}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
     #[cfg(windows)] // WinHTTP (andere Systeme haben noch keinen Transport, #149/#150)
     #[test]
     fn end_to_end_openai_sse() {
@@ -890,6 +1118,93 @@ mod tests {
         let mut a = msg(store::Role::Assistant, "");
         a.tool_calls = ids.iter().map(|(id, n)| store::ToolCall { id: (*id).into(), name: (*n).into(), arguments: serde_json::json!({}) }).collect();
         a
+    }
+
+    fn img_entry(n: u32) -> super::super::images::ImageEntry {
+        super::super::images::ImageEntry { n, file: format!("{n}.png"), mime: "image/png".into(), width: 56, height: 28, send_width: 56, send_height: 28, ..Default::default() }
+    }
+
+    /// Bilder (#357): Nutzer-Nachrichten bekommen ihre Bilder, Bilder von Werkzeugen folgen als Nutzer-Nachricht hinter
+    /// den Ergebnissen; Ollama bekommt `images`, OpenAI-kompatible Server Inhaltsteile mit `image_url`.
+    #[test]
+    fn images_go_to_user_messages_and_after_tool_results() {
+        let dir = std::path::PathBuf::from("C:\\data\\chats\\5\\images");
+        let entries = vec![img_entry(1), img_entry(2), img_entry(3)];
+        let mut u = msg(store::Role::User, "what is this? [Image#1]");
+        u.images = vec![1, 9];
+        let mut t = tool_msg("c1", "screenshot", "{\"image\":\"[Image#2]\"}");
+        t.images = vec![2];
+        let mut u2 = msg(store::Role::User, "and this [Image#3]");
+        u2.images = vec![3];
+        let hist = vec![u, call_msg(&[("c1", "screenshot"), ("c2", "whoami")]), t, tool_msg("c2", "whoami", "{}"), msg(store::Role::Assistant, "done"), u2];
+        let si = SendImages { dir: &dir, entries: &entries };
+        let (m, origin) = map_history_with(&hist, Some(si));
+        assert_eq!(m.iter().map(|m| m.role).collect::<Vec<_>>(), [Role::User, Role::Assistant, Role::Tool, Role::Tool, Role::User, Role::Assistant, Role::User]);
+        assert_eq!(m[0].images.len(), 1, "unbekanntes Bild 9 fällt weg");
+        assert_eq!(m[0].images[0].path.as_deref(), Some(dir.join("1.png").as_path()));
+        assert!(m[2].images.is_empty() && m[3].images.is_empty(), "Werkzeug-Nachrichten tragen keine Bilder");
+        assert_eq!(m[4].content, "Images from the tool results above: [Image#2]");
+        assert_eq!(m[4].images[0].path.as_deref(), Some(dir.join("2.png").as_path()));
+        assert_eq!(origin, [0, 1, 2, 3, 2, 4, 5]);
+        assert_eq!(m[6].images.len(), 1);
+        // Ohne Bilder (Modell ohne Bildverständnis): dieselben Texte, keine Bilder, keine zusätzliche Nachricht
+        let (plain, _) = map_history(&hist);
+        assert_eq!(plain.len(), 6);
+        assert!(plain.iter().all(|m| m.images.is_empty()));
+        // Folgt die Frage direkt auf die Werkzeug-Ergebnisse (Runde abgebrochen), wird sie mit den Bildern eine Nachricht.
+        let mut t2 = tool_msg("c1", "screenshot", "{}");
+        t2.images = vec![2];
+        let (m, _) = map_history_with(&[msg(store::Role::User, "q"), call_msg(&[("c1", "screenshot")]), t2, msg(store::Role::User, "next")], Some(si));
+        assert_eq!(m.len(), 4);
+        assert_eq!((m[3].content.as_str(), m[3].images.len()), ("Images from the tool results above: [Image#2]\n\nnext", 1));
+        // Anfrage-JSON: Ollama `images` (reines Base64), OpenAI Teile mit `data:`-Adresse
+        let mut req = ChatRequest { model: "m".into(), messages: vec![ChatMessage { role: Role::User, content: "see".into(), images: vec![llm::ImagePart { mime: "image/png".into(), data: "QUJD".into(), ..Default::default() }], ..Default::default() }], ..Default::default() };
+        let o = crate::llm::request_body(llm::ServerKind::Ollama, &req);
+        assert_eq!(o["messages"][0]["images"], serde_json::json!(["QUJD"]));
+        assert_eq!(o["messages"][0]["content"], "see");
+        let a = crate::llm::request_body(llm::ServerKind::OpenAi, &req);
+        assert_eq!(a["messages"][0]["content"], serde_json::json!([{"type": "text", "text": "see"}, {"type": "image_url", "image_url": {"url": "data:image/png;base64,QUJD"}}]));
+        // Ohne Daten (Datei fehlte): weder `images` noch Teile
+        req.messages[0].images[0].data.clear();
+        assert!(crate::llm::request_body(llm::ServerKind::Ollama, &req)["messages"][0].get("images").is_none());
+        assert_eq!(crate::llm::request_body(llm::ServerKind::OpenAi, &req)["messages"][0]["content"], "see");
+    }
+
+    /// Modell ohne Bildverständnis (#357): Bilder bleiben weg, die Antwort bekommt einen Hinweis mit geeigneten Modellen;
+    /// unbekannt (OpenAI-kompatibel) wird versucht.
+    #[test]
+    fn vision_detection_decides_whether_images_are_sent_and_explains_why_not() {
+        let mut s = server("http://localhost:11434", ServerKind::Ollama);
+        s.last_models = vec![ModelInfo { name: "m1".into(), vision: Some(false), ..Default::default() }, ModelInfo { name: "gemma3".into(), vision: Some(true), ..Default::default() }];
+        let mut c = cx(vec![s.clone()]);
+        c.images = super::super::images::TurnImages { dir: Some("C:\\x".into()), entries: vec![img_entry(1)] };
+        let mut u = msg(store::Role::User, "[Image#1] ?");
+        u.images = vec![1];
+        let p = prepare(&meta(), std::slice::from_ref(&u), &c).unwrap();
+        assert!(p.request.messages.iter().all(|m| m.images.is_empty()));
+        let note = p.note.unwrap();
+        assert!(note.starts_with("This model cannot read images") && note.contains("gemma3 (Local)"), "{note}");
+        // Mit Bildverständnis: Bild dabei, kein Hinweis, Platz im Kontext eingerechnet
+        let g = ChatMeta { server: "s1".into(), model: "gemma3".into() };
+        let p = prepare(&g, std::slice::from_ref(&u), &c).unwrap();
+        assert_eq!(p.request.messages[1].images.len(), 1);
+        assert_eq!(p.note, None);
+        let without = prepare(&g, &[msg(store::Role::User, "[Image#1] ?")], &c).unwrap();
+        assert!(p.prompt_estimate >= without.prompt_estimate + 256, "{} vs {}", p.prompt_estimate, without.prompt_estimate);
+        // Unbekannt (OpenAI-kompatibel): wird versucht
+        let mut o = server("http://localhost:1234/v1", ServerKind::OpenAi);
+        o.last_models = vec![ModelInfo { name: "m1".into(), ..Default::default() }];
+        let mut co = c.clone();
+        co.servers = vec![o.clone()];
+        assert_eq!(prepare(&meta(), std::slice::from_ref(&u), &co).unwrap().request.messages[1].images.len(), 1);
+        // Gemerkte Ablehnung (eigene Angabe „aus“): nicht mehr
+        o.set_model_cfg(LlmModel { vision: Some(false), ..LlmModel::named("m1") });
+        co.servers = vec![o];
+        let p = prepare(&meta(), std::slice::from_ref(&u), &co).unwrap();
+        assert!(p.request.messages[1].images.is_empty() && p.note.is_some());
+        // Bilder nur in einer älteren Runde: kein Hinweis mehr
+        let later = [u.clone(), msg(store::Role::Assistant, "a"), msg(store::Role::User, "next")];
+        assert_eq!(prepare(&meta(), &later, &c).unwrap().note, None);
     }
 
     #[test]
@@ -1176,6 +1491,80 @@ mod tests {
         eprintln!("CHAT BODY {len} bytes, {} tools", body["tools"].as_array().unwrap().len());
     }
 
+    /// #359 gegen einen Ersatz-Server im Prozess (`http::fake`): Die Zusammenfassungs-Anfrage, die wirklich gesendet
+    /// wird, passt in den Kontext – samt der begrenzten Antwort – auch bei riesigen Werkzeug-Ergebnissen und kleinen
+    /// Kontexten; Ollama bekommt `num_ctx`/`num_predict`, OpenAI-kompatible Server `max_tokens`, nie Werkzeuge.
+    #[test]
+    fn the_summary_request_sent_to_a_fake_server_fits_into_the_context() {
+        use crate::llm::http::{fake::{Canned, Fake}, Method};
+        let huge = format!("BEGIN{}END", "x".repeat(300_000));
+        let mut hist = Vec::new();
+        for i in 0..30 {
+            hist.push(msg(store::Role::User, &format!("question {i}")));
+            hist.push(call_msg(&[(&format!("c{i}"), "read_terminal")]));
+            hist.push(tool_msg(&format!("c{i}"), "read_terminal", if i % 3 == 0 { &huge } else { "{\"text\":\"ok\"}" }));
+            hist.push(msg(store::Role::Assistant, &"ä".repeat(if i % 4 == 0 { 30_000 } else { 10 })));
+        }
+        let ollama_body = "{\"message\":{\"content\":\"The user ran \"}}\n{\"message\":{\"content\":\"commands.\"}}\n{\"done\":true,\"done_reason\":\"stop\",\"prompt_eval_count\":900,\"eval_count\":12}\n";
+        let openai_body = "data: {\"choices\":[{\"delta\":{\"content\":\"The user ran commands.\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n";
+        for (kind, base, url, body) in [
+            (ServerKind::Ollama, "http://localhost:11434", "http://localhost:11434/api/chat", ollama_body),
+            (ServerKind::OpenAi, "http://localhost:1234/v1", "http://localhost:1234/v1/chat/completions", openai_body),
+        ] {
+            for ctx in [2048u32, 4096, 8192, 32768] {
+                for scale in [1.0f32, 2.5] {
+                    let fake = Arc::new(Fake::default().with(Method::Post, url, Canned::ok(body)));
+                    let b = LlmBackend::with_transport(fake.clone());
+                    let mut s = server(base, kind);
+                    s.set_model_cfg(LlmModel { context_length: Some(ctx), ..LlmModel::named("m1") });
+                    let mut c = cx(vec![s]);
+                    c.token_scale = scale;
+                    let mut chat = super::super::ChatState::new(store::ChatFile { messages: hist.clone(), ..Default::default() }, None);
+                    chat.token_scale = scale;
+                    let r = chat.compact_now(&b, &meta(), &c, Arc::new(|| {}));
+                    if let Err(e) = r {
+                        assert!(matches!(e, super::super::compact::CompactError::ContextTooSmall(_)) && ctx <= 2048, "{kind:?} {ctx} {scale}: {e:?}");
+                        continue;
+                    }
+                    let t = std::time::Instant::now();
+                    while chat.compact.running() && t.elapsed() < Duration::from_secs(10) {
+                        chat.poll();
+                        std::thread::sleep(Duration::from_millis(1));
+                    }
+                    assert_eq!(chat.compact.failure, None, "{kind:?} {ctx} {scale}");
+                    let s = super::super::compact::active_summary(chat.messages()).expect("übernommen");
+                    assert_eq!(chat.messages()[s].summary.as_ref().unwrap().text, "The user ran commands.");
+                    let log = fake.log();
+                    assert_eq!(log.len(), 1);
+                    let sent = log[0].body.as_ref().unwrap();
+                    assert!(sent.get("tools").is_none(), "keine Werkzeuge");
+                    let msgs = sent["messages"].as_array().unwrap();
+                    assert_eq!(msgs.iter().map(|m| m["role"].as_str().unwrap()).collect::<Vec<_>>(), ["system", "user"]);
+                    assert!(msgs[0]["content"].as_str().unwrap().starts_with("You compact a conversation"));
+                    let user = msgs[1]["content"].as_str().unwrap();
+                    assert!(!user.contains(&"x".repeat(2000)), "riesige Ergebnisse gekürzt");
+                    let answer = match kind {
+                        ServerKind::Ollama => {
+                            assert_eq!(sent["options"]["num_ctx"], serde_json::json!(ctx));
+                            assert!(sent.get("max_tokens").is_none());
+                            sent["options"]["num_predict"].as_u64().unwrap()
+                        }
+                        ServerKind::OpenAi => {
+                            assert!(sent.get("options").is_none());
+                            sent["max_tokens"].as_u64().unwrap()
+                        }
+                    };
+                    let window = super::super::compact::safety_window(ctx, &Default::default()) as u64;
+                    let est = |r: llm::Role, i: usize| llm::tokens::message_tokens(&ChatMessage::new(r, msgs[i]["content"].as_str().unwrap().to_string()));
+                    let real = |n: usize| (n as f64 * scale as f64).ceil() as u64;
+                    assert!(real(est(Role::System, 0)) + answer <= window, "{kind:?} {ctx} {scale}: Anweisung + Antwort im Fenster");
+                    assert!(real(est(Role::System, 0) + est(Role::User, 1)) + answer <= ctx as u64, "{kind:?} {ctx} {scale}: Anfrage passt in den Kontext");
+                    assert!(answer >= super::super::compact::MIN_SUMMARY_TOKENS as u64);
+                }
+            }
+        }
+    }
+
     #[test]
     fn empty_answer_texts_in_both_languages() {
         for lang in [Lang::En, Lang::De] {
@@ -1213,7 +1602,7 @@ mod tests {
     #[test]
     fn control_without_override_gets_enough_context_and_an_override_gets_a_notice() {
         let mut s = server("http://localhost:11434", ServerKind::Ollama);
-        s.last_models = vec![ModelInfo { name: "m1".into(), tools: Some(true), context_length: Some(131_072) }];
+        s.last_models = vec![ModelInfo { name: "m1".into(), tools: Some(true), context_length: Some(131_072), vision: None }];
         s.set_model_cfg(LlmModel { level: McpLevel::Control, level_chosen: true, ..LlmModel::named("m1") });
         let p = prepare(&meta(), &[msg(store::Role::User, "q")], &cx(vec![s.clone()])).unwrap();
         let ctx = p.request.num_ctx.unwrap();

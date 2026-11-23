@@ -38,6 +38,10 @@ pub struct TimeData {
     pub stopwatches: Vec<Stopwatch>,
     pub clocks: Vec<WorldClock>,
     pub birthdays: Vec<Birthday>,
+    /// Nächster Termin je Wecker (nur im Speicher, `engine`): Kennung → (Prüfwert der Einstellungen, berechnet um, Termin).
+    /// Die lokale Zeitzone abzufragen ist teuer (unter Windows je Aufruf eine Systemfunktion) – ohne Zwischenspeicher
+    /// kosteten 1000 Wecker bei jedem Takt einen spürbaren Teil eines Bilds.
+    pub next_cache: std::collections::HashMap<i64, (u64, i64, Option<i64>)>,
 }
 
 impl TimeData {
@@ -64,6 +68,40 @@ impl TimeData {
     }
     pub fn birthday(&self, id: i64) -> Option<&Birthday> {
         self.birthdays.iter().find(|b| b.id == id)
+    }
+}
+
+/// Zeitzone des Rechners als IANA-Zone (`chrono-tz`, reines Rust), höchstens eine Minute alt; `None`, wenn der Name nicht
+/// bekannt ist (dann gilt `chrono::Local`). Für den Takt: `chrono::Local` fragt unter Windows bei jeder Umrechnung das
+/// System, was bei 1000 Weckern spürbar dauert.
+pub fn system_tz() -> Option<chrono_tz::Tz> {
+    use std::sync::Mutex;
+    use std::time::{Duration, Instant};
+    static CACHE: Mutex<Option<(Instant, Option<chrono_tz::Tz>)>> = Mutex::new(None);
+    let mut c = CACHE.lock().ok()?;
+    if let Some((at, tz)) = *c
+        && at.elapsed() < Duration::from_secs(60)
+    {
+        return tz;
+    }
+    let tz = iana_time_zone::get_timezone().ok().and_then(|n| worldclock::parse_zone(&n));
+    *c = Some((Instant::now(), tz));
+    tz
+}
+
+/// Takt mit der schnellen Zone, falls bekannt (siehe [`system_tz`]).
+pub fn tick_local(data: &mut TimeData, now_ms: i64) -> (Vec<engine::Event>, engine::Changed) {
+    match system_tz() {
+        Some(tz) => engine::tick(data, now_ms, &tz),
+        None => engine::tick(data, now_ms, &chrono::Local),
+    }
+}
+
+/// Nächster Weckzeitpunkt mit der schnellen Zone, falls bekannt.
+pub fn next_wake_local(data: &TimeData, now_ms: i64) -> Option<i64> {
+    match system_tz() {
+        Some(tz) => engine::next_wake(data, now_ms, &tz),
+        None => engine::next_wake(data, now_ms, &chrono::Local),
     }
 }
 
@@ -199,6 +237,19 @@ mod tests {
         assert_eq!(parse_duration_ms("2 Minuten"), Some(120_000));
         for bad in ["", "0", "abc", "1:75", "-5", "5x", "m5", "101h", "1,5h"] {
             assert_eq!(parse_duration_ms(bad), None, "{bad}");
+        }
+    }
+
+    /// Die schnelle Zone stimmt mit `chrono::Local` überein (sonst rechnete der Takt mit einer falschen Zone).
+    #[test]
+    fn system_zone_matches_local_time() {
+        use chrono::{Offset, TimeZone};
+        if let Some(tz) = system_tz() {
+            for ms in [now_ms(), now_ms() + 90 * 86_400_000, now_ms() + 180 * 86_400_000] {
+                let a = tz.timestamp_millis_opt(ms).unwrap().offset().fix();
+                let b = *chrono::Local.timestamp_millis_opt(ms).unwrap().offset();
+                assert_eq!(a.local_minus_utc(), b.local_minus_utc(), "{tz}");
+            }
         }
     }
 

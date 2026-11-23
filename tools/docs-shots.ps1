@@ -74,15 +74,20 @@ $AllViews = @(
   @{ Name = 'editor-find';         Spec = 'editor-find';         W = 1400; H = 860; Wait = 3 }
   @{ Name = 'editor-disk-changed'; Spec = 'editor-disk-changed'; W = 1400; H = 860; Wait = 4 }
   @{ Name = 'editor-search';       Spec = 'editor-search';       W = 1400; H = 860; Wait = 3 }
+  @{ Name = 'editor-syntax';       Spec = 'editor-syntax';       W = 1400; H = 860; Wait = 3 }
   @{ Name = 'editor-settings';     Spec = 'editor-settings';     W = 1100; H = 900 }
   # Reiter Zeit (#164)
   @{ Name = 'time-alarms';         Spec = 'time-alarms';         W = 1300; H = 820; Wait = 2 }
   @{ Name = 'time-timers';         Spec = 'time-timers';         W = 1300; H = 820; Wait = 2 }
   @{ Name = 'time-clocks';         Spec = 'time-clocks';         W = 1300; H = 820; Wait = 2 }
+  # Chats
+  @{ Name = 'chat-images';         Spec = 'chat-images';         W = 1300; H = 860; Wait = 3 }
   # Prozesse
   @{ Name = 'processes';           Spec = 'processes';           H = 1000; Wait = 6 }
   @{ Name = 'process-new';         Spec = 'process-new';         H = 900; Wait = 2 }
   @{ Name = 'process-output';      Spec = 'process-output';      H = 1000; Wait = 6 }
+  # Chats
+  @{ Name = 'chat-compacted';      Spec = 'chat-compacted';      W = 1240; H = 860; Wait = 2 }
   # Themes
   @{ Name = 'theme-appearance';    Spec = 'theme-appearance';    W = 1100; H = 860 }
   @{ Name = 'theme-generate';      Spec = 'theme-generate';      W = 1100; H = 860 }
@@ -92,6 +97,11 @@ $AllViews = @(
   # Kalender (#164; bis zum Zeit-Reiter ueber dem Fenster gezeichnet)
   @{ Name = 'time-calendar-month';  Spec = 'calendar-month';     W = 1400; H = 900;  Wait = 3 }
   @{ Name = 'time-calendar-dialog'; Spec = 'calendar-dialog';    W = 1300; H = 1040; Wait = 3 }
+  # Chats (#355, #356)
+  @{ Name = 'chat-background-command'; Spec = 'chat-background-command'; W = 1400; H = 860; Wait = 3 }
+  @{ Name = 'chat-ask-form';       Spec = 'chat-ask-form';       W = 1100; H = 860; Wait = 2 }
+  # Chats (#358)
+  @{ Name = 'chat-plan';           Spec = 'chat-plan';           W = 1300; H = 900;  Wait = 2 }
   # Tutorial
   @{ Name = 'tutorial-card';       Spec = 'tutorial-card';       Wait = 1 }
   @{ Name = 'tutorial-tour';       Spec = 'tutorial-tour:basics/basics.sidebar'; Wait = 2 }

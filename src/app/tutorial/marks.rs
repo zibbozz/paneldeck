@@ -71,6 +71,7 @@ spots! {
     McpSysprompt = "settings.agents.system_prompt",
     McpLog = "settings.agents.log",
     ModelsServers = "settings.models.servers",
+    ModelsCommands = "settings.models.commands",
     DataBackups = "settings.data.backups",
     DataCleanup = "settings.data.cleanup",
     AboutInfo = "settings.about.info",
@@ -99,6 +100,13 @@ spots! {
     TabEditor = "settings.tab.editor",
     EditorSearchSettings = "settings.editor.search",
     EditorAgentSwitches = "settings.editor.agents",
+    // Reiter „Zeit“ (#164, 3.2.0)
+    TitlebarTime = "titlebar.time",
+    TimeSubTabs = "time.subtabs",
+    TimeNewAlarm = "time.new_alarm",
+    TimePresets = "time.presets",
+    CalendarViews = "time.calendar.views",
+    TimeOptions = "time.options",
 }
 
 /// Wo ein Ziel in diesem Bild lag: ganzes Rechteck und der sichtbare (nicht weggeschnittene) Teil.

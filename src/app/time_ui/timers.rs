@@ -12,8 +12,12 @@ impl TimeUi {
     pub(super) fn timer_list(&mut self, ui: &mut Ui, env: &Env) {
         let lang = env.lang;
         let now = env.now_ms;
-        // Vorlagen
-        if !self.data.presets.is_empty() {
+        // Vorlagen (das Tutorial zeigt auf diese Zeile, auch wenn es noch keine gibt)
+        let top = ui.cursor().min.y;
+        if self.data.presets.is_empty() {
+            ui.add_space(6.0);
+            ui.label(RichText::new(lang.t("Vorlagen: „Als Vorlage speichern“ in den Details eines Timers.", "Presets: “Save as preset” in the details of a timer.")).color(style::dim(ui)));
+        } else {
             ui.add_space(6.0);
             let mut start: Option<Preset> = None;
             let mut del: Option<i64> = None;
@@ -40,6 +44,7 @@ impl TimeUi {
                     self.data.presets.retain(|p| p.id != id);
                 }
         }
+        crate::app::tutorial::spot_since(ui, crate::app::tutorial::Spot::TimePresets, top);
         let idx: Vec<usize> = (0..self.data.timers.len()).filter(|&i| self.matches(1, &self.data.timers[i].name)).collect();
         if self.list_head(ui, 1, lang.t("Neuer Timer", "New timer"), self.data.timers.len(), lang) {
             self.new_timer(env, "", 5 * 60_000, false);

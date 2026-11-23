@@ -13,7 +13,7 @@ pub fn list_models(t: &dyn Transport, ep: &Endpoint, cancel: &Arc<AtomicBool>) -
     let bytes = http::read_all(r.as_mut(), MAX_BODY, cancel)?;
     let v: Value = serde_json::from_slice(&bytes).map_err(|e| LlmError::BadResponse(format!("/v1/models: {e}")))?;
     let data = v.get("data").and_then(|d| d.as_array()).ok_or_else(|| LlmError::BadResponse("/v1/models: no \"data\"".into()))?;
-    Ok(data.iter().filter_map(|m| m.get("id").and_then(|i| i.as_str())).map(|id| ModelInfo { name: id.to_string(), tools: None, context_length: None }).collect())
+    Ok(data.iter().filter_map(|m| m.get("id").and_then(|i| i.as_str())).map(|id| ModelInfo { name: id.to_string(), ..Default::default() }).collect())
 }
 
 /// `POST /tokenize` (neben `/v1`): der llama.cpp-Server liest `content` und antwortet `{"tokens": […]}`, vLLM liest
@@ -70,6 +70,16 @@ pub fn request_json(req: &ChatRequest) -> Value {
             {
                 o["tool_call_id"] = json!(id);
             }
+            // Bilder (#357): Inhalt als Teile – zuerst der Text, dann je Bild ein `image_url` mit `data:`-Adresse.
+            let imgs: Vec<Value> = m.images.iter().filter(|i| !i.data.is_empty()).map(|i| json!({ "type": "image_url", "image_url": { "url": i.data_url() } })).collect();
+            if !imgs.is_empty() {
+                let mut parts = Vec::with_capacity(imgs.len() + 1);
+                if !m.content.is_empty() {
+                    parts.push(json!({ "type": "text", "text": m.content }));
+                }
+                parts.extend(imgs);
+                o["content"] = Value::Array(parts);
+            }
             o
         })
         .collect();
@@ -79,6 +89,9 @@ pub fn request_json(req: &ChatRequest) -> Value {
     }
     if let Some(t) = req.temperature {
         body["temperature"] = json!(t);
+    }
+    if let Some(n) = req.max_tokens {
+        body["max_tokens"] = json!(n);
     }
     body
 }

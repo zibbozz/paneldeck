@@ -266,12 +266,16 @@ impl App {
             return;
         }
         let id = target.map(|t| t.0).unwrap_or(self.focused);
-        if let Some(e) = self.entries.get_mut(&id).filter(|e| e.is_chat()) {
-            // Chat: Pfade ins Eingabefeld, mit Leerzeichen in Anführungszeichen.
-            let text: Vec<String> = files.iter().filter_map(|f| f.path.as_ref()).map(|p| quote_path(&p.to_string_lossy())).collect();
-            if !text.is_empty() {
+        if self.entries.get(&id).is_some_and(|e| e.is_chat()) {
+            // Chat: Bilder als Platzhalter `[Image#n]` (#357), andere Dateien als Pfad ins Eingabefeld (mit Leerzeichen
+            // in Anführungszeichen).
+            let paths: Vec<std::path::PathBuf> = files.iter().filter_map(|f| f.path.clone()).collect();
+            let (imgs, other): (Vec<_>, Vec<_>) = paths.into_iter().partition(|p| crate::chat::images::is_image_name(&p.to_string_lossy()));
+            let text: Vec<String> = other.iter().map(|p| quote_path(&p.to_string_lossy())).collect();
+            if let Some(e) = self.entries.get_mut(&id).filter(|_| !text.is_empty()) {
                 e.insert_text(&text.join(" "), false);
             }
+            self.chat_add_image_files(ctx, id, imgs);
         } else if let Some(s) = self.entries.get(&id).and_then(|e| e.live.as_ref()) {
             let text: Vec<String> = files
                 .iter()

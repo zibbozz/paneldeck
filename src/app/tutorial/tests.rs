@@ -160,6 +160,8 @@ enum Home {
     Palette,
     /// Editor-Reiter; `true` = braucht eine offene Datei (die Beispieldatei der Tour).
     Editor(bool),
+    /// Reiter „Zeit“ mit diesem Unterreiter (#164).
+    Time(super::super::time_ui::Sub),
 }
 
 fn home(s: Spot) -> Home {
@@ -168,7 +170,10 @@ fn home(s: Spot) -> Home {
         TabEditor | EditorSearchSettings | EditorAgentSwitches => Home::Settings(super::super::editor_services::SETTINGS_TAB),
         EditorTree => Home::Editor(false),
         EditorTabBar | EditorSplit | EditorText | EditorFind | EditorStatus | EditorMinimap | EditorSearchFiles => Home::Editor(true),
-        TitlebarEditor => Home::Hub,
+        TitlebarEditor | TitlebarTime => Home::Hub,
+        TimeSubTabs | TimeNewAlarm | TimeOptions => Home::Time(super::super::time_ui::Sub::Alarms),
+        TimePresets => Home::Time(super::super::time_ui::Sub::Timers),
+        CalendarViews => Home::Time(super::super::time_ui::Sub::Calendar),
         ThemeManage => Home::Settings(1),
         ClaudeMode | ClaudeDefaults | ClaudeBudget => Home::Settings(2),
         TabShortcuts => Home::Settings(5),
@@ -176,7 +181,7 @@ fn home(s: Spot) -> Home {
         McpLevel | McpRegister | McpSysprompt | McpLog => Home::Settings(7),
         DataBackups | DataCleanup => Home::Settings(8),
         AboutInfo | AboutUpdates | AboutTutorial => Home::Settings(9),
-        TabModels | ModelsServers => Home::Settings(super::super::models_ui::SETTINGS_TAB),
+        TabModels | ModelsServers | ModelsCommands => Home::Settings(super::super::models_ui::SETTINGS_TAB),
         TodoInput | TodoList | ExpertToggle => Home::Tasks,
         PlanProjects | PlanNewTicket | PlanTabBoards | PlanTabBacklog | PlanTabSearch | QueryBar => Home::Plan,
         Palette => Home::Palette,
@@ -206,6 +211,7 @@ fn preparations_open_the_home_of_each_target() {
                 assert!(has(Prep::Editor) && has(Prep::NoSettings), "{}: Editor-Reiter ohne Einstellungen", s.id);
                 assert!(!file || has(Prep::EditorFile), "{}: Beispieldatei der Tour offen", s.id);
             }
+            Home::Time(sub) => assert!(has(Prep::Time(sub)) && has(Prep::NoSettings), "{}: Reiter Zeit, Unterreiter {sub:?}", s.id),
         }
         // Ziele, die eine Sitzung brauchen
         if matches!(spot, Spot::SessionRow | Spot::PaneSplit | Spot::PaneMinimize) {
@@ -294,6 +300,11 @@ fn actions_are_recognised_from_the_state() {
     assert!(done("editor.cursors", &one, &Probe { editor_cursors: 2, ..base.clone() }));
     assert!(!done("editor.cursors", &base, &one), "ein Cursor ist kein weiterer");
     assert!(step("editor.disk").done.is_none() && step("editor.disk").spot.is_none(), "Blase in der Mitte, nur Weiter");
+    // Reiter „Zeit“ (#164)
+    assert!(done("time.intro", &base, &Probe { time: true, ..base.clone() }));
+    assert!(!done("time.intro", &Probe { time: true, ..base.clone() }, &Probe { time: true, ..base.clone() }), "schon offen beim Betreten");
+    assert!(done("time.alarm", &base, &Probe { alarms: 1, ..base.clone() }));
+    assert!(!done("time.alarm", &Probe { alarms: 2, ..base.clone() }, &Probe { alarms: 1, ..base.clone() }), "Löschen zählt nicht");
     // Ohne Erkennung: nur „Weiter“.
     assert!(step("basics.welcome").done.is_none() && step("mcp.register").done.is_none());
 }
@@ -313,6 +324,7 @@ fn whats_new_lists_the_steps_since_a_version() {
     let editor = ids("2.7.0", "3.0.0");
     assert!(editor.contains(&"basics.editor") && editor.contains(&"editor.agents") && editor.contains(&"editor.search"), "{editor:?}");
     assert!(steps::tour("editor").is_some_and(|t| t.steps.iter().all(|s| s.since == "3.0.0")));
+    assert!(steps::tour("time").is_some_and(|t| t.steps.iter().all(|s| s.since == "3.2.0")));
 }
 
 /// Die Schritte im Editor arbeiten in einer eigenen Beispieldatei der Tour im Temp-Ordner, nie in einer des Nutzers.

@@ -41,6 +41,9 @@ pub enum TurnEvent {
     /// Hinweis „Kontext zu klein für die Werkzeug-Stufe“ (eigene Kontextlänge des Nutzers): landet wie `Note` an der
     /// Antwort, aber nur einmal je Chat.
     ContextNotice(String),
+    /// Der Server hat ein Bild der Anfrage abgelehnt (#357; kommt direkt vor `Error`): Das Modell kann vermutlich keine
+    /// Bilder lesen – die App merkt sich das am Modell und wiederholt die Antwort ohne Bilder.
+    VisionRejected,
     /// Antwort fertig.
     Done,
     /// Abbruch mit Fehlermeldung (für den Nutzer, ein Satz).
@@ -93,11 +96,18 @@ pub struct TurnContext {
     pub prompt_parts: crate::llm::prompt_parts::PromptParts,
     /// Projektordner und Einstellungen der Agenten-Werkzeuge (#338; bestimmt, welche Werkzeuge die Anfrage anbietet).
     pub agent: super::agent::AgentEnv,
+    /// Plan-Modus (#358): Plan-Runde oder Ausführung eines freigegebenen Plans – ergänzt den Systemprompt um die
+    /// Anweisungen aus `plan::instructions`. Für eine Anfrage setzt es `ChatState::start_turn` selbst.
+    pub plan: Option<super::plan::PlanPhase>,
+    /// Kompaktieren (#359): automatischer Modus, Schwelle, Sicherheitsfenster (`Settings::chat_compact`).
+    pub compact: super::compact::CompactSettings,
+    /// Bilder des Chats (#357): Ordner und Einträge, auf die die Nachrichten verweisen.
+    pub images: super::images::TurnImages,
 }
 
 impl Default for TurnContext {
     fn default() -> Self {
-        TurnContext { project: String::new(), folder: String::new(), servers: Vec::new(), lang: Lang::En, expert: false, token_scale: 1.0, prompt_parts: Default::default(), agent: Default::default() }
+        TurnContext { project: String::new(), folder: String::new(), servers: Vec::new(), lang: Lang::En, expert: false, token_scale: 1.0, prompt_parts: Default::default(), agent: Default::default(), compact: Default::default(), images: Default::default(), plan: None }
     }
 }
 
@@ -105,6 +115,21 @@ impl Default for TurnContext {
 /// mit `error` sind fehlgeschlagene Antworten und gehören nicht in die Anfrage (siehe [`super::logic::sendable`]).
 pub trait ChatBackend: Send + Sync {
     fn start(&self, meta: &ChatMeta, history: &[ChatMsg], cx: &TurnContext, repaint: Repaint) -> TurnHandle;
+
+    /// Aufteilung, die die nächste Anfrage mit diesem Verlauf hätte (#339/#359: Kontextlänge, Schwelle des
+    /// automatischen Kompaktierens). `None` = unbekannt (dann wird nicht kompaktiert).
+    fn estimate(&self, _meta: &ChatMeta, _history: &[ChatMsg], _cx: &TurnContext) -> Option<super::context::ContextParts> {
+        None
+    }
+
+    /// Zusammenfassung für das Kompaktieren erzeugen (#359): dieselben Ereignisse wie [`ChatBackend::start`] (Text,
+    /// `Done` oder `Error`), ohne Werkzeuge. Ohne eigene Umsetzung ein Fehler.
+    fn summarize(&self, _meta: &ChatMeta, _req: &super::compact::SummaryRequest, cx: &TurnContext, repaint: Repaint) -> TurnHandle {
+        let (h, tx, _) = TurnHandle::pair();
+        let _ = tx.send(TurnEvent::Error(cx.lang.t("Dieses Backend kann nicht kompaktieren.", "This backend cannot compact chats.").into()));
+        repaint();
+        h
+    }
 }
 
 /// Test- und Entwicklungs-Backend: antwortet Wort für Wort mit einem festen Text, der die letzte Nutzer-Nachricht zitiert.
@@ -176,6 +201,42 @@ impl ChatBackend for EchoBackend {
             }
             if !word.is_empty() {
                 send(TurnEvent::Delta(word));
+            }
+            send(TurnEvent::Done);
+        });
+        handle
+    }
+
+    /// Für Tests: 8192 Tokens Kontext, Verlauf = Summe der gesendeten Nachrichten.
+    fn estimate(&self, _meta: &ChatMeta, history: &[ChatMsg], _cx: &TurnContext) -> Option<super::context::ContextParts> {
+        let history = history.iter().filter(|m| super::logic::sendable(m) && !m.compacted).map(super::logic::msg_tokens).sum();
+        Some(super::context::ContextParts { system: 100, tools: 0, history, max: 8192, reserve: 2048, dropped: false, scale: 1.0 })
+    }
+
+    /// „Summary of N messages.“ (N = Nachrichten im Stoff); `/error` im Stoff → Fehler.
+    fn summarize(&self, _meta: &ChatMeta, req: &super::compact::SummaryRequest, _cx: &TurnContext, repaint: Repaint) -> TurnHandle {
+        let (handle, tx, cancel) = TurnHandle::pair();
+        let n = req.user.lines().filter(|l| l.starts_with("### ") || l.starts_with("← result")).count();
+        let fail = req.user.contains("/error");
+        let delay = self.delay;
+        std::thread::spawn(move || {
+            let send = |ev: TurnEvent| {
+                let ok = tx.send(ev).is_ok();
+                repaint();
+                ok
+            };
+            std::thread::sleep(delay);
+            if cancel.load(Ordering::SeqCst) {
+                return;
+            }
+            if fail {
+                send(TurnEvent::Error("Echo backend: simulated error".into()));
+                return;
+            }
+            for w in format!("Summary of {n} messages. ").split_inclusive(' ') {
+                if cancel.load(Ordering::SeqCst) || !send(TurnEvent::Delta(w.to_string())) {
+                    return;
+                }
             }
             send(TurnEvent::Done);
         });

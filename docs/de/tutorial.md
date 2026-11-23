@@ -29,6 +29,7 @@ Die Schritte im Editor-Reiter nutzen eine Beispieldatei der Tour (`paneldeck-tut
 |---|---|
 | Kurze Tour | Seitenleiste, neues Terminal, Umbenennen/Farbe, Projekte, Teilen, Minimieren, weitere Fenster, Befehls-Palette, Tastenkürzel, Claude Code, Status und Kosten, Chats, Todo-Liste, Expertenmodus, Agenten-Schnittstelle, der Editor-Reiter |
 | Der Editor | der Editor-Reiter, Dateien und Ordner öffnen, Reiter, Teilungen, Suchen und Ersetzen, mehrere Cursor, Statusleiste und Gehe zu Zeile, Minimap, auf der Platte geänderte Dateien, Suche in Dateien, *Einstellungen → Editor* (Suche, Agenten-Schalter) |
+| Zeit | der Reiter „Zeit“, seine Unterreiter, ein neuer Wecker, Timer-Vorlagen, die Ansichten des Kalenders, die Optionen der Benachrichtigungen (seit 3.2.0) |
 | Todo-Liste & Expertenmodus | einfache Liste, Expertenmodus, Projekte mit Schlüssel, ein Ticket, Boards, Backlog und Sprints, Suche mit der Abfragesprache |
 | Claude Code im Detail | Claude-Modus, Standards, Budget, Starten, Status, Verlauf, Prompt-Bibliothek, Composer und Warteschlange |
 | Chats mit lokalen Modellen | lokale Server, *Einstellungen → Modelle*, Verbinden, Stufen und Freigaben, ein neuer Chat (geht ohne echtes Modell) |

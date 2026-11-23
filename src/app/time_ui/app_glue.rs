@@ -6,7 +6,7 @@ use super::{Env, Out, Ring, RingKind, TimeUi};
 use crate::app::App;
 use crate::state::{self, Lang};
 use crate::style;
-use crate::time::engine::{self, Event};
+use crate::time::engine::Event;
 use crate::time::notify::{self, Cmd, Kind, Note};
 use crate::time::settings::TimeSettings;
 use crate::time::sounds::SoundRef;
@@ -106,7 +106,7 @@ impl App {
         }
         // nächster Termin: rechtzeitig wieder zeichnen (auch minimiert oder im Tray)
         let mut wait = Duration::from_secs(60);
-        if let Some(next) = engine::next_wake(&self.time.data, now, &chrono::Local) {
+        if let Some(next) = crate::time::next_wake_local(&self.time.data, now) {
             wait = wait.min(Duration::from_millis((next - now).clamp(20, 60_000) as u64));
         }
         if !self.time.ringing.is_empty() {
@@ -314,7 +314,7 @@ impl App {
 /// Ein Takt samt Umsetzung der Ereignisse (ohne App, damit testbar). `first` = erster Takt nach dem Start (Verpasstes
 /// gesammelt melden).
 pub(super) fn handle_tick(t: &mut TimeUi, conn: Option<&rusqlite::Connection>, now: i64, lang: Lang, settings: &TimeSettings, first: bool) {
-    let (events, changed) = engine::tick(&mut t.data, now, &chrono::Local);
+    let (events, changed) = crate::time::tick_local(&mut t.data, now);
     if let Some(conn) = conn
         && !changed.is_empty() {
             let data = &mut t.data;

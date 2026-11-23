@@ -14,10 +14,18 @@ pub fn estimate_tokens(s: &str) -> usize {
     ascii.div_ceil(3) + other
 }
 
-/// Geschätzte Tokens einer Nachricht (Inhalt, Werkzeugaufrufe, kleiner Aufschlag für Rolle/Formatierung).
+/// Geschätzte Tokens einer Nachricht (Inhalt, Werkzeugaufrufe, Bilder, kleiner Aufschlag für Rolle/Formatierung).
 pub fn message_tokens(m: &ChatMessage) -> usize {
     let calls: usize = m.tool_calls.iter().map(|c| estimate_tokens(&c.name) + estimate_tokens(&c.arguments.to_string()) + 3).sum();
-    4 + estimate_tokens(&m.content) + calls
+    let images: usize = m.images.iter().map(|i| i.tokens).sum();
+    4 + estimate_tokens(&m.content) + calls + images
+}
+
+/// Beginnt mit dieser Nachricht eine Runde? Jede Nutzer-Nachricht – außer direkt nach einem Werkzeug-Ergebnis: Dort
+/// stehen die Bilder der Werkzeug-Ergebnisse (#357) bzw. eine neue Frage nach einer abgebrochenen Werkzeug-Runde; beide
+/// gehören zur Runde davor (sonst könnte das Kürzen die Bilder ohne die Frage behalten).
+fn starts_round(messages: &[ChatMessage], i: usize) -> bool {
+    messages[i].role == Role::User && (i == 0 || messages[i - 1].role != Role::Tool)
 }
 
 /// Kürzt den Verlauf auf `budget` Tokens: Die erste Systemnachricht bleibt immer, die ältesten Runden fallen als Ganzes weg
@@ -29,7 +37,7 @@ pub fn message_tokens(m: &ChatMessage) -> usize {
 pub fn trim_to_budget(messages: &[ChatMessage], budget: usize) -> usize {
     let first = first_turn(messages);
     let mut total: usize = messages.iter().map(message_tokens).sum();
-    let mut starts: Vec<usize> = (first..messages.len()).filter(|&i| i == first || messages[i].role == Role::User).collect();
+    let mut starts: Vec<usize> = (first..messages.len()).filter(|&i| i == first || starts_round(messages, i)).collect();
     starts.push(messages.len());
     let mut k = 0;
     // starts[k]..starts[k+1] ist eine Runde; die letzte (starts.len()-2) bleibt.
@@ -86,6 +94,17 @@ mod tests {
         let v = visible(&msgs, 7);
         assert_eq!(v.len(), 2);
         assert_eq!((v[0].role, v[1].role), (Role::System, Role::User));
+    }
+
+    #[test]
+    fn images_count_and_a_user_message_after_tool_results_stays_with_its_round() {
+        let mut u = m(Role::User, 10);
+        u.images = vec![crate::llm::ImagePart { mime: "image/png".into(), tokens: 500, ..Default::default() }];
+        assert_eq!(message_tokens(&u), 14 + 500);
+        // System, U, A, T, U(Bilder der Ergebnisse), A, U: die Bilder-Nachricht beginnt keine eigene Runde.
+        let msgs = vec![m(Role::System, 10), m(Role::User, 10), m(Role::Assistant, 10), m(Role::Tool, 10), m(Role::User, 10), m(Role::Assistant, 10), m(Role::User, 10)];
+        assert_eq!(trim_to_budget(&msgs, 50), 6, "erste Runde (U, A, T, U, A) fällt als Ganzes weg");
+        assert_eq!(trim_to_budget(&msgs, 1000), 1);
     }
 
     #[test]

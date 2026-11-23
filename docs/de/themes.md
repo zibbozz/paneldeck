@@ -162,6 +162,21 @@ Die Namen gehören zur öffentlichen Schnittstelle (sie kommen nur dazu, werden 
 | `syntax_function` | Diff und Syntax | Syntax: Funktion | `#e07fb0` |
 | `syntax_predicate` | Diff und Syntax | Syntax: Prädikat | `#4fb8a8` |
 | `syntax_sort` | Diff und Syntax | Syntax: Sortierung | `#d8b94a` |
+| `code_comment` | Editor: Syntaxfarben | Code: Kommentar | `mix(fg, bg, 30%)` (dunkel) / `mix(fg, bg, 35%)` (hell) |
+| `code_string` | Editor: Syntaxfarben | Code: Zeichenkette | `mix(ansi2, white, 25%)` (dunkel) / `mix(ansi2, fg, 40%)` (hell) |
+| `code_number` | Editor: Syntaxfarben | Code: Zahl | `mix(code_type, code_tag, 45%)` |
+| `code_constant` | Editor: Syntaxfarben | Code: Konstante (true, null, Makros) | `@code_number` |
+| `code_keyword` | Editor: Syntaxfarben | Code: Schlüsselwort | `mix(ansi5, white, 25%)` (dunkel) / `mix(ansi5, fg, 40%)` (hell) |
+| `code_type` | Editor: Syntaxfarben | Code: Typ, Klasse | `mix(ansi3, white, 25%)` (dunkel) / `mix(ansi3, fg, 40%)` (hell) |
+| `code_function` | Editor: Syntaxfarben | Code: Funktion | `mix(ansi4, white, 25%)` (dunkel) / `mix(ansi4, fg, 40%)` (hell) |
+| `code_operator` | Editor: Syntaxfarben | Code: Operator | `mix(ansi6, white, 25%)` (dunkel) / `mix(ansi6, fg, 40%)` (hell) |
+| `code_tag` | Editor: Syntaxfarben | Code: Tag (HTML/XML), Schlüssel (YAML) | `mix(ansi1, white, 25%)` (dunkel) / `mix(ansi1, fg, 40%)` (hell) |
+| `code_attribute` | Editor: Syntaxfarben | Code: Attribut, Schlüssel (JSON, INI) | `@code_number` |
+| `code_preprocessor` | Editor: Syntaxfarben | Code: Präprozessor, Direktive | `mix(code_keyword, code_function, 50%)` |
+| `code_escape` | Editor: Syntaxfarben | Code: Escape-Sequenz, Platzhalter | `@code_operator` |
+| `code_heading` | Editor: Syntaxfarben | Code: Überschrift, Abschnitt | `@code_function` |
+| `code_variable` | Editor: Syntaxfarben | Code: Variable, Parameter | `@code_tag` |
+| `code_invalid` | Editor: Syntaxfarben | Code: ungültig | `@error` |
 
 Terminalfarben für Verweise: `fg`, `bg`, `cursor`, `selection`, `ansi0` … `ansi15` (in der Datei: die Felder `fg`, `bg`, `cursor`, `selection` und die Liste `ansi`).
 

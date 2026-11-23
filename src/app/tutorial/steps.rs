@@ -12,6 +12,8 @@
 //!
 //! Editor-Reiter (#54, 3.0.0): Kapitel `editor` und der Schritt `basics.editor`; Schritte mit Text im Editor öffnen eine
 //! eigene Beispieldatei der Tour (`Prep::EditorFile`, nie eine Datei des Nutzers).
+//!
+//! Reiter „Zeit“ (#164, 3.2.0): Kapitel `time` (`Prep::Time(<Unterreiter>)`).
 
 use super::marks::Spot;
 
@@ -66,6 +68,10 @@ pub(super) struct Probe {
     pub editor_find: bool,
     /// Cursor (Auswahlen) im aktiven Reiter des Editors.
     pub editor_cursors: usize,
+    /// Reiter „Zeit“ aktiv (#164).
+    pub time: bool,
+    /// Zahl der Wecker.
+    pub alarms: usize,
 }
 
 /// Erkennung „Aufgabe erledigt“: Zustand beim Betreten des Schritts, Zustand jetzt.
@@ -108,6 +114,8 @@ pub(super) enum Prep {
     EditorFind(bool),
     /// Fenster „In Dateien suchen“ offen bzw. geschlossen.
     EditorSearch(bool),
+    /// Reiter „Zeit“ mit diesem Unterreiter zeigen (#164).
+    Time(super::super::time_ui::Sub),
 }
 
 /// Voraussetzung eines Schritts.
@@ -232,6 +240,12 @@ fn editor_find_opened(a: &Probe, b: &Probe) -> bool {
 }
 fn editor_cursor_added(a: &Probe, b: &Probe) -> bool {
     b.editor_cursors > 1 && b.editor_cursors > a.editor_cursors
+}
+fn time_shown(a: &Probe, b: &Probe) -> bool {
+    b.time && !a.time
+}
+fn alarms_grew(a: &Probe, b: &Probe) -> bool {
+    b.alarms > a.alarms
 }
 
 // Indizes der Einstellungsreiter (siehe `settings.rs`).
@@ -1000,6 +1014,19 @@ const CHAT: &[Step] = &[
         need: None,
     },
     Step {
+        id: "chat.commands",
+        since: "3.1.0",
+        spot: Some(Spot::ModelsCommands),
+        title: tx("Befehle und Fragen", "Commands and questions"),
+        body: tx(
+            "Ein Modell mit der Stufe „Steuern“ kann lange Befehle im Hintergrund starten: Jeder läuft in einem eigenen Terminal unter dem Chat, am Ende kommt eine Nachricht in den Chat. Hier stellst du Zeitlimit und Anzahl ein. Außerdem kann ein Modell dir Fragen mit Auswahl stellen – mit „(Empfohlen)“ und „Andere …“.",
+            "A model with level “Control” can start long commands in the background: each runs in its own terminal below the chat, and a message comes into the chat when it ends. Set the time limit and the number here. A model can also ask you questions with choices – with “(Recommended)” and “Other …”.",
+        ),
+        prep: &[Prep::Terminals, Prep::Settings(S_MODELS)],
+        done: None,
+        need: None,
+    },
+    Step {
         id: "chat.new",
         since: "2.2.0",
         spot: Some(Spot::SidebarChat),
@@ -1010,6 +1037,107 @@ const CHAT: &[Step] = &[
         ),
         prep: HUB,
         done: Some(chat_started),
+        need: None,
+    },
+    Step {
+        // Der Schalter steht nur in einem offenen Chat (das Tutorial legt keinen an): Schritt ohne Ziel.
+        id: "chat.plan",
+        since: "3.1.0",
+        spot: None,
+        title: tx("Erst planen, dann ändern", "Plan first, then change"),
+        body: tx(
+            "Neben „Senden“ steht im Chat der Schalter „Plan“ (Umschalt+Tab) mit einer Stufe von „niedrig“ bis „maximal“. Ist er an, recherchiert das Modell zuerst nur lesend und schreibt einen Plan – Schreib-Werkzeuge sperrt Paneldeck so lange. Der Plan erscheint als Karte: „Ausführen“ gibt ihn frei und füllt die To-do-Liste, „Änderungen anfragen“ lässt ihn überarbeiten, „Verwerfen“ beendet den Plan-Modus.",
+            "Next to “Send” a chat has the “Plan” toggle (Shift+Tab) with a level from “low” to “max”. When it is on, the model first researches read-only and writes a plan – Paneldeck locks the writing tools until then. The plan appears as a card: “Execute” approves it and fills the to-do list, “Request changes” has it revised, “Discard” ends the plan mode.",
+        ),
+        prep: HUB,
+        done: None,
+        need: None,
+    },
+];
+
+use super::super::time_ui::Sub as TimeSub;
+
+/// Unterreiter des Zeit-Reiters ohne Einstellungen und Palette.
+const TIME_ALARMS: &[Prep] = &[Prep::NoSettings, Prep::Palette(false), Prep::NoTools, Prep::Time(TimeSub::Alarms)];
+
+/// Kapitel „Zeit“ (#164, 3.2.0): Reiter, Unterreiter, Wecker, Timer-Vorlagen, Kalender, Optionen.
+const TIME: &[Step] = &[
+    Step {
+        id: "time.intro",
+        since: "3.2.0",
+        spot: Some(Spot::TitlebarTime),
+        title: tx("Der Reiter Zeit", "The Time tab"),
+        body: tx(
+            "Wecker, Timer, Kalender, Stoppuhren, Weltuhren und Geburtstage an einem Ort. Öffne den Reiter mit einem Klick oder {key:mode_time}, um weiterzumachen.",
+            "Alarms, timers, calendar, stopwatches, world clocks and birthdays in one place. Open the tab with a click or {key:mode_time} to continue.",
+        ),
+        prep: HUB,
+        done: Some(time_shown),
+        need: None,
+    },
+    Step {
+        id: "time.subtabs",
+        since: "3.2.0",
+        spot: Some(Spot::TimeSubTabs),
+        title: tx("Unterreiter", "Sub-tabs"),
+        body: tx(
+            "Jeder Unterreiter ist eine Liste mit Details rechts. Wecker und Timer klingeln, solange Paneldeck läuft – auch minimiert oder im Tray; was verpasst wurde, steht beim nächsten Start oben als Hinweis.",
+            "Every sub-tab is a list with details on the right. Alarms and timers ring while Paneldeck runs – also minimized or in the tray; what was missed is shown as a hint at the top at the next start.",
+        ),
+        prep: TIME_ALARMS,
+        done: None,
+        need: None,
+    },
+    Step {
+        id: "time.alarm",
+        since: "3.2.0",
+        spot: Some(Spot::TimeNewAlarm),
+        title: tx("Einen Wecker stellen", "Set an alarm"),
+        body: tx(
+            "„+ Neuer Wecker“ legt einen Wecker an; rechts stellst du Uhrzeit, Wochentage oder einmalig, Klang (mit Vorschau) und Schlummern ein. Leg einen an, um weiterzumachen.",
+            "“+ New alarm” adds an alarm; on the right you set the time, weekdays or once, the sound (with preview) and snooze. Add one to continue.",
+        ),
+        prep: TIME_ALARMS,
+        done: Some(alarms_grew),
+        need: None,
+    },
+    Step {
+        id: "time.presets",
+        since: "3.2.0",
+        spot: Some(Spot::TimePresets),
+        title: tx("Timer und Vorlagen", "Timers and presets"),
+        body: tx(
+            "Mehrere Timer laufen gleichzeitig und überstehen einen Neustart. „Als Vorlage speichern“ in den Details eines Timers legt hier einen Knopf an, z. B. „Tee 4 min“ – ein Klick startet einen neuen Timer.",
+            "Several timers run at the same time and survive a restart. “Save as preset” in a timer's details puts a button here, e.g. “Tea 4 min” – one click starts a new timer.",
+        ),
+        prep: &[Prep::NoSettings, Prep::Palette(false), Prep::NoTools, Prep::Time(TimeSub::Timers)],
+        done: None,
+        need: None,
+    },
+    Step {
+        id: "time.calendar",
+        since: "3.2.0",
+        spot: Some(Spot::CalendarViews),
+        title: tx("Kalender", "Calendar"),
+        body: tx(
+            "Monat, Woche, Tag oder Liste: eigene Termine (auch wiederkehrend, per Baukasten oder Cron) und – in den Optionen des Kalenders schaltbar – Fälligkeiten, Sprints, Versionen und gebuchte Zeit deiner Projekte. iCal-Dateien lassen sich importieren und exportieren.",
+            "Month, week, day or list: your own events (also recurring, via the builder or cron) and – switchable in the calendar's options – due dates, sprints, versions and booked time of your projects. iCal files can be imported and exported.",
+        ),
+        prep: &[Prep::NoSettings, Prep::Palette(false), Prep::NoTools, Prep::Time(TimeSub::Calendar)],
+        done: None,
+        need: None,
+    },
+    Step {
+        id: "time.options",
+        since: "3.2.0",
+        spot: Some(Spot::TimeOptions),
+        title: tx("Benachrichtigungen", "Notifications"),
+        body: tx(
+            "Hier legst du fest, ob Wecker, Timer, Termine und Geburtstage mit Klang und Toast melden, ob die Taskleiste blinkt, wie laut es ist – und ob Timer und Stoppuhren Zeit an Tickets buchen.",
+            "Here you choose whether alarms, timers, events and birthdays notify with sound and toast, whether the taskbar flashes, how loud it is – and whether timers and stopwatches book time on tickets.",
+        ),
+        prep: TIME_ALARMS,
+        done: None,
         need: None,
     },
 ];
@@ -1212,6 +1340,7 @@ const TOOLS: &[Step] = &[
 pub(super) static TOURS: &[Tour] = &[
     Tour { id: "basics", title: tx("Kurze Tour", "Short tour"), summary: tx("Die wichtigsten Teile in etwa 3 Minuten", "The main parts in about 3 minutes"), steps: BASICS },
     Tour { id: "editor", title: tx("Der Editor", "The editor"), summary: tx("Dateien, Reiter, Teilungen, Suchen und Ersetzen, mehrere Cursor, Suche in Dateien, Agenten", "Files, tabs, splits, find and replace, multiple cursors, search in files, agents"), steps: EDITOR },
+    Tour { id: "time", title: tx("Zeit", "Time"), summary: tx("Wecker, Timer und Vorlagen, Kalender, Benachrichtigungen", "Alarms, timers and presets, calendar, notifications"), steps: TIME },
     Tour { id: "todo", title: tx("Todo-Liste & Expertenmodus", "To-do list & expert mode"), summary: tx("Liste, Projekte, Tickets, Boards, Sprints, Abfragen", "List, projects, tickets, boards, sprints, queries"), steps: TODO },
     Tour { id: "claude", title: tx("Claude Code im Detail", "Claude Code in detail"), summary: tx("Claude-Modus, Status, Kosten und Budget, Verlauf, Prompts, Warteschlange", "Claude mode, status, costs and budget, history, prompts, queue"), steps: CLAUDE },
     Tour { id: "chat", title: tx("Chats mit lokalen Modellen", "Chats with local models"), summary: tx("Ollama einrichten, Modelle verbinden, Stufen und Freigaben", "Set up Ollama, connect models, levels and approvals"), steps: CHAT },
