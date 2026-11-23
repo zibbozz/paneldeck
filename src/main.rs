@@ -5,6 +5,7 @@ mod app;
 mod backup;
 mod boxdraw;
 mod calc;
+mod calendar;
 mod chat;
 mod cleanup;
 mod claude_opts;

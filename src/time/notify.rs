@@ -19,8 +19,7 @@ use std::sync::{Mutex, OnceLock};
 pub enum Kind {
     Alarm,
     Timer,
-    /// Termin-Erinnerung (Kalender; ausgelöst vom Kalender-Teil).
-    #[allow(dead_code)]
+    /// Termin-Erinnerung (Kalender).
     Reminder,
     Birthday,
 }

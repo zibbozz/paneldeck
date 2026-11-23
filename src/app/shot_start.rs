@@ -273,6 +273,18 @@ impl App {
                 self.shot_procs_demo(ctx, pid);
                 self.shot_proc_editor(pid);
             }
+            // ---- Kalender (#164): Beispieltermine rund um heute
+            "calendar-month" | "calendar-week" | "calendar-dialog" => {
+                let zone = crate::calendar::zone::SystemZone;
+                let env = calendar_ui::CalEnv { conn: self.db.as_ref().map(|d| &d.conn), lang: self.settings.language, now: chrono::Local::now().naive_local(), zone: &zone };
+                if let Some(c) = env.conn {
+                    calendar_ui::demo_seed(c, env.now.date(), env.lang);
+                }
+                self.cal.demo_prepare(&env, view.trim_start_matches("calendar-"));
+                // im Unterreiter „Kalender“ des Zeit-Reiters
+                self.set_mode(titlebar::Mode::Time);
+                self.time.sub = time_ui::Sub::Calendar;
+            }
             // ---- Aufräumen
             "cleanup" => self.open_cleanup(ctx),
             "cleanup-confirm" => self.shot_cleanup_confirm(ctx),

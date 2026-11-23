@@ -1,9 +1,10 @@
 //! Einstellungen des Reiters „Zeit“ (`settings.json` → `time`, seit 3.2.0, #164). Alles optional und je Wert tolerant:
 //! Fehlt ein Wert oder ist er unlesbar, gilt der Standard.
 //!
-//! Standards (Entscheidung zu #164): Wecker und Timer-Ende mit Klang und Toast **an**; Termin-Erinnerungen (Kalender) und
-//! das Blinken der Taskleiste **aus**; Geburtstags-Erinnerungen mit Toast (die Erinnerung selbst ist je Eintrag aus);
-//! Zeiterfassung an Tickets **aus**.
+//! Standards (Entscheidung zu #164): Wecker und Timer-Ende mit Klang und Toast **an**; Termin-Erinnerungen (Kalender)
+//! sind **aus** – der Schalter dafür ist „Erinnerungen an Termine“ in den Kalender-Optionen; ist er an, kommen sie hier mit
+//! Klang und Toast (beides abschaltbar); das Blinken der Taskleiste ist **aus**; Geburtstags-Erinnerungen mit Toast (die
+//! Erinnerung selbst ist je Eintrag aus); Zeiterfassung an Tickets **aus**.
 
 use super::notify::Kind;
 use serde::{Deserialize, Serialize};
@@ -43,8 +44,8 @@ impl Default for TimeSettings {
             alarm_toast: true,
             timer_sound: true,
             timer_toast: true,
-            reminder_sound: false,
-            reminder_toast: false,
+            reminder_sound: true,
+            reminder_toast: true,
             birthday_sound: false,
             birthday_toast: true,
             flash: false,
@@ -123,7 +124,8 @@ mod tests {
     fn defaults_and_tolerant_reading() {
         let d = TimeSettings::default();
         assert!(d.alarm_sound && d.alarm_toast && d.timer_sound && d.timer_toast);
-        assert!(!d.reminder_toast && !d.reminder_sound && !d.flash && !d.ticket_booking, "Termine, Blinken, Zeiterfassung aus");
+        assert!(!d.flash && !d.ticket_booking, "Blinken, Zeiterfassung aus");
+        assert!(d.reminder_toast && d.reminder_sound, "wie Termin-Erinnerungen gemeldet werden; ob, schalten die Kalender-Optionen (aus)");
         assert_eq!(TimeSettings::from_value(&json!(null)), d);
         assert_eq!(TimeSettings::from_value(&json!("kaputt")), d);
         let s = TimeSettings::from_value(&json!({"flash": true, "volume": 500, "alarm_toast": "ja", "ring_minutes": 0, "future": 1}));
@@ -134,6 +136,6 @@ mod tests {
         // Rundweg über serde
         let txt = serde_json::to_string(&s).unwrap();
         assert_eq!(TimeSettings::from_value(&serde_json::from_str::<Value>(&txt).unwrap()), s);
-        assert!(d.toast(Kind::Alarm) && !d.toast(Kind::Reminder) && d.toast(Kind::Birthday) && !d.sound(Kind::Birthday));
+        assert!(d.toast(Kind::Alarm) && d.toast(Kind::Reminder) && d.toast(Kind::Birthday) && !d.sound(Kind::Birthday));
     }
 }

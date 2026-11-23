@@ -17,6 +17,20 @@ use std::time::Duration;
 
 /// Timer klingeln höchstens so lange (ms), danach verstummen sie (das Fenster bleibt).
 const TIMER_RING_MS: i64 = 60_000;
+/// Abstand der Abfrage der Kalender-Erinnerungen (ms).
+const CAL_POLL_MS: i64 = 30_000;
+
+/// Erinnerungen an Kalendertermine melden (`Kind::Reminder`); verpasste („Verpasst: …“) zusätzlich als Hinweis oben im
+/// Reiter.
+pub(super) fn calendar_reminders(t: &mut TimeUi, rs: &[crate::calendar::remind::Reminder], lang: Lang) {
+    for r in rs {
+        let text = r.text(lang);
+        notify::fire(Kind::Reminder, lang.t("Termin", "Event"), &text, None);
+        if r.missed {
+            t.notes.push(text);
+        }
+    }
+}
 
 impl App {
     /// Reiter „Zeit“ zeichnen (jedes Fenster).
@@ -25,6 +39,10 @@ impl App {
         let mut s = self.settings.time.clone();
         self.time.show(ctx, &env, &mut s);
         self.settings.time = s;
+        // Unterreiter „Kalender“: der Kalender (#164) mit eigener Ansicht und eigenem Detailbereich.
+        if self.time.sub == super::Sub::Calendar {
+            egui::CentralPanel::default().show(ctx, |ui| crate::app::calendar_ui::show(self, ui));
+        }
         self.time_outs();
     }
 
@@ -58,6 +76,15 @@ impl App {
             let first = !self.time.started;
             self.time.started = true;
             handle_tick(&mut self.time, conn, now, lang, &settings, first);
+        }
+        // Erinnerungen an Kalendertermine (#164; in den Kalender-Optionen standardmäßig aus): alle 30 s
+        if self.time.loaded && now - self.time.last_cal_poll >= CAL_POLL_MS {
+            self.time.last_cal_poll = now;
+            if let Some(conn) = self.db.as_ref().map(|d| &d.conn) {
+                let lang = self.settings.language;
+                let rs = self.time.cal_poller.poll(conn, now.div_euclid(1000), &crate::calendar::zone::SystemZone);
+                calendar_reminders(&mut self.time, &rs, lang);
+            }
         }
         // Höchstdauer des Klingelns
         let alarm_limit = self.settings.time.ring_minutes as i64 * 60_000;

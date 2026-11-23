@@ -120,14 +120,15 @@ fn both(f: impl Fn(&mut H)) {
 }
 
 #[test]
-fn every_sub_tab_renders_in_both_languages_and_the_calendar_has_its_placeholder() {
+fn every_sub_tab_renders_in_both_languages_and_the_calendar_gets_the_main_area() {
     both(|h| {
         h.frames(2);
         for s in Sub::ALL {
             assert!(h.has(s.label(h.lang)), "Reiter {s:?} in {:?}", h.lang);
         }
         h.sub(Sub::Calendar);
-        assert!(h.has(h.lang.t("Kalender – kommt in dieser Version", "Calendar – coming in this version")));
+        // Kalender: keine Liste des Zeit-Reiters (den Hauptbereich zeichnet `calendar_ui::show` über `App::time_view`)
+        assert!(!h.has(&format!("+ {}", h.lang.t("Neuer Wecker", "New alarm"))) && h.has(Sub::Calendar.label(h.lang)));
         for (s, empty) in [
             (Sub::Alarms, h.lang.t("Noch keine Wecker", "No alarms yet")),
             (Sub::Timers, h.lang.t("Noch keine Timer", "No timers yet")),
@@ -339,6 +340,26 @@ fn tick_rings_snoozes_and_reports_missed_alarms_after_restart() {
     assert!(ui.notes.iter().any(|n| n.starts_with("Timer “Tee” expired at ")), "{:?}", ui.notes);
     assert!(!ui.is_ringing(RingKind::Timer(t.id)));
     let _ = notify::take();
+}
+
+/// Erinnerungen an Kalendertermine (#164): über den Benachrichtiger mit `Kind::Reminder`, verpasste auch als Hinweis.
+#[test]
+fn calendar_reminders_go_through_the_notifier() {
+    use crate::calendar::remind::Reminder;
+    let _g = notify::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _ = notify::take();
+    let mut ui = TimeUi::default();
+    let start = chrono::NaiveDate::from_ymd_opt(2026, 11, 23).unwrap().and_hms_opt(9, 30, 0).unwrap();
+    let rs = vec![
+        Reminder { event_id: 1, title: "Standup".into(), start, fire_at: 0, minutes_before: 0, missed: false },
+        Reminder { event_id: 2, title: "Review".into(), start, fire_at: 0, minutes_before: 15, missed: true },
+    ];
+    super::app_glue::calendar_reminders(&mut ui, &rs, Lang::En);
+    let cmds = notify::take();
+    assert_eq!(cmds.len(), 2);
+    assert!(matches!(&cmds[0], Cmd::Fire(n) if n.kind == Kind::Reminder && n.title == "Event" && n.body == "Standup – now"));
+    assert!(matches!(&cmds[1], Cmd::Fire(n) if n.kind == Kind::Reminder && n.body.starts_with("Missed: Review")));
+    assert_eq!(ui.notes, vec![rs[1].text(Lang::En)]);
 }
 
 /// Zeiterfassung: Stoppuhr mit Ticket → beim Stoppen die Rückfrage → Buchen legt einen Zeiteintrag an.

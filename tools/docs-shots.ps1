@@ -89,6 +89,9 @@ $AllViews = @(
   @{ Name = 'theme-editor';        Spec = 'theme-editor';        W = 1400; H = 900 }
   @{ Name = 'theme-color';         Spec = 'theme-color';         W = 1400; H = 900 }
   @{ Name = 'theme-checks';        Spec = 'theme-checks';        W = 1400; H = 900; Wait = 2 }
+  # Kalender (#164; bis zum Zeit-Reiter ueber dem Fenster gezeichnet)
+  @{ Name = 'time-calendar-month';  Spec = 'calendar-month';     W = 1400; H = 900;  Wait = 3 }
+  @{ Name = 'time-calendar-dialog'; Spec = 'calendar-dialog';    W = 1300; H = 1040; Wait = 3 }
   # Tutorial
   @{ Name = 'tutorial-card';       Spec = 'tutorial-card';       Wait = 1 }
   @{ Name = 'tutorial-tour';       Spec = 'tutorial-tour:basics/basics.sidebar'; Wait = 2 }

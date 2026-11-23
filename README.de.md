@@ -19,7 +19,7 @@ Paneldeck arbeitet **offline**: Es meldet sich nur bei GitHub, wenn du selbst na
 - **Themes:** ein [Theme-Editor](docs/de/themes.md) mit Live-Vorschau, Design-Prüfung und benannten Oberflächenfarben; ein neues Theme lässt sich aus einer Hintergrund- und einer Akzentfarbe erzeugen.
 - **Aufräumen:** sehen, was Paneldeck speichert, und löschen, was du nicht mehr brauchst – Sicherungen, Verläufe, Protokolle, Inhalte, Einstellungen – bis zum kompletten Zurücksetzen ([Aufräumen](docs/de/data-and-backups.md#aufräumen)).
 - **Editor:** ein Reiter mit einfachem Texteditor – Ordnerbaum, Tabs, freie Teilungen, mehrere Cursor, Minimap, Suchen/Ersetzen (auch regulär) und Suche in Dateien (beachtet `.gitignore`); behält Kodierung und Zeilenenden, speichert atomar, rettet ungespeicherte Änderungen über einen Neustart und bleibt auch bei Dateien mit mehreren hundert MB flüssig. Agenten können ihn lesen und – nur mit deinen Schaltern – Dateien öffnen, bearbeiten und speichern.
-- **Zeit:** Wecker (Wochentage oder einmalig, Schlummern, eigene Klänge), mehrere Timer mit Vorlagen, Stoppuhren mit Runden, Weltuhren und Geburtstage mit Alter und Countdown in einem eigenen Reiter – Timer und Stoppuhren überstehen einen Neustart, verpasste Wecker werden gemeldet, und Zeit lässt sich an Tickets buchen ([Zeit](docs/de/time.md)).
+- **Zeit:** Wecker (Wochentage oder einmalig, Schlummern, eigene Klänge), mehrere Timer mit Vorlagen, ein Kalender (Monat/Woche/Tag, wiederkehrende Termine per Cron, Fälligkeiten und Sprints deiner Projekte, iCal-Import/-Export), Stoppuhren mit Runden, Weltuhren und Geburtstage mit Alter und Countdown in einem eigenen Reiter – Timer und Stoppuhren überstehen einen Neustart, verpasste Wecker werden gemeldet, und Zeit lässt sich an Tickets buchen ([Zeit](docs/de/time.md)).
 - **Chats mit lokalen Modellen:** mit Ollama, LM Studio, llama.cpp oder vLLM auf diesem Rechner oder im eigenen Netz sprechen, direkt neben deinen Terminals – das Modell kann Paneldecks Werkzeuge nutzen, in Grenzen, die du je Modell festlegst.
 - **Agenten-Schnittstelle (MCP):** KI-Agenten können Sitzungen sehen, Terminals lesen, Befehle ausführen und mit deiner Todo-Liste und deinen Tickets arbeiten – standardmäßig aus, mit einstellbarem Systemprompt.
 - **Kommandozeile und Profile:** getrennte Datenordner und Profile, die nebeneinander laufen, jedes mit eigenem Autostart- und MCP-Eintrag.
@@ -62,7 +62,7 @@ Die Anleitungen liegen in [`docs/de/`](docs/de/) (Englisch: [`docs/en/`](docs/en
 - [Abfragesprache](docs/de/query-language.md) – Tickets suchen, Beispiele, Referenz
 - [Prozessliste](docs/de/processes.md) – Entwicklungsserver und Watcher mit ihrer Ausgabe in einem eigenen Bereich
 - [Editor](docs/de/editor.md) – der Editor-Reiter: Dateien und Ordner, Teilungen, Suchen/Ersetzen, Suche in Dateien, Kodierungen, Hot Exit, große Dateien, Agenten
-- [Zeit](docs/de/time.md) – der Reiter „Zeit“: Wecker, Timer, Stoppuhren, Weltuhren, Geburtstage, Benachrichtigungen und Klänge, Zeiterfassung
+- [Zeit](docs/de/time.md) – der Reiter „Zeit“: Wecker, Timer, Kalender (Wiederholungen, iCal), Stoppuhren, Weltuhren, Geburtstage, Benachrichtigungen und Klänge, Zeiterfassung
 - [Chats mit lokalen Modellen](docs/de/chat.md) – Ollama und OpenAI-kompatible Server, Modelle, Werkzeuge und Freigaben, Sicherheit
 - [Themes und der Theme-Editor](docs/de/themes.md) – Themes bearbeiten und erzeugen, Design-Prüfung, Dateiformat und Farbnamen
 - [Agenten-Schnittstelle (MCP)](docs/de/agent-interface.md) – Stufen, Werkzeuge, Sicherheit, Systemprompt

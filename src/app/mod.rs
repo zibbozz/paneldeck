@@ -31,6 +31,10 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+/// Kalender (#164): Ansichten, Dialoge; Einstieg `calendar_ui::show` (für den Zeit-Reiter).
+// Bis der Zeit-Reiter `show` aufruft, ist die Oberfläche nur in Tests erreichbar.
+#[allow(dead_code)]
+pub(crate) mod calendar_ui;
 mod chat_ui;
 mod cleanup_ui;
 mod claude_status;
@@ -858,6 +862,8 @@ pub struct App {
     db_error: Option<String>,
     tasks: tasks_ui::TasksUi,
     plan: planning_ui::PlanUi,
+    /// Kalender (#164, `calendar_ui`).
+    cal: calendar_ui::CalUi,
     /// Ticket↔Terminal-Verknüpfung (`terminal_links.rs`).
     tlinks: terminal_links::TLinks,
     backup_rx: Option<std::sync::mpsc::Receiver<Result<crate::backup::BackupInfo, String>>>,
@@ -1239,6 +1245,7 @@ impl App {
             db_error,
             tasks: tasks_ui::TasksUi::default(),
             plan: planning_ui::PlanUi::default(),
+            cal: calendar_ui::CalUi::default(),
             backup_rx: None,
             backup_checked: Instant::now().checked_sub(Duration::from_secs(61)).unwrap_or_else(Instant::now),
             backup_msg: None,

@@ -124,6 +124,8 @@ impl ToolPolicy {
             // Reiter „Zeit“ (#164): nur für externe Agenten – die Kurzfassung des Chat-Prompts hätte sonst bei Steuern im
             // Expertenmodus keinen Platz mehr in 8192 Tokens.
             && !crate::time::agent::TOOLS.contains(&def.name)
+            // Kalender (#164): vorerst nur für externe Agenten – der Chat-Prompt hat kein Budget mehr dafür.
+            && !crate::calendar::agent::TOOLS.contains(&def.name)
     }
 
     /// Werkzeuge für die Anfrage: alle, die Stufe und Modus erlauben und die nicht einzeln gesperrt sind.

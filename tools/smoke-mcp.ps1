@@ -2403,6 +2403,36 @@ c.close()
   $log = if (Test-Path "$data\mcp-log.jsonl") { [IO.File]::ReadAllText("$data\mcp-log.jsonl") } else { '' }
   Check 'Zeit: Aufrufe im Agenten-Protokoll' ($log -match 'create_timer' -and $log -match 'control_stopwatch') ''
   $script:prestart = $null
+  Write-Host "== Kalender (#164): list/create/update_calendar_event" -ForegroundColor Cyan
+  Set-Level 'Read' -Empty
+  [void](Rpc 'initialize' @{ protocolVersion = '2025-06-18'; capabilities = @{}; clientInfo = @{ name = 'smoke'; version = '1' } })
+  Start-Sleep 2
+  $names = @((Rpc 'tools/list').result.tools | ForEach-Object name)
+  Check 'Kalender, Nur lesen: list_calendar_events ja, create/update nein' ($names -contains 'list_calendar_events' -and $names -notcontains 'create_calendar_event' -and $names -notcontains 'update_calendar_event') ($names -join ',')
+  $cl = Tool 'list_calendar_events' @{ from = '2026-11-23'; to = '2026-11-29' }
+  Check 'Kalender, Nur lesen: leere Woche, Zeitzone gemeldet' (-not $cl.err -and $cl.data.total -eq 0 -and [string]$cl.data.timezone -ne '') $cl.text
+  Check 'Kalender, Nur lesen: create_calendar_event verboten' ((Code (Tool 'create_calendar_event' @{ title = 'x'; start = '2026-11-23T09:00' })) -eq 'forbidden')
+  Set-Level 'Control' -Empty
+  [void](Rpc 'initialize' @{ protocolVersion = '2025-06-18'; capabilities = @{}; clientInfo = @{ name = 'smoke'; version = '1' } })
+  Start-Sleep 2
+  $names = @((Rpc 'tools/list').result.tools | ForEach-Object name)
+  Check 'Kalender, Steuern: alle drei Werkzeuge, kein Loeschen' (@('list_calendar_events', 'create_calendar_event', 'update_calendar_event' | Where-Object { $names -contains $_ }).Count -eq 3 -and -not ($names | Where-Object { $_ -match 'delete.*calendar' })) ($names -join ',')
+  $cc = Tool 'create_calendar_event' @{ title = 'Smoke-Standup'; start = '2026-11-23T09:00'; duration_minutes = 15; cron = '0 9 * * MON-FRI'; count = 10; note = 'geheime Notiz' }
+  Check 'create_calendar_event: Serie mit 5 naechsten Terminen' (-not $cc.err -and $cc.data.event.recurrence.cron -eq '0 9 * * MON-FRI' -and @($cc.data.next_occurrences).Count -eq 5 -and $cc.data.event.origin -eq 'agent') $cc.text
+  $cid = $cc.data.event.event_id
+  $co = Tool 'create_calendar_event' @{ title = 'Smoke-Odd'; start = '2026-11-13T00:00'; cron = '0 0 13 * FRI' }
+  Check 'create_calendar_event: ODER-Fall mit warning' (-not $co.err -and [string]$co.data.warning -ne '') $co.text
+  $ca = Tool 'create_calendar_event' @{ title = 'Smoke-Trip'; start = '2026-11-25'; days = 3 }
+  Check 'create_calendar_event: ganztaegig ueber mehrere Tage' ($ca.data.event.all_day -eq $true -and $ca.data.event.duration_minutes -eq 4320) $ca.text
+  $cl = Tool 'list_calendar_events' @{ from = '2026-11-23'; to = '2026-11-29'; limit = 3 }
+  Check 'list_calendar_events: Woche mit Serie, Reise und ODER-Fall, seitenweise' ($cl.data.total -eq 7 -and @($cl.data.items).Count -eq 3 -and $cl.data.more -eq $true -and $cl.data.items[0].event_id -eq $cid) $cl.text
+  $cu = Tool 'update_calendar_event' @{ event = $cid; title = 'Smoke-Daily'; exceptions = @('2026-11-24') }
+  Check 'update_calendar_event: Titel und Ausnahme, Rest unveraendert' (-not $cu.err -and $cu.data.event.title -eq 'Smoke-Daily' -and $cu.data.event.duration_minutes -eq 15 -and @($cu.data.event.recurrence.exceptions)[0] -eq '2026-11-24') $cu.text
+  Check 'update_calendar_event: unbekannte Kennung -> not_found' ((Code (Tool 'update_calendar_event' @{ event = 99999; title = 'x' })) -eq 'not_found')
+  Check 'create_calendar_event: kaputter Ausdruck -> bad_args' ((Code (Tool 'create_calendar_event' @{ title = 'x'; start = '2026-11-23T09:00'; cron = '61 * * * *' })) -eq 'bad_args')
+  Check 'list_calendar_events: mehr als 366 Tage -> bad_args' ((Code (Tool 'list_calendar_events' @{ from = '2026-01-01'; to = '2027-06-01' })) -eq 'bad_args')
+  $log = if (Test-Path "$data\mcp-log.jsonl") { [IO.File]::ReadAllText("$data\mcp-log.jsonl") } else { '' }
+  Check 'Kalender: mcp-log.jsonl nennt die Werkzeuge, aber keine Notiz' ($log -match 'create_calendar_event' -and $log -notmatch 'geheime Notiz') ''
 
   Write-Host "== Shell-Integration: Hilfsdateien beim Beenden geloescht (#57)" -ForegroundColor Cyan
   # Eigener Hub ohne Sitzungen (keine Rueckfrage beim Schliessen); Fenster normal schliessen statt Prozess beenden.

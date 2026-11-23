@@ -58,6 +58,8 @@ const MIGRATIONS: &[&str] = &[
     crate::planning::maintenance::schema::MIGRATION,
     // 11: Reiter „Zeit“ (Issue #164): Wecker, Timer und Timer-Vorlagen, Stoppuhren, Weltuhren, Geburtstage, SQL in `time/store.rs`
     crate::time::store::MIGRATION,
+    // 12: Kalender (Issue #164): eigene Termine (`cal_events`) und Einstellungen (`cal_settings`), SQL in `calendar/store.rs`
+    crate::calendar::store::MIGRATION,
 ];
 
 /// Schema-Version dieser Programmversion (auch für die Rettung einer beschädigten Datenbank in eine neue Datei).
@@ -79,6 +81,18 @@ pub fn create_schema(conn: &mut Connection) -> rusqlite::Result<()> {
 #[cfg(test)]
 pub fn latest_version() -> u32 {
     MIGRATIONS.len() as u32
+}
+
+/// Stelle einer Migration in der Liste (für Migrationstests anderer Module, unabhängig von der Reihenfolge).
+#[cfg(test)]
+pub fn migration_index(sql: &str) -> usize {
+    MIGRATIONS.iter().position(|m| *m == sql).expect("Migration nicht in der Liste")
+}
+
+/// Datenbank im Datenordner mit nur den ersten `n` Migrationen öffnen (Stand einer älteren Programmversion, für Tests).
+#[cfg(test)]
+pub fn open_prefix(data_dir: &Path, backup_dir: &Path, n: usize) -> Result<Db, OpenError> {
+    open_with(data_dir, backup_dir, &MIGRATIONS[..n])
 }
 
 /// Datenbank im Speicher mit allen Migrationen (für Tests anderer Module).

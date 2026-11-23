@@ -899,6 +899,8 @@ impl App {
             // Editor (#54): Dokument bzw. Pfad, nie Dateiinhalt.
             (_, t) if crate::editor_svc::tools::TOOLS.contains(&t) => crate::editor_svc::tools::log_info(t, args),
             (_, t) if crate::time::agent::TOOLS.contains(&t) => crate::time::agent::log_info(t, args),
+            // Kalender (#164): Zeitraum bzw. Kennung und Kurztitel, nie die Notiz.
+            (_, t) if crate::calendar::agent::TOOLS.contains(&t) => crate::calendar::agent::log_info(t, args),
             _ => String::new(),
         };
         let (log_how, model) = self.log_origin(how, caller);
@@ -1040,6 +1042,8 @@ impl App {
             t if crate::editor_svc::tools::TOOLS.contains(&t) => Out::Now(self.mcp_editor(ctx, t, args)),
             // Reiter „Zeit“ (#164): Wecker, Timer, Stoppuhren (lesen/steuern), Weltuhren und Geburtstage (nur lesen).
             t if crate::time::agent::TOOLS.contains(&t) => Out::Now(self.mcp_time(t, args, caller)),
+            // Kalender (#164): `calendar::agent`, Oberfläche `calendar_ui`.
+            t if crate::calendar::agent::TOOLS.contains(&t) => Out::Now(self.mcp_calendar(t, args)),
             "send_text" => Out::Now(self.mcp_send_text(args, caller)),
             "send_keys" => Out::Now(self.mcp_send_keys(args, caller)),
             "run_command" => self.mcp_run(args, caller, reply, tool, how),
@@ -1102,6 +1106,35 @@ impl App {
                     self.tasks.invalidate();
                     self.plan.invalidate();
                     self.wins.data_gen += 1; // weitere Fenster laden ihre Todo-Ansicht ebenfalls neu
+                }
+                Ok(done.result)
+            }
+            Err(e) => Err(tool_err(e)),
+        }
+    }
+
+    /// Kalender (#164, `calendar::agent`): kurz in der UI-Schleife auf der Datenbank. Änderungen zeigen einen Hinweis und
+    /// lassen die Kalenderansicht neu laden.
+    fn mcp_calendar(&mut self, tool: &str, args: &Value) -> R {
+        let Some(db) = self.db.as_ref() else {
+            return Err(er("db_unavailable", tr("Die Datenbank ist nicht verfügbar.", "The database is not available.")));
+        };
+        if mcp::tool_level(tool) == Some(mcp::McpLevel::Control) {
+            if let Some(ms) = crate::planning::maintenance::busy() {
+                return Err(tool_err(agent::ToolError {
+                    code: "busy",
+                    message: tr("Die Wartung schreibt gerade in die Datenbank – bitte kurz warten und erneut versuchen.", "Maintenance is writing to the database – please wait briefly and try again.").to_string(),
+                    details: Some(json!({"retry_after_ms": ms})),
+                }));
+            }
+        }
+        let zone = crate::calendar::zone::SystemZone;
+        let ctx = crate::calendar::agent::Ctx { conn: &db.conn, lang: state::lang(), now: chrono::Local::now().naive_local(), zone: &zone };
+        match crate::calendar::agent::call(&ctx, tool, args) {
+            Ok(done) => {
+                if let Some(c) = done.change {
+                    self.push_toast(mcp::short(&c.text, 140), super::toasts::ToastKind::Info, None);
+                    self.cal.invalidate();
                 }
                 Ok(done.result)
             }

@@ -614,6 +614,8 @@ pub fn tools() -> Vec<ToolDef> {
     .chain(crate::editor_svc::tools::defs())
     // ---- Reiter „Zeit“ (#164, 3.2.0): lesen bei Stufe Lesen, Wecker/Timer/Stoppuhren anlegen und steuern bei Steuern
     .chain(crate::time::agent::defs())
+    // ---- Kalender (#164, 3.2.0): lesen bei Stufe Lesen, anlegen/ändern bei Steuern (kein Löschen)
+    .chain(crate::calendar::agent::defs())
     .collect()
 }
 

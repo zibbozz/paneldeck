@@ -9,7 +9,6 @@
 mod alarms;
 mod app_glue;
 mod birthdays;
-mod calendar_slot;
 mod clocks;
 mod stopwatches;
 #[cfg(test)]
@@ -156,6 +155,9 @@ pub(crate) struct TimeUi {
     pub started: bool,
     /// Vorschau läuft (Klang-Schlüssel `preview`).
     pub previewing: bool,
+    /// Erinnerungen an Kalendertermine (alle 30 s abgefragt, `calendar::remind`).
+    pub cal_poller: crate::calendar::remind::Poller,
+    pub last_cal_poll: i64,
 }
 
 impl TimeUi {
@@ -255,10 +257,8 @@ impl TimeUi {
             }
         });
         if self.sub == Sub::Calendar {
-            egui::CentralPanel::default().show(ctx, |ui| {
-                // KALENDER-PLATZ (#164): Hier kommt beim Zusammenführen mit feature/3.2-calendar dessen `show` hin.
-                calendar_slot::show(ui, lang);
-            });
+            // Der Kalender braucht die ganze Anwendung (`calendar_ui::show(app, ui)`): `App::time_view` zeichnet ihn im
+            // Hauptbereich (eigener Detailbereich rechts), hier nur Leiste und Hinweise.
         } else {
             egui::SidePanel::right(style::salted(Id::new("time_detail")))
                 .resizable(true)
