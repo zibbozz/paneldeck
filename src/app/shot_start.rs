@@ -278,7 +278,7 @@ impl App {
             "cleanup-confirm" => self.shot_cleanup_confirm(ctx),
             "cleanup-result" => self.shot_cleanup_result(),
             // ---- Editor
-            "editor" | "editor-find" | "editor-disk-changed" | "editor-search" => {
+            "editor" | "editor-find" | "editor-disk-changed" | "editor-search" | "editor-syntax" => {
                 write_demo_project(&demo);
                 self.set_mode(titlebar::Mode::Editor);
                 self.ed.set_root(&demo);
@@ -287,6 +287,14 @@ impl App {
                 }
                 if view == "editor" {
                     self.ed.open_path(&demo.join("src/main.rs"), true);
+                }
+                if view == "editor-syntax" {
+                    // Syntax-Modus (#312): Rust links, Markdown rechts, beide mit Farben.
+                    self.ed.open_path(&demo.join("src/main.rs"), true);
+                    let ids: Vec<u64> = self.ed.docs.keys().copied().collect();
+                    for id in ids {
+                        self.ed.set_doc_mode(id, Some(crate::editor::syntax::Mode::Syntax));
+                    }
                 }
                 if view == "editor-search" {
                     self.editor_svc.search_open = true;

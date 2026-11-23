@@ -26,6 +26,9 @@ EXTRA_BY_PKG = {pkg: files.split() for files, pkgs in EXTRA_MAP.items() for pkg 
 # Lucide: Version wie in tools/update-lucide.ps1 (das Skript schreibt auch die Lizenzdatei).
 EMBEDDED = [
     ("lucide-static (Lucide-Icons, Schrift assets/fonts/lucide.ttf.deflate)", "1.66.0", "ISC (aus Feather abgeleitete Icons: MIT)", ["lucide-LICENSE.txt"]),
+    # Grammatiken der Syntaxfarben (#312): von two-face eingebettet; die Datei erzeugt und prüft der Test
+    # editor::syntax::tests::grammar_licences_are_listed (Version = die von two-face in der Liste oben).
+    ("Grammatiken der Syntaxfarben (bat, eingebettet über two-face)", "wie two-face", "je Grammatik (MIT, Sublime, BSD, Apache-2.0, Unlicense)", ["two-face-syntaxes.md"]),
 ]
 # Mitgelieferte Programmdateien, die keine Crates sind (Version aus dem Fetch-Skript).
 FETCH_CONPTY = ROOT / "tools" / "fetch-conpty.ps1"

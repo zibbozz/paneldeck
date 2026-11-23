@@ -245,6 +245,21 @@ pub fn run(t: &Theme, on: impl Fn(Rule) -> bool) -> Vec<Hint> {
             ("syntax_function", "input_bg", TEXT_MIN),
             ("syntax_predicate", "input_bg", TEXT_MIN),
             ("syntax_sort", "input_bg", TEXT_MIN),
+            // Syntaxfarben des Editors (#312) auf dem Hintergrund des Editors; Kommentare dürfen gedämpft sein.
+            ("code_comment", "bg", LARGE_MIN),
+            ("code_string", "bg", TEXT_MIN),
+            ("code_number", "bg", TEXT_MIN),
+            ("code_constant", "bg", TEXT_MIN),
+            ("code_keyword", "bg", TEXT_MIN),
+            ("code_type", "bg", TEXT_MIN),
+            ("code_function", "bg", TEXT_MIN),
+            ("code_operator", "bg", TEXT_MIN),
+            ("code_tag", "bg", TEXT_MIN),
+            ("code_attribute", "bg", TEXT_MIN),
+            ("code_preprocessor", "bg", TEXT_MIN),
+            ("code_escape", "bg", TEXT_MIN),
+            ("code_heading", "bg", TEXT_MIN),
+            ("code_variable", "bg", TEXT_MIN),
             ("accent", "window_bg", LARGE_MIN),
             ("danger", "window_bg", LARGE_MIN),
             ("info", "window_bg", LARGE_MIN),
@@ -365,6 +380,14 @@ mod tests {
             }
             assert!(hints.len() <= 32, "{}: {} Hinweise", t.name, hints.len());
             assert!(hints.iter().all(|h| !h.tokens.is_empty() && !h.msg.de.is_empty() && !h.msg.en.is_empty()));
+        }
+    }
+
+    #[test]
+    fn builtin_themes_have_readable_syntax_colours() {
+        for t in crate::theme::all() {
+            let bad: Vec<String> = run(&t, |r| r == Rule::Contrast).into_iter().filter(|h| h.tokens.iter().any(|n| n.starts_with("code_"))).map(|h| h.msg.en).collect();
+            assert!(bad.is_empty(), "{}: {bad:?}", t.name);
         }
     }
 

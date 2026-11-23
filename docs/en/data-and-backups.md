@@ -189,6 +189,16 @@ All fields are optional; older versions ignore them, and missing fields mean the
 - `settings.json` → `agent_tools` → `command_timeout_max_secs`: the largest `timeout_secs` a chat model can ask for in the foreground, default `1800` (30 minutes; 10–14400). `command_timeout_secs` (default `120`) is now at most this value (before 3.1.0: 5–600).
 - `settings.json` → `agent_tools` → `background_limit`: how many background commands may run at the same time per chat, default `3` (1–10).
 - `chats/<id>.json` → messages from Paneldeck: a message with `role: "system"` and an object `event` – `{"kind": "background_command", "id": "bg1", "command": "…", "state": "exited" | "stopped" | "failed", "exit_code": 0, "duration_ms": 1234, "error": "…"}` (`exit_code`/`error` only when known). `content` is the text the model gets (as a message from the user); the chat shows its own line. An unreadable `event` is ignored; older versions show such a message as a system message and do not send it.
+- `settings.json` → `editor` ([Syntax colours](editor.md#syntax-colours)), all optional (missing = default, older files load unchanged):
+
+  | Field | Default | Meaning |
+  |---|---|---|
+  | `default_mode` | `"text"` | mode of files whose language has no own setting: `"text"` or `"syntax"` (unknown values → `"text"`) |
+  | `language_modes` | `{}` | mode per language id, e.g. `{"rust": "syntax"}`; ids as in the language picker (`rust`, `python`, `powershell` …, other bat grammars by their scope such as `source.haskell`) |
+  | `language_map` | `{}` | own mappings pattern → language id, before the built-in detection; a pattern is an extension (`"*.tpl"`, `".tpl"`) or a file name (`"Jenkinsfile"`), case-insensitive (at most 500 entries) |
+
+- Theme colours `code_*` (syntax colours of the editor, [colour names](themes.md#interface-colours)).
+- `editor-state.json` (internal) remembers the language and mode chosen per tab.
 
 ## Backups
 *Settings → Data & backup* controls the automatic backups of `paneldeck.db`: by default one copy every 24 hours, keeping two (plus the database itself). If the computer was off when a backup was due, it is made at the next start; several missed ones result in just one. You can choose another backup folder, open it, press **Back up now** (manual copies are never deleted automatically) and **Restore** any copy from the list – the current state is backed up first, Paneldeck then quits and applies the restore at the next start. Before every database update (migration) Paneldeck makes a copy as well, and it never touches a database created by a newer version.

@@ -189,6 +189,16 @@ Alle Felder sind optional; ältere Versionen ignorieren sie, fehlende Felder bed
 - `settings.json` → `agent_tools` → `command_timeout_max_secs`: das größte `timeout_secs`, das ein Chat-Modell im Vordergrund verlangen kann, Standard `1800` (30 Minuten; 10–14400). `command_timeout_secs` (Standard `120`) ist jetzt höchstens dieser Wert (vor 3.1.0: 5–600).
 - `settings.json` → `agent_tools` → `background_limit`: wie viele Hintergrund-Befehle je Chat gleichzeitig laufen dürfen, Standard `3` (1–10).
 - `chats/<id>.json` → Nachrichten von Paneldeck: eine Nachricht mit `role: "system"` und einem Objekt `event` – `{"kind": "background_command", "id": "bg1", "command": "…", "state": "exited" | "stopped" | "failed", "exit_code": 0, "duration_ms": 1234, "error": "…"}` (`exit_code`/`error` nur, wenn bekannt). `content` ist der Text, den das Modell bekommt (als Nachricht des Nutzers); der Chat zeigt eine eigene Zeile. Ein unlesbares `event` wird ignoriert; ältere Versionen zeigen eine solche Nachricht als Systemnachricht und senden sie nicht.
+- `settings.json` → `editor` ([Syntaxfarben](editor.md#syntaxfarben)), alle optional (fehlt = Standard, ältere Dateien laden unverändert):
+
+  | Feld | Standard | Bedeutung |
+  |---|---|---|
+  | `default_mode` | `"text"` | Modus von Dateien, für deren Sprache nichts eingestellt ist: `"text"` oder `"syntax"` (unbekannte Werte → `"text"`) |
+  | `language_modes` | `{}` | Modus je Sprach-Id, z. B. `{"rust": "syntax"}`; Ids wie in der Sprachauswahl (`rust`, `python`, `powershell` …, weitere bat-Grammatiken mit ihrem Scope wie `source.haskell`) |
+  | `language_map` | `{}` | eigene Zuordnungen Muster → Sprach-Id, vor der eingebauten Erkennung; ein Muster ist eine Endung (`"*.tpl"`, `".tpl"`) oder ein Dateiname (`"Jenkinsfile"`), ohne Groß/Klein (höchstens 500 Einträge) |
+
+- Theme-Farben `code_*` (Syntaxfarben des Editors, [Farbnamen](themes.md#oberflächenfarben)).
+- `editor-state.json` (intern) merkt sich die je Tab gewählte Sprache und den Modus.
 
 ## Sicherungen
 *Einstellungen → Daten & Sicherung* steuert die automatischen Sicherungen von `paneldeck.db`: Standard ist eine Kopie alle 24 Stunden, behalten werden zwei (zusätzlich zur Datenbank selbst). War der Rechner zur fälligen Zeit aus, wird die Sicherung beim nächsten Start nachgeholt; mehrere verpasste ergeben nur eine. Du kannst einen anderen Sicherungsordner wählen, ihn öffnen, mit **Jetzt sichern** eine Kopie anlegen (manuelle Kopien werden nie automatisch gelöscht) und jede Kopie aus der Liste **wiederherstellen** – dabei wird zuerst der aktuelle Stand gesichert, danach beendet sich Paneldeck und spielt die Wiederherstellung beim nächsten Start ein. Vor jedem Datenbank-Update (Migration) legt Paneldeck ebenfalls eine Kopie an und fasst eine Datenbank einer neueren Version nie an.

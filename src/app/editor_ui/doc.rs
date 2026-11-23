@@ -2,6 +2,7 @@
 //! Oberfläche zusätzlich braucht: Pfad/Titel, verzögertes Laden, Hinweisleisten-Zustand, Hot-Exit-Schlüssel, Übersetzung
 //! der Tastenbefehle in Kern-Aufrufe.
 
+use crate::editor::syntax::{self, DocHighlight, Mode};
 use crate::editor::{self as core, Document, EditOrigin, Selections};
 use crate::state::Lang;
 use std::path::{Path, PathBuf};
@@ -45,6 +46,49 @@ pub(crate) struct StatusInfo {
     pub encoding_key: &'static str,
     pub crlf: bool,
     pub indent: String,
+}
+
+/// Syntax-Modus eines Dokuments für die Statusleiste (#312).
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct SyntaxStatus {
+    /// Sprache (Id) – gewählt oder erkannt; `None` = reiner Text.
+    pub lang: Option<String>,
+    /// Anzeigename der Sprache.
+    pub lang_name: String,
+    /// Die Sprache ist im Dokument gewählt (nicht erkannt).
+    pub lang_chosen: bool,
+    /// Gewählter bzw. eingestellter Modus.
+    pub mode: Mode,
+    /// Der Modus ist im Dokument gewählt (nicht aus den Einstellungen).
+    pub mode_chosen: bool,
+    /// Farben sind gerade an (Modus Syntax, Sprache mit Grammatik, keine große Datei).
+    pub active: bool,
+    /// Große Datei: Syntaxfarben bleiben aus.
+    pub large: bool,
+}
+
+/// Zustand des Syntax-Modus je Dokument (#312): eigene Wahl (Statusleiste, gemerkt in `editor-state.json`),
+/// erkannte Sprache und die Syntaxfarben. Gilt für alle Reiter/Teilungen des Dokuments gemeinsam.
+#[derive(Default)]
+pub(crate) struct SyntaxDoc {
+    /// Sprache in der Statusleiste gewählt (`None` = erkennen).
+    pub lang: Option<String>,
+    /// Modus in der Statusleiste gewählt (`None` = aus den Einstellungen).
+    pub mode: Option<Mode>,
+    /// Gemerkter Modus, den diese Version nicht kennt (z. B. `smart` einer neueren): bleibt beim Speichern erhalten.
+    pub mode_unknown: Option<String>,
+    /// Erkannte Sprache und wofür erkannt wurde (Pfad, Zuordnungen, Dokument gelesen).
+    detected: Option<(DetectKey, Option<String>)>,
+    pub(super) hl: Option<DocHighlight>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct DetectKey {
+    path: Option<PathBuf>,
+    map_gen: u64,
+    loaded: bool,
+    /// Unbenannte Datei: ihre Shebang-Zeile (neu erkennen, sobald eine dazukommt oder sich ändert).
+    shebang: Option<String>,
 }
 
 /// Reaktion auf eine Änderung auf der Platte.
@@ -104,6 +148,8 @@ pub(crate) struct DocEntry {
     loading: Option<std::sync::mpsc::Receiver<Result<Document, String>>>,
     /// Auswahlen für Änderungen ohne Ansicht (Agent, Neu laden).
     scratch: Selections,
+    /// Syntax-Modus (#312).
+    pub syntax: SyntaxDoc,
 }
 
 /// Ab dieser Dateigröße wird im Hilfsthread gelesen (die Oberfläche bleibt bedienbar).
@@ -111,7 +157,7 @@ pub(super) const BACKGROUND_BYTES: u64 = 4 * 1024 * 1024;
 
 impl DocEntry {
     fn blank(path: Option<PathBuf>, untitled: u32) -> Self {
-        DocEntry { path, untitled, doc: None, load_error: None, pending_hot: None, initial_text: None, hot: Default::default(), opened_by_agent: false, agent_edited: false, agent_note_dismissed: false, large_dismissed: false, disk_conflict: false, disk_deleted: false, edited_at: None, touched: false, loading: None, scratch: Selections::default() }
+        DocEntry { path, untitled, doc: None, load_error: None, pending_hot: None, initial_text: None, hot: Default::default(), opened_by_agent: false, agent_edited: false, agent_note_dismissed: false, large_dismissed: false, disk_conflict: false, disk_deleted: false, edited_at: None, touched: false, loading: None, scratch: Selections::default(), syntax: SyntaxDoc::default() }
     }
 
     /// Noch nicht gelesenes Dokument (Datei und/oder Hot-Exit-Inhalt).
@@ -277,6 +323,75 @@ impl DocEntry {
             disk_changed: self.disk_conflict,
             disk_deleted: self.disk_deleted,
             loaded: self.doc.is_some(),
+        }
+    }
+
+    // ---- Syntax-Modus (#312) ----
+
+    /// Sprache des Dokuments: gewählt, sonst erkannt (Dateiname, Shebang, Modeline; erst nach dem Lesen auch nach dem
+    /// Inhalt). `None` = reiner Text.
+    pub fn language(&mut self, prefs: &super::EditorPrefs) -> Option<String> {
+        if let Some(l) = &self.syntax.lang {
+            return Some(l.clone());
+        }
+        let shebang = if self.path.is_none() {
+            self.doc.as_ref().map(|d| d.line_part(0, 0..200).to_string()).filter(|l| l.starts_with("#!"))
+        } else {
+            None
+        };
+        let key = DetectKey { path: self.path.clone(), map_gen: prefs.syntax.map_gen, loaded: self.doc.is_some(), shebang };
+        if let Some((k, l)) = &self.syntax.detected
+            && *k == key
+        {
+            return l.clone();
+        }
+        let (head, tail) = self.doc.as_ref().map(|d| syntax::detect::head_tail(d.rope())).unwrap_or_default();
+        let l = syntax::detect(self.path.as_deref(), &head, &tail, &prefs.syntax.user_map);
+        self.syntax.detected = Some((key, l.clone()));
+        l
+    }
+
+    /// Modus: gewählt, sonst die Einstellung der Sprache, sonst der Standard (Text).
+    pub fn mode(&mut self, prefs: &super::EditorPrefs) -> Mode {
+        if let Some(m) = self.syntax.mode {
+            return m;
+        }
+        let l = self.language(prefs);
+        prefs.syntax.mode_for(l.as_deref())
+    }
+
+    /// Stand für die Statusleiste.
+    pub fn syntax_status(&mut self, prefs: &super::EditorPrefs, lang: Lang) -> SyntaxStatus {
+        let l = self.language(prefs);
+        let mode = self.mode(prefs);
+        let large = self.is_large(prefs);
+        let lang_name = match &l {
+            Some(id) => syntax::language_name(id).map(str::to_string).unwrap_or_else(|| id.clone()),
+            None => lang.t("Reiner Text", "Plain text").to_string(),
+        };
+        let has_grammar = l.as_deref().is_some_and(syntax::engine::has_grammar) && !self.syntax.hl.as_ref().is_some_and(|h| h.failed());
+        SyntaxStatus { lang: l, lang_name, lang_chosen: self.syntax.lang.is_some(), mode, mode_chosen: self.syntax.mode.is_some(), active: mode == Mode::Syntax && has_grammar && !large, large }
+    }
+
+    /// Sprache wählen (`None` = wieder erkennen).
+    pub fn set_language(&mut self, lang: Option<String>) {
+        self.syntax.lang = lang;
+    }
+
+    /// Modus wählen (`None` = wieder aus den Einstellungen).
+    pub fn set_mode(&mut self, mode: Option<Mode>) {
+        self.syntax.mode = mode;
+        self.syntax.mode_unknown = None;
+    }
+
+    /// Syntaxfarben bereitstellen, wenn sie an sind (Modus Syntax, Sprache mit Grammatik, keine große Datei), sonst
+    /// verwerfen. Danach liegen sie in `self.syntax` für das Zeichnen.
+    pub fn ensure_highlight(&mut self, prefs: &super::EditorPrefs) {
+        let want = if self.doc.is_some() && !self.is_large(prefs) && self.mode(prefs) == Mode::Syntax { self.language(prefs) } else { None };
+        match (want, &self.syntax.hl) {
+            (Some(l), Some(h)) if h.lang == l => {}
+            (Some(l), _) => self.syntax.hl = self.doc.as_ref().and_then(|d| DocHighlight::new(&l, d)),
+            (None, _) => self.syntax.hl = None,
         }
     }
 
