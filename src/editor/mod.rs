@@ -26,6 +26,7 @@ pub mod document;
 pub mod editorconfig;
 pub mod encoding;
 pub mod file;
+pub mod format;
 pub mod history;
 pub mod hotexit;
 pub mod indent;
