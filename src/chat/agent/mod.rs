@@ -169,6 +169,8 @@ pub struct AgentEnv {
     pub settings: AgentToolSettings,
     /// Platz für das Ergebnis in Bytes (0 = nur die Grenze des Werkzeugs).
     pub max_bytes: usize,
+    /// Nur für Modelle mit Bildverständnis (#357): `read_file` liest Bilddateien als Bild und legt es hier ab.
+    pub images: Option<super::images::ImageSink>,
     /// Der Chat hat Hintergrund-Befehle (#355): erst dann bekommt das Modell `command_status`, `command_output` und
     /// `stop_command` (spart Kontext, wie die Editor-Werkzeuge nur bei offenem Dokument).
     pub background: bool,

@@ -36,7 +36,7 @@ fn ollama_lists_models_with_details() {
     let ep = Endpoint::new(ServerKind::Ollama, OL);
     let ms = list_models(&t, &ep, &no_cancel()).unwrap();
     assert_eq!(ms.len(), 3);
-    assert_eq!(ms[0], ModelInfo { name: "qwen3:8b".into(), tools: Some(true), context_length: Some(40960) });
+    assert_eq!(ms[0], ModelInfo { name: "qwen3:8b".into(), tools: Some(true), context_length: Some(40960), vision: Some(false) });
     let log = t.log();
     assert_eq!(log.len(), 4);
     assert_eq!(log[1].body, Some(json!({"model": "qwen3:8b"})));
@@ -49,6 +49,10 @@ fn ollama_show_details() {
     assert_eq!(ollama::show_info(&json!({"capabilities":["completion"]})), (Some(false), None));
     assert_eq!(ollama::show_info(&json!({})), (None, None));
     assert_eq!(ollama::show_info(&json!({"model_info":{"llama.context_length":8192}})), (None, Some(8192)));
+    // Bildverständnis (#357)
+    assert_eq!(ollama::show_vision(&json!({"capabilities":["completion","vision"]})), Some(true));
+    assert_eq!(ollama::show_vision(&json!({"capabilities":["completion","tools"]})), Some(false));
+    assert_eq!(ollama::show_vision(&json!({})), None, "ältere Ollama-Versionen: unbekannt");
 }
 
 #[test]
@@ -57,7 +61,7 @@ fn ollama_show_failure_keeps_model() {
         .with(Method::Get, "http://localhost:11434/api/tags", Canned::ok(r#"{"models":[{"name":"a"}]}"#))
         .with(Method::Post, "http://localhost:11434/api/show", Canned::status(500, "{}"));
     let ms = list_models(&t, &Endpoint::new(ServerKind::Ollama, OL), &no_cancel()).unwrap();
-    assert_eq!(ms, vec![ModelInfo { name: "a".into(), tools: None, context_length: None }]);
+    assert_eq!(ms, vec![ModelInfo { name: "a".into(), tools: None, context_length: None, vision: None }]);
 }
 
 #[test]
@@ -646,7 +650,7 @@ mod e2e {
         });
         let base = base.replace("127.0.0.1", "localhost");
         let r = list_models(system_transport().as_ref(), &Endpoint::new(ServerKind::OpenAi, &format!("{base}/v1")), &no_cancel()).unwrap();
-        assert_eq!(r, vec![ModelInfo { name: "phi-4".into(), tools: None, context_length: None }]);
+        assert_eq!(r, vec![ModelInfo { name: "phi-4".into(), tools: None, context_length: None, vision: None }]);
         assert!(h.join().unwrap().head.starts_with("GET /v1/models HTTP/1.1\r\n"));
     }
 

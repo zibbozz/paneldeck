@@ -6,8 +6,8 @@
 //!     "receive_timeout_secs": 600,
 //!     "models": [ { "name": "llama3.1:8b", "level": "Read", "level_chosen": true, "disabled_tools": ["read_terminal"], "ask_write": true,
 //!                   "max_steps": 10, "tools": true, "context_length": 16384, "temperature": 0.7,
-//!                   "prompt_parts": { "examples": false }, "prompt_family": "llama" } ],
-//!     "last_models": [ { "name": "llama3.1:8b", "tools": true, "context_length": 131072 } ] }
+//!                   "prompt_parts": { "examples": false }, "prompt_family": "llama", "vision": false } ],
+//!     "last_models": [ { "name": "llama3.1:8b", "tools": true, "context_length": 131072, "vision": false } ] }
 //! ]
 //! ```
 //!
@@ -133,6 +133,10 @@ pub struct LlmModel {
     /// fehlt = am Modellnamen erkannt; ein unbekannter Wert bleibt erhalten und gilt wie fehlend).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prompt_family: Option<String>,
+    /// Bilder an das Modell senden (#357, seit 3.1.0): `None` = automatisch (vom Server erkannt; unbekannt = versuchen),
+    /// `Some(false)` auch dann, wenn der Server ein Bild abgelehnt hat (Paneldeck merkt sich das hier).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vision: Option<bool>,
 }
 
 impl Default for LlmModel {
@@ -149,6 +153,7 @@ impl Default for LlmModel {
             temperature: None,
             prompt_parts: PromptOverride::default(),
             prompt_family: None,
+            vision: None,
         }
     }
 }
@@ -178,6 +183,7 @@ impl<'de> Deserialize<'de> for LlmModel {
             temperature: get(o, "temperature", None),
             prompt_parts: get(o, "prompt_parts", PromptOverride::default()),
             prompt_family: get(o, "prompt_family", None),
+            vision: get(o, "vision", None),
             name: def.name,
         })
     }
@@ -356,6 +362,11 @@ impl LlmServer {
     /// Kann das Modell Werkzeuge aufrufen? Eigene Angabe vor Erkanntem; `None` = unbekannt.
     pub fn tools_supported(&self, name: &str) -> Option<bool> {
         self.model_cfg(name).tools.or_else(|| self.info(name).and_then(|i| i.tools))
+    }
+
+    /// Kann das Modell Bilder lesen (#357)? Eigene Angabe (oder gemerkte Ablehnung) vor Erkanntem; `None` = unbekannt.
+    pub fn vision_supported(&self, name: &str) -> Option<bool> {
+        self.model_cfg(name).vision.or_else(|| self.info(name).and_then(|i| i.vision))
     }
 
     /// Kontextlänge zur Anzeige: eigene Angabe > vom Server erkannt > `DEFAULT_CONTEXT`.
@@ -581,7 +592,7 @@ mod tests {
 
     #[test]
     fn request_context_for_ollama_and_openai() {
-        let mut s = LlmServer { last_models: vec![ModelInfo { name: "big".into(), tools: None, context_length: Some(131072) }, ModelInfo { name: "small".into(), tools: None, context_length: Some(2048) }], ..Default::default() };
+        let mut s = LlmServer { last_models: vec![ModelInfo { name: "big".into(), tools: None, context_length: Some(131072), vision: None }, ModelInfo { name: "small".into(), tools: None, context_length: Some(2048), vision: None }], ..Default::default() };
         assert_eq!(s.request_context("big", None), DEFAULT_CONTEXT, "Ollama: ohne bekannten Bedarf 8192");
         assert_eq!(s.request_context("big", Some(9_000)), 32768, "Bedarf (9000 + 4096) / 0,75 → 32768");
         assert_eq!(s.request_context("big", Some(5_000)), 16384);
@@ -633,7 +644,7 @@ mod tests {
 
     #[test]
     fn model_lookup_and_overrides() {
-        let mut s = LlmServer { last_models: vec![ModelInfo { name: "a".into(), tools: Some(false), context_length: Some(4096) }, ModelInfo { name: "b".into(), tools: None, context_length: None }], ..Default::default() };
+        let mut s = LlmServer { last_models: vec![ModelInfo { name: "a".into(), tools: Some(false), context_length: Some(4096), vision: None }, ModelInfo { name: "b".into(), tools: None, context_length: None, vision: None }], ..Default::default() };
         assert_eq!(s.tools_supported("a"), Some(false));
         assert_eq!(s.tools_supported("b"), None);
         assert_eq!(s.context_length("a"), 4096);

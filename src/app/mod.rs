@@ -31,6 +31,8 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+mod chat_images;
+mod chat_images_ui;
 mod chat_ask_ui;
 mod chat_ui;
 mod cleanup_ui;
@@ -474,6 +476,8 @@ enum Action {
     ChatRevoke(u64, chatmod::AllowRule),
     /// Antwort auf die einmalige Frage nach der Stufe des Modells.
     ChatLevel(u64, crate::mcp::McpLevel),
+    /// Bild in den Chat (#357): Strg+V oder Büroklammer.
+    ChatImage(u64, chat_images_ui::ImageReq),
     /// Tutorial (#143): Tour starten, fortsetzen, „Was ist neu“, Hinweis ausblenden.
     Tutorial(tutorial::Cmd),
 }
@@ -3276,6 +3280,7 @@ impl App {
         if tools_running {
             ctx.request_repaint_after(Duration::from_millis(100));
         }
+        self.poll_chat_images(ctx);
         self.refresh_chat_context();
     }
 
@@ -3377,6 +3382,7 @@ impl App {
             token_scale: e.and_then(|e| e.chat.as_ref()).map_or(1.0, |c| c.token_scale),
             prompt_parts: self.settings.chat_prompt_parts,
             agent: self.agent_env(id),
+            images: self.chat_turn_images(id),
         }
     }
 
@@ -4333,6 +4339,7 @@ impl App {
                 self.new_chat = Some(models_ui::NewChatDlg::new(&self.settings, cwd, Some(path)));
             }
             Action::ChatSend(id) | Action::ChatStop(id) | Action::ChatRegenerate(id) | Action::ChatEdit(id) | Action::ChatDecide(id, ..) | Action::ChatContinue(id) | Action::ChatRevoke(id, _) | Action::ChatLevel(id, _) => self.chat_action(ctx, id, &a),
+            Action::ChatImage(id, req) => self.chat_image(ctx, id, req),
             Action::Tutorial(c) => self.tut_cmd(ctx, c),
         }
     }
@@ -4963,6 +4970,9 @@ fn show_pane(ui: &mut Ui, id: u64, rect: Rect, cx: &mut PaneCx) {
         }
         if let Some(level) = o.level {
             cx.actions.push(Action::ChatLevel(id, level));
+        }
+        if let Some(req) = o.image {
+            cx.actions.push(Action::ChatImage(id, req));
         }
         if !cx.detached {
             edge_buttons(ui, id, body, cx, false);
@@ -6007,7 +6017,13 @@ impl chatmod::driver::ChatToolHost for ChatHost<'_> {
             let max = self.app.entries.get(&chat).and_then(|e| e.chat.as_ref()).map_or(0, |c| c.result_cap_for(&call.name));
             return self.app.agent_call(self.ctx, chat, call, max);
         }
-        self.app.mcp_call_chat(self.ctx, chat, &call.name, &call.arguments)
+        // `screenshot` für ein Modell mit Bildverständnis (#357): das Bild kommt in den Chat.
+        let sink = if call.name == "screenshot" { self.app.chat_tool_image_sink(chat, call) } else { None };
+        let rx = self.app.mcp_call_chat(self.ctx, chat, &call.name, &call.arguments);
+        match sink {
+            Some(s) => chatmod::images::forward_screenshot(rx, s),
+            None => rx,
+        }
     }
     fn request(&mut self, id: u64) {
         self.app.chat_next_request(self.ctx, id);

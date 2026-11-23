@@ -123,6 +123,21 @@ pub fn pick_file(_start: &str) -> Option<std::path::PathBuf> {
     None
 }
 
+/// Öffnen-Dialog für Bilder (Büroklammer im Chat, #357; mehrere möglich); `start` wie bei [`pick_file`].
+#[cfg(any(windows, unix))]
+pub fn pick_images(start: &str) -> Vec<std::path::PathBuf> {
+    let mut d = rfd::FileDialog::new().add_filter(crate::state::t("Bilder", "Images"), crate::chat::images::EXTENSIONS);
+    if !crate::pathfmt::is_remote(start) && !crate::wsl::is_wsl_unc(start) && std::path::Path::new(start).is_dir() {
+        d = d.set_directory(start);
+    }
+    d.pick_files().unwrap_or_default()
+}
+
+#[cfg(not(any(windows, unix)))]
+pub fn pick_images(_start: &str) -> Vec<std::path::PathBuf> {
+    Vec::new()
+}
+
 /// „Speichern unter“ für beliebige Dateien (Editor, #54): Startordner `dir` (wenn lokal vorhanden), Vorschlag `name`.
 #[cfg(any(windows, unix))]
 pub fn save_any(dir: Option<&std::path::Path>, name: &str) -> Option<std::path::PathBuf> {

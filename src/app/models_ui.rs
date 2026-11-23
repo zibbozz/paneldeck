@@ -639,7 +639,13 @@ pub(super) fn model_summary(s: &LlmServer, name: &str, lang: Lang) -> String {
     let ctx = s.context_length(name);
     let ctx = if ctx >= 1024 && ctx % 1024 == 0 { format!("{}k", ctx / 1024) } else { ctx.to_string() };
     let missing = if !s.last_models.is_empty() && s.info(name).is_none() { lang.t(" · vom Server nicht mehr gemeldet", " · no longer reported by the server") } else { "" };
-    format!("{tools} · {} {ctx}{missing}", lang.t("Kontext", "context"))
+    // Bildverständnis nur nennen, wenn es bekannt ist (#357).
+    let vision = match s.vision_supported(name) {
+        Some(true) => lang.t(" · Bilder ✓", " · images ✓"),
+        Some(false) => lang.t(" · keine Bilder", " · no images"),
+        None => "",
+    };
+    format!("{tools} · {} {ctx}{vision}{missing}", lang.t("Kontext", "context"))
 }
 
 fn model_row(ui: &mut Ui, lang: Lang, s: &mut LlmServer, name: &str, expert: bool, out: &mut ModelsOut, prompt: &mut super::prompt_ui::PromptUi) {
@@ -679,6 +685,18 @@ fn model_row(ui: &mut Ui, lang: Lang, s: &mut LlmServer, name: &str, expert: boo
             crate::afford::choice_value(ui, &mut cfg.tools, None, auto, 0.0);
             crate::afford::choice_value(ui, &mut cfg.tools, Some(true), lang.t("An", "On"), 0.0);
             crate::afford::choice_value(ui, &mut cfg.tools, Some(false), lang.t("Aus", "Off"), 0.0);
+        });
+        // Bilder (#357): automatisch nach dem Server; lehnt er ein Bild ab, steht hier „Aus“.
+        row(ui, lang.t("Bilder", "Images"), |ui| {
+            let detected = s.info(name).and_then(|i| i.vision);
+            let auto = format!("{} ({})", lang.t("Automatisch", "Auto"), match detected {
+                Some(true) => lang.t("erkannt: ja", "detected: yes"),
+                Some(false) => lang.t("erkannt: nein", "detected: no"),
+                None => lang.t("unbekannt – wird versucht", "unknown – will be tried"),
+            });
+            crate::afford::choice_value(ui, &mut cfg.vision, None, auto, 0.0);
+            crate::afford::choice_value(ui, &mut cfg.vision, Some(true), lang.t("An", "On"), 0.0);
+            crate::afford::choice_value(ui, &mut cfg.vision, Some(false), lang.t("Aus", "Off"), 0.0);
         });
         row(ui, lang.t("Kontextlänge", "Context length"), |ui| {
             let mut own = cfg.context_length.is_some();
@@ -1007,7 +1025,7 @@ mod tests {
     use super::*;
 
     fn info(name: &str, tools: Option<bool>) -> ModelInfo {
-        ModelInfo { name: name.into(), tools, context_length: Some(4096) }
+        ModelInfo { name: name.into(), tools, context_length: Some(4096), vision: None }
     }
     use crate::llm::http::fake::{Canned, Fake};
     use crate::llm::http::Method;
@@ -1370,7 +1388,7 @@ mod tests {
             std::thread::sleep(Duration::from_millis(2));
         }
         assert!(changed);
-        assert_eq!(servers[0].last_models, vec![ModelInfo { name: "llama3".into(), tools: Some(true), context_length: Some(8192) }, ModelInfo { name: "phi".into(), tools: Some(true), context_length: Some(8192) }]);
+        assert_eq!(servers[0].last_models, vec![ModelInfo { name: "llama3".into(), tools: Some(true), context_length: Some(8192), vision: Some(false) }, ModelInfo { name: "phi".into(), tools: Some(true), context_length: Some(8192), vision: Some(false) }]);
         assert!(servers[1].last_models.is_empty());
         assert!(c.errors.contains_key("b"), "unbekannte Adresse der Attrappe: Fehler");
     }

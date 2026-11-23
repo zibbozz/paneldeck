@@ -17,14 +17,19 @@
 //!       "repairs": [ { "id": "c2", "text_call": true, "fixes": [ "lines: \"50\" → 50" ] } ] },
 //!     { "role": "tool", "content": "{\"text\":\"…\"}", "ts": 1763200005,
 //!       "tool_call_id": "c2", "tool_name": "read_terminal", "status": "ok" },
-//!     { "role": "assistant", "content": "", "ts": 1763200010, "error": "connection refused" }
-//!   ]
+//!     { "role": "assistant", "content": "", "ts": 1763200010, "error": "connection refused" },
+//!     { "role": "user", "content": "What is wrong here? [Image#1]", "ts": 1763200020, "images": [1] }
+//!   ],
+//!   "images": [ { "n": 1, "file": "1.png", "send": "1.send.jpg", "mime": "image/jpeg", "width": 3840, "height": 2160,
+//!                 "send_width": 1568, "send_height": 882, "source": "paste" } ]
 //! }
 //! ```
 //!
 //! Lesen ist tolerant: BOM erlaubt, unbekannte Felder werden ignoriert, eine einzelne ungültige Nachricht wird
 //! übersprungen; eine unlesbare oder zu große Datei ergibt einen leeren Chat mit Hinweis (die Datei wird vorher als
-//! `<id>.defekt-<zeit>.json` gesichert). Geschrieben wird atomar (temporäre Datei, dann umbenennen).
+//! `<id>.defekt-<zeit>.json` gesichert). Geschrieben wird atomar (temporäre Datei, dann umbenennen). Seit 3.1.0 (#357)
+//! liegen Bilder in `chats/<id>/images/` (siehe `images`); die Datei nennt sie nur (`images`, je Nachricht die Nummern).
+//! Beim Speichern steht `images` vor `messages` (wie alle Felder außer den Nachrichten).
 
 use crate::state;
 use serde::{Deserialize, Serialize};
@@ -94,11 +99,28 @@ pub struct ChatMsg {
     /// `id`). Nur für die Anzeige, wird nicht an das Modell gesendet; Unlesbares ergibt eine leere Liste.
     #[serde(skip_serializing_if = "Vec::is_empty", deserialize_with = "lenient_repairs")]
     pub repairs: Vec<CallRepair>,
+    /// Bilder dieser Nachricht (#357, seit 3.1.0): Nummern aus `ChatFile::images` – bei Nutzer-Nachrichten die
+    /// Platzhalter `[Image#n]` im Text, bei Werkzeug-Ergebnissen das Bild von `screenshot`/`read_file`. Unlesbares
+    /// ergibt eine leere Liste.
+    #[serde(skip_serializing_if = "Vec::is_empty", deserialize_with = "lenient_numbers")]
+    pub images: Vec<u32>,
     /// Nur Nachrichten von Paneldeck (Rolle `system`, seit 3.1.0, #355): Ereignis, z. B. „Hintergrund-Befehl beendet“.
     /// `content` ist der Text für das Modell (geht als Nachricht des Nutzers mit); die Oberfläche zeigt eine eigene Zeile.
     /// Unlesbares ergibt `None` (ältere Versionen zeigen solche Nachrichten als Systemnachricht und senden sie nicht).
     #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "lenient_event")]
     pub event: Option<ChatEvent>,
+}
+
+/// Bildnummern tolerant lesen: Unlesbares fällt weg, ein falscher Typ ergibt eine leere Liste.
+fn lenient_numbers<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<u32>, D::Error> {
+    let v = serde_json::Value::deserialize(d)?;
+    let mut out: Vec<u32> = Vec::new();
+    for n in v.as_array().map(|a| a.iter().filter_map(|x| x.as_u64()).filter(|n| *n > 0 && *n <= u32::MAX as u64).map(|n| n as u32).collect::<Vec<_>>()).unwrap_or_default() {
+        if !out.contains(&n) {
+            out.push(n);
+        }
+    }
+    Ok(out)
 }
 
 /// Ereignis von Paneldeck im Verlauf (#355).
@@ -173,12 +195,16 @@ pub struct ChatFile {
     /// Liste.
     #[serde(skip_serializing_if = "Vec::is_empty", deserialize_with = "lenient_todos")]
     pub todos: Vec<ChatTodo>,
+    /// Bilder des Chats (#357, seit 3.1.0): Verweise auf die Dateien in `chats/<id>/images/`; die Nachrichten nennen
+    /// nur die Nummern (`ChatMsg::images`). Unlesbares und unsichere Dateinamen fallen weg.
+    #[serde(skip_serializing_if = "Vec::is_empty", deserialize_with = "super::images::lenient_entries")]
+    pub images: Vec<super::images::ImageEntry>,
     pub messages: Vec<ChatMsg>,
 }
 
 impl Default for ChatFile {
     fn default() -> Self {
-        ChatFile { version: VERSION, context_start: None, always_allow: Vec::new(), todos: Vec::new(), messages: Vec::new() }
+        ChatFile { version: VERSION, context_start: None, always_allow: Vec::new(), todos: Vec::new(), images: Vec::new(), messages: Vec::new() }
     }
 }
 
@@ -443,7 +469,7 @@ pub fn serialize_capped(file: &ChatFile, cap: usize) -> Vec<u8> {
     let keep_from = file.messages.iter().take_while(|m| m.role == Role::System && m.event.is_none()).count();
     let size = |from: usize| -> usize { parts[..keep_from].iter().chain(&parts[from..]).map(|p| p.len() + 1).sum() };
     // Kopf ohne Nachrichten (+ Reserve für context_start): `{"version":1,"context_start":N,"always_allow":[…],"messages":[]}`
-    let head_len = 64 + serde_json::to_vec(&file.always_allow).map(|v| v.len()).unwrap_or(0) + serde_json::to_vec(&file.todos).map(|v| v.len() + 10).unwrap_or(0) + 16;
+    let head_len = 64 + serde_json::to_vec(&file.always_allow).map(|v| v.len()).unwrap_or(0) + serde_json::to_vec(&file.todos).map(|v| v.len() + 10).unwrap_or(0) + serde_json::to_vec(&file.images).map(|v| v.len() + 12).unwrap_or(0) + 16;
     let mut drop_to = keep_from;
     if head_len + size(keep_from) > cap {
         let mut total = size(keep_from);
@@ -455,7 +481,7 @@ pub fn serialize_capped(file: &ChatFile, cap: usize) -> Vec<u8> {
     let dropped = drop_to - keep_from;
     // Gekürzt: der Index rückt nach; lag er im weggefallenen Teil, sieht das Modell ohnehin alles Übrige.
     let context_start = if dropped == 0 { file.context_start } else { file.context_start.and_then(|c| (c >= drop_to).then(|| c - dropped)).filter(|c| *c > keep_from) };
-    let head = ChatFile { version: file.version, context_start, always_allow: file.always_allow.clone(), todos: file.todos.clone(), messages: Vec::new() };
+    let head = ChatFile { version: file.version, context_start, always_allow: file.always_allow.clone(), todos: file.todos.clone(), images: file.images.clone(), messages: Vec::new() };
     let mut data = serde_json::to_vec(&head).unwrap_or_default();
     // `messages` ist das letzte Feld: `…"messages":[]}` → Nachrichten zwischen die Klammern setzen.
     data.truncate(data.len().saturating_sub(2));
@@ -471,8 +497,9 @@ pub fn serialize_capped(file: &ChatFile, cap: usize) -> Vec<u8> {
     data
 }
 
-/// Höchste Sitzungs-Id, zu der es im Datenordner noch Dateien gibt (`chats/<id>…`, `scrollback/<id>…`). Damit vergibt
-/// der Hub nach einem Absturz oder einer zurückgesetzten `state.json` keine Id, deren alter Verlauf noch daliegt.
+/// Höchste Sitzungs-Id, zu der es im Datenordner noch Dateien gibt (`chats/<id>…`, `scrollback/<id>…`, der Ordner
+/// `chats/<id>/` mit den Bildern). Damit vergibt der Hub nach einem Absturz oder einer zurückgesetzten `state.json`
+/// keine Id, deren alter Verlauf noch daliegt.
 pub fn max_used_id(data_dir: &Path) -> u64 {
     let mut max = 0;
     for sub in ["chats", "scrollback"] {
@@ -480,7 +507,8 @@ pub fn max_used_id(data_dir: &Path) -> u64 {
         for e in rd.flatten() {
             let name = e.file_name().to_string_lossy().to_string();
             let digits: String = name.chars().take_while(|c| c.is_ascii_digit()).collect();
-            if digits.len() < name.len() && name[digits.len()..].starts_with('.') {
+            let dir_of_chat = sub == "chats" && !digits.is_empty() && digits.len() == name.len() && e.path().is_dir();
+            if dir_of_chat || (digits.len() < name.len() && name[digits.len()..].starts_with('.')) {
                 if let Ok(n) = digits.parse::<u64>() {
                     max = max.max(n);
                 }
@@ -504,12 +532,25 @@ pub fn set_aside(path: &Path) -> Option<PathBuf> {
         n += 1;
     }
     std::fs::rename(path, &target).ok()?;
+    // Bilder des fremden Verlaufs mit beiseitelegen (#357), sonst gehörten sie dem neuen Chat mit dieser Id.
+    let images = path.with_file_name(&stem);
+    if images.is_dir() {
+        let mut aside = path.with_file_name(format!("{stem}.orphan-{secs}-images"));
+        let mut n = 2;
+        while aside.exists() {
+            aside = path.with_file_name(format!("{stem}.orphan-{secs}-images-{n}"));
+            n += 1;
+        }
+        let _ = std::fs::rename(&images, aside);
+    }
     Some(target)
 }
 
-/// Verlauf eines geschlossenen Chats löschen, samt seiner Sicherungen beschädigter Dateien (`<id>.defekt-*.json`).
+/// Verlauf eines geschlossenen Chats löschen, samt seiner Sicherungen beschädigter Dateien (`<id>.defekt-*.json`) und
+/// seiner Bilder (`chats/<id>/`, #357).
 pub fn remove(data_dir: &Path, id: u64) {
     let _ = std::fs::remove_file(path(data_dir, id));
+    super::images::remove_all(data_dir, id);
     let prefix = format!("{id}.defekt-");
     if let Ok(rd) = std::fs::read_dir(dir(data_dir)) {
         for e in rd.flatten() {
@@ -539,7 +580,7 @@ mod tests {
         t.status = Some(ToolStatus::Ok);
         let mut e = ChatMsg::new(Role::Assistant, "");
         e.error = Some("connection refused".into());
-        ChatFile { version: VERSION, context_start: Some(1), always_allow: vec![rule("send_text", Some(4))], todos: Vec::new(), messages: vec![ChatMsg::new(Role::User, "Hi ä 😀"), a, t, ChatMsg::new(Role::Assistant, "**done**"), e] }
+        ChatFile { version: VERSION, context_start: Some(1), always_allow: vec![rule("send_text", Some(4))], todos: Vec::new(), images: Vec::new(), messages: vec![ChatMsg::new(Role::User, "Hi ä 😀"), a, t, ChatMsg::new(Role::Assistant, "**done**"), e] }
     }
 
     #[test]
@@ -660,6 +701,59 @@ mod tests {
         assert_eq!(parse(&text).unwrap().0, f);
         let (f, _) = parse(r#"{"todos":"x","messages":[]}"#).unwrap();
         assert!(f.todos.is_empty());
+    }
+
+    #[test]
+    fn images_are_optional_lenient_round_trip_and_survive_the_size_cap() {
+        // Datei von 3.0.0 ohne Bilder: geladen, und ohne Bilder werden die Felder nicht geschrieben
+        let (f, skipped) = parse(r#"{"version":1,"messages":[{"role":"user","content":"[Image#1] x"}]}"#).unwrap();
+        assert_eq!((skipped, f.images.len(), f.messages[0].images.len()), (0, 0, 0));
+        let text = String::from_utf8(serialize_capped(&f, 10_000)).unwrap();
+        assert!(!text.contains("images"), "{text}");
+        // Unlesbares fällt weg, die Nachricht bleibt
+        let (f, skipped) = parse(r#"{"images":[{"n":1,"file":"1.png","mime":"image/png","width":4,"height":3,"send_width":4,"send_height":3},{"n":2,"file":"../x","mime":"image/png"}],"messages":[{"role":"user","content":"[Image#1]","images":[1,"2",0,1]},{"role":"user","content":"y","images":"oops"}]}"#).unwrap();
+        assert_eq!(skipped, 0);
+        assert_eq!(f.images.iter().map(|e| e.n).collect::<Vec<_>>(), [1]);
+        assert_eq!(f.messages[0].images, [1]);
+        assert!(f.messages[1].images.is_empty());
+        // Hin und zurück; die Bilder stehen vor den Nachrichten
+        let text = String::from_utf8(serialize_capped(&f, 10_000)).unwrap();
+        assert!(text.contains(r#""images":[{"n":1,"file":"1.png","mime":"image/png","width":4,"height":3,"send_width":4,"send_height":3,"source":"paste"}],"messages""#), "{text}");
+        assert!(text.contains(r#""content":"[Image#1]","ts":0,"images":[1]"#), "{text}");
+        assert_eq!(parse(&text).unwrap().0, f);
+        // Gekürzt gespeichert: die Liste bleibt
+        let mut big = f.clone();
+        for i in 0..100 {
+            big.messages.push(ChatMsg::new(Role::User, format!("{i}{}", "z".repeat(200))));
+        }
+        let data = serialize_capped(&big, 4_000);
+        assert!(data.len() <= 4_000);
+        assert_eq!(parse(std::str::from_utf8(&data).unwrap()).unwrap().0.images, f.images);
+    }
+
+    #[test]
+    fn removing_a_chat_deletes_its_images_and_setting_aside_moves_them() {
+        let d = tmp("imgs");
+        let images = super::super::images::dir(&d, 9);
+        std::fs::create_dir_all(&images).unwrap();
+        std::fs::write(images.join("1.png"), "x").unwrap();
+        std::fs::write(path(&d, 9), "{}").unwrap();
+        assert_eq!(max_used_id(&d), 9);
+        std::fs::remove_file(path(&d, 9)).unwrap();
+        assert_eq!(max_used_id(&d), 9, "der Bilderordner allein hält die Id belegt");
+        std::fs::write(path(&d, 9), "{}").unwrap();
+        // Beiseitelegen: Verlauf und Bilder gehören nicht mehr zur Id
+        let b = set_aside(&path(&d, 9)).unwrap();
+        assert!(b.exists() && !images.exists());
+        let aside: Vec<String> = std::fs::read_dir(dir(&d)).unwrap().flatten().map(|e| e.file_name().to_string_lossy().to_string()).filter(|n| n.ends_with("-images")).collect();
+        assert_eq!(aside.len(), 1, "{aside:?}");
+        // Löschen mit dem Chat
+        std::fs::create_dir_all(&images).unwrap();
+        std::fs::write(images.join("2.png"), "x").unwrap();
+        std::fs::write(path(&d, 9), "{}").unwrap();
+        remove(&d, 9);
+        assert!(!path(&d, 9).exists() && !super::super::images::chat_dir(&d, 9).exists());
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]
