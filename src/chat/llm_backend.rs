@@ -157,11 +157,14 @@ pub fn map_history(history: &[ChatMsg]) -> (Vec<ChatMessage>, Vec<usize>) {
     for (i, m) in history.iter().enumerate() {
         // Kompaktierte Nachrichten (#359) ersetzt ihre Zusammenfassung; die geht als Nutzer-Nachricht mit (eine zweite
         // Systemnachricht mitten im Verlauf lehnen manche Chat-Vorlagen ab) und verschmilzt mit der Frage danach.
+        // Ereignisse von Paneldeck (#355, z. B. „Hintergrund-Befehl beendet“) gehen ebenfalls als Nachricht des Nutzers mit.
         let summary = m.summary.is_some();
-        if m.compacted || !logic::sendable(m) || (m.role == store::Role::System && !summary) || (m.role == store::Role::Assistant && m.content.is_empty() && m.tool_calls.is_empty()) {
+        let event = m.role == store::Role::System && m.event.is_some();
+        if m.compacted || !logic::sendable(m) || (m.role == store::Role::System && !summary && !event) || (m.role == store::Role::Assistant && m.content.is_empty() && m.tool_calls.is_empty()) {
             continue;
         }
-        let r = if summary { Role::User } else { role(m.role) };
+        let mrole = if summary || event { store::Role::User } else { m.role };
+        let r = role(mrole);
         if m.role == store::Role::Tool {
             match m.tool_call_id.as_deref().and_then(|id| open.iter().position(|(o, _)| o == id)) {
                 Some(k) => {

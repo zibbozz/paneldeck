@@ -364,6 +364,11 @@ fn render(m: &ChatMsg, caps: Caps, images: &mut usize) -> Option<String> {
         s
     };
     match m.role {
+        // Nachrichten von Paneldeck (#355, z. B. „Hintergrund-Befehl beendet“) gehören zum Stoff wie Nachrichten.
+        Role::System if m.event.is_some() => {
+            out += "### Paneldeck event\n";
+            out += &neutralize(&shorten(m.content.trim(), caps.text));
+        }
         Role::System => return None,
         Role::User => {
             out += "### User\n";
@@ -1404,6 +1409,34 @@ mod tests {
         pump(&mut c);
         let s = active_summary(c.messages()).unwrap();
         assert!(c.messages()[s].summary.as_ref().unwrap().omitted > 0);
+    }
+
+    /// Nachrichten von Paneldeck (#355) gehen in den Stoff und werden mit kompaktiert; während einer Zusammenfassung
+    /// warten neue (sonst würde sie verworfen), danach kommen sie in den Verlauf.
+    #[test]
+    fn paneldeck_events_are_summarised_and_wait_during_a_compaction() {
+        use crate::chat::store::ChatEvent;
+        let ev = ChatEvent { kind: ChatEvent::BACKGROUND_COMMAND.into(), id: "bg1".into(), command: "cargo build".into(), state: "exited".into(), exit_code: Some(0), duration_ms: 5, error: None };
+        let mut e = ChatMsg::new(Role::System, "Background command bg1 (cargo build) exited with code 0.");
+        e.event = Some(ev.clone());
+        let mut n = 0;
+        assert_eq!(render(&e, LEVELS[0], &mut n).as_deref(), Some("### Paneldeck event\nBackground command bg1 (cargo build) exited with code 0."));
+        let mut m = three_rounds();
+        m.insert(3, e);
+        let meta = crate::chat::default_chat_meta();
+        let mut c = chat_with(m);
+        let slow = EchoBackend { delay: Duration::from_millis(50) };
+        c.compact_now(&slow, &meta, &TurnContext::default(), Arc::new(|| {})).unwrap();
+        c.push_event(ev, "Background command bg2 finished.".into());
+        assert!(c.events_pending() && !c.messages().iter().any(|m| m.content.contains("bg2")), "wartet während der Zusammenfassung");
+        pump(&mut c);
+        let s = active_summary(c.messages()).expect("übernommen, nicht verworfen");
+        assert!(c.messages()[..s].iter().all(|m| m.compacted), "das alte Ereignis ist mit kompaktiert");
+        assert_eq!(c.messages()[s].summary.as_ref().unwrap().messages, 5);
+        // Danach kommt das neue Ereignis in den Verlauf; eine Zusammenfassung von Hand ist keine Runde: kein neuer Auftrag.
+        let policy = crate::chat::tools::ToolPolicy::new(crate::llm::config::LlmModel::named("m"), None, false);
+        assert_eq!(c.tool_step(&policy), crate::chat::ToolStep::Idle);
+        assert!(c.messages().last().unwrap().content.contains("bg2") && !c.events_pending());
     }
 
     #[test]

@@ -7,6 +7,7 @@ use super::text::{self, TextCx};
 use super::tree::TreeOut;
 use super::{CloseAsk, EditorUi, TabDrag};
 use crate::app::tutorial::{spot_rect, Spot, TutMark};
+use crate::editor::syntax::Mode;
 use crate::layout::{Dir, Node};
 use crate::state::Lang;
 use crate::style::{self, Icon};
@@ -51,6 +52,14 @@ pub(super) enum Cmd {
     SetEncoding(u64, &'static str),
     SetEol(u64, bool),
     ForgetRecent,
+    /// Sprache des Dokuments wählen (`None` = erkennen) – Statusleiste (#312).
+    SetLanguage(u64, Option<String>),
+    /// Modus des Dokuments wählen (`None` = aus den Einstellungen).
+    SetDocMode(u64, Option<Mode>),
+    /// Modus für alle Dateien einer Sprache (Einstellung; `None` = Standard). Die eigene Wahl im Dokument fällt weg.
+    SetLangMode(u64, String, Option<Mode>),
+    /// Standard-Modus für alle übrigen Dateien (Einstellung). Die eigene Wahl im Dokument fällt weg.
+    SetDefaultMode(u64, Mode),
 }
 
 impl super::super::App {
@@ -312,6 +321,23 @@ impl super::super::App {
             Cmd::ForgetRecent => {
                 self.ed.recent_files.clear();
                 self.ed.recent_folders.clear();
+            }
+            Cmd::SetLanguage(id, l) => self.ed.set_doc_language(id, l),
+            Cmd::SetDocMode(id, m) => self.ed.set_doc_mode(id, m),
+            Cmd::SetLangMode(id, l, m) => {
+                match m {
+                    Some(m) => {
+                        self.settings.editor.language_modes.insert(l, m);
+                    }
+                    None => {
+                        self.settings.editor.language_modes.remove(&l);
+                    }
+                }
+                self.ed.set_doc_mode(id, None);
+            }
+            Cmd::SetDefaultMode(id, m) => {
+                self.settings.editor.default_mode = m;
+                self.ed.set_doc_mode(id, None);
             }
         }
     }
@@ -1235,8 +1261,10 @@ fn welcome(ui: &mut Ui, rect: Rect, ed: &EditorUi, lang: Lang, cmds: &mut Vec<Cm
     }
 }
 
-/// Statusleiste: Zeile:Spalte, Auswahlen, Einrückung, Kodierung und Zeilenende (anklickbar), Hinweise.
-fn status_bar(ui: &mut Ui, ed: &EditorUi, lang: Lang, prefs: &super::EditorPrefs, cmds: &mut Vec<Cmd>) {
+/// Statusleiste: Zeile:Spalte, Auswahlen, Einrückung, Kodierung und Zeilenende (anklickbar), Modus und Sprache
+/// (anklickbar, #312), Hinweise.
+fn status_bar(ui: &mut Ui, ed: &mut EditorUi, lang: Lang, prefs: &super::EditorPrefs, cmds: &mut Vec<Cmd>) {
+    let syn = ed.active_doc().and_then(|id| ed.docs.get_mut(&id)).filter(|d| d.doc.is_some()).map(|d| d.syntax_status(prefs, lang));
     ui.horizontal_centered(|ui| {
         let doc = ed.active_doc();
         let info: Option<(StatusInfo, String, usize)> = ed.focused_view_and_doc().and_then(|(v, d)| d.status(prefs, lang).map(|s| (s, v.position_text(d, lang), v.selection_count())));
@@ -1251,8 +1279,9 @@ fn status_bar(ui: &mut Ui, ed: &EditorUi, lang: Lang, prefs: &super::EditorPrefs
             ui.label(RichText::new(t).small().color(style::ui().info));
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            let (Some(id), Some((s, ..))) = (doc, info) else { return };
-            ui.label(RichText::new(lang.t("Nur Text", "Plain text")).small().weak());
+            let (Some(id), Some((s, ..)), Some(syn)) = (doc, info, syn) else { return };
+            language_picker(ui, ed, id, &syn, lang, cmds);
+            mode_picker(ui, ed, id, &syn, prefs, lang, cmds);
             ui.add_space(style::S2);
             let eol = ui.add(egui::Button::new(RichText::new(if s.crlf { "CRLF" } else { "LF" }).small()).frame(false)).on_hover_text(lang.t("Zeilenende ändern", "Change line endings"));
             egui::Popup::menu(&eol).show(|ui| {
@@ -1274,5 +1303,132 @@ fn status_bar(ui: &mut Ui, ed: &EditorUi, lang: Lang, prefs: &super::EditorPrefs
             });
             ui.label(RichText::new(&s.indent).small()).on_hover_text(lang.t("Einrückung (erkannt bzw. aus .editorconfig)", "Indentation (detected or from .editorconfig)"));
         });
+    });
+}
+
+/// Anzeigename einer Sprache (reiner Text in der Sprache der Oberfläche).
+pub(crate) fn lang_label(id: &str, name: &str, lang: Lang) -> String {
+    if id == "plaintext" { lang.t("Reiner Text", "Plain text").to_string() } else { name.to_string() }
+}
+
+/// Sprachen, die zur Suche passen (Name, Id oder Endung; ohne Groß/Klein), eingebaute zuerst.
+pub(super) fn filter_languages(query: &str) -> Vec<&'static crate::editor::syntax::LangInfo> {
+    let q = query.trim().trim_start_matches("*.").trim_start_matches('.').to_lowercase();
+    crate::editor::syntax::all_languages()
+        .iter()
+        .filter(|l| q.is_empty() || l.name.to_lowercase().contains(&q) || l.id.to_lowercase().contains(&q) || l.exts.iter().any(|e| e.to_lowercase() == q))
+        .collect()
+}
+
+/// Sprachwahl in der Statusleiste: Suchfeld (Enter nimmt den ersten Treffer), „Automatisch erkennen“, alle Sprachen.
+fn language_picker(ui: &mut Ui, ed: &mut EditorUi, id: u64, syn: &super::doc::SyntaxStatus, lang: Lang, cmds: &mut Vec<Cmd>) {
+    let shown = syn.lang.as_deref().map(|l| lang_label(l, &syn.lang_name, lang)).unwrap_or_else(|| syn.lang_name.clone());
+    let tip = if syn.lang_chosen { lang.t("Sprache (gewählt) – klicken zum Ändern", "Language (chosen) – click to change") } else { lang.t("Sprache (erkannt) – klicken zum Ändern", "Language (detected) – click to change") };
+    let b = ui.add(egui::Button::new(RichText::new(&shown).small()).frame(false)).on_hover_text(tip);
+    ed.status_rects.0 = Some(b.rect);
+    if b.clicked() {
+        ed.lang_search.clear();
+        ed.lang_search_focus = true;
+    }
+    egui::Popup::menu(&b).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
+        ui.set_min_width(260.0);
+        let r = ui.add(egui::TextEdit::singleline(&mut ed.lang_search).hint_text(lang.t("Sprache suchen …", "Search language …")).desired_width(250.0).id(Id::new("ed_lang_search")));
+        if std::mem::take(&mut ed.lang_search_focus) {
+            r.request_focus();
+        }
+        let hits = filter_languages(&ed.lang_search);
+        if r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
+            if let Some(l) = hits.first() {
+                cmds.push(Cmd::SetLanguage(id, Some(l.id.clone())));
+            }
+            ui.close();
+            return;
+        }
+        if ui.selectable_label(!syn.lang_chosen, lang.t("Automatisch erkennen", "Detect automatically")).clicked() {
+            cmds.push(Cmd::SetLanguage(id, None));
+            ui.close();
+        }
+        ui.separator();
+        egui::ScrollArea::vertical().max_height(320.0).auto_shrink([false, true]).show(ui, |ui| {
+            let mut extra_shown = false;
+            for l in &hits {
+                if !l.builtin && !extra_shown {
+                    extra_shown = true;
+                    ui.label(RichText::new(lang.t("Weitere Grammatiken (bat)", "More grammars (bat)")).small().color(style::dim(ui)));
+                }
+                let current = syn.lang.as_deref() == Some(l.id.as_str());
+                let exts = l.exts.iter().take(4).map(|e| format!(".{e}")).collect::<Vec<_>>().join(" ");
+                let resp = ui.selectable_label(current, lang_label(&l.id, &l.name, lang));
+                let resp = if exts.is_empty() { resp } else { resp.on_hover_text(exts) };
+                if resp.clicked() {
+                    cmds.push(Cmd::SetLanguage(id, Some(l.id.clone())));
+                    ui.close();
+                }
+            }
+            if hits.is_empty() {
+                ui.label(RichText::new(lang.t("Keine Sprache gefunden", "No language found")).small().color(style::dim(ui)));
+            }
+        });
+    });
+}
+
+/// Moduswahl in der Statusleiste: für diese Datei, für alle Dateien der Sprache, für alle übrigen Dateien.
+fn mode_picker(ui: &mut Ui, ed: &mut EditorUi, id: u64, syn: &super::doc::SyntaxStatus, prefs: &super::EditorPrefs, lang: Lang, cmds: &mut Vec<Cmd>) {
+    let name = |m: Mode| match m {
+        Mode::Text => lang.t("Text", "Text"),
+        Mode::Syntax => lang.t("Syntax", "Syntax"),
+    };
+    let label = if syn.mode == Mode::Syntax && syn.large { lang.t("Syntax (aus: große Datei)", "Syntax (off: large file)").to_string() } else { name(syn.mode).to_string() };
+    let tip = if syn.mode_chosen { lang.t("Modus (für diese Datei gewählt) – klicken zum Ändern", "Mode (chosen for this file) – click to change") } else { lang.t("Modus (aus den Einstellungen) – klicken zum Ändern", "Mode (from the settings) – click to change") };
+    let b = ui.add(egui::Button::new(RichText::new(label).small()).frame(false)).on_hover_text(tip);
+    ed.status_rects.1 = Some(b.rect);
+    egui::Popup::menu(&b).show(|ui| {
+        ui.set_min_width(240.0);
+        ui.label(RichText::new(lang.t("Diese Datei", "This file")).small().color(style::dim(ui)));
+        for m in [Mode::Text, Mode::Syntax] {
+            if ui.selectable_label(syn.mode_chosen && syn.mode == m, name(m)).clicked() {
+                cmds.push(Cmd::SetDocMode(id, Some(m)));
+                ui.close();
+            }
+        }
+        ui.add_enabled(false, egui::Button::selectable(false, lang.t("Smart (Sprachserver)", "Smart (language server)")))
+            .on_disabled_hover_text(lang.t("Kommt in einer späteren Version.", "Coming in a later version."));
+        if syn.mode_chosen && ui.selectable_label(false, lang.t("Einstellung verwenden", "Use the setting")).clicked() {
+            cmds.push(Cmd::SetDocMode(id, None));
+            ui.close();
+        }
+        if let Some(l) = &syn.lang {
+            ui.separator();
+            let shown = lang_label(l, &syn.lang_name, lang);
+            ui.label(RichText::new(format!("{} {shown}", lang.t("Alle Dateien:", "All files:"))).small().color(style::dim(ui)));
+            let cur = prefs.syntax.language_modes.get(l).copied();
+            ui.horizontal(|ui| {
+                for m in [Mode::Text, Mode::Syntax] {
+                    if ui.selectable_label(cur == Some(m), name(m)).clicked() {
+                        cmds.push(Cmd::SetLangMode(id, l.clone(), Some(m)));
+                        ui.close();
+                    }
+                }
+                if ui.selectable_label(cur.is_none(), lang.t("Standard", "Default")).clicked() {
+                    cmds.push(Cmd::SetLangMode(id, l.clone(), None));
+                    ui.close();
+                }
+            });
+        }
+        ui.separator();
+        ui.label(RichText::new(lang.t("Standard für alle übrigen Dateien", "Default for all other files")).small().color(style::dim(ui)));
+        ui.horizontal(|ui| {
+            for m in [Mode::Text, Mode::Syntax] {
+                if ui.selectable_label(prefs.syntax.default_mode == m, name(m)).clicked() {
+                    cmds.push(Cmd::SetDefaultMode(id, m));
+                    ui.close();
+                }
+            }
+        });
+        if syn.large {
+            ui.label(RichText::new(lang.t("Große Datei: Syntaxfarben bleiben aus.", "Large file: syntax colours stay off.")).small().color(style::ui().warning));
+        } else if syn.mode == Mode::Syntax && !syn.active {
+            ui.label(RichText::new(lang.t("Für diese Sprache gibt es keine Syntaxfarben.", "There are no syntax colours for this language.")).small().color(style::dim(ui)));
+        }
     });
 }

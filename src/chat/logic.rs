@@ -64,21 +64,30 @@ pub fn can_regenerate(msgs: &[ChatMsg]) -> bool {
     last_user(msgs).is_some_and(|i| i + 1 < msgs.len())
 }
 
-/// Alles nach der letzten Nutzer-Nachricht entfernen (Antworten, Werkzeugergebnisse). `false` ohne Nutzer-Nachricht.
+/// Alles nach Index `i` entfernen – außer Nachrichten von Paneldeck (#355, z. B. „Hintergrund-Befehl beendet“): die
+/// bleiben in ihrer Reihenfolge stehen (sie berichten von Dingen, die wirklich geschehen sind).
+fn truncate_keep_events(msgs: &mut Vec<ChatMsg>, i: usize) {
+    let kept: Vec<ChatMsg> = msgs.drain(i + 1..).filter(|m| m.event.is_some()).collect();
+    msgs.extend(kept);
+}
+
+/// Alles nach der letzten Nutzer-Nachricht entfernen (Antworten, Werkzeugergebnisse; Nachrichten von Paneldeck bleiben).
+/// `false` ohne Nutzer-Nachricht.
 pub fn truncate_after_last_user(msgs: &mut Vec<ChatMsg>) -> bool {
     match last_user(msgs) {
         Some(i) => {
-            msgs.truncate(i + 1);
+            truncate_keep_events(msgs, i);
             true
         }
         None => false,
     }
 }
 
-/// Letzte Nutzer-Nachricht durch `text` ersetzen und die Antworten danach verwerfen. `false` ohne Nutzer-Nachricht.
+/// Letzte Nutzer-Nachricht durch `text` ersetzen und die Antworten danach verwerfen (Nachrichten von Paneldeck bleiben).
+/// `false` ohne Nutzer-Nachricht.
 pub fn apply_edit(msgs: &mut Vec<ChatMsg>, text: &str) -> bool {
     let Some(i) = last_user(msgs) else { return false };
-    msgs.truncate(i + 1);
+    truncate_keep_events(msgs, i);
     msgs[i].content = text.to_string();
     msgs[i].ts = super::now_secs();
     true
@@ -118,6 +127,27 @@ pub fn to_markdown(title: &str, model: &str, msgs: &[ChatMsg], lang: crate::stat
         }
     }
     out
+}
+
+#[cfg(test)]
+mod event_tests {
+    use super::*;
+
+    /// #355 Review: Neu erzeugen und Bearbeiten werfen Nachrichten von Paneldeck nicht weg.
+    #[test]
+    fn regenerate_and_edit_keep_paneldeck_messages() {
+        let ev = || {
+            let mut m = ChatMsg::new(Role::System, "bg1 finished");
+            m.event = Some(super::super::store::ChatEvent { kind: "background_command".into(), id: "bg1".into(), ..Default::default() });
+            m
+        };
+        let mut msgs = vec![ChatMsg::new(Role::User, "q"), ChatMsg::new(Role::Assistant, "a"), ev(), ChatMsg::new(Role::Assistant, "b")];
+        assert!(truncate_after_last_user(&mut msgs));
+        assert_eq!(msgs.iter().map(|m| (m.role, m.event.is_some())).collect::<Vec<_>>(), [(Role::User, false), (Role::System, true)]);
+        msgs.push(ChatMsg::new(Role::Assistant, "c"));
+        assert!(apply_edit(&mut msgs, "q2"));
+        assert_eq!((msgs[0].content.as_str(), msgs.len(), msgs[1].event.is_some()), ("q2", 2, true));
+    }
 }
 
 #[cfg(test)]

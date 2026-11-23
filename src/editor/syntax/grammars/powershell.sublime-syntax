@@ -1,0 +1,91 @@
+%YAML 1.2
+---
+# PowerShell – compact grammar of Paneldeck (MIT, see LICENSE). Comments (# and <# #>), strings and here-strings with
+# escapes and variables, variables ($x, ${x}, $env:X, @splat), types ([string]), keywords, operators (-eq …),
+# cmdlets (Verb-Noun), parameters (-Path), numbers, function and class names.
+name: PowerShell
+file_extensions: [ps1, psm1, psd1]
+scope: source.powershell
+first_line_match: '^#!.*\b(?:pwsh|powershell)\b'
+contexts:
+  main:
+    - match: '<#'
+      scope: punctuation.definition.comment.begin.powershell
+      push: block_comment
+    - match: '#.*$'
+      scope: comment.line.number-sign.powershell
+    - match: '@"\s*$'
+      scope: punctuation.definition.string.begin.powershell
+      push: here_double
+    - match: '@''\s*$'
+      scope: punctuation.definition.string.begin.powershell
+      push: here_single
+    - match: '"'
+      scope: punctuation.definition.string.begin.powershell
+      push: string_double
+    - match: ''''
+      scope: punctuation.definition.string.begin.powershell
+      push: string_single
+    - include: variables
+    - match: '(?i)\b(function|filter|workflow|configuration)\s+([\w-]+(?::[\w-]+)?)'
+      captures:
+        1: storage.type.function.powershell
+        2: entity.name.function.powershell
+    - match: '(?i)\b(class|enum)\s+([A-Za-z_]\w*)'
+      captures:
+        1: storage.type.powershell
+        2: entity.name.type.powershell
+    - match: '(?i)\b(?:begin|break|catch|continue|data|define|do|dynamicparam|else|elseif|end|exit|finally|for|foreach|from|if|in|param|process|return|switch|throw|trap|try|until|using|var|while|hidden|static|parallel|sequence|inlinescript|function|filter|class|enum)\b'
+      scope: keyword.control.powershell
+    - match: '(?i)-(?:[ci])?(?:eq|ne|gt|ge|lt|le|like|notlike|match|notmatch|contains|notcontains|in|notin|replace|split)\b|-(?:and|or|not|xor|band|bor|bxor|bnot|shl|shr|is|isnot|as|f|join)\b'
+      scope: keyword.operator.word.powershell
+    - match: '\[[A-Za-z_][\w.`]*(?:\[\])?\](?!\s*\()'
+      scope: support.type.powershell
+    - match: '\b[A-Za-z]+-[A-Za-z]\w*\b'
+      scope: support.function.cmdlet.powershell
+    - match: '(?i)\b(?:0x[0-9a-f]+|[0-9]+(?:\.[0-9]+)?(?:e[-+]?[0-9]+)?)(?:[kmgtp]b|[dl])?\b'
+      scope: constant.numeric.powershell
+    - match: '(?<![\w$])-[A-Za-z][\w-]*'
+      scope: variable.parameter.powershell
+    - match: '[-+*/%]=?|==?|!=?|<|>|\|\||&&|\||\?\?=?|::'
+      scope: keyword.operator.powershell
+  variables:
+    - match: '(?i)\$(?:true|false|null)\b'
+      scope: constant.language.powershell
+    - match: '\$\{[^}\n]*\}'
+      scope: variable.other.readwrite.powershell
+    - match: '\$(?:[A-Za-z]+:)?[A-Za-z_]\w*|\$[_?^$]|@[A-Za-z_]\w*'
+      scope: variable.other.readwrite.powershell
+  block_comment:
+    - meta_scope: comment.block.powershell
+    - match: '#>'
+      scope: punctuation.definition.comment.end.powershell
+      pop: true
+  string_double:
+    - meta_scope: string.quoted.double.powershell
+    - match: '`.|""'
+      scope: constant.character.escape.powershell
+    - match: '"'
+      scope: punctuation.definition.string.end.powershell
+      pop: true
+    - include: variables
+  string_single:
+    - meta_scope: string.quoted.single.powershell
+    - match: ''''''
+      scope: constant.character.escape.powershell
+    - match: ''''
+      scope: punctuation.definition.string.end.powershell
+      pop: true
+  here_double:
+    - meta_scope: string.quoted.double.heredoc.powershell
+    - match: '^"@'
+      scope: punctuation.definition.string.end.powershell
+      pop: true
+    - match: '`.'
+      scope: constant.character.escape.powershell
+    - include: variables
+  here_single:
+    - meta_scope: string.quoted.single.heredoc.powershell
+    - match: '^''@'
+      scope: punctuation.definition.string.end.powershell
+      pop: true

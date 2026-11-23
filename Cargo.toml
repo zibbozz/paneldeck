@@ -1,6 +1,6 @@
 [package]
 name = "paneldeck"
-version = "3.0.0"
+version = "3.1.0"
 edition = "2024"
 
 [dependencies]
@@ -30,6 +30,10 @@ unicode-segmentation = "1"
 unicode-width = "0.2"
 # Editor (#54): Suche in Dateien – Ordner durchlaufen mit .gitignore-Regeln (ignore, MIT/Unlicense, aus ripgrep).
 ignore = "0.4"
+# Editor, Syntax-Modus (#312): Syntaxfarben mit syntect (Sublime-Grammatiken, reines Rust über fancy-regex, kein Oniguruma)
+# und den Grammatiken von bat (two-face). Eigene Grammatiken für AutoIt, Inno Setup, Visual Basic, PowerShell: src/editor/syntax/grammars/.
+syntect = { version = "5.3", default-features = false, features = ["parsing", "yaml-load", "regex-fancy"] }
+two-face = { version = "0.5", default-features = false, features = ["syntect-fancy"] }
 
 [features]
 # Nur für die README- und Doku-Screenshots (tools/docs-shots.ps1): Startansicht per Umgebungsvariable PANELDECK_SHOT. Nie im Release.

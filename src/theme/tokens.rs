@@ -19,11 +19,12 @@ pub enum Group {
     Tickets,
     Chat,
     DiffSyntax,
+    Code,
     Terminal,
 }
 
 impl Group {
-    pub const ALL: [Group; 10] = [Group::Base, Group::Text, Group::Surfaces, Group::Accent, Group::Status, Group::Sidebar, Group::Tickets, Group::Chat, Group::DiffSyntax, Group::Terminal];
+    pub const ALL: [Group; 11] = [Group::Base, Group::Text, Group::Surfaces, Group::Accent, Group::Status, Group::Sidebar, Group::Tickets, Group::Chat, Group::DiffSyntax, Group::Code, Group::Terminal];
 
     pub fn label(self, lang: crate::state::Lang) -> &'static str {
         match self {
@@ -36,6 +37,7 @@ impl Group {
             Group::Tickets => lang.t("Tickets und Chips", "Tickets and chips"),
             Group::Chat => lang.t("Chat", "Chat"),
             Group::DiffSyntax => lang.t("Diff und Syntax", "Diff and syntax"),
+            Group::Code => lang.t("Editor: Syntaxfarben", "Editor: syntax colours"),
             Group::Terminal => lang.t("Terminal", "Terminal"),
         }
     }
@@ -116,6 +118,21 @@ ui_tokens! {
     syntax_function: DiffSyntax, "Syntax: Funktion", "Syntax: function";
     syntax_predicate: DiffSyntax, "Syntax: Prädikat", "Syntax: predicate";
     syntax_sort: DiffSyntax, "Syntax: Sortierung", "Syntax: sort key";
+    code_comment: Code, "Code: Kommentar", "Code: comment";
+    code_string: Code, "Code: Zeichenkette", "Code: string";
+    code_number: Code, "Code: Zahl", "Code: number";
+    code_constant: Code, "Code: Konstante (true, null, Makros)", "Code: constant (true, null, macros)";
+    code_keyword: Code, "Code: Schlüsselwort", "Code: keyword";
+    code_type: Code, "Code: Typ, Klasse", "Code: type, class";
+    code_function: Code, "Code: Funktion", "Code: function";
+    code_operator: Code, "Code: Operator", "Code: operator";
+    code_tag: Code, "Code: Tag (HTML/XML), Schlüssel (YAML)", "Code: tag (HTML/XML), key (YAML)";
+    code_attribute: Code, "Code: Attribut, Schlüssel (JSON, INI)", "Code: attribute, key (JSON, INI)";
+    code_preprocessor: Code, "Code: Präprozessor, Direktive", "Code: preprocessor, directive";
+    code_escape: Code, "Code: Escape-Sequenz, Platzhalter", "Code: escape sequence, placeholder";
+    code_heading: Code, "Code: Überschrift, Abschnitt", "Code: heading, section";
+    code_variable: Code, "Code: Variable, Parameter", "Code: variable, parameter";
+    code_invalid: Code, "Code: ungültig", "Code: invalid";
 }
 
 /// Die Terminalfarben (Felder `fg`, `bg`, `cursor`, `selection` und `ansi` der Datei) als Namen für Verweise und Editor.
@@ -286,6 +303,23 @@ pub fn default_expr(name: &str, dark: bool) -> Expr {
         "syntax_function" => rgb(0xe07fb0),
         "syntax_predicate" => rgb(0x4fb8a8),
         "syntax_sort" => rgb(0xd8b94a),
+        // Syntaxfarben des Editors (#312): aus der Terminal-Palette, aufgehellt (dunkel) bzw. zur Schrift hin abgedunkelt
+        // (hell), damit sie auf dem Hintergrund lesbar bleiben (Kontrast-Prüfung wie bei `syntax_*`).
+        "code_comment" => d(M("fg", "bg", 0.3), M("fg", "bg", 0.35)),
+        "code_string" => d(M("ansi2", "white", 0.25), M("ansi2", "fg", 0.4)),
+        "code_type" => d(M("ansi3", "white", 0.25), M("ansi3", "fg", 0.4)),
+        "code_keyword" => d(M("ansi5", "white", 0.25), M("ansi5", "fg", 0.4)),
+        "code_function" => d(M("ansi4", "white", 0.25), M("ansi4", "fg", 0.4)),
+        "code_operator" => d(M("ansi6", "white", 0.25), M("ansi6", "fg", 0.4)),
+        "code_tag" => d(M("ansi1", "white", 0.25), M("ansi1", "fg", 0.4)),
+        "code_number" => M("code_type", "code_tag", 0.45),
+        "code_constant" => R("code_number"),
+        "code_attribute" => R("code_number"),
+        "code_preprocessor" => M("code_keyword", "code_function", 0.5),
+        "code_escape" => R("code_operator"),
+        "code_heading" => R("code_function"),
+        "code_variable" => R("code_tag"),
+        "code_invalid" => R("error"),
         _ => C(Color32::from_rgb(0xff, 0x00, 0xff)),
     }
 }
