@@ -79,16 +79,67 @@ pub fn due_reminders(events: &[Event], now: i64, last_check: i64, zone: &dyn Zon
     out
 }
 
-/// Prüft die Erinnerungen der Datenbank seit der letzten Prüfung und merkt sich `now` als neue letzte Prüfung. Sind
-/// Erinnerungen in den Optionen aus, kommt nichts zurück (die Prüfung wird trotzdem vermerkt, damit beim Einschalten
-/// keine alten Erinnerungen nachkommen). Beim allerersten Aufruf gibt es keine (nichts nachholen).
-pub fn poll(conn: &rusqlite::Connection, now: i64, zone: &dyn Zone) -> Vec<Reminder> {
-    let last = super::store::last_reminder_check(conn);
-    let _ = super::store::set_last_reminder_check(conn, now);
-    let Some(last) = last else { return vec![] };
-    if !super::store::load_options(conn).reminders {
-        return vec![];
+/// Zeitpunkt der letzten Prüfung wird höchstens so oft in die Datenbank geschrieben (Sekunden), außer es kam eine
+/// Erinnerung.
+pub const PERSIST_EVERY_SECS: i64 = 300;
+
+/// Prüft die Erinnerungen regelmäßig (z. B. alle 30 s aus dem Takt des Zeit-Reiters) – billig: die letzte Prüfung liegt
+/// im Speicher, in die Datenbank kommt sie nur alle [`PERSIST_EVERY_SECS`] und sofort, wenn eine Erinnerung kam. So kann
+/// nach einem Neustart nichts doppelt kommen: zwischen dem gespeicherten Zeitpunkt und dem Beenden gab es keine.
+#[derive(Debug, Default)]
+pub struct Poller {
+    /// Letzte Prüfung (im Speicher); `None` = noch nicht aus der Datenbank geladen.
+    last: Option<i64>,
+    /// Zuletzt gespeicherter Zeitpunkt.
+    persisted: i64,
+    loaded: bool,
+}
+
+impl Poller {
+    /// Erinnerungen in `(letzte Prüfung, now]`. Beim allerersten Aufruf ohne gespeicherten Zeitpunkt gibt es keine
+    /// (nichts nachholen); danach kommen nach einem Neustart die verpassten mit `missed = true`. Sind Erinnerungen in
+    /// den Optionen aus, kommt nichts zurück (die Prüfung rückt trotzdem vor, damit beim Einschalten nichts Altes kommt).
+    pub fn poll(&mut self, conn: &rusqlite::Connection, now: i64, zone: &dyn Zone) -> Vec<Reminder> {
+        if !self.loaded {
+            self.loaded = true;
+            self.last = super::store::last_reminder_check(conn);
+            self.persisted = self.last.unwrap_or(i64::MIN);
+        }
+        let Some(last) = self.last else {
+            self.last = Some(now);
+            self.persist(conn, now);
+            return vec![];
+        };
+        if now <= last {
+            return vec![];
+        }
+        self.last = Some(now);
+        let out = if super::store::load_options(conn).reminders {
+            let events = super::store::events_with_reminder(conn).unwrap_or_default();
+            due_reminders(&events, now, last, zone)
+        } else {
+            vec![]
+        };
+        if !out.is_empty() || now - self.persisted >= PERSIST_EVERY_SECS {
+            self.persist(conn, now);
+        }
+        out
     }
-    let events = super::store::events_with_reminder(conn).unwrap_or_default();
-    due_reminders(&events, now, last, zone)
+
+    fn persist(&mut self, conn: &rusqlite::Connection, now: i64) {
+        if super::store::set_last_reminder_check(conn, now).is_ok() {
+            self.persisted = now;
+        }
+    }
+}
+
+/// Einmalige Prüfung ohne gemerkten Zustand (liest und schreibt die letzte Prüfung in der Datenbank). Für regelmäßige
+/// Aufrufe [`Poller`] nehmen.
+pub fn poll(conn: &rusqlite::Connection, now: i64, zone: &dyn Zone) -> Vec<Reminder> {
+    let mut p = Poller::default();
+    let r = p.poll(conn, now, zone);
+    if p.persisted != now {
+        p.persist(conn, now);
+    }
+    r
 }

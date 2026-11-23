@@ -26,6 +26,7 @@ CREATE TABLE cal_events (
     cron TEXT,
     rec_until TEXT,
     rec_count INTEGER CHECK (rec_count IS NULL OR rec_count > 0),
+    rec_end TEXT,
     exceptions TEXT NOT NULL DEFAULT '[]',
     reminder INTEGER CHECK (reminder IS NULL OR reminder >= 0),
     project_id INTEGER REFERENCES projects (id) ON DELETE SET NULL,
@@ -109,6 +110,10 @@ impl EventInput {
         if !self.color.is_empty() && !is_hex_color(&self.color) {
             return Err(StoreError::invalid("Die Farbe muss #RRGGBB sein.", "The colour must be #RRGGBB."));
         }
+        let years = || StoreError::invalid(format!("Datum außerhalb von {}–{}.", super::MIN_YEAR, super::MAX_YEAR), format!("Date outside {}-{}.", super::MIN_YEAR, super::MAX_YEAR));
+        if !super::year_ok(self.start.date()) {
+            return Err(years());
+        }
         if self.minutes < 0 || self.minutes > MAX_MINUTES {
             return Err(StoreError::invalid("Die Dauer muss zwischen 0 und 366 Tagen liegen.", "The duration must be between 0 and 366 days."));
         }
@@ -125,6 +130,9 @@ impl EventInput {
             rec.cron = c.text;
             if rec.count.is_some_and(|n| n == 0 || n > MAX_COUNT) {
                 return Err(StoreError::invalid(format!("Die Anzahl muss zwischen 1 und {MAX_COUNT} liegen."), format!("The count must be between 1 and {MAX_COUNT}.")));
+            }
+            if rec.until.is_some_and(|u| !super::year_ok(u)) || rec.except.iter().any(|d| !super::year_ok(*d)) {
+                return Err(years());
             }
             if rec.until.is_some_and(|u| u < self.start.date()) {
                 return Err(StoreError::invalid("Das Ende der Wiederholung liegt vor dem Beginn.", "The end of the recurrence is before the start."));
@@ -208,13 +216,54 @@ pub fn create_event(conn: &Connection, input: EventInput, uid: Option<&str>, ori
     let uid = uid.map(str::to_string).unwrap_or_else(new_uid);
     let now = now_text();
     let (cron, until, count, exc) = rec_cols(&i.recur);
+    let end = series_end(&i);
     let project = i.project_id.filter(|p| project_exists(conn, *p));
     conn.execute(
-        "INSERT INTO cal_events (uid, title, note, color, all_day, start, minutes, cron, rec_until, rec_count, exceptions, reminder, project_id, origin, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?15)",
-        params![uid, i.title, i.note, i.color, i.all_day as i64, super::fmt_stored(i.start), i.minutes, cron, until, count, exc, i.reminder, project, origin, now],
+        "INSERT INTO cal_events (uid, title, note, color, all_day, start, minutes, cron, rec_until, rec_count, rec_end, exceptions, reminder, project_id, origin, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?16)",
+        params![uid, i.title, i.note, i.color, i.all_day as i64, super::fmt_stored(i.start), i.minutes, cron, until, count, end, exc, i.reminder, project, origin, now],
     )?;
     get_event(conn, conn.last_insert_rowid())
+}
+
+/// Letzter Tag, an dem ein Vorkommen der Serie beginnen kann (`rec_end`): das Ende bzw. das letzte gezählte Vorkommen
+/// (in UTC gerechnet, die Abfrage gibt einen Tag Spielraum); `None` = endlos. So fallen abgelaufene Serien schon in der
+/// Datenbank-Abfrage weg und werden nicht bei jedem Neuladen neu gezählt.
+fn series_end(i: &EventInput) -> Option<String> {
+    let r = i.recur.as_ref()?;
+    let by_count = r.count.and_then(|n| {
+        let cron = super::cron::Cron::parse(&r.cron).ok()?;
+        let utc = super::zone::RuleZone::fixed("UTC", 0);
+        let mut last = i.start.date();
+        if i.all_day {
+            let mut d = i.start.date();
+            let mut k = 0;
+            // höchstens gut 30 Jahre suchen
+            for _ in 0..(366 * 31) {
+                if cron.day_matches(d) {
+                    last = d;
+                    k += 1;
+                    if k >= n {
+                        break;
+                    }
+                }
+                d = super::add_days(d, 1);
+            }
+        } else {
+            let mut t = super::add_minutes(i.start, -1);
+            for _ in 0..n {
+                let Some((wall, _)) = cron.next_in(t, &utc) else { break };
+                last = wall.date();
+                t = wall;
+            }
+        }
+        Some(last)
+    });
+    let end = match (by_count, r.until) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
+    };
+    end.map(|d| d.format("%Y-%m-%d").to_string())
 }
 
 fn rec_cols(r: &Option<Recurrence>) -> (Option<String>, Option<String>, Option<i64>, String) {
@@ -232,11 +281,12 @@ fn project_exists(conn: &Connection, id: i64) -> bool {
 pub fn update_event(conn: &Connection, id: i64, input: EventInput) -> SRes<Event> {
     let i = input.validate()?;
     let (cron, until, count, exc) = rec_cols(&i.recur);
+    let end = series_end(&i);
     let project = i.project_id.filter(|p| project_exists(conn, *p));
     let n = conn.execute(
         "UPDATE cal_events SET title = ?2, note = ?3, color = ?4, all_day = ?5, start = ?6, minutes = ?7, cron = ?8, rec_until = ?9, rec_count = ?10,
-         exceptions = ?11, reminder = ?12, project_id = ?13, updated_at = ?14 WHERE id = ?1",
-        params![id, i.title, i.note, i.color, i.all_day as i64, super::fmt_stored(i.start), i.minutes, cron, until, count, exc, i.reminder, project, now_text()],
+         exceptions = ?11, reminder = ?12, project_id = ?13, updated_at = ?14, rec_end = ?15 WHERE id = ?1",
+        params![id, i.title, i.note, i.color, i.all_day as i64, super::fmt_stored(i.start), i.minutes, cron, until, count, exc, i.reminder, project, now_text(), end],
     )?;
     if n == 0 {
         return Err(StoreError::NotFound);
@@ -281,11 +331,13 @@ pub fn all_events(conn: &Connection) -> SRes<Vec<Event>> {
 /// Termine, die sich mit `[from, to)` überschneiden können: Serien (immer, sie werden später nur im Zeitraum
 /// ausgerechnet) und Einzeltermine, die vor `to` beginnen und nicht vor `from` minus der längsten Dauer enden.
 pub fn events_for_range(conn: &Connection, from: NaiveDateTime, to: NaiveDateTime) -> SRes<Vec<Event>> {
-    let earliest = super::fmt_stored(from - chrono::Duration::minutes(MAX_MINUTES));
+    let earliest = super::fmt_stored(super::add_minutes(from, -MAX_MINUTES));
+    // Serien, deren letztes mögliches Vorkommen (plus Dauer und einen Tag Spielraum) vor dem Zeitraum liegt, fallen weg.
     let mut st = conn.prepare(&format!(
-        "SELECT {COLS} FROM cal_events WHERE (cron IS NOT NULL AND start < ?2) OR (cron IS NULL AND start < ?2 AND start >= ?1) ORDER BY start, id"
+        "SELECT {COLS} FROM cal_events WHERE (cron IS NOT NULL AND start < ?2 AND (rec_end IS NULL OR date(rec_end, '+' || (minutes / 1440 + 2) || ' days') >= ?3))
+         OR (cron IS NULL AND start < ?2 AND start >= ?1) ORDER BY start, id"
     ))?;
-    let rows = st.query_map(params![earliest, super::fmt_stored(to)], from_row)?.collect::<Result<Vec<_>, _>>()?;
+    let rows = st.query_map(params![earliest, super::fmt_stored(to), from.format("%Y-%m-%d").to_string()], from_row)?.collect::<Result<Vec<_>, _>>()?;
     Ok(rows.into_iter().filter(|e| e.recur.is_some() || e.end_of(e.start) > from || (e.minutes == 0 && e.start >= from)).collect())
 }
 

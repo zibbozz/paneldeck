@@ -18,7 +18,7 @@ use super::{Event, Recurrence};
 use crate::mcp::{Group, McpLevel, ToolDef};
 use crate::planning::agent::{Change, Done, ToolError};
 use crate::state::Lang;
-use chrono::{Duration, NaiveDate, NaiveDateTime, NaiveTime};
+use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
 use rusqlite::Connection;
 use serde_json::{json, Map, Value};
 
@@ -182,9 +182,28 @@ fn rec_json(r: &Recurrence, lang: Lang) -> Value {
     })
 }
 
+/// Schlüssel des Zwischenspeichers von `list_calendar_events`.
+#[derive(PartialEq, Eq)]
+struct ListKey {
+    conn: usize,
+    from: NaiveDate,
+    to: NaiveDate,
+    with_sources: bool,
+    changes: u64,
+    opts: String,
+    zone: String,
+}
+
+type ListData = std::rc::Rc<(Vec<Event>, Vec<sources::Item>)>;
+
+thread_local! {
+    /// Zuletzt berechneter Zeitraum (je Thread: MCP läuft in der UI-Schleife, Tests in eigenen Threads).
+    static LIST_CACHE: std::cell::RefCell<Option<(ListKey, ListData)>> = const { std::cell::RefCell::new(None) };
+}
+
 fn list(ctx: &Ctx, v: &Value) -> R {
     let from = date_arg(ctx, v, "from")?.unwrap_or(ctx.now.date());
-    let to = date_arg(ctx, v, "to")?.unwrap_or(from + Duration::days(30));
+    let to = date_arg(ctx, v, "to")?.unwrap_or(super::add_days(from, 30));
     if to < from {
         return Err(bad(ctx, "to liegt vor from", "to is before from"));
     }
@@ -195,14 +214,27 @@ fn list(ctx: &Ctx, v: &Value) -> R {
     let limit = v.get("limit").and_then(Value::as_u64).map(|n| (n as usize).clamp(1, MAX_LIMIT)).unwrap_or(DEFAULT_LIMIT);
     let offset = v.get("offset").and_then(Value::as_u64).unwrap_or(0) as usize;
     let opts = store::load_options(ctx.conn);
-    let end = to + Duration::days(1);
+    let end = super::add_days(to, 1);
     let (f, t) = (from.and_time(NaiveTime::MIN), end.and_time(NaiveTime::MIN));
-    let events = store::events_for_range(ctx.conn, f, t).map_err(|e| store_err(ctx, e))?;
-    let mut items: Vec<sources::Item> = events.iter().flat_map(|e| sources::event_items(e, f, t, ctx.zone)).collect();
-    if with_sources {
-        items.extend(sources::source_items(ctx.conn, &opts, from, end));
-    }
-    sources::sort(&mut items);
+    // Seitenweises Lesen: dieselbe Abfrage nicht für jede Seite neu ausrechnen (gilt, solange die Verbindung nichts
+    // geändert hat – `total_changes` zählt jede Änderung über sie, auch in der Planung).
+    let key = ListKey { conn: ctx.conn as *const Connection as usize, from, to, with_sources, changes: ctx.conn.total_changes(), opts: serde_json::to_string(&opts).unwrap_or_default(), zone: ctx.zone.name() };
+    let cached = LIST_CACHE.with(|c| c.borrow().as_ref().filter(|(k, _)| *k == key).map(|(_, v)| std::rc::Rc::clone(v)));
+    let data = match cached {
+        Some(d) => d,
+        None => {
+            let events = store::events_for_range(ctx.conn, f, t).map_err(|e| store_err(ctx, e))?;
+            let mut items: Vec<sources::Item> = events.iter().flat_map(|e| sources::event_items(e, f, t, ctx.zone)).collect();
+            if with_sources {
+                items.extend(sources::source_items(ctx.conn, &opts, from, end));
+            }
+            sources::sort(&mut items);
+            let d = std::rc::Rc::new((events, items));
+            LIST_CACHE.with(|c| *c.borrow_mut() = Some((key, std::rc::Rc::clone(&d))));
+            d
+        }
+    };
+    let (events, items) = (&data.0, &data.1);
     let keys = project_keys(ctx.conn);
     let by_id: std::collections::HashMap<i64, &Event> = events.iter().map(|e| (e.id, e)).collect();
     let total = items.len();

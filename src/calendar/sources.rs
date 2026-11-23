@@ -213,7 +213,7 @@ pub fn source_items(conn: &Connection, opts: &Options, from: NaiveDate, to: Naiv
     let early = day(from - Duration::days(2));
     if let Ok(mut st) = conn.prepare(
         "SELECT e.id, p.id, p.key, t.number, t.title, e.start, e.minutes, p.color FROM time_entries e JOIN tickets t ON t.id = e.ticket_id
-         JOIN projects p ON p.id = t.project_id WHERE p.system = 0 AND e.start >= ?1 AND e.start < ?2",
+         JOIN projects p ON p.id = t.project_id WHERE p.system = 0 AND t.archived = 0 AND e.start >= ?1 AND e.start < ?2",
     ) {
         let rows = st.query_map(params![early, ts], |r| {
             Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, String>(2)?, r.get::<_, i64>(3)?, r.get::<_, String>(4)?, r.get::<_, String>(5)?, r.get::<_, i64>(6)?, r.get::<_, String>(7)?))

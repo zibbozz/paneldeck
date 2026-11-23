@@ -155,7 +155,7 @@ fn sources_follow_the_options_globally_and_per_project() {
     // archivierte Tickets fehlen; ohne Sprints im Projekt keine Sprints
     f.c.execute("UPDATE tickets SET archived = 1 WHERE id = ?1", [t.id]).unwrap();
     update_project(&f.c, f.project, &UpdateProject { use_sprints: Some(false), ..Default::default() }).unwrap();
-    assert_eq!(kinds(&all), [Kind::Due, Kind::Todo, Kind::Version, Kind::Time]);
+    assert_eq!(kinds(&all), [Kind::Due, Kind::Todo, Kind::Version], "auch die Zeiteinträge des archivierten Tickets fehlen");
     // außerhalb des Zeitraums nichts
     assert!(sources::source_items(&f.c, &all, d("2027-01-01"), d("2027-02-01")).is_empty());
 }
@@ -266,8 +266,8 @@ fn export_format_is_stable_public_api() {
     assert!(text.split("\r\n").all(|l| l.len() <= 75), "gefaltet");
     for must in [
         "BEGIN:VTIMEZONE\r\nTZID:Europe/Berlin\r\n",
-        "BEGIN:DAYLIGHT\r\nDTSTART:20260329T020000\r\nTZOFFSETFROM:+0100\r\nTZOFFSETTO:+0200\r\nRRULE:FREQ=YEARLY;BYMONTH=3;BYDAY=-1SU\r\nEND:DAYLIGHT",
-        "BEGIN:STANDARD\r\nDTSTART:20261025T030000\r\nTZOFFSETFROM:+0200\r\nTZOFFSETTO:+0100\r\nRRULE:FREQ=YEARLY;BYMONTH=10;BYDAY=-1SU\r\nEND:STANDARD",
+        "BEGIN:DAYLIGHT\r\nDTSTART:19700329T020000\r\nTZOFFSETFROM:+0100\r\nTZOFFSETTO:+0200\r\nRRULE:FREQ=YEARLY;BYMONTH=3;BYDAY=-1SU\r\nEND:DAYLIGHT",
+        "BEGIN:STANDARD\r\nDTSTART:19701025T030000\r\nTZOFFSETFROM:+0200\r\nTZOFFSETTO:+0100\r\nRRULE:FREQ=YEARLY;BYMONTH=10;BYDAY=-1SU\r\nEND:STANDARD",
         "UID:standup@test\r\n",
         "DTSTAMP:20261122T090000Z\r\n",
         "DTSTART;TZID=Europe/Berlin:20261102T090000\r\n",
@@ -540,15 +540,14 @@ fn tmp(name: &str) -> std::path::PathBuf {
 
 #[test]
 fn migration_adds_the_calendar_to_an_old_database() {
-    // Datenbank im Stand vor dem Kalender (Schema ohne die Kalender-Tabellen, Version eins darunter) mit Daten
+    // Datenbank im Stand vor dem Kalender (alle Migrationen davor, egal an welcher Stelle er steht) mit Daten
     let dir = tmp("mig");
     let latest = crate::db::schema_version();
+    let idx = crate::db::migration_index(store::MIGRATION);
     {
-        let mut old = rusqlite::Connection::open(dir.join(crate::db::FILE)).unwrap();
-        crate::db::create_schema(&mut old).unwrap();
-        old.execute_batch("DROP TABLE cal_events; DROP TABLE cal_settings;").unwrap();
-        old.pragma_update(None, "user_version", latest - 1).unwrap();
-        old.execute("INSERT INTO todo_items (title, body, done, position, created_at, updated_at) VALUES ('keep me', '', 0, 1, 'x', 'x')", []).unwrap();
+        let old = crate::db::open_prefix(&dir, &dir.join("backups"), idx).unwrap();
+        assert!(old.conn.prepare("SELECT * FROM cal_events").is_err(), "noch kein Kalender");
+        old.conn.execute("INSERT INTO todo_items (title, body, done, position, created_at, updated_at) VALUES ('keep me', '', 0, 1, 'x', 'x')", []).unwrap();
     }
     let db = crate::db::open(&dir, &dir.join("backups")).unwrap();
     let v: u32 = db.conn.pragma_query_value(None, "user_version", |r| r.get(0)).unwrap();
@@ -614,4 +613,255 @@ fn bilingual_texts_differ() {
     }
     let e = store::StoreError::NotFound;
     assert_ne!(e.message(Lang::De), e.message(Lang::En));
+}
+
+// ───────────────────────── Härtung (Review): Grenzen, kaputte Eingaben, Leistung
+
+#[test]
+fn extreme_years_are_refused_everywhere() {
+    for s in ["+262142-12-31", "262142-12-31", "-0001-01-01", "1899-12-31", "2201-01-01", "+2026-11-23", "99999-01-01T00:00"] {
+        assert!(parse_when(s).is_none() && super::parse_date(s).is_none(), "{s}");
+    }
+    assert!(super::parse_date("2200-12-31").is_some() && super::parse_date("1900-01-01").is_some());
+    assert_eq!(super::add_minutes(NaiveDateTime::MAX, 10), NaiveDateTime::MAX, "gesättigt statt Panik");
+    assert_eq!(super::add_days(NaiveDate::MIN, -10), NaiveDate::MIN);
+    let c = crate::db::open_memory();
+    let code = |tool: &str, a: Value| call(&c, tool, a).map(|_| "ok").unwrap_or_else(|e| e.code);
+    for bad in ["+262142-12-31", "262142-12-31", "2201-01-01"] {
+        assert_eq!(code("list_calendar_events", json!({"from": bad})), "bad_args", "{bad}");
+        assert_eq!(code("list_calendar_events", json!({"from": "2026-11-01", "to": bad})), "bad_args", "{bad}");
+        assert_eq!(code("create_calendar_event", json!({"title": "x", "start": format!("{bad}T00:00")})), "bad_args", "{bad}");
+        assert_eq!(code("create_calendar_event", json!({"title": "x", "start": bad})), "bad_args", "{bad}");
+        assert_eq!(code("create_calendar_event", json!({"title": "x", "start": "2026-11-23T09:00", "cron": "@daily", "until": bad})), "bad_args", "{bad}");
+        assert_eq!(code("create_calendar_event", json!({"title": "x", "start": "2026-11-23T09:00", "cron": "@daily", "exceptions": [bad]})), "bad_args", "{bad}");
+    }
+    // am Rand des erlaubten Bereichs: rechnet ohne Panik
+    let d = call(&c, "create_calendar_event", json!({"title": "Edge", "start": "2200-12-31T23:30", "duration_minutes": 527040, "cron": "* * * * *"})).unwrap();
+    let id = d.result["event"]["event_id"].as_i64().unwrap();
+    assert_eq!(code("list_calendar_events", json!({"from": "2200-12-01"})), "ok", "to = from + 30 Tage liegt hinter 2200");
+    assert_eq!(code("list_calendar_events", json!({"from": "1900-01-01", "to": "1900-12-31"})), "ok");
+    assert_eq!(code("update_calendar_event", json!({"event": id, "start": "+262142-12-31T00:00"})), "bad_args");
+    assert_eq!(code("update_calendar_event", json!({"event": id, "start": "1900-01-01", "all_day": true, "days": 366})), "ok");
+    // Dialog
+    let mut f = crate::app::calendar_ui::test_form(dt("2026-11-23T09:00"));
+    f.title = "x".into();
+    f.date = "+262142-12-31".into();
+    assert!(f.input(Lang::En).is_err());
+    f.date = "2200-12-31".into();
+    f.time = "23:59".into();
+    f.minutes = 527040;
+    assert!(f.input(Lang::En).is_ok());
+    let z = RuleZone::berlin();
+    let env = crate::app::calendar_ui::CalEnv { conn: Some(&c), lang: Lang::En, now: dt("2026-11-23T09:00"), zone: &z };
+    let _ = f.preview(&env);
+}
+
+/// Einfacher Pseudo-Zufall (fest, wiederholbar).
+struct Lcg(u64);
+impl Lcg {
+    fn next(&mut self) -> u64 {
+        self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        self.0 >> 33
+    }
+    fn pick<'a>(&mut self, v: &[&'a str]) -> &'a str {
+        v[(self.next() as usize) % v.len()]
+    }
+}
+
+#[test]
+fn malformed_rrules_and_timezones_never_panic() {
+    let parts = [
+        "FREQ=", "DAILY", "WEEKLY", "MONTHLY", "YEARLY", "MINUTELY", "HOURLY", "SECONDLY", ";", "=", ",", "BYDAY=", "ÄM", "MO", "1MO", "-1SU", "+5FR", "99999999999MO", "BYMONTH=", "13", "0", "-5",
+        "BYMONTHDAY=", "BYHOUR=", "BYMINUTE=", "INTERVAL=", "COUNT=", "UNTIL=", "99991231T235959Z", "ß", "€", "Ö1", "BYSETPOS=", "2147483647", "9223372036854775807", "", " ", "\u{1F600}",
+    ];
+    let mut r = Lcg(42);
+    let start = dt("2026-11-02T09:30");
+    for _ in 0..20_000 {
+        let n = 1 + r.next() % 8;
+        let s: String = (0..n).map(|_| r.pick(&parts)).collect();
+        let _ = ics::rrule_to_cron(&s, start, r.next().is_multiple_of(2));
+    }
+    for s in ["BYDAY=ÄM", "FREQ=MONTHLY;BYDAY=Ä", "FREQ=YEARLY;BYDAY=1ÄÖ", "FREQ=WEEKLY;BYDAY=€", "FREQ=DAILY;BYDAY=ßß"] {
+        assert!(ics::rrule_to_cron(s, start, false).is_err(), "{s}");
+    }
+    // ganze Dateien mit kaputten VTIMEZONE- und VEVENT-Werten
+    let tz_rrule = ["FREQ=YEARLY;BYMONTH=3;BYDAY=-1SU", "FREQ=YEARLY;BYMONTH=99;BYDAY=2147483647SU", "BYDAY=ÄM", "BYDAY=", "BYMONTH=x", "FREQ=YEARLY;BYDAY=-9SU", ""];
+    let tz_off = ["+0100", "+9999", "-99", "abc", "+01ÄÖ", ""];
+    let tz_start = ["19700329T020000", "99991231T235959", "00000101T000000", "x", ""];
+    let ev_start = ["DTSTART:20261123T090000", "DTSTART:99991231T235959Z", "DTSTART;VALUE=DATE:00010101", "DTSTART;TZID=Z1:20261123T090000", "DTSTART:2026", "DTSTART;TZID=\"Ä\":20261123T090000"];
+    let ev_more = [
+        "DURATION:P99999999999999W", "DURATION:-PT1H", "DURATION:PÄ", "DTEND:99991231T235959", "EXDATE:ÄÖÜ,20261124T090000", "RRULE:FREQ=YEARLY;BYMONTHDAY=1", "RRULE:BYDAY=ÄM", "RECURRENCE-ID:20261124T090000",
+        "STATUS:CANCELLED", "X-PANELDECK-RANGE:UNTIL=Ä;COUNT=99999999999", "X-PANELDECK-CRON:Ä", "X-PANELDECK-EXCEPT:Ä",
+    ];
+    let z = RuleZone::berlin();
+    for i in 0..1500 {
+        let text = format!(
+            "BEGIN:VCALENDAR\r\nBEGIN:VTIMEZONE\r\nTZID:Z1\r\nBEGIN:DAYLIGHT\r\nDTSTART:{}\r\nTZOFFSETTO:{}\r\nRRULE:{}\r\nEND:DAYLIGHT\r\nBEGIN:STANDARD\r\nDTSTART:{}\r\nTZOFFSETTO:{}\r\nRRULE:{}\r\nEND:STANDARD\r\nEND:VTIMEZONE\r\nBEGIN:VEVENT\r\nUID:u{i}\r\n{}\r\n{}\r\n{}\r\nSUMMARY:Ä{i}\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n",
+            r.pick(&tz_start),
+            r.pick(&tz_off),
+            r.pick(&tz_rrule),
+            r.pick(&tz_start),
+            r.pick(&tz_off),
+            r.pick(&tz_rrule),
+            r.pick(&ev_start),
+            r.pick(&ev_more),
+            r.pick(&ev_more)
+        );
+        let (items, _) = ics::parse(&text, &|_| false, &z);
+        for p in items {
+            // was durchkommt, ist gültig und lässt sich ausrechnen
+            let e = Event {
+                id: 1,
+                uid: p.uid,
+                title: p.input.title,
+                note: String::new(),
+                color: String::new(),
+                all_day: p.input.all_day,
+                start: p.input.start,
+                minutes: p.input.minutes,
+                recur: p.input.recur,
+                reminder: None,
+                project_id: None,
+                origin: String::new(),
+                created_at: String::new(),
+                updated_at: String::new(),
+            };
+            let _ = e.next_occurrences(e.start, 3, &z);
+        }
+    }
+}
+
+#[test]
+fn yearly_rules_without_bymonth_keep_every_month() {
+    let start = dt("2026-11-02T09:30");
+    let c = |r: &str| ics::rrule_to_cron(r, start, false).map(|x| x.cron).unwrap();
+    assert_eq!(c("FREQ=YEARLY;BYMONTHDAY=1"), "30 9 1 * *", "jeder Monatserste");
+    assert_eq!(c("FREQ=YEARLY;BYDAY=MO"), "30 9 * * MON", "jeder Montag");
+    assert_eq!(c("FREQ=YEARLY;BYMONTH=6"), "30 9 2 6 *");
+}
+
+#[test]
+fn cancelled_instances_become_exceptions_of_the_series() {
+    let text = "BEGIN:VCALENDAR\r\n\
+BEGIN:VEVENT\r\nUID:w@x\r\nDTSTART:20261102T080000\r\nDTEND:20261102T083000\r\nRRULE:FREQ=WEEKLY;BYDAY=MO\r\nSUMMARY:Weekly\r\nEND:VEVENT\r\n\
+BEGIN:VEVENT\r\nUID:w@x\r\nRECURRENCE-ID:20261109T080000\r\nDTSTART:20261109T080000\r\nSTATUS:CANCELLED\r\nSUMMARY:Weekly\r\nEND:VEVENT\r\n\
+BEGIN:VEVENT\r\nUID:c@x\r\nDTSTART:20261110T080000\r\nSTATUS:CANCELLED\r\nSUMMARY:Cancelled single\r\nEND:VEVENT\r\n\
+END:VCALENDAR\r\n";
+    let (items, rep) = ics::parse(text, &|_| false, &RuleZone::utc());
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].input.recur.as_ref().unwrap().except, [d("2026-11-09")]);
+    assert_eq!(rep.skipped.iter().map(|s| s.title.as_str()).collect::<Vec<_>>(), ["Cancelled single"], "abgesagtes Vorkommen ist kein Fehler");
+}
+
+#[test]
+fn export_names_the_time_when_dtstart_falls_into_the_dst_gap() {
+    let c = crate::db::open_memory();
+    let mut i = EventInput::new("Night job", dt("2026-03-29T02:30"), 15);
+    i.recur = Some(Recurrence { cron: "30 2 * * *".into(), ..Default::default() });
+    store::create_event(&c, i, Some("night@test"), "local").unwrap();
+    let z = RuleZone::berlin();
+    let (text, _) = ics::export(&store::all_events(&c).unwrap(), &z, secs(dt("2026-03-01T00:00")));
+    assert!(text.contains("DTSTART;TZID=Europe/Berlin:20260329T030000\r\n"), "{text}");
+    assert!(text.contains("RRULE:FREQ=DAILY;BYHOUR=2;BYMINUTE=30\r\n"), "{text}");
+    // Rundreise: gleiche Vorkommen
+    let target = crate::db::open_memory();
+    ics::import_text(&target, &text, &z).unwrap();
+    let a = store::all_events(&c).unwrap()[0].occurrences(dt("2026-03-28"), dt("2026-04-05"), &z);
+    let b = store::all_events(&target).unwrap()[0].occurrences(dt("2026-03-28"), dt("2026-04-05"), &z);
+    assert_eq!(a, b);
+}
+
+#[test]
+fn next_occurrences_of_frequent_long_events_are_found() {
+    let z = RuleZone::utc();
+    let e = ev("2026-11-01T00:00", 3 * 1440, Some("*/5 * * * *"));
+    let n = e.next_occurrences(dt("2026-11-20T10:00"), 5, &z);
+    assert_eq!(fmt(&n), ["2026-11-20 10:00", "2026-11-20 10:05", "2026-11-20 10:10", "2026-11-20 10:15", "2026-11-20 10:20"]);
+    let occ = e.occurrences(dt("2026-11-20"), dt("2026-12-20"), &z);
+    assert_eq!(occ.iter().filter(|s| **s >= dt("2026-11-20")).count(), super::MAX_OCC_PER_RANGE, "Grenze nur für Vorkommen ab `from`");
+}
+
+#[test]
+fn exhausted_count_series_are_skipped_by_the_query() {
+    let c = crate::db::open_memory();
+    let mut i = EventInput::new("Short series", dt("2026-01-05T09:00"), 30);
+    i.recur = Some(Recurrence { cron: "0 9 * * MON".into(), count: Some(3), ..Default::default() });
+    let short = store::create_event(&c, i, None, "local").unwrap().id;
+    let mut i = EventInput::new("Every minute", dt("2026-01-01T00:00"), 1);
+    i.recur = Some(Recurrence { cron: "* * * * *".into(), count: Some(10_000), ..Default::default() });
+    let minutes = store::create_event(&c, i, None, "local").unwrap().id;
+    let ids = |from: &str, to: &str| store::events_for_range(&c, dt(from), dt(to)).unwrap().iter().map(|e| e.id).collect::<Vec<_>>();
+    assert!(ids("2026-01-01", "2026-02-01").contains(&short));
+    assert!(!ids("2026-03-01", "2026-04-01").contains(&short), "nach dem dritten Vorkommen vorbei");
+    assert!(ids("2026-01-07", "2026-01-08").contains(&minutes), "10 000 Minuten ≈ 7 Tage");
+    assert!(!ids("2026-02-01", "2026-03-01").contains(&minutes));
+}
+
+#[test]
+fn list_paging_uses_the_cache_and_sees_changes() {
+    let c = crate::db::open_memory();
+    call(&c, "create_calendar_event", json!({"title": "A", "start": "2026-11-23T09:00", "cron": "*/30 * * * *"})).unwrap();
+    let p1 = call(&c, "list_calendar_events", json!({"from": "2026-11-23", "to": "2026-11-29", "limit": 10})).unwrap();
+    let p2 = call(&c, "list_calendar_events", json!({"from": "2026-11-23", "to": "2026-11-29", "limit": 10, "offset": 10})).unwrap();
+    assert_eq!(p1.result["total"], p2.result["total"]);
+    assert_ne!(p1.result["items"][0]["start"], p2.result["items"][0]["start"]);
+    call(&c, "create_calendar_event", json!({"title": "B", "start": "2026-11-23T09:01"})).unwrap();
+    let p3 = call(&c, "list_calendar_events", json!({"from": "2026-11-23", "to": "2026-11-29", "limit": 10})).unwrap();
+    assert_eq!(p3.result["total"].as_u64().unwrap(), p1.result["total"].as_u64().unwrap() + 1, "Änderung leert den Zwischenspeicher");
+}
+
+#[test]
+fn poller_writes_the_database_rarely() {
+    use super::remind::{Poller, PERSIST_EVERY_SECS};
+    let c = crate::db::open_memory();
+    let z = RuleZone::utc();
+    let mut i = EventInput::new("Call", dt("2026-11-23T09:00"), 30);
+    i.reminder = Some(0);
+    store::create_event(&c, i, None, "local").unwrap();
+    let mut o = store::load_options(&c);
+    o.reminders = true;
+    store::save_options(&c, &o).unwrap();
+    let at = |s: &str| z.instant(dt(s));
+    let mut p = Poller::default();
+    assert!(p.poll(&c, at("2026-11-23T08:50"), &z).is_empty());
+    assert_eq!(store::last_reminder_check(&c), Some(at("2026-11-23T08:50")), "erster Zeitpunkt gespeichert");
+    assert!(p.poll(&c, at("2026-11-23T08:50:30"), &z).is_empty());
+    assert_eq!(store::last_reminder_check(&c), Some(at("2026-11-23T08:50")), "nicht bei jedem Aufruf geschrieben");
+    let r = p.poll(&c, at("2026-11-23T09:00:10"), &z);
+    assert_eq!(r.len(), 1);
+    assert_eq!(store::last_reminder_check(&c), Some(at("2026-11-23T09:00:10")), "nach einer Erinnerung sofort");
+    assert!(p.poll(&c, at("2026-11-23T09:00:40"), &z).is_empty());
+    let later = at("2026-11-23T09:00:10") + PERSIST_EVERY_SECS;
+    assert!(p.poll(&c, later, &z).is_empty());
+    assert_eq!(store::last_reminder_check(&c), Some(later), "spätestens alle {PERSIST_EVERY_SECS} s");
+    // nach einem Neustart nichts doppelt
+    let mut p2 = Poller::default();
+    assert!(p2.poll(&c, later + 30, &z).is_empty());
+}
+
+#[test]
+fn a_thousand_events_expand_fast_in_the_system_zone_too() {
+    let c = crate::db::open_memory();
+    c.execute_batch("BEGIN").unwrap();
+    for i in 0..1000i64 {
+        let start = dt("2026-01-01T08:00") + chrono::Duration::hours(i * 7);
+        let mut inp = EventInput::new(&format!("Event {i}"), start, 45);
+        if i % 4 == 0 {
+            inp.recur = Some(Recurrence { cron: ["0 9 * * MON-FRI", "*/30 8-18 * * *", "0 18 * * MON#1"][(i / 4) as usize % 3].into(), ..Default::default() });
+        }
+        store::create_event(&c, inp, None, "local").unwrap();
+    }
+    c.execute_batch("COMMIT").unwrap();
+    let z = super::zone::SystemZone;
+    let t = std::time::Instant::now();
+    let items = sources::collect(&c, &Options::default(), d("2026-11-23"), d("2027-01-04"), &z);
+    let ms = t.elapsed().as_millis();
+    assert!(items.len() > 1000);
+    assert!(ms < 2500, "Monatsansicht mit 1000 Terminen in der Rechner-Zone: {ms} ms");
+    let ctx = super::agent::Ctx { conn: &c, lang: Lang::En, now: dt("2026-11-22T10:00"), zone: &z };
+    let t = std::time::Instant::now();
+    for k in 0..5 {
+        super::agent::call(&ctx, "list_calendar_events", &json!({"from": "2026-11-01", "to": "2027-10-31", "limit": 500, "offset": k * 500})).unwrap();
+    }
+    assert!(t.elapsed().as_millis() < 8000, "fünf Seiten eines Jahres: {} ms", t.elapsed().as_millis());
 }

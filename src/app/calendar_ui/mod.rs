@@ -8,8 +8,14 @@
 //! * `views`: die vier Ansichten (gemalt, Einträge erst im sichtbaren Zeitraum ausgerechnet).
 //! * `dialog`: Termin anlegen/bearbeiten.
 
-mod dialog;
+pub(crate) mod dialog;
 mod views;
+
+/// Formular für Tests anderer Module (Grenzwerte im Dialog).
+#[cfg(test)]
+pub(crate) fn test_form(t: NaiveDateTime) -> dialog::EventForm {
+    dialog::EventForm::new_at(t, false)
+}
 
 #[cfg(test)]
 mod tests;
@@ -70,7 +76,7 @@ struct Cache {
     to: NaiveDate,
     generation: u64,
     at: Instant,
-    items: Vec<Item>,
+    items: std::rc::Rc<Vec<Item>>,
 }
 
 /// Zustand der Kalender-Oberfläche.
@@ -113,7 +119,7 @@ impl CalUi {
     }
 
     pub(crate) fn anchor(&self, env: &CalEnv) -> NaiveDate {
-        self.anchor.unwrap_or(env.now.date())
+        self.anchor.filter(|d| cal::year_ok(*d)).unwrap_or(env.now.date())
     }
 
     fn options(&mut self, conn: &Connection) -> &mut Options {
@@ -132,41 +138,45 @@ impl CalUi {
             ViewKind::Month => {
                 let first = NaiveDate::from_ymd_opt(a.year(), a.month(), 1).unwrap_or(a);
                 let s = cal::week_start(first);
-                (s, s + Duration::days(42))
+                (s, cal::add_days(s, 42))
             }
             ViewKind::Week => {
                 let s = cal::week_start(a);
-                (s, s + Duration::days(7))
+                (s, cal::add_days(s, 7))
             }
-            ViewKind::Day => (a, a + Duration::days(1)),
-            ViewKind::List => (a, a + Duration::days(60)),
+            ViewKind::Day => (a, cal::add_days(a, 1)),
+            ViewKind::List => (a, cal::add_days(a, 60)),
         }
     }
 
-    /// Einträge des sichtbaren Zeitraums (zwischengespeichert).
-    pub(crate) fn items(&mut self, env: &CalEnv) -> Vec<Item> {
-        let Some(conn) = env.conn else { return vec![] };
+    /// Einträge des sichtbaren Zeitraums (zwischengespeichert, geteilt statt je Bild kopiert).
+    pub(crate) fn items(&mut self, env: &CalEnv) -> std::rc::Rc<Vec<Item>> {
+        let Some(conn) = env.conn else { return Default::default() };
         let (from, to) = self.range(env);
         let fresh = self.cache.as_ref().is_some_and(|c| c.from == from && c.to == to && c.generation == self.generation && c.at.elapsed().as_secs_f32() < CACHE_SECS);
         if !fresh {
             let opts = self.options(conn).clone();
             let items = sources::collect(conn, &opts, from, to, env.zone);
-            self.cache = Some(Cache { from, to, generation: self.generation, at: Instant::now(), items });
+            self.cache = Some(Cache { from, to, generation: self.generation, at: Instant::now(), items: std::rc::Rc::new(items) });
         }
-        self.cache.as_ref().map(|c| c.items.clone()).unwrap_or_default()
+        self.cache.as_ref().map(|c| std::rc::Rc::clone(&c.items)).unwrap_or_default()
     }
 
     fn step(&mut self, env: &CalEnv, dir: i64) {
         let a = self.anchor(env);
-        self.anchor = Some(match self.view {
+        let next = match self.view {
             ViewKind::Month => {
                 let idx = a.year() as i64 * 12 + a.month0() as i64 + dir;
                 NaiveDate::from_ymd_opt(idx.div_euclid(12) as i32, idx.rem_euclid(12) as u32 + 1, 1).unwrap_or(a)
             }
-            ViewKind::Week => a + Duration::days(7 * dir),
-            ViewKind::Day => a + Duration::days(dir),
-            ViewKind::List => a + Duration::days(30 * dir),
-        });
+            ViewKind::Week => cal::add_days(a, 7 * dir),
+            ViewKind::Day => cal::add_days(a, dir),
+            ViewKind::List => cal::add_days(a, 30 * dir),
+        };
+        // nie aus dem erlaubten Bereich blättern
+        if cal::year_ok(next) {
+            self.anchor = Some(next);
+        }
     }
 
     pub(crate) fn set_view(&mut self, env: &CalEnv, v: ViewKind) {
@@ -292,7 +302,7 @@ impl CalUi {
             ViewKind::Month => format!("{} {}", builder::month_name(a.month(), lang), a.year()),
             ViewKind::Week => {
                 let s = cal::week_start(a);
-                let e = s + Duration::days(6);
+                let e = cal::add_days(s, 6);
                 match lang {
                     Lang::De => format!("KW {} · {}–{}", s.iso_week().week(), s.format("%d.%m."), e.format("%d.%m.%Y")),
                     Lang::En => format!("Week {} · {} – {}", s.iso_week().week(), s.format("%b %d"), e.format("%b %d, %Y")),

@@ -2,8 +2,8 @@
 //!
 //! **Der Export ist öffentliche API** (Format unten, nur additiv ändern):
 //! `VCALENDAR` (`VERSION:2.0`, `PRODID:-//Paneldeck//Calendar <Version>//EN`, `CALSCALE:GREGORIAN`) mit einem
-//! `VTIMEZONE` der Rechner-Zeitzone (`TZID` = IANA-Name, `STANDARD`/`DAYLIGHT` mit jährlicher `RRULE` aus den Wechseln
-//! des laufenden Jahres) und je eigenem Termin ein `VEVENT` mit `UID`, `DTSTAMP`, `CREATED`, `LAST-MODIFIED`,
+//! `VTIMEZONE` der Rechner-Zeitzone (`TZID` = IANA-Name, `STANDARD`/`DAYLIGHT` ab 1970 mit jährlicher
+//! `RRULE`, abgeleitet aus den Wechseln des laufenden Jahres) und je eigenem Termin ein `VEVENT` mit `UID`, `DTSTAMP`, `CREATED`, `LAST-MODIFIED`,
 //! `DTSTART`/`DTEND` (mit `TZID`; ganztägig `VALUE=DATE`, Ende ausschließlich), `SUMMARY`, `DESCRIPTION` (Notiz),
 //! `RRULE` (wenn sich die Wiederholung übersetzen lässt), `EXDATE` (Ausnahmen), `X-PANELDECK-CRON` (der Cron-Ausdruck,
 //! immer bei Wiederholungen), `X-PANELDECK-COLOR` (`#RRGGBB`) und `VALARM` (`ACTION:DISPLAY`, `TRIGGER:-PT<n>M`).
@@ -216,6 +216,8 @@ fn parse_raw(v: &str) -> Option<(NaiveDateTime, bool, bool)> {
 /// Zeitzonen der Datei (`TZID` → Zone; `None` = unbekannt, als lokale Zeit lesen).
 struct Zones {
     defs: Vec<(String, Option<RuleZone>)>,
+    /// Name der eigenen Zone (einmal ermittelt; `Zone::name` kann teuer sein).
+    local_name: String,
 }
 
 impl Zones {
@@ -225,7 +227,7 @@ impl Zones {
 }
 
 /// Ergebnis beim Lesen einer Zeit: Wert + ob eine Zone unbekannt war.
-fn read_when(p: &Prop, zones: &mut Zones, local: &dyn Zone) -> Option<(When, bool)> {
+fn read_when(p: &Prop, zones: &mut Zones) -> Option<(When, bool)> {
     let first = p.value.split(',').next()?;
     let (t, is_date, utc) = parse_raw(first)?;
     if is_date || p.param("VALUE").is_some_and(|v| v.eq_ignore_ascii_case("DATE")) {
@@ -238,7 +240,7 @@ fn read_when(p: &Prop, zones: &mut Zones, local: &dyn Zone) -> Option<(When, boo
         None => Some((When::Floating(t), false)),
         Some(id) => {
             let id = id.trim_matches('"');
-            if id == local.name() {
+            if id == zones.local_name {
                 return Some((When::Floating(t), false));
             }
             match zones.index(id) {
@@ -284,14 +286,14 @@ fn parse_duration(s: &str) -> Option<i64> {
             u => {
                 let n: i64 = num.parse().ok()?;
                 num.clear();
-                total += match (u, in_time) {
-                    ('W', false) => n * 7 * 1440,
-                    ('D', false) => n * 1440,
-                    ('H', true) => n * 60,
+                total = total.saturating_add(match (u, in_time) {
+                    ('W', false) => n.saturating_mul(7 * 1440),
+                    ('D', false) => n.saturating_mul(1440),
+                    ('H', true) => n.saturating_mul(60),
                     ('M', true) => n,
                     ('S', true) => n / 60,
                     _ => return None,
-                };
+                });
             }
         }
     }
@@ -317,7 +319,14 @@ fn even_step(v: &[u32], n: u32) -> Option<u32> {
 
 /// RRULE (ohne `UNTIL`/`COUNT`) zu einem Ausdruck; `None` im ODER-Fall. Die Uhrzeit einzelner Termine kommt aus
 /// `DTSTART` (= erstes Vorkommen).
+#[cfg(test)]
 pub fn cron_to_rrule(c: &Cron, all_day: bool) -> Option<String> {
+    cron_to_rrule_with(c, all_day, false)
+}
+
+/// Wie [`cron_to_rrule`]; `explicit_time` = Uhrzeit immer als `BYHOUR`/`BYMINUTE` (wenn `DTSTART` wegen der
+/// Sommerzeit-Lücke nicht die Uhrzeit des Ausdrucks hat).
+pub fn cron_to_rrule_with(c: &Cron, all_day: bool, explicit_time: bool) -> Option<String> {
     if c.or_case() {
         return None;
     }
@@ -332,8 +341,8 @@ pub fn cron_to_rrule(c: &Cron, all_day: bool) -> Option<String> {
     let has_nth = !c.nth_values().is_empty();
     let days_all = doms.is_none() && months.is_none() && byday.is_empty();
     let mut parts: Vec<String> = Vec::new();
-    let single_time = all_day || (mins.len() == 1 && hours.len() == 1);
-    if !all_day && days_all && hours.len() == 24
+    let single_time = all_day || (!explicit_time && mins.len() == 1 && hours.len() == 1);
+    if !all_day && !explicit_time && days_all && hours.len() == 24
         && let Some(st) = even_step(&mins, 60) {
             parts.push("FREQ=MINUTELY".into());
             if st > 1 {
@@ -341,7 +350,7 @@ pub fn cron_to_rrule(c: &Cron, all_day: bool) -> Option<String> {
             }
             return Some(parts.join(";"));
         }
-    if !all_day && days_all && mins.len() == 1
+    if !all_day && !explicit_time && days_all && mins.len() == 1
         && let Some(st) = even_step(&hours, 24) {
             parts.push("FREQ=HOURLY".into());
             if st > 1 {
@@ -443,7 +452,7 @@ pub fn rrule_to_cron(rrule: &str, start: NaiveDateTime, all_day: bool) -> Result
     if let Some(v) = map.get("BYDAY") {
         for x in v.split(',') {
             let x = x.trim();
-            if x.len() < 2 {
+            if x.len() < 2 || !x.is_ascii() {
                 return Err(un(format!("BYDAY: „{x}“"), format!("BYDAY: “{x}”")));
             }
             let (n, code) = x.split_at(x.len() - 2);
@@ -522,7 +531,9 @@ pub fn rrule_to_cron(rrule: &str, start: NaiveDateTime, all_day: bool) -> Result
         }
         "YEARLY" => {
             only_one("YEARLY")?;
-            if month.is_none() {
+            // ohne BYMONTH/BYMONTHDAY/BYDAY: Tag und Monat aus DTSTART; mit BYMONTHDAY oder BYDAY ohne BYMONTH gilt
+            // das in jedem Monat (RFC 5545: BYxxx erweitert über das ganze Jahr)
+            if month.is_none() && dom.is_none() && dow.is_none() {
                 month = Some(start.month().to_string());
             }
             if dom.is_none() && dow.is_none() {
@@ -566,8 +577,10 @@ fn vtimezone(zone: &dyn Zone, year: i32, out: &mut String) {
         let d = local.date();
         let last = super::zone::last_day(d.year(), d.month()).map(|l| l.day()).unwrap_or(31);
         let nth: i32 = if d.day() + 7 > last { -1 } else { ((d.day() - 1) / 7 + 1) as i32 };
+        // Beobachtung ab 1970 mit jährlicher Regel (gilt damit auch für Termine in anderen Jahren)
+        let first = nth_weekday(1970, d.month(), d.weekday(), nth).unwrap_or(d).and_time(local.time());
         fold(&format!("BEGIN:{kind}"), out);
-        fold(&format!("DTSTART:{}", fmt_dt(local)), out);
+        fold(&format!("DTSTART:{}", fmt_dt(first)), out);
         fold(&format!("TZOFFSETFROM:{}", fmt_offset(from)), out);
         fold(&format!("TZOFFSETTO:{}", fmt_offset(to)), out);
         fold(&format!("RRULE:FREQ=YEARLY;BYMONTH={};BYDAY={nth}{}", d.month(), DOW_CODES[d.weekday().num_days_from_sunday() as usize]), out);
@@ -623,7 +636,9 @@ pub fn export(events: &[Event], zone: &dyn Zone, now: i64) -> (String, ExportRep
             fold(&format!("DESCRIPTION:{}", escape(&e.note)), &mut out);
         }
         if let (Some(r), Some(c)) = (&e.recur, &parsed) {
-            match cron_to_rrule(c, e.all_day).filter(|_| first.is_some()) {
+            // DTSTART in der Sommerzeit-Lücke verschoben (z. B. 03:00 statt 02:30): Uhrzeit ausdrücklich angeben
+            let shifted = !e.all_day && !(c.minute_values().contains(&start.minute()) && c.hour_values().contains(&start.hour()));
+            match cron_to_rrule_with(c, e.all_day, shifted).filter(|_| first.is_some()) {
                 Some(mut rule) => {
                     if let Some(u) = r.until {
                         if e.all_day {
@@ -783,6 +798,9 @@ fn vtimezone_zone(id: &str, props: &[Prop]) -> Option<RuleZone> {
                 match part.split_once('=') {
                     Some(("BYMONTH", v)) => month = v.parse().ok()?,
                     Some(("BYDAY", v)) => {
+                        if !v.is_ascii() {
+                            return None;
+                        }
                         let (n, code) = v.split_at(v.len().checked_sub(2)?);
                         nth = n.trim_start_matches('+').parse().ok()?;
                         let d = DOW_CODES.iter().position(|c| *c == code)?;
@@ -812,7 +830,7 @@ pub fn parse(text: &str, exists: &dyn Fn(&str) -> bool, local: &dyn Zone) -> (Ve
     let props = unfold(text);
     let mut rep = ImportReport::default();
     // Komponenten zerlegen: VTIMEZONE und VEVENT (verschachtelte VALARM gehören zum VEVENT)
-    let mut zones = Zones { defs: Vec::new() };
+    let mut zones = Zones { defs: Vec::new(), local_name: local.name() };
     let mut events: Vec<(usize, Vec<Prop>, bool)> = Vec::new(); // (Zeile, Eigenschaften, vollständig)
     let mut i = 0;
     let mut saw_calendar = false;
@@ -878,7 +896,19 @@ pub fn parse(text: &str, exists: &dyn Fn(&str) -> bool, local: &dyn Zone) -> (Ve
             skip(&mut rep, "END:VEVENT fehlt", "END:VEVENT is missing");
             continue;
         }
-        if top.iter().any(|p| p.name == "STATUS" && p.value.eq_ignore_ascii_case("CANCELLED")) {
+        let mut uid = top.iter().find(|p| p.name == "UID").map(|p| unescape(p.value.trim())).filter(|u| !u.is_empty()).unwrap_or_else(|| fallback_uid(&top));
+        // geändertes bzw. abgesagtes Einzelvorkommen: beim Original eine Ausnahme für diesen Tag
+        let rid_day = top.iter().find(|p| p.name == "RECURRENCE-ID").and_then(|rid| read_when(rid, &mut zones)).map(|(w, _)| to_local(w, &zones, local).date());
+        let cancelled = top.iter().any(|p| p.name == "STATUS" && p.value.eq_ignore_ascii_case("CANCELLED"));
+        if let Some(d) = rid_day {
+            overrides.push((uid.clone(), d));
+            if cancelled {
+                // abgesagtes Vorkommen (z. B. aus Outlook): nur die Ausnahme, kein eigener Termin
+                continue;
+            }
+            uid = format!("{uid}/{}", fmt_date(d));
+        }
+        if cancelled {
             skip(&mut rep, "abgesagt (STATUS:CANCELLED)", "cancelled (STATUS:CANCELLED)");
             continue;
         }
@@ -886,7 +916,7 @@ pub fn parse(text: &str, exists: &dyn Fn(&str) -> bool, local: &dyn Zone) -> (Ve
             skip(&mut rep, "DTSTART fehlt", "DTSTART is missing");
             continue;
         };
-        let Some((sw, unknown_tz)) = read_when(dtstart, &mut zones, local) else {
+        let Some((sw, unknown_tz)) = read_when(dtstart, &mut zones) else {
             skip(&mut rep, &format!("DTSTART unlesbar ({})", dtstart.value), &format!("DTSTART unreadable ({})", dtstart.value));
             continue;
         };
@@ -894,7 +924,7 @@ pub fn parse(text: &str, exists: &dyn Fn(&str) -> bool, local: &dyn Zone) -> (Ve
         let start = to_local(sw, &zones, local);
         let mut minutes = if all_day { 1440 } else { 0 };
         if let Some(p) = top.iter().find(|p| p.name == "DTEND") {
-            match read_when(p, &mut zones, local) {
+            match read_when(p, &mut zones) {
                 Some((ew, _)) => {
                     let end = to_local(ew, &zones, local);
                     minutes = (end - start).num_minutes();
@@ -921,13 +951,6 @@ pub fn parse(text: &str, exists: &dyn Fn(&str) -> bool, local: &dyn Zone) -> (Ve
             skip(&mut rep, "länger als 366 Tage", "longer than 366 days");
             continue;
         }
-        let mut uid = top.iter().find(|p| p.name == "UID").map(|p| unescape(p.value.trim())).filter(|u| !u.is_empty()).unwrap_or_else(|| fallback_uid(&top));
-        if let Some(rid) = top.iter().find(|p| p.name == "RECURRENCE-ID")
-            && let Some((w, _)) = read_when(rid, &mut zones, local) {
-                let d = to_local(w, &zones, local).date();
-                overrides.push((uid.clone(), d));
-                uid = format!("{uid}/{}", fmt_date(d));
-            }
         if uid.chars().count() > 255 {
             skip(&mut rep, "UID ist zu lang", "UID is too long");
             continue;
@@ -981,7 +1004,7 @@ pub fn parse(text: &str, exists: &dyn Fn(&str) -> bool, local: &dyn Zone) -> (Ve
             for p in top.iter().filter(|p| p.name == "EXDATE") {
                 for v in p.value.split(',') {
                     let one = Prop { value: v.to_string(), ..p.clone() };
-                    if let Some((w, _)) = read_when(&one, &mut zones, local) {
+                    if let Some((w, _)) = read_when(&one, &mut zones) {
                         exc.push(to_local(w, &zones, local).date());
                     }
                 }
@@ -992,6 +1015,21 @@ pub fn parse(text: &str, exists: &dyn Fn(&str) -> bool, local: &dyn Zone) -> (Ve
             r.except = exc;
             if r.until.is_some_and(|u| u < start.date()) {
                 r.until = Some(start.date());
+            }
+        }
+        // DTSTART kann ein in der Sommerzeit-Lücke verschobenes Vorkommen sein (03:00 statt 02:30): dann beginnt die Serie
+        // mit der passenden Cron-Zeit desselben Tages, sonst fiele dieses erste Vorkommen weg
+        if !all_day
+            && let Some(c) = rec.as_ref().and_then(|r| Cron::parse(&r.cron).ok())
+            && !(c.minute_values().contains(&start.minute()) && c.hour_values().contains(&start.hour()))
+        {
+            let mut t = start.date().and_time(NaiveTime::MIN) - Duration::minutes(1);
+            while let Some(m) = c.next_after(t).filter(|m| *m < start) {
+                if local.resolve(m).0 == start {
+                    input.start = m;
+                    break;
+                }
+                t = m;
             }
         }
         input.recur = rec;
@@ -1010,13 +1048,14 @@ pub fn parse(text: &str, exists: &dyn Fn(&str) -> bool, local: &dyn Zone) -> (Ve
         }
     }
     // Ausnahmen der geänderten Einzelvorkommen beim Original eintragen
+    let by_uid: std::collections::HashMap<String, usize> = out.iter().enumerate().map(|(i, p)| (p.uid.clone(), i)).collect();
     for (uid, d) in overrides {
-        if let Some(p) = out.iter_mut().find(|p| p.uid == uid)
-            && let Some(r) = &mut p.input.recur
-                && r.except.binary_search(&d).is_err() {
-                    r.except.push(d);
-                    r.except.sort();
-                }
+        if let Some(&i) = by_uid.get(&uid)
+            && let Some(r) = &mut out[i].input.recur
+            && let Err(pos) = r.except.binary_search(&d)
+        {
+            r.except.insert(pos, d);
+        }
     }
     (out, rep)
 }

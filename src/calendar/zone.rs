@@ -132,6 +132,9 @@ impl Transition {
 
 /// `n`-ter Wochentag eines Monats (1..=5; -1 = letzter, -2 = vorletzter …); `None`, wenn es ihn nicht gibt.
 pub fn nth_weekday(year: i32, month: u32, wd: Weekday, n: i32) -> Option<NaiveDate> {
+    if !(1..=5).contains(&n.abs()) {
+        return None;
+    }
     if n > 0 {
         let first = NaiveDate::from_ymd_opt(year, month, 1)?;
         let shift = (7 + wd.num_days_from_monday() as i64 - first.weekday().num_days_from_monday() as i64) % 7;

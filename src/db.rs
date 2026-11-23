@@ -81,6 +81,18 @@ pub fn latest_version() -> u32 {
     MIGRATIONS.len() as u32
 }
 
+/// Stelle einer Migration in der Liste (für Migrationstests anderer Module, unabhängig von der Reihenfolge).
+#[cfg(test)]
+pub fn migration_index(sql: &str) -> usize {
+    MIGRATIONS.iter().position(|m| *m == sql).expect("Migration nicht in der Liste")
+}
+
+/// Datenbank im Datenordner mit nur den ersten `n` Migrationen öffnen (Stand einer älteren Programmversion, für Tests).
+#[cfg(test)]
+pub fn open_prefix(data_dir: &Path, backup_dir: &Path, n: usize) -> Result<Db, OpenError> {
+    open_with(data_dir, backup_dir, &MIGRATIONS[..n])
+}
+
 /// Datenbank im Speicher mit allen Migrationen (für Tests anderer Module).
 #[cfg(test)]
 pub fn open_memory() -> Connection {

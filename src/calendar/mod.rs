@@ -45,6 +45,33 @@ pub const MAX_EXCEPTIONS: usize = 1000;
 pub const MAX_REMINDER: i64 = 4 * 7 * 24 * 60;
 /// Höchstens so viele Vorkommen eines Termins in einem Zeitraum (z. B. „jede Minute“ in der Monatsansicht).
 pub const MAX_OCC_PER_RANGE: usize = 2000;
+/// Erlaubte Jahre für alle Eingaben (Datumsrechnung bleibt damit weit weg von den Grenzen von `chrono`).
+pub const MIN_YEAR: i32 = 1900;
+pub const MAX_YEAR: i32 = 2200;
+
+/// Liegt der Tag im erlaubten Bereich ([`MIN_YEAR`]..=[`MAX_YEAR`])?
+pub fn year_ok(d: NaiveDate) -> bool {
+    use chrono::Datelike;
+    (MIN_YEAR..=MAX_YEAR).contains(&d.year())
+}
+
+/// `t + minutes`, an den Grenzen von `chrono` gesättigt (nie Panik).
+pub fn add_minutes(t: NaiveDateTime, minutes: i64) -> NaiveDateTime {
+    match Duration::try_minutes(minutes).and_then(|d| t.checked_add_signed(d)) {
+        Some(x) => x,
+        None if minutes < 0 => NaiveDateTime::MIN,
+        None => NaiveDateTime::MAX,
+    }
+}
+
+/// `d + days`, gesättigt (nie Panik).
+pub fn add_days(d: NaiveDate, days: i64) -> NaiveDate {
+    match Duration::try_days(days).and_then(|x| d.checked_add_signed(x)) {
+        Some(x) => x,
+        None if days < 0 => NaiveDate::MIN,
+        None => NaiveDate::MAX,
+    }
+}
 
 /// Wiederholung eines Termins.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -89,7 +116,7 @@ pub struct Event {
 impl Event {
     /// Ende (ausschließlich) eines Vorkommens mit Beginn `start`.
     pub fn end_of(&self, start: NaiveDateTime) -> NaiveDateTime {
-        start + Duration::minutes(self.minutes)
+        add_minutes(start, self.minutes)
     }
 
     /// Ganztägige Tage (mindestens 1).
@@ -98,7 +125,8 @@ impl Event {
     }
 
     /// Vorkommen (Beginn, lokale Wanduhrzeit), die sich mit `[from, to)` überschneiden; Wiederholungen werden nur in
-    /// diesem Zeitraum ausgerechnet. Ein ungültiger Cron-Ausdruck ergibt nur den Beginn.
+    /// diesem Zeitraum ausgerechnet. Ein ungültiger Cron-Ausdruck ergibt nur den Beginn. Höchstens
+    /// [`MAX_OCC_PER_RANGE`] Vorkommen, die ab `from` beginnen (davor beginnende, hineinreichende zählen nicht mit).
     pub fn occurrences(&self, from: NaiveDateTime, to: NaiveDateTime, zone: &dyn Zone) -> Vec<NaiveDateTime> {
         let overlaps = |s: NaiveDateTime| {
             let e = self.end_of(s);
@@ -111,14 +139,18 @@ impl Event {
             return if overlaps(self.start) { vec![self.start] } else { vec![] };
         };
         let mut out = Vec::new();
-        let dur = Duration::minutes(self.minutes.max(0));
         // Ohne Anzahl reicht es, kurz vor dem Zeitraum (minus Dauer) zu beginnen; mit Anzahl wird ab dem Beginn gezählt.
-        let lower = if rec.count.is_some() { self.start } else { self.start.max(from - dur) };
+        let lower = if rec.count.is_some() { self.start } else { self.start.max(add_minutes(from, -self.minutes.max(0))) };
         let mut n: u32 = 0;
-        let keep = |s: NaiveDateTime, out: &mut Vec<NaiveDateTime>| {
+        let mut after_from = 0usize;
+        let mut keep = |s: NaiveDateTime, out: &mut Vec<NaiveDateTime>| {
             if overlaps(s) && rec.except.binary_search(&s.date()).is_err() {
                 out.push(s);
+                if s >= from {
+                    after_from += 1;
+                }
             }
+            after_from >= MAX_OCC_PER_RANGE
         };
         if self.all_day {
             let mut d = lower.date();
@@ -133,8 +165,7 @@ impl Event {
                     if rec.count.is_some_and(|c| n > c) {
                         break;
                     }
-                    keep(d.and_time(NaiveTime::MIN), &mut out);
-                    if out.len() >= MAX_OCC_PER_RANGE {
+                    if keep(d.and_time(NaiveTime::MIN), &mut out) {
                         break;
                     }
                 }
@@ -143,7 +174,7 @@ impl Event {
             }
             return out;
         }
-        let mut t = lower - Duration::minutes(1);
+        let mut t = add_minutes(lower, -1);
         while let Some((wall, _)) = cron.next_in(t, zone) {
             if wall >= to || rec.until.is_some_and(|u| wall.date() > u) {
                 break;
@@ -152,8 +183,7 @@ impl Event {
             if rec.count.is_some_and(|c| n > c) {
                 break;
             }
-            keep(wall, &mut out);
-            if out.len() >= MAX_OCC_PER_RANGE {
+            if keep(wall, &mut out) {
                 break;
             }
             t = wall;
@@ -167,14 +197,14 @@ impl Event {
             return if self.start >= from { vec![self.start] } else { vec![] };
         }
         // schrittweise größere Fenster, bis genug gefunden sind (höchstens gut 30 Jahre)
-        let mut span = Duration::days(31);
+        let mut span = 31i64;
         loop {
-            let to = from + span;
+            let to = add_minutes(from, span * 1440);
             let occ: Vec<NaiveDateTime> = self.occurrences(from, to, zone).into_iter().filter(|s| *s >= from).take(n).collect();
-            if occ.len() >= n || span > Duration::days(366 * 30) {
+            if occ.len() >= n || span > 366 * 30 {
                 return occ;
             }
-            span = span * 4;
+            span *= 4;
         }
     }
 }
@@ -190,27 +220,40 @@ pub fn fmt_stored(t: NaiveDateTime) -> String {
 }
 
 /// Liest `JJJJ-MM-TT`, `JJJJ-MM-TTTHH:MM` oder `JJJJ-MM-TTTHH:MM:SS` (auch mit Leerzeichen statt `T`). Liefert die Zeit
-/// und ob nur ein Datum angegeben war.
+/// und ob nur ein Datum angegeben war. Nur Jahre [`MIN_YEAR`]..=[`MAX_YEAR`] (genau vier Ziffern).
 pub fn parse_when(s: &str) -> Option<(NaiveDateTime, bool)> {
     let s = s.trim();
+    if !four_digit_year(s) {
+        return None;
+    }
     if let Ok(d) = NaiveDate::parse_from_str(s, "%Y-%m-%d") {
-        return Some((d.and_time(NaiveTime::MIN), true));
+        return year_ok(d).then(|| (d.and_time(NaiveTime::MIN), true));
     }
     for f in ["%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"] {
         if let Ok(t) = NaiveDateTime::parse_from_str(s, f) {
-            return Some((t, false));
+            return year_ok(t.date()).then_some((t, false));
         }
     }
     None
 }
 
-/// Liest ein Datum `JJJJ-MM-TT`.
+/// Beginnt der Text mit genau vier Ziffern und einem Bindestrich (kein `+262142-…`)?
+fn four_digit_year(s: &str) -> bool {
+    let b = s.as_bytes();
+    b.len() >= 5 && b[..4].iter().all(u8::is_ascii_digit) && b[4] == b'-'
+}
+
+/// Liest ein Datum `JJJJ-MM-TT` (Jahre [`MIN_YEAR`]..=[`MAX_YEAR`]).
 pub fn parse_date(s: &str) -> Option<NaiveDate> {
-    NaiveDate::parse_from_str(s.trim(), "%Y-%m-%d").ok()
+    let s = s.trim();
+    if !four_digit_year(s) {
+        return None;
+    }
+    NaiveDate::parse_from_str(s, "%Y-%m-%d").ok().filter(|d| year_ok(*d))
 }
 
 /// Montag der Woche von `d`.
 pub fn week_start(d: NaiveDate) -> NaiveDate {
     use chrono::Datelike;
-    d - Duration::days(d.weekday().num_days_from_monday() as i64)
+    add_days(d, -(d.weekday().num_days_from_monday() as i64))
 }
