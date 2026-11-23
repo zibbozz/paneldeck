@@ -29,6 +29,8 @@ pub(super) struct ChatOut {
     pub revoke: Option<AllowRule>,
     /// Antwort auf die einmalige Frage nach der Stufe des Modells.
     pub level: Option<McpLevel>,
+    /// Jetzt kompaktieren (#359, Knopf in der Kopfzeile).
+    pub compact: bool,
     /// Bild einfügen (#357): Strg+V mit Bild in der Zwischenablage oder die Büroklammer.
     pub image: Option<super::chat_images_ui::ImageReq>,
     /// Antwort auf die Fragen des Modells (`ask_user`, #356): schon an den Aufruf geschickt (`ChatState::answer_ask`).
@@ -79,6 +81,9 @@ pub(super) fn chat_body(ui: &mut Ui, body: Rect, session: u64, chat: &mut ChatSt
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 context_gauge(ui, session, chat, lang);
+                if !chat.messages().is_empty() {
+                    compact_button(ui, chat, lang, &mut out);
+                }
             });
         });
     });
@@ -147,6 +152,11 @@ struct RowCx<'a> {
     preview: Option<(String, Preview)>,
     /// Text unter einer noch leeren Antwort („…“, „Denkt nach …“, „Warte auf das Modell … 12 s“).
     waiting: String,
+    /// Kompaktierte Originale werden gezeigt (#359, „Original anzeigen“), Schalter dafür in den egui-Daten.
+    show_original: bool,
+    show_id: Id,
+    /// Erste kompaktierte Nachricht (darüber steht aufgeklappt die Überschrift der Originale).
+    first_compacted: Option<usize>,
     /// Bilder des Chats (#357; für die Platzhalter an Werkzeug-Ergebnissen).
     images: &'a [crate::chat::images::ImageEntry],
 }
@@ -196,11 +206,18 @@ fn messages(ui: &mut Ui, session: u64, chat: &mut ChatState, model: &str, lang: 
     let rev = chat.rev();
     let from = std::mem::replace(&mut chat.changed_from, usize::MAX);
     let pending = chat.calls.iter().map(|p| (p.call.id.clone(), p.state)).collect();
-    let paused = chat.paused.then(|| (chat.steps, chat.pause_note.clone(), chat.loop_stop));
+    // Während einer Zusammenfassung (#359) kein „Weiter“: die Runde geht erst danach weiter.
+    let paused = (chat.paused && !chat.compact.running()).then(|| (chat.steps, chat.pause_note.clone(), chat.loop_stop));
     let level_question = chat.level_question.is_some();
     let target = chat.approval_target.clone();
     let preview = chat.approval_preview.clone().filter(|(id, _)| pending_has(&chat.calls, id));
-    let ChatState { file, ui: cache, warning, follow, notice, usage, ask, .. } = chat;
+    let compacting = chat.compact.elapsed();
+    if compacting.is_some() {
+        ui.ctx().request_repaint_after(std::time::Duration::from_secs(1));
+    }
+    let show_id = Id::new(("chat_show_original", session));
+    let show_original = ui.data(|d| d.get_temp::<bool>(show_id)).unwrap_or(false);
+    let ChatState { file, ui: cache, warning, follow, notice, usage, compact, ask, .. } = chat;
     let msgs = &file.messages;
     let n = msgs.len();
     // Zwischenspeicher nur für Geändertes erneuern (nicht jedes Bild den ganzen Verlauf).
@@ -238,6 +255,9 @@ fn messages(ui: &mut Ui, session: u64, chat: &mut ChatState, model: &str, lang: 
         pending,
         target,
         preview,
+        show_original,
+        show_id,
+        first_compacted: msgs.iter().position(|m| m.compacted),
         images: &file.images,
     };
     // Am Ende kleben, solange der Nutzer nicht hochscrollt; nach dem Öffnen und nach dem Senden einmal ganz nach unten.
@@ -279,6 +299,10 @@ fn messages(ui: &mut Ui, session: u64, chat: &mut ChatState, model: &str, lang: 
         let mut y = 0.0;
         let mut remeasured = false;
         for (i, m) in msgs.iter().enumerate() {
+            // Kompaktierte Originale (#359) nur aufgeklappt; sonst belegen sie keinen Platz.
+            if m.compacted && !rc.show_original {
+                continue;
+            }
             let known = cache.heights[i];
             let h = if known > 0.0 { known } else { EST_ROW };
             let top = origin.y - content_top + y;
@@ -301,6 +325,22 @@ fn messages(ui: &mut Ui, session: u64, chat: &mut ChatState, model: &str, lang: 
             let rect = Rect::from_min_size(Pos2::new(origin.x, origin.y + y), Vec2::new(width, 1.0e6));
             let mut bar = ui.new_child(UiBuilder::new().id_salt(("chat_paused", session)).max_rect(rect).layout(egui::Layout::top_down(egui::Align::Min)));
             paused_bar(&mut bar, steps, note.as_deref(), loop_stop, lang, out);
+            y += bar.min_rect().height() + S1;
+        }
+        // Kompaktieren (#359): läuft gerade bzw. schlug fehl.
+        if let Some(d) = compacting {
+            let rect = Rect::from_min_size(Pos2::new(origin.x, origin.y + y), Vec2::new(width, 1.0e6));
+            let mut bar = ui.new_child(UiBuilder::new().id_salt(("chat_compacting", session)).max_rect(rect).layout(egui::Layout::top_down(egui::Align::Min)));
+            let dim = style::dim(&bar);
+            bar.label(RichText::new(compacting_text(d.as_secs(), lang)).color(dim));
+            y += bar.min_rect().height() + S1;
+        }
+        if let Some(f) = compact.failure.clone() {
+            let rect = Rect::from_min_size(Pos2::new(origin.x, origin.y + y), Vec2::new(width, 1.0e6));
+            let mut bar = ui.new_child(UiBuilder::new().id_salt(("chat_compact_failed", session)).max_rect(rect).layout(egui::Layout::top_down(egui::Align::Min)));
+            if compact_failed_bar(&mut bar, &f, lang) {
+                compact.failure = None;
+            }
             y += bar.min_rect().height() + S1;
         }
         // Einmalige Frage nach der Stufe (die Nachricht wartet im Eingabefeld).
@@ -336,6 +376,9 @@ fn row(ui: &mut Ui, i: usize, m: &ChatMsg, msgs: &[ChatMsg], cache: &mut UiCache
     if rc.context_start == Some(i) {
         context_marker(ui, lang);
     }
+    if rc.first_compacted == Some(i) {
+        original_marker(ui, lang);
+    }
     match m.role {
         Role::User => user_bubble(ui, rc.session, i, m, Some(i) == rc.last_user && !rc.streaming, lang, out),
         Role::Assistant => {
@@ -368,6 +411,7 @@ fn row(ui: &mut Ui, i: usize, m: &ChatMsg, msgs: &[ChatMsg], cache: &mut UiCache
             tool_line(ui, Id::new(("chat_tool_r", rc.session, i)), m.tool_name.as_deref().unwrap_or("?"), None, Some(m), None, (None, None), None, lang, out);
             super::chat_images_ui::links(ui, rc.session, &m.images, rc.images, lang);
         }
+        Role::System if m.summary.is_some() => summary_card(ui, i, m, cache, rc),
         Role::System if m.event.is_some() => {
             if let Some(ev) = &m.event {
                 event_line(ui, ev, lang);
@@ -455,6 +499,102 @@ fn context_marker(ui: &mut Ui, lang: Lang) {
     ui.painter().hline((c.x + half).min(r.max.x)..=r.max.x, c.y, st);
     ui.painter().galley(Pos2::new(c.x - g.size().x / 2.0, c.y - g.size().y / 2.0), g, col);
     ui.add_space(S2);
+}
+
+/// Über den aufgeklappten Originalen (#359): sie gehen nicht mehr an das Modell.
+fn original_marker(ui: &mut Ui, lang: Lang) {
+    ui.label(RichText::new(lang.t("Ursprünglicher Verlauf – kompaktiert, wird nicht mehr an das Modell gesendet", "Original history – compacted, no longer sent to the model")).small().strong().color(style::dim(ui)));
+    ui.add_space(S1);
+}
+
+/// Text während des Kompaktierens.
+pub(super) fn compacting_text(secs: u64, lang: Lang) -> String {
+    match lang {
+        Lang::De => format!("Kompaktiere den Chat – das Modell schreibt die Zusammenfassung … {secs} s"),
+        Lang::En => format!("Compacting the chat – the model is writing the summary … {secs} s"),
+    }
+}
+
+/// Zusammenfassung einer Kompaktierung (#359): Kopf mit Zahl der ersetzten Nachrichten und „Original anzeigen“, darunter
+/// der Text, den das Modell künftig statt der Originale sieht. Ältere (selbst kompaktierte) Zusammenfassungen erscheinen
+/// nur aufgeklappt und ohne Knopf.
+fn summary_card(ui: &mut Ui, i: usize, m: &ChatMsg, cache: &mut UiCache, rc: &RowCx) {
+    let lang = rc.lang;
+    let n = m.summary.as_ref().map_or(0, |s| s.messages);
+    let accent = crate::style::ui().accent;
+    egui::Frame::new().fill(ui.visuals().faint_bg_color).stroke(Stroke::new(1.0_f32, accent.gamma_multiply(0.5))).corner_radius(CornerRadius::same(style::RADIUS)).inner_margin(Margin::same(8)).show(ui, |ui| {
+        ui.set_min_width(ui.available_width());
+        ui.horizontal_wrapped(|ui| {
+            let head = match (m.compacted, lang) {
+                (true, Lang::De) => format!("Frühere Zusammenfassung ({n} Nachrichten)"),
+                (true, Lang::En) => format!("Earlier summary ({n} messages)"),
+                (false, Lang::De) => format!("Kompaktiert – {n} ältere Nachrichten zusammengefasst"),
+                (false, Lang::En) => format!("Compacted – {n} older messages summarised"),
+            };
+            ui.label(RichText::new(head).strong());
+            if !m.compacted {
+                let label = if rc.show_original { lang.t("Original ausblenden", "Hide original") } else { lang.t("Original anzeigen", "Show original") };
+                let tip = lang.t(
+                    "Die ursprünglichen Nachrichten bleiben im Chat gespeichert, gehen aber nicht mehr an das Modell.",
+                    "The original messages stay saved in the chat but are no longer sent to the model.",
+                );
+                if ui.small_button(label).on_hover_text(tip).clicked() {
+                    ui.data_mut(|d| d.insert_temp(rc.show_id, !rc.show_original));
+                }
+            }
+        });
+        let omitted = m.summary.as_ref().map_or(0, |s| s.omitted);
+        if omitted > 0 {
+            let text = match lang {
+                Lang::De => format!("{omitted} der ältesten Nachrichten passten nicht mehr in die Anfrage und fehlen in der Zusammenfassung."),
+                Lang::En => format!("{omitted} of the oldest messages no longer fitted into the request and are missing from the summary."),
+            };
+            ui.label(RichText::new(format!("⚠ {text}")).small().color(crate::style::ui().warning));
+        }
+        ui.label(RichText::new(lang.t("Das sieht das Modell statt der älteren Nachrichten:", "The model sees this instead of the older messages:")).small().color(style::dim(ui)));
+        let doc = cache.md.entry(i).or_insert_with(|| markdown::parse_plain(&m.content));
+        let opts = RenderOpts { soft_breaks_as_newlines: true, copy_button: Some(lang.t("Kopieren", "Copy")) };
+        let o = markdown::render(ui, doc, &opts);
+        if let Some(u) = o.clicked_url {
+            ui.ctx().open_url(egui::OpenUrl::new_tab(u));
+        }
+    });
+}
+
+/// Hinweis nach einem gescheiterten Kompaktieren (#359) mit „Ausblenden“. `true` = ausgeblendet.
+fn compact_failed_bar(ui: &mut Ui, text: &str, lang: Lang) -> bool {
+    let warn = crate::style::ui().warning;
+    let mut dismiss = false;
+    egui::Frame::new().fill(warn.gamma_multiply(0.14)).stroke(Stroke::new(1.0_f32, warn.gamma_multiply(0.6))).corner_radius(CornerRadius::same(style::RADIUS)).inner_margin(Margin::same(8)).show(ui, |ui| {
+        ui.set_min_width(ui.available_width());
+        ui.horizontal_wrapped(|ui| {
+            ui.label(format!("⚠ {text}"));
+            dismiss = ui.small_button(lang.t("Ausblenden", "Dismiss")).clicked();
+        });
+    });
+    dismiss
+}
+
+/// Kopfzeile: „Kompaktieren“ (#359) – aktiv, wenn es vor den letzten zwei Runden etwas zusammenzufassen gibt und keine
+/// Runde läuft. Im Layout von rechts nach links aufrufen.
+fn compact_button(ui: &mut Ui, chat: &ChatState, lang: Lang, out: &mut ChatOut) {
+    let can = chat.can_compact();
+    let tip = if chat.compact.running() {
+        lang.t("Kompaktiert gerade …", "Compacting …")
+    } else if chat.busy() || chat.editing {
+        lang.t("Gerade nicht möglich – erst die laufende Antwort abwarten oder stoppen.", "Not possible right now – wait for the running answer or stop it first.")
+    } else if can {
+        lang.t(
+            "Ältere Nachrichten durch eine Zusammenfassung des Modells ersetzen. Die letzten zwei Runden, offene To-dos und berührte Dateien bleiben wörtlich; die Originale bleiben im Chat. Auch mit /compact.",
+            "Replace older messages with a summary written by the model. The last two rounds, open to-dos and touched files are kept as they are; the originals stay in the chat. Also with /compact.",
+        )
+    } else {
+        lang.t("Noch nichts zu kompaktieren – die letzten zwei Runden bleiben immer wörtlich erhalten.", "Nothing to compact yet – the last two rounds are always kept as they are.")
+    };
+    let r = ui.add_enabled(can, egui::Button::new(RichText::new(lang.t("Kompaktieren", "Compact")).small())).on_hover_text(tip).on_disabled_hover_text(tip);
+    if r.clicked() {
+        out.compact = true;
+    }
 }
 
 /// Eigene Nachricht: rechtsbündige Blase; an der letzten ein Knopf zum Bearbeiten. Platzhalter von Bildern (#357) sind
@@ -1079,6 +1219,7 @@ mod tests {
                 o.stop |= r.stop;
                 o.regenerate |= r.regenerate;
                 o.edit |= r.edit;
+                o.compact |= r.compact;
                 o.image = o.image.or(r.image);
             }
             o
@@ -1718,6 +1859,71 @@ mod tests {
         }
         assert_eq!(usage_text(Some((None, Some(3))), Lang::En).as_deref(), Some("Tokens: 3 out"));
         assert_eq!(usage_text(Some((None, None)), Lang::En), None);
+    }
+
+    /// Kompaktieren (#359) in der Oberfläche: Knopf in der Kopfzeile (nur mit genug Runden), Hinweis während der
+    /// Zusammenfassung, Karte mit „Original anzeigen“ – die Originale erscheinen erst aufgeklappt –, Fehlermeldung mit
+    /// „Ausblenden“; Texte in beiden Sprachen.
+    #[test]
+    fn compact_button_summary_card_show_original_and_failure_bar() {
+        let rounds = |n: usize| (0..n).flat_map(|i| [ChatMsg::new(Role::User, format!("question {i}")), ChatMsg::new(Role::Assistant, format!("answer {i}"))]).collect::<Vec<_>>();
+        // Zwei Runden: der Knopf ist da, aber ohne Wirkung.
+        let mut c = ChatState::new(ChatFile { messages: rounds(2), ..ChatFile::default() }, None);
+        let mut h = H::new();
+        h.frame(&mut c, Lang::En, false, vec![]);
+        let p = h.pos_of("Compact").expect("Knopf in der Kopfzeile");
+        assert!(!h.click(&mut c, Lang::En, p).compact, "nichts zu kompaktieren: Knopf gesperrt");
+        // Drei Runden: Klick meldet „kompaktieren“.
+        let mut c = ChatState::new(ChatFile { messages: rounds(3), ..ChatFile::default() }, None);
+        let mut h = H::new();
+        h.frame(&mut c, Lang::En, false, vec![]);
+        let p = h.pos_of("Compact").unwrap();
+        assert!(h.click(&mut c, Lang::En, p).compact);
+        // Die App kompaktiert (hier mit dem Echo-Backend); währenddessen ein Hinweis und Stopp statt Senden.
+        let b = EchoBackend { delay: Duration::from_millis(30) };
+        c.compact_now(&b, &crate::chat::default_chat_meta(), &crate::chat::TurnContext::default(), Arc::new(|| {})).unwrap();
+        h.frame(&mut c, Lang::En, false, vec![]);
+        assert!(h.texts.iter().any(|t| t.starts_with("Compacting the chat – the model is writing the summary …")), "{:?}", h.texts);
+        assert!(h.pos_of("Stop").is_some());
+        let t = Instant::now();
+        while c.compact.running() && t.elapsed() < Duration::from_secs(5) {
+            c.poll();
+            h.frame(&mut c, Lang::En, false, vec![]);
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        h.frame(&mut c, Lang::En, false, vec![]);
+        h.frame(&mut c, Lang::En, false, vec![]);
+        assert!(h.texts.iter().any(|t| t == "Compacted – 2 older messages summarised"), "{:?}", h.texts);
+        assert!(h.texts.iter().any(|t| t == "The model sees this instead of the older messages:"));
+        assert!(h.texts.iter().any(|t| t.contains("Summary of 2 messages.")), "{:?}", h.texts);
+        assert!(!h.texts.iter().any(|t| t == "question 0" || t == "answer 0"), "Originale zugeklappt: {:?}", h.texts);
+        assert!(h.texts.iter().any(|t| t == "question 1") && h.texts.iter().any(|t| t == "answer 2"), "behaltene Runden sichtbar");
+        // Original anzeigen / ausblenden.
+        let p = h.pos_of("Show original").unwrap();
+        h.click(&mut c, Lang::En, p);
+        h.frame(&mut c, Lang::En, false, vec![]);
+        h.frame(&mut c, Lang::En, false, vec![]);
+        assert!(h.texts.iter().any(|t| t == "question 0"), "{:?}", h.texts);
+        assert!(h.texts.iter().any(|t| t == "Original history – compacted, no longer sent to the model"));
+        let p = h.pos_of("Hide original").unwrap();
+        h.click(&mut c, Lang::En, p);
+        h.frame(&mut c, Lang::En, false, vec![]);
+        assert!(!h.texts.iter().any(|t| t == "question 0"), "{:?}", h.texts);
+        // Deutsch.
+        h.frame(&mut c, Lang::De, false, vec![]);
+        h.frame(&mut c, Lang::De, false, vec![]);
+        for want in ["Kompaktiert – 2 ältere Nachrichten zusammengefasst", "Original anzeigen", "Kompaktieren", "Das sieht das Modell statt der älteren Nachrichten:"] {
+            assert!(h.texts.iter().any(|t| t == want), "{want}: {:?}", h.texts);
+        }
+        // Fehlermeldung mit „Ausblenden“.
+        c.compact.failure = Some("Compaction failed: boom The chat is unchanged.".into());
+        h.frame(&mut c, Lang::En, false, vec![]);
+        h.frame(&mut c, Lang::En, false, vec![]);
+        assert!(h.texts.iter().any(|t| t == "⚠ Compaction failed: boom The chat is unchanged."), "{:?}", h.texts);
+        let p = h.pos_of("Dismiss").unwrap();
+        h.click(&mut c, Lang::En, p);
+        assert_eq!(c.compact.failure, None);
+        assert_eq!(compacting_text(12, Lang::De), "Kompaktiere den Chat – das Modell schreibt die Zusammenfassung … 12 s");
     }
 
     /// Füllstand des Kontexts (#339) in der Kopfzeile: immer da, geschätzt mit `~`, vom Server ohne, nahe der Grenze mit

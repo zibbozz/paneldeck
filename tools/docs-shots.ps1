@@ -82,6 +82,8 @@ $AllViews = @(
   @{ Name = 'processes';           Spec = 'processes';           H = 1000; Wait = 6 }
   @{ Name = 'process-new';         Spec = 'process-new';         H = 900; Wait = 2 }
   @{ Name = 'process-output';      Spec = 'process-output';      H = 1000; Wait = 6 }
+  # Chats
+  @{ Name = 'chat-compacted';      Spec = 'chat-compacted';      W = 1240; H = 860; Wait = 2 }
   # Themes
   @{ Name = 'theme-appearance';    Spec = 'theme-appearance';    W = 1100; H = 860 }
   @{ Name = 'theme-generate';      Spec = 'theme-generate';      W = 1100; H = 860 }

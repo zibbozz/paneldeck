@@ -103,6 +103,7 @@ pub fn to_markdown(title: &str, model: &str, msgs: &[ChatMsg], lang: crate::stat
     let mut out = format!("# {title}\n\n{}: `{model}`\n", lang.t("Modell", "Model"));
     for m in msgs {
         let head = match m.role {
+            Role::System if m.summary.is_some() => lang.t("Zusammenfassung (kompaktiert)", "Summary (compacted)").to_string(),
             Role::System => lang.t("System", "System").to_string(),
             Role::User => lang.t("Du", "You").to_string(),
             Role::Assistant => model.to_string(),

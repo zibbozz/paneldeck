@@ -152,6 +152,8 @@ pub struct ChatState {
     fail_count: u32,
     /// Die Runde hielt an, weil derselbe Aufruf [`LOOP_LIMIT`]-mal in Folge fehlschlug (deutlich angezeigt).
     pub loop_stop: bool,
+    /// Kompaktieren (#359): laufende Zusammenfassung, letzte Fehlermeldung (siehe `chat::compact`).
+    pub compact: super::compact::CompactState,
     /// Bilder zur Laufzeit (#357): Ordner, Bildverständnis des Modells, laufende Aufbereitungen, Ablehnung des Servers.
     pub img: super::images::ChatImages,
     /// Offene Fragen des Modells an den Nutzer (`ask_user`, #356): das Formular; der Aufruf läuft, bis der Nutzer
@@ -284,6 +286,7 @@ impl ChatState {
             fail_streak: None,
             fail_count: 0,
             loop_stop: false,
+            compact: Default::default(),
             img: Default::default(),
             ask: None,
             events: Vec::new(),
@@ -336,6 +339,11 @@ impl ChatState {
 
     /// Die Runde läuft noch: Antwort wird erzeugt, Werkzeuge laufen oder warten auf Freigabe (nicht: angehalten).
     pub fn busy(&self) -> bool {
+        self.round_busy() || self.compact.running()
+    }
+
+    /// Wie [`ChatState::busy`], aber ohne eine Zusammenfassung (#359): läuft eine Runde des Modells?
+    fn round_busy(&self) -> bool {
         self.streaming() || (!self.paused && (!self.calls.is_empty() || self.next_request || self.text_check))
     }
 
@@ -389,7 +397,8 @@ impl ChatState {
     pub fn push_event(&mut self, event: super::store::ChatEvent, text: String) {
         let mut msg = ChatMsg::new(Role::System, text);
         msg.event = Some(event);
-        let resume = self.busy();
+        // Nur eine laufende Runde macht danach weiter – eine Zusammenfassung von Hand (#359) ist keine.
+        let resume = self.round_busy();
         self.events.push(PendingEvent { msg, resume });
         self.flush_events();
         self.touch();
@@ -403,7 +412,8 @@ impl ChatState {
     /// Wartende Nachrichten in den Verlauf, wenn es geht (keine Antwort läuft, keine offenen Aufrufe, keine Antwort
     /// wartet auf die Suche nach Text-Aufrufen). `true`, wenn eine davon während der Runde kam (dann weiter anfragen).
     fn flush_events(&mut self) -> bool {
-        if self.events.is_empty() || self.streaming() || !self.calls.is_empty() || self.text_check {
+        // Auch nicht während einer Zusammenfassung (#359): sie übernimmt nur einen unveränderten Verlauf.
+        if self.events.is_empty() || self.streaming() || !self.calls.is_empty() || self.text_check || self.compact.running() {
             return false;
         }
         let at = self.file.messages.len();
@@ -463,6 +473,7 @@ impl ChatState {
         self.context_pause = false;
         self.text_check = false;
         self.loop_stop = false;
+        self.compact.reset();
         self.changed(0);
         true
     }
@@ -495,6 +506,16 @@ impl ChatState {
         let text = self.draft.trim().to_string();
         if text.is_empty() || self.busy() || self.images_pending(&text) {
             return false;
+        }
+        // `/compact` (#359): kompaktieren statt senden (Fehler zeigt der Chat).
+        if super::compact::is_command(&text) {
+            if self.editing {
+                self.cancel_edit();
+            } else {
+                self.draft.clear();
+            }
+            let _ = self.compact_now(backend, meta, cx, repaint);
+            return true;
         }
         // Bilder (#357): die Platzhalter im Text, die es im Chat gibt.
         let images = super::images::referenced(&text, &self.file.images);
@@ -577,8 +598,23 @@ impl ChatState {
 
     /// Nächste Anfrage einer Werkzeug-Runde (nach [`ToolStep::Request`]).
     pub fn next_request(&mut self, backend: &dyn ChatBackend, meta: &ChatMeta, cx: &TurnContext, repaint: Repaint) {
-        if !self.streaming() {
+        if !self.streaming() && !self.compact.running() {
             self.start_turn(backend, meta, cx, repaint);
+        }
+    }
+
+    /// Die nächste Anfrage über die Werkzeug-Schleife starten lassen ([`ToolStep::Request`]), ohne dass das als leerer
+    /// Schritt zählt (nach einer Kompaktierung vor der Anfrage, #359).
+    pub(super) fn queue_request(&mut self) {
+        self.next_request = true;
+        self.step_executed = true;
+    }
+
+    /// Bei `at` wurde eine Nachricht eingefügt (die Zusammenfassung, #359): der Index der letzten Antwort rückt nach
+    /// (z. B. für eine angehaltene Runde, die danach mit „Weiter“ fortgesetzt wird).
+    pub(super) fn inserted_at(&mut self, at: usize) {
+        if self.turn_msg >= at {
+            self.turn_msg += 1;
         }
     }
 
@@ -596,6 +632,10 @@ impl ChatState {
     }
 
     fn start_turn(&mut self, backend: &dyn ChatBackend, meta: &ChatMeta, cx: &TurnContext, repaint: Repaint) {
+        // Automatisch kompaktieren (#359, nur mit Schalter): dann folgt die Anfrage nach der Zusammenfassung.
+        if self.compact_before_turn(backend, meta, cx, &repaint) {
+            return;
+        }
         // Die Kürzung gilt nur für eine Anfrage; das Backend meldet sie neu (`TurnEvent::ContextStart`), wenn es kürzt.
         self.file.context_start = None;
         self.usage = None;
@@ -638,6 +678,14 @@ impl ChatState {
     /// Werkzeugaufrufe (auch ein laufender) bekommen das Ergebnis „abgebrochen“; ein schon gestartetes Werkzeug kann im
     /// Hub trotzdem noch zu Ende laufen, sein Ergebnis wird verworfen.
     pub fn stop(&mut self) {
+        // Eine laufende Zusammenfassung (#359) endet ohne Wirkung. Kompaktieren auf Wunsch: nur das – eine angehaltene Runde
+        // bleibt mit ihren Aufrufen stehen. Automatisch vor einer Anfrage: die zurückgehaltene Anfrage fällt mit weg.
+        if let Some(then_turn) = self.compact.cancel() {
+            self.touch();
+            if !then_turn {
+                return;
+            }
+        }
         if self.streaming() && !self.poll().finished && self.turn.take().is_some() {
             self.drop_empty_answer();
             self.changed(self.turn_msg);
@@ -912,7 +960,8 @@ impl ChatState {
     ///   Hinweis; bei `max_steps = 1` sieht das Modell so die Ablehnung noch einmal).
     /// * Kein Aufruf läuft ohne Platz für sein Ergebnis: dann hält die Runde vorher an.
     pub fn tool_step(&mut self, policy: &ToolPolicy) -> ToolStep {
-        if self.streaming() || self.paused {
+        // Während einer Zusammenfassung (#359) ruht die Schleife (eine wartende Anfrage bleibt vorgemerkt).
+        if self.streaming() || self.paused || self.compact.running() {
             return ToolStep::Idle;
         }
         if std::mem::take(&mut self.text_check) {
@@ -1072,7 +1121,8 @@ impl ChatState {
     /// Aufrufe nicht mehr (sie bekommen „nicht ausgeführt“); stattdessen geht gleich die nächste Anfrage mit neu
     /// berechnetem Platz los – das Modell entscheidet dann selbst, was es noch braucht.
     pub fn resume(&mut self) -> bool {
-        if !self.paused {
+        // Während einer Zusammenfassung (#359) nicht: die Runde geht erst danach weiter.
+        if !self.paused || self.compact.running() {
             return false;
         }
         if std::mem::take(&mut self.context_pause) {
@@ -1107,6 +1157,9 @@ impl ChatState {
 
     /// Ereignisse der laufenden Antwort abholen (jedes Bild, für alle Chats).
     pub fn poll(&mut self) -> Polled {
+        if self.compact.running() {
+            return self.poll_compact();
+        }
         let mut p = Polled::default();
         let Some(turn) = &self.turn else { return p };
         let mut events = Vec::new();
