@@ -385,8 +385,8 @@ impl CalUi {
             if ev.recur.is_some() {
                 let r = ui.button(lang.t("Dieses Vorkommen auslassen", "Skip this occurrence"));
                 self.hits.push((Hit::Button("skip"), r.rect));
-                if r.clicked() {
-                    if let Some(conn) = env.conn {
+                if r.clicked()
+                    && let Some(conn) = env.conn {
                         match store::skip_occurrence(conn, ev.id, item.start.date()) {
                             Ok(_) => {
                                 self.selected = None;
@@ -395,7 +395,6 @@ impl CalUi {
                             Err(e) => self.msg = Some((e.message(lang), true)),
                         }
                     }
-                }
             }
             let r = ui.button(RichText::new(lang.t("Löschen …", "Delete …")).color(style::danger_soft()));
             self.hits.push((Hit::Button("delete"), r.rect));
@@ -408,11 +407,10 @@ impl CalUi {
     /// Eintrag anklicken: auswählen; doppelt (eigener Termin): bearbeiten.
     pub(crate) fn click_item(&mut self, env: &CalEnv, it: &Item, double: bool) {
         self.selected = Some(it.sel_key());
-        if double && it.kind == Kind::Event {
-            if let Some(ev) = self.event(env, it.id) {
+        if double && it.kind == Kind::Event
+            && let Some(ev) = self.event(env, it.id) {
                 self.form = Some(dialog::EventForm::from_event(&ev));
             }
-        }
     }
 
     pub(crate) fn import_path(&mut self, env: &CalEnv, path: &std::path::Path) {
@@ -475,11 +473,10 @@ impl CalUi {
                     let r = ui.button(RichText::new(lang.t("Löschen", "Delete")).color(style::danger_soft()));
                     self.hits.push((Hit::Button("delete_confirm"), r.rect));
                     if r.clicked() {
-                        if let Some(conn) = env.conn {
-                            if let Err(e) = store::delete_event(conn, id) {
+                        if let Some(conn) = env.conn
+                            && let Err(e) = store::delete_event(conn, id) {
                                 self.msg = Some((e.message(lang), true));
                             }
-                        }
                         self.selected = None;
                         self.touched();
                         close = true;

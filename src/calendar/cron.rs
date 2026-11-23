@@ -287,11 +287,10 @@ impl Cron {
         let mut date = t.date();
         let mut from = t.hour() * 60 + t.minute() + 1;
         for _ in 0..MAX_SEARCH_DAYS {
-            if from < 1440 && self.day_matches(date) {
-                if let Some(m) = self.first_time_from(from) {
+            if from < 1440 && self.day_matches(date)
+                && let Some(m) = self.first_time_from(from) {
                     return date.and_hms_opt(m / 60, m % 60, 0);
                 }
-            }
             date = date.succ_opt()?;
             from = 0;
         }

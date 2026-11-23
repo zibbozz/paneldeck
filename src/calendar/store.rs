@@ -116,11 +116,10 @@ impl EventInput {
             self.start = self.start.date().and_time(chrono::NaiveTime::MIN);
             self.minutes = ((self.minutes + 1439) / 1440).max(1) * 1440;
         }
-        if let Some(r) = self.reminder {
-            if !(0..=MAX_REMINDER).contains(&r) {
+        if let Some(r) = self.reminder
+            && !(0..=MAX_REMINDER).contains(&r) {
                 return Err(StoreError::invalid("Die Erinnerung muss zwischen 0 Minuten und 4 Wochen vorher liegen.", "The reminder must be between 0 minutes and 4 weeks before."));
             }
-        }
         if let Some(rec) = &mut self.recur {
             let c = super::cron::Cron::parse(&rec.cron).map_err(|e| StoreError::invalid(format!("Wiederholung: {}", e.de), format!("Recurrence: {}", e.en)))?;
             rec.cron = c.text;
@@ -471,7 +470,7 @@ mod tests {
         o2.view = ViewKind::Week;
         save_options(&c, &o2).unwrap();
         assert_eq!(load_options(&c), o2);
-        assert_eq!(o2.for_project(5).sprints, true);
+        assert!(o2.for_project(5).sprints);
         assert_eq!(o2.for_project(6), o2.sources);
         c.execute("UPDATE cal_settings SET value = '{\"reminders\": true, \"view\": \"bogus\"' WHERE key = 'options'", []).unwrap();
         assert_eq!(load_options(&c), Options::default(), "kaputt → Standard");

@@ -107,7 +107,7 @@ fn single(v: &[u32]) -> Option<u32> {
 /// Schritt einer gleichmäßigen Folge ab 0 über den ganzen Bereich `0..n` (z. B. 0,15,30,45 → 15).
 fn even_step(v: &[u32], n: u32) -> Option<u32> {
     let st = if v.len() == 1 { n } else { v.get(1)? - v[0] };
-    (v.first() == Some(&0) && st > 0 && n % st == 0 && v.len() as u32 == n / st && v.iter().enumerate().all(|(i, x)| *x == i as u32 * st)).then_some(st)
+    (v.first() == Some(&0) && st > 0 && n.is_multiple_of(st) && v.len() as u32 == n / st && v.iter().enumerate().all(|(i, x)| *x == i as u32 * st)).then_some(st)
 }
 
 /// Muster und Uhrzeit (Stunde, Minute) eines Ausdrucks, wenn der Baukasten genau ihn erzeugt hätte (gleiche Bedeutung).

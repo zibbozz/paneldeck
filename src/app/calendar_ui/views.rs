@@ -311,8 +311,8 @@ impl CalUi {
                     ui.painter().vline(c.left(), r.top()..=r.bottom(), Stroke::new(0.5_f32, vis.widgets.noninteractive.bg_stroke.color));
                     self.hits.push((Hit::Day(d), c));
                 }
-                if resp.double_clicked() {
-                    if let Some(p) = resp.interact_pointer_pos() {
+                if resp.double_clicked()
+                    && let Some(p) = resp.interact_pointer_pos() {
                         let i = ((p.x - r.left() - GUTTER) / col_w).floor() as i64;
                         if (0..n).contains(&i) {
                             let minutes = (((p.y - r.top()) / HOUR_H * 60.0) as i64 / 30 * 30).clamp(0, 23 * 60 + 30);
@@ -320,7 +320,6 @@ impl CalUi {
                             self.form = Some(dialog::EventForm::new_at(t, false));
                         }
                     }
-                }
                 // Blöcke je Tag
                 for i in 0..n {
                     let d = from + Duration::days(i);

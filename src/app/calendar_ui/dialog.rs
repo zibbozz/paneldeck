@@ -73,6 +73,7 @@ pub(crate) fn reminder_label(m: Option<i64>, lang: Lang) -> String {
 }
 
 /// Ergebnis eines Bildes des Dialogs.
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum Outcome {
     Open,
     Cancel,
@@ -160,14 +161,13 @@ impl EventForm {
         if let Some(r) = &e.recur {
             f.cron = r.cron.clone();
             f.rkind = RKind::Custom;
-            if let Ok(c) = Cron::parse(&r.cron) {
-                if let Some((p, h, m)) = builder::recognise(&c) {
+            if let Ok(c) = Cron::parse(&r.cron)
+                && let Some((p, h, m)) = builder::recognise(&c) {
                     let same_time = matches!(p, Pattern::EveryMinutes(_)) || (matches!(p, Pattern::EveryHours(_)) && m == e.start.minute()) || (h == e.start.hour() && m == e.start.minute()) || e.all_day;
                     if same_time {
                         f.set_pattern(p);
                     }
                 }
-            }
             if let Some(u) = r.until {
                 f.end = EndKind::Until;
                 f.until = u.format("%Y-%m-%d").to_string();
@@ -405,11 +405,10 @@ impl EventForm {
             ui.add_space(style::S2);
             ui.horizontal(|ui| {
                 let r = ui.add_enabled(!self.title.trim().is_empty(), egui::Button::new(lang.t("Speichern", "Save")));
-                if r.clicked() || (ui.input(|i| i.key_pressed(egui::Key::Enter) && i.modifiers.ctrl) && !self.title.trim().is_empty()) {
-                    if let Some(e) = self.save(env) {
+                if (r.clicked() || (ui.input(|i| i.key_pressed(egui::Key::Enter) && i.modifiers.ctrl) && !self.title.trim().is_empty()))
+                    && let Some(e) = self.save(env) {
                         out = Outcome::Saved(e);
                     }
-                }
                 if ui.button(lang.t("Abbrechen", "Cancel")).clicked() {
                     out = Outcome::Cancel;
                 }

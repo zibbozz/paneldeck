@@ -312,7 +312,7 @@ fn even_step(v: &[u32], n: u32) -> Option<u32> {
         return None;
     }
     let st = v[1] - v[0];
-    (st > 0 && n % st == 0 && v.len() as u32 == n / st && v.iter().enumerate().all(|(i, x)| *x == i as u32 * st)).then_some(st)
+    (st > 0 && n.is_multiple_of(st) && v.len() as u32 == n / st && v.iter().enumerate().all(|(i, x)| *x == i as u32 * st)).then_some(st)
 }
 
 /// RRULE (ohne `UNTIL`/`COUNT`) zu einem Ausdruck; `None` im ODER-Fall. Die Uhrzeit einzelner Termine kommt aus
@@ -333,24 +333,22 @@ pub fn cron_to_rrule(c: &Cron, all_day: bool) -> Option<String> {
     let days_all = doms.is_none() && months.is_none() && byday.is_empty();
     let mut parts: Vec<String> = Vec::new();
     let single_time = all_day || (mins.len() == 1 && hours.len() == 1);
-    if !all_day && days_all && hours.len() == 24 {
-        if let Some(st) = even_step(&mins, 60) {
+    if !all_day && days_all && hours.len() == 24
+        && let Some(st) = even_step(&mins, 60) {
             parts.push("FREQ=MINUTELY".into());
             if st > 1 {
                 parts.push(format!("INTERVAL={st}"));
             }
             return Some(parts.join(";"));
         }
-    }
-    if !all_day && days_all && mins.len() == 1 {
-        if let Some(st) = even_step(&hours, 24) {
+    if !all_day && days_all && mins.len() == 1
+        && let Some(st) = even_step(&hours, 24) {
             parts.push("FREQ=HOURLY".into());
             if st > 1 {
                 parts.push(format!("INTERVAL={st}"));
             }
             return Some(parts.join(";"));
         }
-    }
     // Frequenz: einfache Muster lesbar, sonst DAILY (MONTHLY bei n-tem Wochentag)
     let freq = if has_nth {
         "MONTHLY"
@@ -471,7 +469,7 @@ pub fn rrule_to_cron(rrule: &str, start: NaiveDateTime, all_day: bool) -> Result
     let list = |v: &Option<Vec<u32>>| v.as_ref().map(|v| join(v));
     let (mut minute, mut hour, mut dom, mut month, mut dow) = (list(&by_min).unwrap_or_else(minute_default), list(&by_hour).unwrap_or_else(hour_default), list(&by_mday), list(&by_month), (!by_day.is_empty()).then(|| by_day.join(",")));
     let step = |interval: u32, n: u32, first: u32, base: u32| -> Result<String, Untranslatable> {
-        if n % interval != 0 {
+        if !n.is_multiple_of(interval) {
             return Err(un(format!("INTERVAL={interval} teilt {n} nicht"), format!("INTERVAL={interval} does not divide {n}")));
         }
         Ok(if interval == 1 { "*".into() } else { format!("{}/{interval}", (first - base) % interval + base) })
@@ -553,7 +551,7 @@ pub struct ExportReport {
 }
 
 fn vtimezone(zone: &dyn Zone, year: i32, out: &mut String) {
-    fold(&format!("BEGIN:VTIMEZONE"), out);
+    fold("BEGIN:VTIMEZONE", out);
     fold(&format!("TZID:{}", zone.name()), out);
     let tr = super::zone::transitions(zone, year);
     if tr.is_empty() {
@@ -743,10 +741,13 @@ fn fallback_uid(props: &[Prop]) -> String {
     format!("import-{h:016x}@paneldeck")
 }
 
+/// Eine Beobachtung eines `VTIMEZONE`: Sommerzeit?, `DTSTART`, `TZOFFSETTO`, `RRULE`.
+type Observance = (bool, Option<NaiveDateTime>, Option<i32>, Option<String>);
+
 fn vtimezone_zone(id: &str, props: &[Prop]) -> Option<RuleZone> {
     // Beobachtungen: (Art, DTSTART, TZOFFSETTO, RRULE)
-    let mut obs: Vec<(bool, Option<NaiveDateTime>, Option<i32>, Option<String>)> = Vec::new();
-    let mut cur: Option<(bool, Option<NaiveDateTime>, Option<i32>, Option<String>)> = None;
+    let mut obs: Vec<Observance> = Vec::new();
+    let mut cur: Option<Observance> = None;
     for p in props {
         match (p.name.as_str(), p.value.to_ascii_uppercase().as_str()) {
             ("BEGIN", "STANDARD") => cur = Some((false, None, None, None)),
@@ -774,7 +775,7 @@ fn vtimezone_zone(id: &str, props: &[Prop]) -> Option<RuleZone> {
     let pick = |dst: bool| obs.iter().filter(|o| o.0 == dst && o.2.is_some()).max_by_key(|o| o.1).cloned();
     let std = pick(false);
     let dst = pick(true);
-    let trans = |o: &(bool, Option<NaiveDateTime>, Option<i32>, Option<String>)| -> Option<Transition> {
+    let trans = |o: &Observance| -> Option<Transition> {
         let start = o.1?;
         let (mut month, mut nth, mut wd) = (start.month(), 0i32, start.weekday());
         if let Some(r) = &o.3 {
@@ -921,13 +922,12 @@ pub fn parse(text: &str, exists: &dyn Fn(&str) -> bool, local: &dyn Zone) -> (Ve
             continue;
         }
         let mut uid = top.iter().find(|p| p.name == "UID").map(|p| unescape(p.value.trim())).filter(|u| !u.is_empty()).unwrap_or_else(|| fallback_uid(&top));
-        if let Some(rid) = top.iter().find(|p| p.name == "RECURRENCE-ID") {
-            if let Some((w, _)) = read_when(rid, &mut zones, local) {
+        if let Some(rid) = top.iter().find(|p| p.name == "RECURRENCE-ID")
+            && let Some((w, _)) = read_when(rid, &mut zones, local) {
                 let d = to_local(w, &zones, local).date();
                 overrides.push((uid.clone(), d));
                 uid = format!("{uid}/{}", fmt_date(d));
             }
-        }
         if uid.chars().count() > 255 {
             skip(&mut rep, "UID ist zu lang", "UID is too long");
             continue;
@@ -1011,14 +1011,12 @@ pub fn parse(text: &str, exists: &dyn Fn(&str) -> bool, local: &dyn Zone) -> (Ve
     }
     // Ausnahmen der geänderten Einzelvorkommen beim Original eintragen
     for (uid, d) in overrides {
-        if let Some(p) = out.iter_mut().find(|p| p.uid == uid) {
-            if let Some(r) = &mut p.input.recur {
-                if r.except.binary_search(&d).is_err() {
+        if let Some(p) = out.iter_mut().find(|p| p.uid == uid)
+            && let Some(r) = &mut p.input.recur
+                && r.except.binary_search(&d).is_err() {
                     r.except.push(d);
                     r.except.sort();
                 }
-            }
-        }
     }
     (out, rep)
 }

@@ -154,8 +154,8 @@ pub fn source_items(conn: &Connection, opts: &Options, from: NaiveDate, to: Naiv
         }
     }
     // Fälligkeiten der einfachen Todo-Liste (Projekt 0)
-    if on(0, |s| s.due) {
-        if let Ok(mut st) = conn.prepare("SELECT id, title, due, done FROM todo_items WHERE due IS NOT NULL AND due >= ?1 AND due < ?2") {
+    if on(0, |s| s.due)
+        && let Ok(mut st) = conn.prepare("SELECT id, title, due, done FROM todo_items WHERE due IS NOT NULL AND due >= ?1 AND due < ?2") {
             let rows = st.query_map(params![fs, ts], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, bool>(3)?)));
             for (id, title, due, done) in rows.into_iter().flatten().flatten() {
                 if let Some(it) = due_item(Kind::Todo, id, &format!("TODO-{id}"), &title, &due, TODO_COLOR, None, done) {
@@ -163,7 +163,6 @@ pub fn source_items(conn: &Connection, opts: &Options, from: NaiveDate, to: Naiv
                 }
             }
         }
-    }
     // Sprints (mit Datum) als mehrtägige Balken
     if let Ok(mut st) = conn.prepare(
         "SELECT s.id, p.id, p.key, s.name, s.start_date, s.end_date, s.state, p.color FROM sprints s JOIN projects p ON p.id = s.project_id
