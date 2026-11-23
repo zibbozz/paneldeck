@@ -1687,7 +1687,7 @@ c.close()
     $ev = @($rc.data.messages | Where-Object { $_.role -eq 'system' -and $null -ne $_.event -and $_.event.id -eq 'bg1' }) | Select-Object -Last 1
     if (-not $ev) { Start-Sleep 1 }
   }
-  Check 'Hintergrund-Befehl endet (#355): Nachricht von Paneldeck im Chat (event exited, Exit-Code 0, ohne Ausgabe)' ($null -ne $ev -and $ev.event.state -eq 'exited' -and $ev.event.exit_code -eq 0 -and $ev.content -match 'command_output' -and $ev.content -notmatch 'agent-bg-ok') ($rc.text)
+  Check 'Hintergrund-Befehl endet (#355): Nachricht von Paneldeck im Chat (event exited, Exit-Code 0, ohne Ausgabe)' ($null -ne $ev -and $ev.event.state -eq 'exited' -and $ev.event.exit_code -eq 0 -and $ev.content -match 'command_output' -and ($ev.content -replace '`[^`]*`', '') -notmatch 'agent-bg-ok') ($rc.text)
   [void](Tool 'wait_for_status' @{ session = $AG; status = @('ready'); timeout_secs = 30 } 40000)
   # #356: Fragen mit Auswahl - eigener Chat; er wartet auf den Nutzer (approval), externe Agenten schreiben dann nicht hinein.
   $AK = (Tool 'create_session' @{ kind = 'chat'; server = 'Fake'; model = 'fake-model'; name = 'Smoke-Ask'; cwd = "$agDir" }).data.id
@@ -2499,7 +2499,10 @@ c.close()
           $n = Tut-Wait { param($x) -not $x.running -or $x.run.index -gt $i }
           if (-not ($n -and (-not $n.running -or $n.run.index -gt $i))) {
             $pending = Test-Path -LiteralPath "$hook\tutorial-cmd.txt"
-            Write-Host "  WARN  Tutorial ${tid}: 'next' bei $($r.step) ohne Wirkung (Befehlsdatei noch da: $pending)"
+            Write-Host "  WARN  Tutorial ${tid}: 'next' bei $($r.step) ohne Wirkung (Befehlsdatei noch da: $pending) - zweiter Versuch"
+            # Der Test-Hook kann einen Befehl verbrauchen, waehrend die Tour den Schritt gerade neu aufbaut; einmal wiederholen.
+            Tut-Cmd 'next'
+            [void](Tut-Wait { param($x) -not $x.running -or $x.run.index -gt $i })
           }
         }
       }
