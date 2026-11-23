@@ -53,7 +53,8 @@ pub fn target_label(call: &ToolCall, name: impl Fn(u64) -> Option<String>, lang:
 /// nächsten Aufruf prüfen und ausführen, nach dem letzten Ergebnis die nächste Anfrage starten.
 pub fn drive(host: &mut dyn ChatToolHost, id: u64) -> Driven {
     let mut out = Driven::default();
-    if host.chat(id).is_none_or(|c| c.calls.is_empty() && !c.busy()) {
+    // Wartende Nachrichten von Paneldeck (#355) brauchen den nächsten Schritt, auch wenn die Antwort schon fertig ist.
+    if host.chat(id).is_none_or(|c| c.calls.is_empty() && !c.busy() && !c.events_pending()) {
         return out;
     }
     let policy = host.policy(id);

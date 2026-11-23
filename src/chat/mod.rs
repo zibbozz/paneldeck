@@ -11,9 +11,13 @@
 //! * [`driver`]: führt die Werkzeug-Schleife je Bild weiter, über [`driver::ChatToolHost`] (umgesetzt von der App).
 //! * [`context`]: Füllstand des Kontexts (`4342/8192 (53%)`, #339) aus Schätzung und Zählung des Servers.
 //! * [`agent`]: Agenten-Werkzeuge nur für Chats (#338): Dateien, Suche, Befehle im Terminal des Chats, Git, Web, To-dos.
+//! * [`bg_commands`]: Befehle im Hintergrund (#355), Zeitlimits und Wahl der Shell für `run_command`.
+//! * [`ask`]: `ask_user` (#356) – Fragen mit Auswahl an den Nutzer (Prüfung der Argumente, Zustand des Formulars).
 
 pub mod agent;
+pub mod ask;
 pub mod backend;
+pub mod bg_commands;
 pub mod context;
 pub mod driver;
 pub mod llm_backend;

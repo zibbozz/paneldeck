@@ -152,6 +152,22 @@ pub struct ChatState {
     fail_count: u32,
     /// Die Runde hielt an, weil derselbe Aufruf [`LOOP_LIMIT`]-mal in Folge fehlschlug (deutlich angezeigt).
     pub loop_stop: bool,
+    /// Offene Fragen des Modells an den Nutzer (`ask_user`, #356): das Formular; der Aufruf läuft, bis der Nutzer
+    /// absendet oder abbricht. Nicht gespeichert (nach einem Neustart ist der Aufruf „unterbrochen“).
+    pub ask: Option<super::ask::AskForm>,
+    /// Nachrichten von Paneldeck (#355, z. B. „Hintergrund-Befehl beendet“), die noch nicht in den Verlauf durften,
+    /// weil gerade eine Antwort läuft oder Werkzeugaufrufe offen sind ([`ChatState::push_event`]).
+    events: Vec<PendingEvent>,
+    /// Eine Nachricht von Paneldeck kam während der Runde und steht schon im Verlauf: der nächste `tool_step` fragt das
+    /// Modell noch einmal an (geht nicht verloren, wenn sie außerhalb von `tool_step` einsortiert wurde).
+    events_resume: bool,
+}
+
+/// Wartende Nachricht von Paneldeck.
+struct PendingEvent {
+    msg: ChatMsg,
+    /// Kam sie, während die Runde lief? Dann macht das Modell danach weiter.
+    resume: bool,
 }
 
 /// So oft in Folge darf derselbe fehlgeschlagene Aufruf (gleiches Werkzeug, gleiche Argumente) kommen, dann hält die
@@ -266,6 +282,9 @@ impl ChatState {
             fail_streak: None,
             fail_count: 0,
             loop_stop: false,
+            ask: None,
+            events: Vec::new(),
+            events_resume: false,
         };
         if fixed > 0 {
             c.touch();
@@ -288,7 +307,7 @@ impl ChatState {
     /// vorher, zeigt der Chat nach dem Neustart „Wiederholen“). Die fertige Antwort überschreibt das später.
     /// Offene Werkzeugaufrufe stehen in der Datei mit dem Ergebnis „unterbrochen“ (im Speicher laufen sie weiter).
     pub fn file_for_save(&self) -> std::borrow::Cow<'_, ChatFile> {
-        if !self.streaming() && self.calls.is_empty() {
+        if !self.streaming() && self.calls.is_empty() && self.events.is_empty() {
             return std::borrow::Cow::Borrowed(&self.file);
         }
         let mut f = self.file.clone();
@@ -298,6 +317,9 @@ impl ChatState {
             }
         }
         logic::close_orphans(&mut f.messages, tools::interrupted);
+        // Wartende Nachrichten von Paneldeck (#355, z. B. während die Runde angehalten ist) gehen nicht verloren: in der
+        // Datei stehen sie hinter den (dort als unterbrochen geschlossenen) Aufrufen.
+        f.messages.extend(self.events.iter().map(|e| e.msg.clone()));
         std::borrow::Cow::Owned(f)
     }
 
@@ -325,9 +347,77 @@ impl ChatState {
         self.level_question.is_some()
     }
 
+    /// Das Modell hat dem Nutzer Fragen gestellt (`ask_user`, #356), die noch offen sind. Zählt wie eine Freigabe als
+    /// „braucht dich“ (Status `approval`, Hinweis wie bei Freigaben); in der Seitenleiste „wartet auf dich“.
+    pub fn awaiting_answer(&self) -> bool {
+        self.ask.as_ref().is_some_and(|f| self.calls.iter().any(|c| c.state == CallState::Running && c.call.id == f.call_id))
+    }
+
+    /// Fragen des Modells zeigen (`ask_user`): das Formular gehört zum gerade laufenden Aufruf `form.call_id`.
+    pub fn open_ask(&mut self, form: super::ask::AskForm) {
+        self.ask = Some(form);
+        self.follow = true;
+        self.touch();
+    }
+
+    /// Nur für die Doku-Bilder (`readme-shots`): ein laufender `ask_user`-Aufruf mit offenem Formular, ohne Hub.
+    #[cfg(feature = "readme-shots")]
+    pub fn shot_ask(&mut self, call: ToolCall, form: super::ask::AskForm) {
+        self.calls.push(PendingCall { call, state: CallState::Running, rx: None });
+        self.open_ask(form);
+    }
+
+    /// Antwort des Nutzers auf die offenen Fragen (Absenden oder Abbrechen): das Ergebnis geht an den wartenden Aufruf.
+    /// `false`, wenn es keine Fragen gibt oder „Absenden“ noch nicht geht (nicht alles beantwortet).
+    pub fn answer_ask(&mut self, r: super::ask::AskReply) -> bool {
+        let ok = self.ask.as_mut().is_some_and(|f| f.reply(r));
+        if ok {
+            self.ask = None;
+            self.focus_input = true;
+            self.touch();
+        }
+        ok
+    }
+
+    /// Nachricht von Paneldeck in den Chat (#355: ein Hintergrund-Befehl ist zu Ende). `text` ist für das Modell (geht als
+    /// Nachricht des Nutzers mit), `event` für die Anzeige. Läuft gerade eine Antwort oder sind Werkzeugaufrufe offen,
+    /// wartet sie, bis der Verlauf wieder stimmig ist (ein Ergebnis muss direkt auf seinen Aufruf folgen). Kam sie während
+    /// einer laufenden Runde, macht das Modell danach weiter – auch wenn es seine Antwort schon ohne Aufrufe beendet hat.
+    pub fn push_event(&mut self, event: super::store::ChatEvent, text: String) {
+        let mut msg = ChatMsg::new(Role::System, text);
+        msg.event = Some(event);
+        let resume = self.busy();
+        self.events.push(PendingEvent { msg, resume });
+        self.flush_events();
+        self.touch();
+    }
+
+    /// Warten Nachrichten von Paneldeck auf ihren Platz im Verlauf?
+    pub fn events_pending(&self) -> bool {
+        !self.events.is_empty() || self.events_resume
+    }
+
+    /// Wartende Nachrichten in den Verlauf, wenn es geht (keine Antwort läuft, keine offenen Aufrufe, keine Antwort
+    /// wartet auf die Suche nach Text-Aufrufen). `true`, wenn eine davon während der Runde kam (dann weiter anfragen).
+    fn flush_events(&mut self) -> bool {
+        if self.events.is_empty() || self.streaming() || !self.calls.is_empty() || self.text_check {
+            return false;
+        }
+        let at = self.file.messages.len();
+        let mut resume = false;
+        for e in std::mem::take(&mut self.events) {
+            resume |= e.resume;
+            self.file.messages.push(e.msg);
+        }
+        self.follow = true;
+        self.changed(at);
+        self.events_resume |= resume;
+        resume
+    }
+
     /// Status für Seitenleiste und MCP: Freigabe/Frage offen → `Approval`, Runde läuft → `Working`, sonst `Ready`.
     pub fn status(&self) -> ChatStatus {
-        if self.awaiting_approval() || self.awaiting_level_choice() {
+        if self.awaiting_approval() || self.awaiting_level_choice() || self.awaiting_answer() {
             ChatStatus::Approval
         } else if self.busy() {
             ChatStatus::Working
@@ -533,9 +623,14 @@ impl ChatState {
         self.loop_stop = false;
         self.approval_target = None;
         self.approval_preview = None;
+        // Offene Fragen (#356) gehören zur Runde; ihr Aufruf hat jetzt „abgebrochen“.
+        self.ask = None;
         if had || fixed > 0 {
             self.changed(self.turn_msg.min(self.file.messages.len()));
         }
+        // Wartende Nachrichten von Paneldeck (#355) kommen jetzt in den Verlauf (die Runde ist vorbei, keine neue Anfrage).
+        self.flush_events();
+        self.events_resume = false;
     }
 
     /// Ergebnis des ersten offenen Aufrufs eintragen und ihn entfernen.
@@ -548,6 +643,9 @@ impl ChatState {
         self.file.messages.push(logic::tool_result(&p.call, status, content));
         self.approval_target = None;
         self.approval_preview = None;
+        if self.ask.as_ref().is_some_and(|f| f.call_id == p.call.id) {
+            self.ask = None;
+        }
         self.changed(at);
     }
 
@@ -734,8 +832,14 @@ impl ChatState {
         let max = policy.cfg.max_steps.max(1);
         loop {
             let Some(p) = self.calls.first() else {
+                // Nachrichten von Paneldeck (#355) kommen vor die nächste Anfrage; kam eine während der Runde, fragt der
+                // Chat das Modell danach noch einmal (auch wenn die Antwort schon ohne Aufrufe endete).
+                // Nach einer fehlgeschlagenen Antwort nicht von selbst weiter (der Server ist vielleicht weg).
+                let errored = self.has_error();
+                self.flush_events();
+                let resume = std::mem::take(&mut self.events_resume) && !errored;
                 if !self.next_request {
-                    return ToolStep::Idle;
+                    return if resume { ToolStep::Request } else { ToolStep::Idle };
                 }
                 // Schritt zu Ende: nichts ausgeführt → zählt als leerer Schritt.
                 if std::mem::take(&mut self.step_executed) {
@@ -1402,7 +1506,7 @@ mod tests {
         let id = c.pending_approval().unwrap().id.clone();
         assert!(c.decide(&id, Decision::Always));
         assert_eq!(drive(&mut c, &b, &p, &ok_exec), ["send_text"]);
-        let rule = AllowRule { tool: "send_text".into(), session: Some(2), prefix: None };
+        let rule = AllowRule { tool: "send_text".into(), session: Some(2), prefix: None, ..AllowRule::default() };
         assert_eq!(c.file.always_allow, [rule.clone()]);
         c.draft = "third".into();
         c.send(&b, &ChatMeta::default(), &TurnContext::default(), Arc::new(|| {}));
@@ -1862,5 +1966,164 @@ mod tests {
         let ran = drive(&mut c, &ok_then_fail, &p, &|_| if n.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % 2 == 0 { ok_exec(&ToolCall::default()) } else { Err(("boom".into(), "x".into())) });
         assert_eq!(ran.len(), 10, "bis zur Höchstzahl, nicht vom Schleifen-Schutz angehalten");
         assert!(c.paused && !c.loop_stop);
+    }
+
+    fn bg_event(id: &str) -> super::super::store::ChatEvent {
+        super::super::store::ChatEvent { kind: "background_command".into(), id: id.into(), command: "cargo build".into(), state: "exited".into(), exit_code: Some(0), duration_ms: 1000, error: None }
+    }
+
+    /// Bis zum nächsten Schritt: Antwort abholen, Ergebnisse abholen, `tool_step`.
+    fn step(c: &mut ChatState, p: &ToolPolicy) -> ToolStep {
+        for _ in 0..100 {
+            c.poll();
+            c.poll_tools();
+            if !c.streaming() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        c.tool_step(p)
+    }
+
+    /// `ask_user` (#356): der Aufruf läuft, bis der Nutzer absendet; solange „braucht dich“. Abbrechen sagt es dem Modell,
+    /// Stopp räumt das Formular weg.
+    #[test]
+    fn ask_user_waits_for_the_answer_and_counts_as_needs_you() {
+        let ask = serde_json::json!({"questions": [{"question": "Which?", "options": ["a", {"label": "b", "recommended": true}]}]});
+        let b = Script::new(vec![vec![tc("q", "ask_user", ask.clone()), TurnEvent::Done], text("Thanks.")]);
+        let p = policy(crate::mcp::McpLevel::Read, 10);
+        let mut c = ChatState::new(ChatFile::default(), None);
+        start(&mut c, &b, "help me choose");
+        let ToolStep::Execute(call) = step(&mut c, &p) else { panic!("ask_user läuft ohne Freigabe") };
+        // Wie der Hub: Formular mit dem Kanal des Aufrufs öffnen.
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        let (qs, fixes) = super::super::ask::parse(&call.arguments).unwrap();
+        c.open_ask(super::super::ask::AskForm::new(call.id.clone(), qs, fixes, Some(tx)));
+        c.tool_started(rx);
+        assert!(c.awaiting_answer());
+        assert_eq!(c.status(), ChatStatus::Approval, "wartet auf den Nutzer wie eine Freigabe");
+        assert!(!c.answer_ask(super::super::ask::AskReply::Submit), "nichts gewählt");
+        c.ask.as_mut().unwrap().toggle(0, 0);
+        assert_eq!(c.ask.as_ref().unwrap().questions[0].options[0].label, "b", "empfohlen zuerst");
+        assert!(c.answer_ask(super::super::ask::AskReply::Submit));
+        assert!(c.ask.is_none() && !c.awaiting_answer());
+        assert_eq!(step(&mut c, &p), ToolStep::Request);
+        let res = c.messages().iter().find(|m| m.role == Role::Tool).unwrap();
+        assert_eq!(res.status, Some(ToolStatus::Ok));
+        assert!(res.content.contains("\"selected\":[\"b\"]"), "{}", res.content);
+        // Abbrechen
+        let b = Script::new(vec![vec![tc("q", "ask_user", ask.clone()), TurnEvent::Done], text("ok")]);
+        let mut c = ChatState::new(ChatFile::default(), None);
+        start(&mut c, &b, "again");
+        let ToolStep::Execute(call) = step(&mut c, &p) else { panic!() };
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        let (qs, _) = super::super::ask::parse(&call.arguments).unwrap();
+        c.open_ask(super::super::ask::AskForm::new(call.id.clone(), qs, vec![], Some(tx)));
+        c.tool_started(rx);
+        assert!(c.answer_ask(super::super::ask::AskReply::Cancel));
+        step(&mut c, &p);
+        let res = c.messages().iter().find(|m| m.role == Role::Tool).unwrap();
+        assert!(res.content.contains("\"cancelled\":true"), "{}", res.content);
+        // Stopp während die Fragen offen sind
+        let b = Script::new(vec![vec![tc("q", "ask_user", ask), TurnEvent::Done]]);
+        let mut c = ChatState::new(ChatFile::default(), None);
+        start(&mut c, &b, "third");
+        let ToolStep::Execute(call) = step(&mut c, &p) else { panic!() };
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        let (qs, _) = super::super::ask::parse(&call.arguments).unwrap();
+        c.open_ask(super::super::ask::AskForm::new(call.id.clone(), qs, vec![], Some(tx)));
+        c.tool_started(rx);
+        c.stop();
+        assert!(c.ask.is_none() && c.status() == ChatStatus::Ready);
+        consistent(&c);
+    }
+
+    /// Nachrichten von Paneldeck (#355): sofort im Verlauf, wenn nichts läuft (keine neue Anfrage); während eines
+    /// Werkzeugaufrufs warten sie bis nach dem Ergebnis; kommen sie während der Runde, fragt der Chat danach noch einmal.
+    #[test]
+    fn events_wait_for_a_consistent_history_and_resume_a_running_round() {
+        let p = policy(crate::mcp::McpLevel::Read, 10);
+        // Ruhend: sofort, keine Anfrage
+        let b = Script::new(vec![text("Started it.")]);
+        let mut c = ChatState::new(ChatFile::default(), None);
+        start(&mut c, &b, "build");
+        assert_eq!(step(&mut c, &p), ToolStep::Idle);
+        c.push_event(bg_event("bg1"), "[Paneldeck] Background command bg1 finished".into());
+        let last = c.messages().last().unwrap();
+        assert_eq!((last.role, last.event.as_ref().map(|e| e.id.as_str())), (Role::System, Some("bg1")));
+        assert!(!c.events_pending());
+        assert_eq!(step(&mut c, &p), ToolStep::Idle, "Runde war vorbei: das Modell sieht es mit der nächsten Nachricht");
+        // Die Nachricht geht als Nachricht des Nutzers an das Modell.
+        let (sent, _) = super::super::llm_backend::map_history(c.messages());
+        assert_eq!(sent.last().map(|m| (m.role, m.content.as_str())), Some((crate::llm::Role::User, "[Paneldeck] Background command bg1 finished")));
+        // Während ein Werkzeug läuft: erst nach dem Ergebnis, vor der nächsten Anfrage
+        let b = Script::new(vec![vec![tc("w", "list_sessions", serde_json::json!({})), TurnEvent::Done], text("Done.")]);
+        let mut c = ChatState::new(ChatFile::default(), None);
+        start(&mut c, &b, "go");
+        let ToolStep::Execute(_) = step(&mut c, &p) else { panic!() };
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        c.tool_started(rx);
+        c.push_event(bg_event("bg2"), "bg2 finished".into());
+        assert!(c.events_pending(), "Aufruf offen: wartet");
+        tx.send(ok_exec(&ToolCall::default())).unwrap();
+        assert_eq!(step(&mut c, &p), ToolStep::Request);
+        let roles: Vec<Role> = c.messages().iter().map(|m| m.role).collect();
+        assert_eq!(roles, [Role::User, Role::Assistant, Role::Tool, Role::System], "Ergebnis direkt nach dem Aufruf, dann die Nachricht");
+        consistent(&c);
+        // Während das Modell schreibt (und dann ohne Aufrufe endet): danach noch eine Anfrage
+        let b = Script::new(vec![text("I will wait for the build."), text("The build passed.")]);
+        let mut c = ChatState::new(ChatFile::default(), None);
+        start(&mut c, &b, "build it");
+        assert!(c.streaming());
+        c.push_event(bg_event("bg3"), "bg3 finished".into());
+        assert!(c.events_pending());
+        assert_eq!(step(&mut c, &p), ToolStep::Request, "die Runde lief: das Modell macht weiter");
+        assert_eq!(c.messages().last().unwrap().event.as_ref().unwrap().id, "bg3");
+        c.next_request(&b, &ChatMeta::default(), &TurnContext::default(), Arc::new(|| {}));
+        assert_eq!(step(&mut c, &p), ToolStep::Idle);
+        assert_eq!(c.messages().last().unwrap().content, "The build passed.");
+        // Nach einer fehlgeschlagenen Antwort nicht von selbst weiter
+        struct Fail;
+        impl ChatBackend for Fail {
+            fn start(&self, _: &ChatMeta, _: &[ChatMsg], _: &TurnContext, _: Repaint) -> TurnHandle {
+                let (h, tx, _) = TurnHandle::pair();
+                tx.send(TurnEvent::Error("refused".into())).unwrap();
+                h
+            }
+        }
+        let mut c = ChatState::new(ChatFile::default(), None);
+        start(&mut c, &Fail, "x");
+        c.push_event(bg_event("bg4"), "bg4 finished".into());
+        assert_eq!(step(&mut c, &p), ToolStep::Idle);
+        assert!(!c.events_pending());
+        // Neue Nachricht des Nutzers: wartende Nachrichten kommen davor
+        let b = Script::new(vec![vec![tc("w", "list_sessions", serde_json::json!({})), TurnEvent::Done], text("ok")]);
+        let mut c = ChatState::new(ChatFile::default(), None);
+        start(&mut c, &b, "go");
+        let ToolStep::Execute(_) = step(&mut c, &p) else { panic!() };
+        let (_tx, rx) = std::sync::mpsc::sync_channel(1);
+        c.tool_started(rx);
+        c.push_event(bg_event("bg5"), "bg5 finished".into());
+        c.stop();
+        assert!(!c.events_pending());
+        assert_eq!(c.messages().last().unwrap().role, Role::System, "nach Stopp im Verlauf");
+        consistent(&c);
+        // Angehalten (Höchstzahl) mit wartenden Aufrufen: die Nachricht wartet im Speicher, steht aber in der Datei.
+        let b = Script::new(vec![vec![tc("a", "list_sessions", serde_json::json!({})), tc("b", "list_sessions", serde_json::json!({})), TurnEvent::Done], text("ok")]);
+        let p1 = policy(crate::mcp::McpLevel::Read, 1);
+        let mut c = ChatState::new(ChatFile::default(), None);
+        start(&mut c, &b, "go");
+        let ToolStep::Execute(_) = step(&mut c, &p1) else { panic!() };
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        tx.send(ok_exec(&ToolCall::default())).unwrap();
+        c.tool_started(rx);
+        assert_eq!(step(&mut c, &p1), ToolStep::Idle);
+        assert!(c.paused);
+        c.push_event(bg_event("bg6"), "bg6 finished".into());
+        assert!(c.events_pending());
+        let saved = c.file_for_save();
+        assert!(saved.messages.last().unwrap().event.as_ref().is_some_and(|e| e.id == "bg6"), "in der Datei");
+        let mut m = saved.messages.clone();
+        assert_eq!(logic::close_orphans(&mut m, tools::interrupted), 0, "Datei stimmig");
     }
 }

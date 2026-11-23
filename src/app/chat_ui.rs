@@ -29,6 +29,8 @@ pub(super) struct ChatOut {
     pub revoke: Option<AllowRule>,
     /// Antwort auf die einmalige Frage nach der Stufe des Modells.
     pub level: Option<McpLevel>,
+    /// Antwort auf die Fragen des Modells (`ask_user`, #356): schon an den Aufruf geschickt (`ChatState::answer_ask`).
+    pub ask: Option<crate::chat::ask::AskReply>,
 }
 
 /// Höhe der Kopfzeile (Füllstand des Kontexts, dauerhafte Freigaben).
@@ -89,6 +91,10 @@ pub(super) fn chat_body(ui: &mut Ui, body: Rect, session: u64, chat: &mut ChatSt
     ui.scope_builder(UiBuilder::new().max_rect(list_rect.shrink2(Vec2::new(PAD, 0.0))), |ui| {
         messages(ui, session, chat, model, lang, &mut out);
     });
+    // Fragen des Modells beantwortet (#356): das Ergebnis geht gleich an den wartenden Aufruf.
+    if let Some(r) = out.ask {
+        chat.answer_ask(r);
+    }
     // Nach einer Entscheidung zurück ins Eingabefeld: der Knopf an derselben Stelle gehört sonst gleich der nächsten
     // Frage, und Enter würde sie freigeben.
     if out.decide.is_some() || out.level.is_some() {
@@ -182,7 +188,7 @@ fn messages(ui: &mut Ui, session: u64, chat: &mut ChatState, model: &str, lang: 
     let level_question = chat.level_question.is_some();
     let target = chat.approval_target.clone();
     let preview = chat.approval_preview.clone().filter(|(id, _)| pending_has(&chat.calls, id));
-    let ChatState { file, ui: cache, warning, follow, notice, usage, .. } = chat;
+    let ChatState { file, ui: cache, warning, follow, notice, usage, ask, .. } = chat;
     let msgs = &file.messages;
     let n = msgs.len();
     // Zwischenspeicher nur für Geändertes erneuern (nicht jedes Bild den ganzen Verlauf).
@@ -291,6 +297,15 @@ fn messages(ui: &mut Ui, session: u64, chat: &mut ChatState, model: &str, lang: 
             level_bar(&mut bar, lang, out);
             y += bar.min_rect().height() + S1;
         }
+        // Fragen des Modells (`ask_user`, #356): ein Formular mit „Absenden“ unter der letzten Nachricht.
+        if let Some(form) = ask.as_mut() {
+            let rect = Rect::from_min_size(Pos2::new(origin.x, origin.y + y), Vec2::new(width, 1.0e6));
+            let mut bar = ui.new_child(UiBuilder::new().id_salt(("chat_ask", session)).max_rect(rect).layout(egui::Layout::top_down(egui::Align::Min)));
+            if let Some(r) = super::chat_ask_ui::ask_form(&mut bar, session, form, lang) {
+                out.ask = Some(r);
+            }
+            y += bar.min_rect().height() + S1;
+        }
         let total = Rect::from_min_size(origin, Vec2::new(width, y + S1));
         ui.allocate_rect(total, Sense::hover());
         if jump {
@@ -337,6 +352,11 @@ fn row(ui: &mut Ui, i: usize, m: &ChatMsg, msgs: &[ChatMsg], cache: &mut UiCache
         // Ergebnisse mit passendem Aufruf stehen in dessen Zeile.
         Role::Tool if cache.matched.contains(&i) => {}
         Role::Tool => tool_line(ui, Id::new(("chat_tool_r", rc.session, i)), m.tool_name.as_deref().unwrap_or("?"), None, Some(m), None, (None, None), None, lang, out),
+        Role::System if m.event.is_some() => {
+            if let Some(ev) = &m.event {
+                event_line(ui, ev, lang);
+            }
+        }
         Role::System => {
             egui::CollapsingHeader::new(RichText::new(lang.t("Systemprompt", "System prompt")).small().color(style::dim(ui))).id_salt(("chat_sys", rc.session, i)).show(ui, |ui| {
                 ui.label(RichText::new(&m.content).small().monospace());
@@ -346,6 +366,47 @@ fn row(ui: &mut Ui, i: usize, m: &ChatMsg, msgs: &[ChatMsg], cache: &mut UiCache
     if !(m.role == Role::Tool && cache.matched.contains(&i)) {
         ui.add_space(S2 + 2.0);
     }
+}
+
+/// Nachricht von Paneldeck im Verlauf (#355): „Hintergrund-Befehl bg1 beendet · Exit-Code 0 · 2 min 5 s“ und der
+/// Befehl. Das Modell bekommt den englischen Text der Nachricht; hier steht er in der Sprache der Oberfläche.
+pub(super) fn event_text(e: &crate::chat::store::ChatEvent, lang: Lang) -> String {
+    let what = match (e.state.as_str(), lang) {
+        ("failed", Lang::De) => format!("Hintergrund-Befehl {} fehlgeschlagen", e.id),
+        ("failed", _) => format!("Background command {} failed", e.id),
+        ("stopped", Lang::De) => format!("Hintergrund-Befehl {} angehalten", e.id),
+        ("stopped", _) => format!("Background command {} stopped", e.id),
+        (_, Lang::De) => format!("Hintergrund-Befehl {} beendet", e.id),
+        _ => format!("Background command {} finished", e.id),
+    };
+    let mut parts = vec![what];
+    match (&e.error, e.exit_code) {
+        (Some(code), _) => parts.push(code.clone()),
+        (None, Some(c)) => parts.push(format!("{} {c}", lang.t("Exit-Code", "exit code"))),
+        (None, None) => {}
+    }
+    parts.push(crate::chat::bg_commands::human_duration(e.duration_ms));
+    parts.join(" · ")
+}
+
+fn event_line(ui: &mut Ui, e: &crate::chat::store::ChatEvent, lang: Lang) {
+    let t = crate::style::ui();
+    let col = match (e.state.as_str(), e.exit_code) {
+        ("failed", _) => error_col(),
+        (_, Some(c)) if c != 0 => t.warning,
+        ("stopped", _) => style::dim(ui),
+        _ => t.success,
+    };
+    egui::Frame::new().fill(ui.visuals().faint_bg_color).corner_radius(CornerRadius::same(style::RADIUS)).inner_margin(Margin::symmetric(8, 4)).show(ui, |ui| {
+        ui.set_min_width(ui.available_width());
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new("⏺").color(col).size(11.0));
+            ui.label(RichText::new(event_text(e, lang)).small());
+            ui.label(RichText::new(crate::mcp::short(&e.command, 120)).small().monospace().color(style::dim(ui)));
+        });
+    })
+    .response
+    .on_hover_text(lang.t("Nachricht von Paneldeck – das Modell hat sie bekommen und kann die Ausgabe mit command_output lesen.", "Message from Paneldeck – the model received it and can read the output with command_output."));
 }
 
 /// „Tokens: 120 Eingabe · 45 Antwort“ (nur, was der Server gemeldet hat).
@@ -598,13 +659,11 @@ fn approval(ui: &mut Ui, id: Id, call_id: &str, name: &str, args: &serde_json::V
             // Agenten-Werkzeuge (#338): je Werkzeug für den Chat, Befehle nur für denselben Anfang (`cargo test`).
             // Sensible Dateien (#338): jedes Mal fragen.
             let always = (AllowRule::eligible(&call) && !sensitive).then(|| {
-                let scope = match AllowRule::for_call(&call) {
+                let rule = AllowRule::for_call(&call);
+                let scope = match &rule {
                     AllowRule { prefix: Some(p), .. } => {
-                        if lang == Lang::De {
-                            format!("Befehle, die mit „{p}“ beginnen")
-                        } else {
-                            format!("commands starting with “{p}”")
-                        }
+                        let base = if lang == Lang::De { format!("Befehle, die mit „{p}“ beginnen") } else { format!("commands starting with “{p}”") };
+                        format!("{base}{}", rule_scope(&rule, lang))
                     }
                     _ if local => {
                         let web = name.starts_with("web_");
@@ -668,6 +727,18 @@ fn paused_bar(ui: &mut Ui, steps: u32, note: Option<&str>, loop_stop: bool, lang
             }
         });
     });
+}
+
+/// Geltungsbereich einer Befehlsregel (#355): „ · Shell gitbash · im Hintergrund“ (leer für Vordergrund mit Projektprofil).
+fn rule_scope(r: &AllowRule, lang: Lang) -> String {
+    let mut s = String::new();
+    if let Some(sh) = &r.shell {
+        s.push_str(&format!(" · {} {sh}", lang.t("Shell", "shell")));
+    }
+    if r.background {
+        s.push_str(&format!(" · {}", lang.t("im Hintergrund", "in the background")));
+    }
+    s
 }
 
 /// Einmalige Frage vor dem ersten Senden: Darf dieses Modell Paneldeck nutzen? (Aus / Lesen / Steuern.)
@@ -738,7 +809,7 @@ fn approvals_menu(ui: &mut Ui, session: u64, rules: &[AllowRule], lang: Lang, ou
                     ui.horizontal(|ui| {
                         let what = match (r.session, &r.prefix) {
                             (Some(s), _) => format!("{} → {} {s}", r.tool, lang.t("Sitzung", "session")),
-                            (None, Some(p)) => format!("{}: {p} …", r.tool),
+                            (None, Some(p)) => format!("{}: {p} …{}", r.tool, rule_scope(r, lang)),
                             (None, None) => r.tool.clone(),
                         };
                         ui.label(RichText::new(what).monospace().size(12.0));
@@ -1349,7 +1420,7 @@ mod tests {
         }
         // Dauerhafte Freigaben: Menü in der Kopfzeile, „Widerrufen“ je Eintrag
         for (lang, title, revoke) in [(Lang::En, "Permanent approvals (2)", "Revoke"), (Lang::De, "Dauerhafte Freigaben (2)", "Widerrufen")] {
-            let rules = vec![AllowRule { tool: "send_text".into(), session: Some(4), prefix: None }, AllowRule { tool: "add_todo".into(), session: None, prefix: None }];
+            let rules = vec![AllowRule { tool: "send_text".into(), session: Some(4), prefix: None, ..AllowRule::default() }, AllowRule { tool: "add_todo".into(), session: None, prefix: None, ..AllowRule::default() }];
             let mut c = ChatState::new(ChatFile { always_allow: rules.clone(), ..ChatFile::default() }, None);
             let mut h = H::new();
             h.frame(&mut c, lang, false, vec![]);
@@ -1515,5 +1586,67 @@ mod tests {
         c.file.context_start = Some(0);
         h.frame(&mut c, Lang::De, false, vec![]);
         assert!(h.texts.iter().any(|t| t == "alte Nachrichten fallen heraus"), "{:?}", h.texts);
+    }
+
+    /// #355: Nachricht von Paneldeck als eigene Zeile in der Sprache der Oberfläche (nicht als Systemprompt).
+    #[test]
+    fn background_command_messages_show_as_a_line() {
+        let ev = |state: &str, code: Option<i64>, err: Option<&str>| {
+            let mut m = ChatMsg::new(Role::System, "[Paneldeck] …");
+            m.event = Some(crate::chat::store::ChatEvent { kind: "background_command".into(), id: "bg1".into(), command: "cargo build".into(), state: state.into(), exit_code: code, duration_ms: 2400, error: err.map(str::to_string) });
+            m
+        };
+        let file = ChatFile { messages: vec![ChatMsg::new(Role::User, "build"), ev("exited", Some(0), None), ev("failed", None, Some("session_closed"))], ..ChatFile::default() };
+        for (lang, ok, fail, sys) in [
+            (Lang::En, "Background command bg1 finished · exit code 0 · 2 s", "Background command bg1 failed · session_closed · 2 s", "System prompt"),
+            (Lang::De, "Hintergrund-Befehl bg1 beendet · Exit-Code 0 · 2 s", "Hintergrund-Befehl bg1 fehlgeschlagen · session_closed · 2 s", "Systemprompt"),
+        ] {
+            let mut c = ChatState::new(file.clone(), None);
+            let mut h = H::new();
+            h.frame(&mut c, lang, false, vec![]);
+            h.frame(&mut c, lang, false, vec![]);
+            assert!(h.texts.iter().any(|t| t == ok) && h.texts.iter().any(|t| t == fail), "{:?}", h.texts);
+            assert!(h.texts.iter().any(|t| t == "cargo build"));
+            assert!(!h.texts.iter().any(|t| t == sys), "keine Systemprompt-Zeile");
+        }
+    }
+
+    /// #356: Das Formular steht im Chat; Absenden schickt die Antwort an den wartenden Aufruf.
+    #[test]
+    fn the_question_form_answers_the_waiting_call() {
+        struct Ask;
+        impl crate::chat::ChatBackend for Ask {
+            fn start(&self, _: &crate::state::ChatMeta, _: &[ChatMsg], _: &crate::chat::TurnContext, _: crate::chat::Repaint) -> crate::chat::backend::TurnHandle {
+                let (h, tx, _) = crate::chat::backend::TurnHandle::pair();
+                let args = serde_json::json!({"questions": [{"question": "Which one?", "options": ["Plain", {"label": "Fancy", "recommended": true}]}]});
+                tx.send(crate::chat::backend::TurnEvent::ToolCall(ToolCall { id: "q1".into(), name: "ask_user".into(), arguments: args })).unwrap();
+                tx.send(crate::chat::backend::TurnEvent::Done).unwrap();
+                h
+            }
+        }
+        let read = crate::chat::tools::ToolPolicy::new(crate::llm::config::LlmModel { level: McpLevel::Read, level_chosen: true, ..crate::llm::config::LlmModel::named("m") }, None, false);
+        let mut c = ChatState::new(ChatFile::default(), None);
+        c.draft = "choose".into();
+        assert!(c.send(&Ask, &crate::state::ChatMeta::default(), &crate::chat::TurnContext::default(), Arc::new(|| {})));
+        c.poll();
+        let crate::chat::ToolStep::Execute(call) = c.tool_step(&read) else { panic!("ask_user läuft") };
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        let (qs, fixes) = crate::chat::ask::parse(&call.arguments).unwrap();
+        c.open_ask(crate::chat::ask::AskForm::new(call.id.clone(), qs, fixes, Some(tx)));
+        c.tool_started(rx);
+        let mut h = H::new();
+        h.frame(&mut c, Lang::En, false, vec![]);
+        h.frame(&mut c, Lang::En, false, vec![]);
+        assert!(h.texts.iter().any(|t| t == "The model has a question for you") && h.texts.iter().any(|t| t == "Which one?"), "{:?}", h.texts);
+        let fancy = h.texts.iter().find(|t| t.starts_with("Fancy")).cloned().unwrap();
+        assert!(fancy.contains("(Recommended)"));
+        let p = h.pos_of(&fancy).unwrap();
+        h.click(&mut c, Lang::En, p);
+        let p = h.pos_of("Submit").unwrap();
+        h.click(&mut c, Lang::En, p);
+        assert!(c.ask.is_none(), "beantwortet");
+        assert!(c.poll_tools());
+        let res = c.messages().iter().find(|m| m.role == Role::Tool).unwrap();
+        assert!(res.content.contains("Fancy") && res.content.contains("\"answered\":true"), "{}", res.content);
     }
 }

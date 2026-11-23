@@ -192,6 +192,10 @@ impl ToolPolicy {
         if let Err(msg) = super::repair::validate(def.name, &def.schema, &call.arguments) {
             return Err((ToolStatus::Error, error_json("bad_args", &msg)));
         }
+        // #355: `background`/`shell` gibt es nur in den Terminals des Chats – vor der Freigabe-Frage ablehnen.
+        if call.name == "run_command" && call.arguments.get("session").is_some_and(|s| !s.is_null()) {
+            return Err((ToolStatus::Error, error_json("bad_args", "background and shell only work in the chat's own terminals – leave out session (or leave out background and shell to run in that session).")));
+        }
         if let Some(msg) = spawn_forbidden(&call.name, &call.arguments, &self.origin_sessions) {
             return Err((ToolStatus::Denied, error_json("forbidden", msg)));
         }
@@ -794,7 +798,7 @@ mod tests {
         // Freigabe
         let st = |s: u64| call("send_text", json!({"session": s, "text": "x"}));
         assert!(c.needs_approval(true, &st(4), &[]));
-        let rules = [AllowRule { tool: "send_text".into(), session: Some(4), prefix: None }];
+        let rules = [AllowRule { tool: "send_text".into(), session: Some(4), prefix: None, ..AllowRule::default() }];
         assert!(!c.needs_approval(true, &st(4), &rules), "Werkzeug und Ziel passen");
         assert!(c.needs_approval(true, &st(5), &rules), "andere Ziel-Sitzung: wieder fragen");
         assert!(!c.needs_approval(false, &call("list_sessions", json!({})), &[]));
@@ -986,7 +990,7 @@ mod tests {
         quiet.cfg.ask_write = false;
         let env_call = call("read_file", json!({"path": ".env"}));
         assert!(quiet.needs_approval(true, &env_call, &[]));
-        assert!(quiet.needs_approval(true, &env_call, &[AllowRule { tool: "read_file".into(), session: None, prefix: None }]), "keine Regel für sensible Dateien");
+        assert!(quiet.needs_approval(true, &env_call, &[AllowRule { tool: "read_file".into(), session: None, prefix: None, ..AllowRule::default() }]), "keine Regel für sensible Dateien");
         assert!(!quiet.needs_approval(true, &call("edit_file", json!({"path": "a"})), &[]));
         // dauerhafte Freigabe je Werkzeug, Befehle je Präfix
         let edit = call("edit_file", json!({"path": "a", "old_string": "x", "new_string": "y"}));
@@ -1020,7 +1024,7 @@ mod tests {
         assert!(!quiet.needs_approval(true, &mv("notes.txt", "n2.txt"), &[]));
         assert!(!quiet.needs_approval(true, &mv("plain", "plain2"), &[]));
         // Quelle, Ziel oder Ordner mit sensibler Datei: immer fragen, auch trotz „Immer für diesen Chat“
-        let always = [AllowRule { tool: "move_file".into(), session: None, prefix: None }];
+        let always = [AllowRule { tool: "move_file".into(), session: None, prefix: None, ..AllowRule::default() }];
         for c in [mv("conf/.env", "conf/notes.txt"), mv("notes.txt", ".env"), mv("conf", "settings"), mv("notes.txt", "keys/server.pem")] {
             assert!(quiet.needs_approval(true, &c, &always), "{}", c.arguments);
             let p = agent::files::preview("move_file", &c.arguments, &env).expect("Hinweis in der Freigabe");
@@ -1066,5 +1070,29 @@ mod tests {
     #[test]
     fn null_arguments_become_an_empty_object() {
         assert_eq!(exec_args(&call("x", Value::Null)), json!({}));
+    }
+
+    /// #355/#356: Hintergrund-Befehle fragen wie run_command, die Werkzeuge dazu erst mit Hintergrund-Befehlen,
+    /// `ask_user` ab Lesen ohne Freigabe; `background`/`shell` mit `session` vor der Freigabe abgelehnt.
+    #[test]
+    fn background_and_question_tools_follow_level_and_state() {
+        let ctl = policy(McpLevel::Control, &[], false);
+        assert_eq!(ctl.check(&call("run_command", json!({"command": "npm run dev", "background": true}))), Ok(true), "fragt wie run_command");
+        let (st, msg) = ctl.check(&call("run_command", json!({"command": "x", "session": 4, "background": true}))).unwrap_err();
+        assert_eq!(st, ToolStatus::Error);
+        assert!(msg.contains("bad_args") && msg.contains("leave out session"), "{msg}");
+        assert_eq!(ctl.check(&call("run_command", json!({"command": "x", "session": 4}))), Ok(true), "wie bisher: Paneldeck-Werkzeug");
+        assert!(ctl.check(&call("command_status", json!({}))).unwrap_err().1.contains("not_available"));
+        assert!(!names(&ctl).contains(&"command_output".to_string()));
+        let bg = ctl.clone().with_agent(AgentEnv { background: true, ..AgentEnv::default() });
+        assert_eq!(bg.check(&call("command_output", json!({"id": "bg1"}))), Ok(false), "ohne Freigabe");
+        assert_eq!(bg.check(&call("stop_command", json!({"id": "bg1"}))), Ok(false));
+        assert!(names(&bg).contains(&"stop_command".to_string()));
+        let read = policy(McpLevel::Read, &[], false).with_agent(AgentEnv { background: true, ..AgentEnv::default() });
+        assert!(!names(&read).contains(&"command_status".to_string()), "erst ab Steuern");
+        let ask = json!({"questions": [{"question": "Which?", "options": ["a", "b"]}]});
+        assert_eq!(read.check(&call("ask_user", ask.clone())), Ok(false), "ab Lesen, ohne Freigabe");
+        assert!(names(&read).contains(&"ask_user".to_string()));
+        assert!(policy(McpLevel::Read, &["ask_user"], false).check(&call("ask_user", ask)).unwrap_err().1.contains("forbidden"), "abwählbar");
     }
 }

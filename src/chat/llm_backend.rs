@@ -153,9 +153,12 @@ pub fn map_history(history: &[ChatMsg]) -> (Vec<ChatMessage>, Vec<usize>) {
         }
     };
     for (i, m) in history.iter().enumerate() {
-        if !logic::sendable(m) || m.role == store::Role::System || (m.role == store::Role::Assistant && m.content.is_empty() && m.tool_calls.is_empty()) {
+        // Ereignisse von Paneldeck (#355, z. B. „Hintergrund-Befehl beendet“) gehen als Nachricht des Nutzers mit.
+        let event = m.role == store::Role::System && m.event.is_some();
+        if !logic::sendable(m) || (m.role == store::Role::System && !event) || (m.role == store::Role::Assistant && m.content.is_empty() && m.tool_calls.is_empty()) {
             continue;
         }
+        let mrole = if event { store::Role::User } else { m.role };
         if m.role == store::Role::Tool {
             match m.tool_call_id.as_deref().and_then(|id| open.iter().position(|(o, _)| o == id)) {
                 Some(k) => {
@@ -170,12 +173,12 @@ pub fn map_history(history: &[ChatMsg]) -> (Vec<ChatMessage>, Vec<usize>) {
             open = m.tool_calls.iter().map(|c| (c.id.clone(), c.name.clone())).collect();
             open_at = i;
         }
-        if let Some(prev) = msgs.last_mut().filter(|p: &&mut ChatMessage| p.role == Role::User && m.role == store::Role::User) {
+        if let Some(prev) = msgs.last_mut().filter(|p: &&mut ChatMessage| p.role == Role::User && mrole == store::Role::User) {
             prev.content = format!("{}\n\n{}", prev.content.trim_end(), m.content);
             continue;
         }
         msgs.push(ChatMessage {
-            role: role(m.role),
+            role: role(mrole),
             content: m.content.clone(),
             tool_calls: m.tool_calls.iter().map(|c| llm::ToolCall { id: c.id.clone(), name: c.name.clone(), arguments: c.arguments.clone() }).collect(),
             tool_call_id: m.tool_call_id.clone(),
