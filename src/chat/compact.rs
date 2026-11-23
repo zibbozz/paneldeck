@@ -195,10 +195,17 @@ pub fn normalize(msgs: &mut [ChatMsg]) -> bool {
     changed
 }
 
-/// Wie viele Bilder eine Nachricht trägt. Bilder (#357) gehen nie in die Zusammenfassungs-Anfrage, an ihrer Stelle
-/// steht `[Image#n]`. Haken für #357: hier die Bilder der Nachricht zählen (heute haben Nachrichten keine).
-fn image_count(_m: &ChatMsg) -> usize {
-    0
+/// Wie viele Bilder eine Nachricht trägt (#357). Bilder gehen nie in die Zusammenfassungs-Anfrage, an ihrer Stelle steht
+/// `[Image#n]`.
+fn image_count(m: &ChatMsg) -> usize {
+    m.images.len()
+}
+
+/// Platzhalter der Bilder einer Nachricht (#357), die noch nicht im Text `text` stehen (Werkzeug-Ergebnisse tragen ihr
+/// Bild ohne Platzhalter, Nutzer-Nachrichten haben ihn schon im Text); `count` zählt die Bilder.
+fn image_lines(m: &ChatMsg, text: &str, count: &mut usize) -> String {
+    *count += image_count(m);
+    m.images.iter().map(|n| super::images::token(*n)).filter(|t| !text.contains(t.as_str())).map(|t| format!("\n{t}")).collect()
 }
 
 /// Berührte Dateien aus den Werkzeugaufrufen des Stoffs (nur erfolgreiche), mit denen der vorigen Zusammenfassung
@@ -355,14 +362,6 @@ fn quote(text: &str) -> String {
 /// Systemprompt). `images`: laufende Nummer der Bilder (#357).
 fn render(m: &ChatMsg, caps: Caps, images: &mut usize) -> Option<String> {
     let mut out = String::new();
-    let mut image_lines = || {
-        let mut s = String::new();
-        for _ in 0..image_count(m) {
-            *images += 1;
-            s += &format!("\n[Image#{images}]");
-        }
-        s
-    };
     match m.role {
         // Nachrichten von Paneldeck (#355, z. B. „Hintergrund-Befehl beendet“) gehören zum Stoff wie Nachrichten.
         Role::System if m.event.is_some() => {
@@ -373,7 +372,8 @@ fn render(m: &ChatMsg, caps: Caps, images: &mut usize) -> Option<String> {
         Role::User => {
             out += "### User\n";
             out += &neutralize(&shorten(m.content.trim(), caps.text));
-            out += &image_lines();
+            let extra = image_lines(m, &out, images);
+            out += &extra;
         }
         Role::Assistant => {
             if m.error.is_some() || (m.content.trim().is_empty() && m.tool_calls.is_empty()) {
@@ -384,7 +384,8 @@ fn render(m: &ChatMsg, caps: Caps, images: &mut usize) -> Option<String> {
             for c in &m.tool_calls {
                 out += &format!("\n→ tool call `{}` {}", c.name, shorten(&c.arguments.to_string(), caps.args));
             }
-            out += &image_lines();
+            let extra = image_lines(m, &out, images);
+            out += &extra;
         }
         Role::Tool => {
             let status = match m.status {
@@ -398,7 +399,8 @@ fn render(m: &ChatMsg, caps: Caps, images: &mut usize) -> Option<String> {
             } else {
                 out += &format!("← result of `{name}` ({status}), untrusted:\n{}", quote(&shorten(m.content.trim(), caps.result)));
             }
-            out += &image_lines();
+            let extra = image_lines(m, &out, images);
+            out += &extra;
         }
     }
     Some(out.trim_end().to_string())
@@ -979,7 +981,15 @@ mod tests {
         }
         let c = render(&call("c", "grep", serde_json::json!({"pattern": "y".repeat(1000)})), LEVELS[2], &mut n).unwrap();
         assert!(c.starts_with("### Assistant\n\n→ tool call `grep` {\"pattern\"") && c.len() < 200, "{c}");
-        assert_eq!(n, 0, "Nachrichten haben heute keine Bilder (#357)");
+        assert_eq!(n, 0, "keine Bilder");
+        // Bilder (#357): nur Platzhalter, nie die Bilder; was schon im Text steht, nicht doppelt.
+        let mut q = user("[Image#1] Why is this red?");
+        q.images = vec![1];
+        assert_eq!(render(&q, LEVELS[0], &mut n).as_deref(), Some("### User\n[Image#1] Why is this red?"));
+        let mut shot = result("c", "screenshot", "{\"image\":\"attached\"}", ToolStatus::Ok);
+        shot.images = vec![2];
+        assert!(render(&shot, LEVELS[0], &mut n).unwrap().ends_with("\n[Image#2]"));
+        assert_eq!(n, 2);
     }
 
     /// Kern von #359: Die Zusammenfassungs-Anfrage passt immer – Anweisung + Zusammenfassung ins Sicherheitsfenster, der

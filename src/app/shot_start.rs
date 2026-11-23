@@ -49,6 +49,33 @@ pub(super) fn templates_closed() -> bool {
     spec().is_some_and(|(v, _)| v == "processes" || v == "process-output")
 }
 
+/// Beispielbild für die Chat-Bilder (#357): eine schlichte Bestellseite, deren Knopf die Summe überdeckt – hier erzeugt,
+/// keine Datei aus dem Netz.
+fn demo_screenshot() -> image::RgbaImage {
+    let (w, h) = (1280u32, 800u32);
+    let mut img = image::RgbaImage::from_pixel(w, h, image::Rgba([243, 244, 246, 255]));
+    let mut rect = |x0: u32, y0: u32, x1: u32, y1: u32, c: [u8; 3]| {
+        for y in y0..y1.min(h) {
+            for x in x0..x1.min(w) {
+                img.put_pixel(x, y, image::Rgba([c[0], c[1], c[2], 255]));
+            }
+        }
+    };
+    rect(0, 0, 1280, 72, [30, 41, 59]); // Kopfzeile
+    rect(40, 22, 220, 50, [148, 163, 184]); // Logo
+    rect(340, 130, 940, 690, [255, 255, 255]); // Karte
+    for (i, y) in [180u32, 250, 320, 390].iter().enumerate() {
+        rect(390, *y, 690 - i as u32 * 40, *y + 26, [203, 213, 225]); // Zeilen
+        rect(780, *y, 890, *y + 26, [148, 163, 184]); // Preise
+    }
+    rect(390, 470, 890, 474, [226, 232, 240]); // Trennlinie
+    rect(390, 500, 600, 540, [71, 85, 105]); // „Gesamt“
+    rect(760, 496, 890, 544, [15, 23, 42]); // Summe
+    rect(560, 510, 900, 580, [234, 88, 12]); // Knopf „Bezahlen“ (überdeckt die Summe)
+    rect(640, 535, 820, 555, [255, 237, 213]);
+    img
+}
+
 /// Ordner des Beispielprojekts neben dem Datenordner der Aufnahme.
 fn demo_dir(data: &Path) -> PathBuf {
     data.parent().unwrap_or(data).join("acme-shop")
@@ -302,6 +329,42 @@ impl App {
         self.activate(id);
     }
 
+    /// Chat mit Bildern (#357): ein Beispiel-Server mit einem Vision-Modell, eine eigene Nachricht mit `[Image#1]` (ein
+    /// hier erzeugtes Beispielbild) und eine Antwort; das Popup öffnet `shot_keep`. Nur im Speicher und im Datenordner
+    /// der Aufnahme.
+    fn shot_chat_images(&mut self, ctx: &egui::Context) {
+        let lang = self.settings.language;
+        self.set_mode(titlebar::Mode::Terminals);
+        if !self.settings.llm_servers.iter().any(|s| s.id == "shot-ollama") {
+            let model = crate::llm::ModelInfo { name: "gemma3:4b".into(), tools: Some(true), context_length: Some(131_072), vision: Some(true) };
+            self.settings.llm_servers.push(crate::llm::config::LlmServer { id: "shot-ollama".into(), name: "Ollama".into(), url: "http://localhost:11434".into(), last_models: vec![model], ..Default::default() });
+        }
+        let pid = self.active_project;
+        let name = lang.t("Checkout-Fehler", "Checkout bug").to_string();
+        let id = self.new_session(ctx, NewOpts { project: Some(pid), name: Some(name.clone()), chat: Some(state::ChatMeta { server: "shot-ollama".into(), model: "gemma3:4b".into() }), ..NewOpts::default() });
+        self.shot_name(id, &name);
+        let dir = self.chat_images_dir(id);
+        let entry = chatmod::images::import_rgba(&dir, 1, demo_screenshot());
+        if let Some(c) = self.entries.get_mut(&id).and_then(|e| e.chat.as_mut()) {
+            let mut q = chatmod::ChatMsg::new(chatmod::Role::User, lang.t("[Image#1] Warum überdeckt der Knopf „Bezahlen“ den Gesamtbetrag?", "[Image#1] Why does the “Pay now” button cover the order total?"));
+            q.images = vec![1];
+            let a = chatmod::ChatMsg::new(
+                chatmod::Role::Assistant,
+                lang.t(
+                    "Im Bild liegt der Knopf **Bezahlen** über der Zeile *Gesamt*: Der Knopf ist absolut positioniert, die Karte darüber hat aber keine feste Höhe.\n\nAm einfachsten: den Knopf in den normalen Fluss der Karte nehmen (`position: static`) und darüber `margin-top: 16px` geben.",
+                    "In the image the **Pay now** button sits on top of the *Total* row: the button is absolutely positioned, but the card above it has no fixed height.\n\nThe simplest fix: put the button back into the card's normal flow (`position: static`) and give it `margin-top: 16px`.",
+                ),
+            );
+            c.file.messages = vec![q, a];
+            if let Ok(e) = entry {
+                c.file.images = vec![e];
+            }
+            c.img.dir = Some(dir);
+            c.touch();
+        }
+        self.activate(id);
+    }
+
     /// Ansicht aufbauen (einmal).
     fn shot_setup(&mut self, ctx: &egui::Context, view: &str, arg: &str) {
         let demo = demo_dir(&self.dir);
@@ -398,6 +461,7 @@ impl App {
             // ---- Chats
             "chat-compacted" => self.shot_chat_compacted(ctx),
             // ---- Tutorial
+            "chat-images" => self.shot_chat_images(ctx),
             "tutorial-card" => self.set_mode(titlebar::Mode::Terminals),
             "tutorial-tour" => {
                 let (tour, step) = arg.split_once('/').unwrap_or(("basics", "basics.sidebar"));
@@ -530,6 +594,12 @@ impl App {
             "processes" | "process-output" | "process-new" if n == 40 => {
                 if let Some(id) = self.shot_sessions().first().copied() {
                     self.shot_run(id, &demo, Some("Get-ChildItem -Name"));
+                }
+            }
+            // Bild-Popup über dem Chat (#357)
+            "chat-images" if n == 10 => {
+                if let Some(id) = self.entries.iter().find(|(_, e)| e.is_chat()).map(|(i, _)| *i) {
+                    chat_images_ui::open(ctx, id, 1);
                 }
             }
             "editor-find" if n == 10 => {

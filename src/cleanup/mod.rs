@@ -92,6 +92,8 @@ pub enum Item {
     ScrollbackAll,
     ChatsOrphaned,
     ChatsAll,
+    /// Bilder in Chats (#357): `chats/<id>/images/` aller Chats.
+    ChatImages,
     CrashLog,
     McpLog,
     Prompts,
@@ -112,7 +114,7 @@ pub enum Item {
 }
 
 impl Item {
-    pub const ALL: [Item; 27] = [
+    pub const ALL: [Item; 28] = [
         Item::DbBackups,
         Item::MaintenanceBackups,
         Item::Clipboard,
@@ -123,6 +125,7 @@ impl Item {
         Item::ScrollbackAll,
         Item::ChatsOrphaned,
         Item::ChatsAll,
+        Item::ChatImages,
         Item::CrashLog,
         Item::McpLog,
         Item::Prompts,
@@ -155,6 +158,7 @@ impl Item {
             Item::ScrollbackAll => "scrollback_all",
             Item::ChatsOrphaned => "chats_orphaned",
             Item::ChatsAll => "chats_all",
+            Item::ChatImages => "chat_images",
             Item::CrashLog => "crash_log",
             Item::McpLog => "mcp_log",
             Item::Prompts => "prompts",
@@ -183,7 +187,7 @@ impl Item {
         use Item::*;
         match self {
             DbBackups | MaintenanceBackups | Clipboard | OldBackups | RunTemp | HotExit => Group::Space,
-            ScrollbackOrphaned | ScrollbackAll | ChatsOrphaned | ChatsAll | CrashLog | McpLog => Group::History,
+            ScrollbackOrphaned | ScrollbackAll | ChatsOrphaned | ChatsAll | ChatImages | CrashLog | McpLog => Group::History,
             Prompts | Templates | Themes | SystemPrompt | Database | Sessions => Group::Content,
             SettingsAll | SettingsModels | SettingsClaude | SettingsKeys => Group::Settings,
             Autostart | ContextMenu | ClaudeJson | Hooks => Group::Integration,
@@ -203,7 +207,7 @@ impl Item {
         match self {
             DbBackups => all_backups,
             // Hot-Exit (#54): ungespeicherte Arbeit des Nutzers, nicht wiederherstellbar.
-            HotExit | ScrollbackAll | ChatsAll | Prompts | Templates | Themes | SystemPrompt | Database | Sessions | SettingsAll | FactoryReset => true,
+            HotExit | ScrollbackAll | ChatsAll | ChatImages | Prompts | Templates | Themes | SystemPrompt | Database | Sessions | SettingsAll | FactoryReset => true,
             _ => false,
         }
     }
@@ -242,7 +246,7 @@ impl Item {
 
     /// Der Dateialter-Filter („älter als X Tage“) gilt hierfür.
     pub fn age_filtered(self) -> bool {
-        matches!(self, Item::ScrollbackOrphaned | Item::ScrollbackAll | Item::ChatsOrphaned | Item::ChatsAll)
+        matches!(self, Item::ScrollbackOrphaned | Item::ScrollbackAll | Item::ChatsOrphaned | Item::ChatsAll | Item::ChatImages)
     }
 
     pub fn label(self, l: Lang) -> &'static str {
@@ -258,6 +262,7 @@ impl Item {
             ScrollbackAll => l.t("Scrollback – alle", "Scrollback – all"),
             ChatsOrphaned => l.t("Chatverläufe ohne Sitzung", "Orphaned chat histories"),
             ChatsAll => l.t("Chatverläufe – alle", "Chat histories – all"),
+            ChatImages => l.t("Bilder in Chats", "Chat images"),
             CrashLog => l.t("Absturzprotokoll (crash.log)", "Crash log (crash.log)"),
             McpLog => l.t("MCP-Protokoll (mcp-log.jsonl)", "MCP call log (mcp-log.jsonl)"),
             Prompts => l.t("Prompt-Bibliothek", "Prompt library"),
@@ -291,6 +296,7 @@ impl Item {
             ScrollbackAll => l.t("Auch offene Terminals: sie behalten nur den Bildschirm.", "Open terminals too: they keep only the screen."),
             ChatsOrphaned => l.t("Verläufe, zu denen es keinen Chat mehr gibt.", "Histories that no chat belongs to any more."),
             ChatsAll => l.t("Auch offene Chats: sie werden leer.", "Open chats too: they become empty."),
+            ChatImages => l.t("Eingefügte Bilder und Bilder von Werkzeugen (chats\\<id>\\images\\). Die Chats bleiben, zeigen und senden die Bilder aber nicht mehr.", "Pasted images and images from tools (chats\\<id>\\images\\). The chats stay but no longer show or send the images."),
             CrashLog => l.t("Protokoll früherer Abstürze.", "Log of earlier crashes."),
             McpLog => l.t("Dokumentiert, was Agenten über MCP getan haben.", "Documents what agents did through MCP."),
             Prompts => l.t("prompts.json – zurück zu den Standard-Prompts.", "prompts.json – back to the default prompts."),
@@ -626,19 +632,62 @@ pub fn session_id_of(name: &str) -> Option<u64> {
     (id > 0 && rest.starts_with('.')).then_some(id)
 }
 
-/// Verlaufsdateien in `sub` (`scrollback` oder `chats`): (verwaist, alle, Ordner als Link übersprungen).
+/// Bilderordner der Chats (#357): `chats/<id>/` und beiseitegelegte `chats/<id>.orphan-…-images/` – je (Id oder `None`
+/// für beiseitegelegte, Dateien darin). Ordner, die selbst ein Link sind, werden nicht betreten.
+fn chat_image_dirs(data_dir: &Path) -> Vec<(Option<u64>, Vec<FileEntry>)> {
+    let dir = data_dir.join("chats");
+    if root_is_link(&dir) {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for e in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+        let Ok(m) = std::fs::symlink_metadata(e.path()) else { continue };
+        if !m.is_dir() || is_link(&m) {
+            continue;
+        }
+        let name = e.file_name().to_string_lossy().to_string();
+        let id = if !name.is_empty() && name.chars().all(|c| c.is_ascii_digit()) {
+            match name.parse::<u64>() {
+                Ok(id) => Some(id),
+                Err(_) => continue,
+            }
+        } else if session_id_of(&name).is_some() && name.contains(".orphan-") && name.contains("-images") {
+            None
+        } else {
+            continue;
+        };
+        let mut files = walk_followed(&e.path());
+        files.sort_by(|a, b| a.path.cmp(&b.path));
+        out.push((id, files));
+    }
+    out.sort_by_key(|(id, _)| *id);
+    out
+}
+
+/// Verlaufsdateien in `sub` (`scrollback` oder `chats`): (verwaist, alle, Ordner als Link übersprungen). Bei `chats`
+/// gehören die Bilder der Chats dazu (#357).
 fn history_files(data_dir: &Path, sub: &str, open: &[u64]) -> (Vec<FileEntry>, Vec<FileEntry>, Vec<PathBuf>) {
     let dir = data_dir.join(sub);
     let linked: Vec<PathBuf> = if root_is_link(&dir) { vec![dir.clone()] } else { Vec::new() };
-    let all = files_in(&dir, |n| session_id_of(n).is_some());
+    let mut all = files_in(&dir, |n| session_id_of(n).is_some());
+    let mut orphaned_images = Vec::new();
+    if sub == "chats" {
+        for (id, files) in chat_image_dirs(data_dir) {
+            if id.is_none_or(|id| !open.contains(&id)) {
+                orphaned_images.extend(files.iter().cloned());
+            }
+            all.extend(files);
+        }
+    }
     let orphaned = all
         .iter()
         .filter(|f| {
             let name = f.path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
             // Beiseitegelegte fremde Verläufe (`.orphan-`) gehören nie zu einer offenen Sitzung.
-            session_id_of(&name).is_some_and(|id| !open.contains(&id)) || name.contains(".orphan-")
+            f.path.parent() == Some(dir.as_path()) && (session_id_of(&name).is_some_and(|id| !open.contains(&id)) || name.contains(".orphan-"))
         })
         .cloned()
+        .chain(orphaned_images)
         .collect();
     (orphaned, all, linked)
 }
@@ -748,6 +797,7 @@ pub fn scan(ctx: &Ctx) -> Scan {
             Item::ScrollbackAll => Found { files: sb_all.clone(), linked: sb_link.clone(), ..Default::default() },
             Item::ChatsOrphaned => Found { files: ch_orph.clone(), linked: ch_link.clone(), ..Default::default() },
             Item::ChatsAll => Found { files: ch_all.clone(), linked: ch_link.clone(), ..Default::default() },
+            Item::ChatImages => Found { files: chat_image_dirs(d).into_iter().flat_map(|(_, f)| f).collect(), linked: ch_link.clone(), ..Default::default() },
             Item::CrashLog => Found { files: files_in_followed(d, |n| n == "crash.log" || n.starts_with("crash.log.")), ..Default::default() },
             Item::McpLog => Found { files: files_in_followed(d, |n| n == "mcp-log.jsonl" || n == "mcp-log.old.jsonl"), ..Default::default() },
             Item::Prompts => Found { files: one_file(&d.join("prompts.json")), ..Default::default() },

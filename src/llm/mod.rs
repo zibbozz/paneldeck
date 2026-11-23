@@ -96,12 +96,37 @@ impl Endpoint {
     }
 }
 
-/// Ein Modell des Servers. `tools`/`context_length` = `None`, wenn der Server es nicht verrät (OpenAI-kompatibel immer).
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// Ein Modell des Servers. `tools`/`context_length`/`vision` = `None`, wenn der Server es nicht verrät
+/// (OpenAI-kompatibel immer).
+#[derive(Clone, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct ModelInfo {
     pub name: String,
     pub tools: Option<bool>,
     pub context_length: Option<u32>,
+    /// Kann das Modell Bilder lesen (Ollama: `capabilities` enthält „vision“; seit 3.1.0, #357)?
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vision: Option<bool>,
+}
+
+/// Ein Bild an einer Nachricht (#357): Base64 der Datei (PNG oder JPEG) und ihr Medientyp. `tokens` = geschätzter
+/// Platz im Kontext; `path` = Datei, aus der `data` erst kurz vor dem Senden gelesen wird (nie mitgesendet).
+#[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ImagePart {
+    pub mime: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub data: String,
+    #[serde(skip)]
+    pub tokens: usize,
+    #[serde(skip)]
+    pub path: Option<std::path::PathBuf>,
+}
+
+impl ImagePart {
+    /// `data:`-Adresse für OpenAI-kompatible Server (`image_url`).
+    pub fn data_url(&self) -> String {
+        format!("data:{};base64,{}", self.mime, self.data)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -139,6 +164,9 @@ pub struct ChatMessage {
     /// Nur bei `Tool`: Name des Werkzeugs (Ollama).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_name: Option<String>,
+    /// Nur bei `User`: Bilder (#357; Ollama `images`, OpenAI-kompatibel Inhaltsteile `image_url`).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<ImagePart>,
 }
 
 impl ChatMessage {
@@ -281,6 +309,15 @@ impl Acc {
 
 pub(crate) fn as_u32(v: Option<&serde_json::Value>) -> Option<u32> {
     v.and_then(|v| v.as_u64()).map(|n| n.min(u32::MAX as u64) as u32)
+}
+
+/// JSON der Anfrage, wie sie an den Server geht (nur Tests).
+#[cfg(test)]
+pub fn request_body(kind: ServerKind, req: &ChatRequest) -> serde_json::Value {
+    match kind {
+        ServerKind::Ollama => ollama::request_json(req),
+        ServerKind::OpenAi => openai::request_json(req),
+    }
 }
 
 /// Ein Chat-Aufruf mit Datenstrom. Meldet Text, Werkzeugaufrufe und das Ende über `on` (blockiert bis zum Ende).

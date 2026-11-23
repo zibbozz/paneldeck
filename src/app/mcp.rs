@@ -2782,7 +2782,7 @@ mod tests {
             name: name.into(),
             url: url.into(),
             api_key: "U0VDUkVULUJMT0I=".into(),
-            last_models: models.iter().map(|m| crate::llm::ModelInfo { name: m.to_string(), tools: Some(true), context_length: Some(4096) }).collect(),
+            last_models: models.iter().map(|m| crate::llm::ModelInfo { name: m.to_string(), tools: Some(true), context_length: Some(4096), vision: None }).collect(),
             ..LlmServer::default()
         }
     }
