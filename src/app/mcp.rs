@@ -1666,6 +1666,16 @@ impl App {
         if c.awaiting_level_choice() {
             return Err(level_question());
         }
+        // Plan-Modus (#358): Über einen Plan entscheidet nur der Nutzer – ein Agent schreibt so lange nicht in den Chat.
+        if c.plan_blocks_agents() {
+            return Err(er(
+                "plan_pending",
+                tr(
+                    "Der Chat ist im Plan-Modus bzw. ein Plan wartet auf die Entscheidung des Nutzers (Ausführen/Änderungen anfragen/Verwerfen) – bis dahin wird nichts gesendet.",
+                    "The chat is in plan mode or a plan is waiting for the user's decision (Execute/Request changes/Discard) – nothing is sent until then.",
+                ),
+            ));
+        }
         match self.chat_send(ctx, id, Some(text), super::ChatSendOrigin::Agent { caller, note: Some(note.clone()) }) {
             super::ChatSendResult::Sent => {
                 self.mcp_taint_write(caller, id);

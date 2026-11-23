@@ -919,5 +919,6 @@ Testinstanz aus einer Kopie der .exe mit eigenem Datenordner, ein Chat mit einem
 - [ ] **Verwerfen / Export:** neuer Plan → *Discard* → Karte „discarded“, Plan-Schalter aus, keine To-dos. *Export …* öffnet den Speichern-Dialog mit `plan-<chat>-<zeit>.md`; Abbrechen speichert nichts, Speichern schreibt die Datei und zeigt einen Toast.
 - [ ] **Neustart:** Hub neu starten → Karte samt Stand, Stufe und Fassung wieder da; eine Chat-Datei aus 3.0.0 (ohne `plan`) lädt unverändert. *Verlauf leeren* entfernt die Karte.
 - [ ] **Ohne `ask_user`/mit `ask_user`:** Stufe „max“ mit einer offenen Aufgabe → das Modell stellt zuerst nummerierte Auswahlfragen ohne Karte (mit #356: über `ask_user`), schreibt den Plan erst nach den Antworten.
-- [ ] **Agenten:** `send_chat_message` an einen Chat mit eingeschaltetem Plan-Schalter → normale Runde (keine read-only-Kopfzeile).
+- [ ] **Agenten:** `send_chat_message` an einen Chat mit eingeschaltetem Plan-Schalter oder wartendem Plan → Fehler `plan_pending`, nichts gesendet; nach Ausführen/Verwerfen (Schalter aus) → normale Runde.
+- [ ] **Angehaltene Plan-Runde:** Stufe „low“, Runde hält nach Budget + 3 Aufrufen an → Karte des vorigen Plans ohne aktive Knöpfe; *Verlauf leeren* → danach läuft kein wartender Aufruf; *Weiter* gibt neues Budget.
 - [ ] **Beide Sprachen:** Schalter, Stufen („niedrig“ … „maximal“), Kopfzeile, Karte, Kommentarfeld, Toasts und die gesendeten Nachrichten („Plan freigegeben – bitte ausführen.“, „Bitte ändere den Plan:“) auf Deutsch und Englisch.

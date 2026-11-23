@@ -319,6 +319,12 @@ impl ChatState {
         self.streaming() || (!self.paused && (!self.calls.is_empty() || self.next_request || self.text_check))
     }
 
+    /// Ist die Runde noch nicht ganz zu Ende – läuft sie oder ist sie angehalten mit wartenden Aufrufen bzw. einer
+    /// ausstehenden Anfrage (*Weiter*)? Anders als [`ChatState::busy`] zählt eine angehaltene Runde mit.
+    pub(super) fn round_open(&self) -> bool {
+        self.streaming() || self.paused || !self.calls.is_empty() || self.next_request || self.text_check
+    }
+
     /// Ein schreibender Aufruf wartet auf die Entscheidung des Nutzers.
     pub fn awaiting_approval(&self) -> bool {
         self.calls.iter().any(|c| c.state == CallState::Approval)
@@ -366,6 +372,12 @@ impl ChatState {
         self.file.todos.clear();
         self.file.plan = None;
         self.planning.round = None;
+        // Eine angehaltene Runde endet ganz: ihre wartenden Aufrufe dürfen danach nie (ohne Sperre, ohne Klick) laufen.
+        self.calls.clear();
+        self.next_request = false;
+        self.reset_steps();
+        self.approval_target = None;
+        self.approval_preview = None;
         self.ui = UiCache::default();
         self.usage = None;
         self.context = None;
@@ -433,8 +445,7 @@ impl ChatState {
         self.editing = false;
         self.draft_before_edit = None;
         self.draft.clear();
-        self.planning.round = plan;
-        self.plan_sync();
+        self.plan_round_started(plan);
         self.start_turn(backend, meta, cx, repaint);
         true
     }
@@ -462,7 +473,7 @@ impl ChatState {
         self.next_request = false;
         self.paused = false;
         self.reset_steps();
-        self.plan_sync();
+        self.plan_regenerate();
         self.changed(self.file.messages.len());
         self.start_turn(backend, meta, cx, repaint);
         true
@@ -486,6 +497,7 @@ impl ChatState {
         self.fail_streak = None;
         self.fail_count = 0;
         self.loop_stop = false;
+        self.planning.research = 0;
     }
 
     fn start_turn(&mut self, backend: &dyn ChatBackend, meta: &ChatMeta, cx: &TurnContext, repaint: Repaint) {
@@ -534,13 +546,13 @@ impl ChatState {
     /// Werkzeugaufrufe (auch ein laufender) bekommen das Ergebnis „abgebrochen“; ein schon gestartetes Werkzeug kann im
     /// Hub trotzdem noch zu Ende laufen, sein Ergebnis wird verworfen.
     pub fn stop(&mut self) {
-        let was_busy = self.busy();
         if self.streaming() && !self.poll().finished && self.turn.take().is_some() {
             self.drop_empty_answer();
             self.changed(self.turn_msg);
         }
         self.cancel_tools();
-        if was_busy {
+        // Plan-Runde (#358): ein Plan „in Überarbeitung“ wartet wieder auf die Entscheidung.
+        if self.planning.round.is_some() {
             self.plan_round_ended(false);
         }
     }
@@ -764,7 +776,7 @@ impl ChatState {
         let max = policy.cfg.max_steps.max(1);
         // Plan-Runde (#358): nur lesende Werkzeuge, Recherche-Budget der Stufe statt der Höchstzahl des Modells.
         let plan_round = self.planning.round;
-        let limit = plan_round.map_or(max, |l| l.step_limit(max));
+        let limit = plan_round.map_or(max, PlanLevel::step_limit);
         loop {
             let Some(p) = self.calls.first() else {
                 if !self.next_request {
@@ -800,7 +812,7 @@ impl ChatState {
                 return ToolStep::Idle;
             }
             let checked = policy.check(&p.call).and_then(|ask| match plan_round.filter(|_| !approved) {
-                Some(level) => plan::gate(level, &p.call, self.steps).map(|()| ask),
+                Some(level) => plan::gate(level, &p.call, self.planning.research, self.grants).map(|()| ask),
                 None => Ok(ask),
             });
             let ask = match checked {
@@ -825,6 +837,9 @@ impl ChatState {
             }
             if !approved {
                 self.steps += 1;
+                if plan_round.is_some() {
+                    self.planning.research += 1;
+                }
                 if policy.needs_approval(ask, &self.calls[0].call, &self.file.always_allow) {
                     self.calls[0].state = CallState::Approval;
                     self.touch();

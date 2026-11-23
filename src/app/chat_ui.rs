@@ -136,6 +136,8 @@ struct RowCx<'a> {
     waiting: String,
     /// Aktueller Plan (#358): seine Nachricht wird als Plan-Karte gezeichnet; `plan_decidable` = Knöpfe aktiv.
     plan: Option<&'a crate::chat::plan::Plan>,
+    /// Index der Nachricht mit dem Plan (bei gleichem Text nur die neueste).
+    plan_msg: Option<usize>,
     plan_decidable: bool,
 }
 
@@ -189,6 +191,7 @@ fn messages(ui: &mut Ui, session: u64, chat: &mut ChatState, model: &str, lang: 
     let target = chat.approval_target.clone();
     let preview = chat.approval_preview.clone().filter(|(id, _)| pending_has(&chat.calls, id));
     let plan_decidable = chat.plan_decidable();
+    let plan_msg = chat.plan_message_index();
     let ChatState { file, ui: cache, warning, follow, notice, usage, .. } = chat;
     let msgs = &file.messages;
     let n = msgs.len();
@@ -228,6 +231,7 @@ fn messages(ui: &mut Ui, session: u64, chat: &mut ChatState, model: &str, lang: 
         target,
         preview,
         plan: file.plan.as_ref(),
+        plan_msg,
         plan_decidable,
     };
     // Am Ende kleben, solange der Nutzer nicht hochscrollt; nach dem Öffnen und nach dem Senden einmal ganz nach unten.
@@ -416,7 +420,7 @@ fn assistant(ui: &mut Ui, i: usize, m: &ChatMsg, msgs: &[ChatMsg], cache: &mut U
     if !m.content.is_empty() {
         let doc = cache.md.entry(i).or_insert_with(|| markdown::parse_plain(&m.content));
         // Die Antwort mit dem aktuellen Plan ist eine Plan-Karte (#358).
-        if let Some(p) = rc.plan.filter(|p| m.error.is_none() && m.content.trim() == p.markdown) {
+        if let Some(p) = rc.plan.filter(|_| rc.plan_msg == Some(i)) {
             super::chat_plan_ui::plan_card(ui, session, p, doc, rc.plan_decidable, lang, out);
         } else {
             let opts = RenderOpts { soft_breaks_as_newlines: true, copy_button: Some(lang.t("Kopieren", "Copy")) };

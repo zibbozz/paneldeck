@@ -186,6 +186,14 @@ impl App {
         if *act == PlanAction::Export {
             return self.export_plan(id);
         }
+        // Wie beim Senden: ohne gewählte Stufe des Modells geht keine Runde los (die Frage erscheint im Chat).
+        if matches!(act, PlanAction::Execute | PlanAction::RequestChanges(_)) && self.chat_level_unchosen(id) {
+            if let Some(c) = self.entries.get_mut(&id).and_then(|e| e.chat.as_mut()) {
+                c.level_question = Some(chatmod::LevelAsker::Agent);
+                c.touch();
+            }
+            return;
+        }
         let lang = self.settings.language;
         let backend = self.chat_backend.clone();
         let rctx = ctx.clone();

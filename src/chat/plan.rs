@@ -79,11 +79,12 @@ impl PlanLevel {
         }
     }
 
-    /// Ab dieser Zahl von Aufrufen hält eine Plan-Runde an (*Weiter*): das Budget plus ein paar Aufrufe, damit das Modell
-    /// die Meldung `plan_budget` sieht und den Plan schreibt; mindestens die Höchstzahl des Modells. *max*: keine Grenze.
-    pub fn step_limit(self, max_steps: u32) -> u32 {
+    /// Ab dieser Zahl von Aufrufen hält eine Plan-Runde an (*Weiter* gibt noch einmal so viele frei – und ebenso viel
+    /// Recherche-Budget): das Budget plus ein paar Aufrufe, damit das Modell die Meldung `plan_budget` sieht und den Plan
+    /// schreibt. Ersetzt die Höchstzahl des Modells. *max*: keine Grenze.
+    pub fn step_limit(self) -> u32 {
         match self.research_budget() {
-            Some(b) => (b + BUDGET_GRACE).max(max_steps),
+            Some(b) => b + BUDGET_GRACE,
             None => u32::MAX,
         }
     }
@@ -127,6 +128,10 @@ pub struct Plan {
     /// Gespeicherte Markdown-Datei relativ zum Datenordner (`plans/<chat>-<zeit>.md`), nach der Freigabe.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub file: Option<String>,
+    /// Die Ausführung des freigegebenen Plans ist vorbei (eine neue Plan-Runde begann oder die To-do-Liste gehört nicht
+    /// mehr zum Plan): der Systemprompt nennt ihn nicht mehr. Fehlt = `false`.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub finished: bool,
 }
 
 impl Plan {
@@ -137,10 +142,16 @@ impl Plan {
     }
 }
 
-/// Plan tolerant lesen (für `ChatFile::plan`): ein unlesbares Objekt oder ein leerer Plan ergibt `None`.
+/// Plan tolerant lesen (für `ChatFile::plan`): ein unlesbares Objekt oder ein leerer Plan ergibt `None`. Ein Plan „in
+/// Überarbeitung“ wartet nach dem Laden wieder auf die Entscheidung (die Runde dazu lief nur bis zum Ende des Hubs).
 pub fn lenient_plan<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Plan>, D::Error> {
     let v = serde_json::Value::deserialize(d)?;
-    Ok(serde_json::from_value::<Plan>(v).ok().filter(|p| !p.markdown.trim().is_empty()))
+    Ok(serde_json::from_value::<Plan>(v).ok().filter(|p| !p.markdown.trim().is_empty()).map(|mut p| {
+        if p.status == PlanStatus::Revising {
+            p.status = PlanStatus::Proposed;
+        }
+        p
+    }))
 }
 
 /// Plan-Modus eines Chats zur Laufzeit (nicht gespeichert).
@@ -154,6 +165,9 @@ pub struct PlanMode {
     /// Die laufende (bzw. letzte) Runde ist eine Plan-Runde mit dieser Stufe: Schreib-Werkzeuge gesperrt,
     /// Recherche-Budget. Gilt für die ganze Runde samt *Weiter* und *Neu erzeugen*; jede neue Nachricht setzt es neu.
     pub round: Option<PlanLevel>,
+    /// Aufrufe der laufenden Plan-Runde, die durch die Sperre kamen (zählen gegen das Recherche-Budget; Aufrufe mit
+    /// kaputten Argumenten oder gesperrte zählen nicht).
+    pub research: u32,
 }
 
 /// Bedienung der Plan-Karte (meldet die Oberfläche, führt die App aus).
@@ -202,9 +216,10 @@ pub fn is_read_only(name: &str) -> bool {
     crate::mcp::tool_level(name) == Some(McpLevel::Read)
 }
 
-/// Darf der Aufruf in einer Plan-Runde der Stufe `level` laufen? `steps` = Aufrufe der Runde vor diesem. `Err` =
-/// Ergebnis-Nachricht für das Modell (Fehler `plan_mode` bzw. `plan_budget`).
-pub fn gate(level: PlanLevel, call: &ToolCall, steps: u32) -> Result<(), (ToolStatus, String)> {
+/// Darf der Aufruf in einer Plan-Runde der Stufe `level` laufen? `research` = schon zugelassene Aufrufe der Runde,
+/// `grants` = wie oft das Budget freigegeben ist (1 + *Weiter*). `Err` = Ergebnis-Nachricht für das Modell (Fehler
+/// `plan_mode` bzw. `plan_budget`).
+pub fn gate(level: PlanLevel, call: &ToolCall, research: u32, grants: u32) -> Result<(), (ToolStatus, String)> {
     if !is_read_only(&call.name) {
         let msg = format!(
             "Plan mode: {} changes something and is locked until the user approves the plan (Execute). Use only read-only tools now, then write the plan.",
@@ -212,7 +227,7 @@ pub fn gate(level: PlanLevel, call: &ToolCall, steps: u32) -> Result<(), (ToolSt
         );
         return Err((ToolStatus::Denied, super::tools::error_json("plan_mode", &msg)));
     }
-    if let Some(b) = level.research_budget().filter(|b| steps >= *b) {
+    if let Some(b) = level.research_budget().filter(|b| research >= b.saturating_mul(grants.max(1))) {
         let msg = format!("Plan mode: the research budget of level {} ({b} tool calls) is used up. Write the plan now from what you found.", level.as_str());
         return Err((ToolStatus::Denied, super::tools::error_json("plan_budget", &msg)));
     }
@@ -252,6 +267,7 @@ fn research(level: PlanLevel, revision: bool, tools: &[String]) -> String {
     s.push_str(depth(level));
     s.push_str(questions(level, tools.iter().any(|t| t == "ask_user")));
     s.push_str("- Answer format: start the plan with the line `# Plan: <short title>` and include a section `## Steps` with a numbered list (`1. …`), one concrete step per line (what and where). When the user presses Execute, these steps become the chat's to-do list.\n");
+    s.push_str("- `# Plan:` and `## Steps` are fixed markers that Paneldeck uses to recognise the plan: keep them exactly like this, in English, in every language; write the title and everything else in the user's language.\n");
     s.push_str("- Write the plan in the user's language. Then stop: do not start the work and do not ask whether to start – the user decides with the buttons Execute, Request changes or Discard.\n");
     if revision {
         s.push_str("- The user requested changes to your previous plan (their comment is the last message). Write the complete revised plan again, in the same format.\n");
@@ -301,36 +317,84 @@ fn execute(steps: &[String], tools: &[String]) -> String {
 // ---------------------------------------------------------------------------------------------------------------
 // Plan im Antworttext
 
-/// Überschrift (Ebene 1–3) → ihr Text, sonst `None`.
+/// Zeilen außerhalb von Codeblöcken (``` bzw. ~~~), mit ihrem Index: Überschriften und Listen in Code zählen nicht.
+fn prose_lines(text: &str) -> Vec<(usize, &str)> {
+    let mut out = Vec::new();
+    let mut fence: Option<char> = None;
+    for (i, l) in text.lines().enumerate() {
+        let t = l.trim_start_matches(' ');
+        let marker = (l.len() - t.len() <= 3).then(|| ['`', '~'].into_iter().find(|c| t.starts_with(&c.to_string().repeat(3)))).flatten();
+        match (fence, marker) {
+            (None, Some(c)) => fence = Some(c),
+            (Some(f), Some(c)) if f == c => fence = None,
+            (None, None) => out.push((i, l)),
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Ebene, die eine ganz fett geschriebene Zeile („**Steps:**“) als Zwischenüberschrift bekommt (unter den echten).
+const BOLD_LEVEL: usize = 4;
+
+/// Überschrift (Ebene 1–3, höchstens 3 Leerzeichen eingerückt) → (Ebene, Text), sonst `None`. Eine Zeile, die ganz fett
+/// ist (`**Steps:**`, `__Schritte__`), zählt als Überschrift der Ebene [`BOLD_LEVEL`].
 fn heading(line: &str) -> Option<(usize, &str)> {
-    let t = line.trim_start();
+    let t = line.trim_start_matches(' ');
+    if line.len() - t.len() > 3 {
+        return None; // eingerückter Codeblock
+    }
     let rest = t.trim_start_matches('#');
     let n = t.len() - rest.len();
-    ((1..=3).contains(&n) && rest.starts_with([' ', '\t'])).then_some((n, rest.trim()))
+    if (1..=3).contains(&n) && rest.starts_with([' ', '\t']) {
+        return Some((n, rest.trim()));
+    }
+    let t = t.trim_end();
+    for m in ["**", "__"] {
+        let inner = t.strip_prefix(m).and_then(|r| r.strip_suffix(m).or_else(|| r.strip_suffix(&format!("{m}:")[..])));
+        if let Some(inner) = inner.filter(|i| !i.trim().is_empty() && !i.contains(m)) {
+            return Some((BOLD_LEVEL, inner.trim()));
+        }
+    }
+    None
 }
 
-/// Beginnt der Text mit dem Wort `word` (danach Ende, Leerzeichen oder Satzzeichen)?
-fn starts_with_word(text: &str, word: &str) -> bool {
-    let t = text.trim_start_matches(['*', '_']).to_lowercase();
-    t.strip_prefix(word).is_some_and(|r| r.chars().next().is_none_or(|c| !c.is_alphanumeric()))
+/// Ist der Überschriftentext genau `word` – danach nur Ende, `:`, ein Gedankenstrich oder `(`? „Plan: Titel“ ja,
+/// „Plan questions“ oder „Planning“ nein.
+/// Groß-/Kleinschreibung egal, Fettdruck und eine Nummer davor („3. Steps“, „2) Schritte“) zählen nicht.
+fn heading_is(text: &str, word: &str) -> bool {
+    let t = text.trim_matches(['*', '_']).trim().to_lowercase();
+    let digits = t.chars().take_while(char::is_ascii_digit).count();
+    let t = match t[digits..].strip_prefix(['.', ')']) {
+        Some(r) if digits > 0 => r.trim_start().trim_start_matches(['*', '_']).to_string(),
+        _ => t,
+    };
+    t.strip_prefix(word).is_some_and(|r| {
+        let r = r.trim_start();
+        r.is_empty() || r.starts_with([':', '–', '—', '-', '('])
+    })
 }
+
+/// Überschriften des Abschnitts mit den Schritten (Englisch und Deutsch; verlangt wird `## Steps`).
+pub const STEPS_HEADINGS: &[&str] = &["steps", "implementation steps", "plan steps", "schritte", "umsetzungsschritte", "arbeitsschritte", "vorgehen", "umsetzung"];
 
 fn steps_heading(text: &str) -> bool {
-    ["steps", "schritte", "implementation steps"].iter().any(|w| starts_with_word(text, w))
+    STEPS_HEADINGS.iter().any(|w| heading_is(text, w))
 }
 
-/// Enthält die Antwort einen Plan? Eine Überschrift `# Plan …` (Ebene 1–3) oder ein Abschnitt `## Steps`/`## Schritte`.
-/// Rückfragen ohne diese Überschriften sind kein Plan.
+/// Enthält die Antwort einen Plan? Eine Überschrift `# Plan …` (Ebene 1–3) oder ein Abschnitt `## Steps`/`## Schritte`,
+/// außerhalb von Codeblöcken. Rückfragen ohne diese Überschriften sind kein Plan.
 pub fn detect(content: &str) -> bool {
-    content.lines().filter_map(heading).any(|(_, h)| starts_with_word(h, "plan") || steps_heading(h))
+    prose_lines(content).into_iter().filter_map(|(_, l)| heading(l)).any(|(_, h)| heading_is(h, "plan") || steps_heading(h))
 }
 
-/// Listenpunkt einer obersten Ebene: `1. text` / `1) text` (nummeriert) bzw. `- text` / `* text` / `- [ ] text`.
+/// Listenpunkt der obersten Ebene (höchstens 1 Leerzeichen eingerückt; 2 und mehr = Unterpunkt): `1. text` / `1) text`
+/// (nummeriert) bzw. `- text` / `* text` / `- [ ] text`.
 fn list_item(line: &str) -> Option<(bool, &str)> {
-    if line.starts_with("    ") || line.starts_with('\t') {
-        return None; // eingerückt: Unterpunkt oder Fortsetzung
+    let t = line.trim_start_matches(' ');
+    if line.len() - t.len() > 1 || t.starts_with('\t') {
+        return None;
     }
-    let t = line.trim_start();
     let digits = t.chars().take_while(char::is_ascii_digit).count();
     if digits > 0 && digits <= 3 {
         let rest = &t[digits..];
@@ -352,20 +416,21 @@ fn clean_step(s: &str) -> String {
 }
 
 /// Schritte des Plans: die obersten Listenpunkte im Abschnitt `Steps`/`Schritte` (nummerierte vor Aufzählungen), ohne
-/// solchen Abschnitt alle nummerierten Punkte der obersten Ebene. Höchstens [`super::agent::MAX_TODOS`].
+/// solchen Abschnitt alle nummerierten Punkte der obersten Ebene; Codeblöcke zählen nicht. Höchstens
+/// [`super::agent::MAX_TODOS`].
 pub fn steps(markdown: &str) -> Vec<String> {
-    let lines: Vec<&str> = markdown.lines().collect();
-    let mut section: Option<(usize, usize)> = None; // (Ebene der Überschrift, erste Zeile)
+    let lines = prose_lines(markdown);
+    let mut section: Option<(usize, usize)> = None; // (Ebene der Überschrift, erste Zeile in `lines`)
     let mut range = None;
-    for (i, l) in lines.iter().enumerate() {
+    for (k, (_, l)) in lines.iter().enumerate() {
         if let Some((n, h)) = heading(l) {
             if let Some((lvl, from)) = section {
                 if n <= lvl {
-                    range = Some((from, i));
+                    range = Some((from, k));
                     break;
                 }
             } else if steps_heading(h) {
-                section = Some((n, i + 1));
+                section = Some((n, k + 1));
             }
         }
     }
@@ -373,7 +438,7 @@ pub fn steps(markdown: &str) -> Vec<String> {
         range = section.map(|(_, from)| (from, lines.len()));
     }
     let pick = |from: usize, to: usize, numbered_only: bool| -> Vec<String> {
-        let items: Vec<(bool, &str)> = lines[from..to].iter().filter_map(|l| list_item(l)).filter(|(_, t)| !t.is_empty()).collect();
+        let items: Vec<(bool, &str)> = lines[from..to].iter().filter_map(|(_, l)| list_item(l)).filter(|(_, t)| !t.is_empty()).collect();
         let numbered = items.iter().any(|(n, _)| *n);
         items.into_iter().filter(|(n, _)| *n || (!numbered && !numbered_only)).map(|(_, t)| clean_step(t)).take(super::agent::MAX_TODOS).collect()
     };
@@ -400,7 +465,13 @@ pub fn dir(data_dir: &Path) -> PathBuf {
 pub fn file_text(plan: &Plan, chat_title: &str) -> String {
     let when = plan.approved.unwrap_or(plan.created);
     let date = chrono::DateTime::from_timestamp(when as i64, 0).map(|d| d.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M").to_string()).unwrap_or_default();
-    let title: String = chat_title.chars().filter(|c| !c.is_control()).collect::<String>().replace("--", "-");
+    // Jede Folge von `-` wird zu einem (sonst schlösse z. B. „--->“ den Kommentar), Steuerzeichen fallen weg.
+    let mut title = String::new();
+    for c in chat_title.chars().filter(|c| !c.is_control()) {
+        if !(c == '-' && title.ends_with('-')) {
+            title.push(c);
+        }
+    }
     let status = if plan.status == PlanStatus::Approved { "approved" } else { "plan" };
     format!("<!-- Paneldeck plan · chat “{}” · level {} · revision {} · {status} {date} -->\n\n{}\n", crate::mcp::short(title.trim(), 80), plan.level.as_str(), plan.revision.max(1), plan.markdown.trim_end())
 }
@@ -452,25 +523,43 @@ impl ChatState {
         self.file.plan.as_ref().filter(|p| p.current()).map(|p| p.markdown.as_str())
     }
 
-    /// Plan-Teil des Systemprompts für die laufende Runde: Plan-Runde → Recherche; sonst, solange ein freigegebener Plan
-    /// noch offene Schritte in der To-do-Liste hat → Ausführung.
+    /// Index der Nachricht, die als Plan-Karte gezeichnet wird: die neueste Antwort mit genau dem Text des Plans.
+    pub fn plan_message_index(&self) -> Option<usize> {
+        let p = self.file.plan.as_ref()?;
+        self.file.messages.iter().rposition(|m| m.role == Role::Assistant && m.error.is_none() && m.content.len() >= p.markdown.len() && m.content.trim() == p.markdown)
+    }
+
+    /// Ist die Nachricht `i` die des aktuellen Plans?
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn is_plan_message(&self, i: usize) -> bool {
+        self.plan_message_index() == Some(i)
+    }
+
+    /// Der freigegebene Plan, solange er ausgeführt wird: nicht beendet, die To-do-Liste besteht genau aus seinen
+    /// Schritten (sonst hat das Modell sie ersetzt), und es ist noch etwas offen.
+    fn executing_plan(&self) -> Option<&Plan> {
+        let p = self.file.plan.as_ref().filter(|p| p.status == PlanStatus::Approved && !p.finished)?;
+        let todos = &self.file.todos;
+        let same = !todos.is_empty() && todos.iter().map(|t| t.content.as_str()).eq(steps(&p.markdown).iter().map(String::as_str));
+        (same && todos.iter().any(|t| t.status != TodoStatus::Completed)).then_some(p)
+    }
+
+    /// Plan-Teil des Systemprompts für die laufende Runde: Plan-Runde → Recherche; sonst, solange der freigegebene Plan
+    /// ausgeführt wird → Ausführung.
     pub fn plan_phase(&self) -> Option<PlanPhase> {
         if let Some(level) = self.planning.round {
             let revision = self.file.plan.as_ref().is_some_and(|p| p.status == PlanStatus::Revising);
             return Some(PlanPhase::Research { level, revision });
         }
-        let p = self.file.plan.as_ref().filter(|p| p.status == PlanStatus::Approved)?;
-        self.file.todos.iter().any(|t| t.status != TodoStatus::Completed).then(|| PlanPhase::Execute { steps: steps(&p.markdown) })
+        self.executing_plan().map(|p| PlanPhase::Execute { steps: steps(&p.markdown) })
     }
 
     /// Wie [`ChatState::plan_phase`], aber für die nächste Nachricht (Schalter *Plan*) – für die Schätzung des Füllstands.
     pub fn next_plan_phase(&self) -> Option<PlanPhase> {
         if self.planning.on {
-            let revision = self.file.plan.as_ref().is_some_and(|p| p.status == PlanStatus::Revising);
-            return Some(PlanPhase::Research { level: self.planning.level, revision });
+            return Some(PlanPhase::Research { level: self.planning.level, revision: false });
         }
-        let p = self.file.plan.as_ref().filter(|p| p.status == PlanStatus::Approved)?;
-        self.file.todos.iter().any(|t| t.status != TodoStatus::Completed).then(|| PlanPhase::Execute { steps: steps(&p.markdown) })
+        self.executing_plan().map(|p| PlanPhase::Execute { steps: steps(&p.markdown) })
     }
 
     /// Schalter *Plan* umlegen (Knopf oder Umschalt+Tab).
@@ -488,28 +577,52 @@ impl ChatState {
         }
     }
 
-    /// Ist die Nachricht `i` die des aktuellen Plans (wird als Plan-Karte gezeichnet)?
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub fn is_plan_message(&self, i: usize) -> bool {
-        let (Some(p), Some(m)) = (self.file.plan.as_ref(), self.file.messages.get(i)) else { return false };
-        m.role == Role::Assistant && m.error.is_none() && m.content.trim() == p.markdown
+    /// Eine neue Runde beginnt (Senden): Plan-Runde der Stufe `plan` oder normal. Eine neue Plan-Runde beendet die
+    /// Ausführung eines freigegebenen Plans; eine normale Nachricht lässt einen Plan „in Überarbeitung“ wieder warten.
+    pub(super) fn plan_round_started(&mut self, plan: Option<PlanLevel>) {
+        self.planning.round = plan;
+        self.planning.research = 0;
+        if let Some(p) = self.file.plan.as_mut() {
+            match (plan.is_some(), p.status) {
+                (true, PlanStatus::Approved) => p.finished = true,
+                (false, PlanStatus::Revising) => p.status = PlanStatus::Proposed,
+                _ => {}
+            }
+        }
+        self.plan_sync();
     }
 
-    /// Eine Plan-Runde ist zu Ende (`complete` = die Antwort kam vollständig an): Steht in der letzten Antwort ein Plan,
-    /// wird er der aktuelle (vorgeschlagen; nach *Änderungen anfragen* als neue Fassung). Sonst (Rückfragen, Fehler,
-    /// Stopp) wartet ein Plan in Überarbeitung wieder auf die Entscheidung.
+    /// *Neu erzeugen* (nachdem der Verlauf abgeschnitten wurde): War die abgeschnittene Antwort der vorgeschlagene Plan,
+    /// ist auch die neue Antwort eine Plan-Runde seiner Stufe – auch nach einem Neustart, wenn der Chat die Stufe der
+    /// letzten Runde nicht mehr kennt.
+    pub(super) fn plan_regenerate(&mut self) {
+        let lost = self.planning.round.is_none() && self.plan_message_index().is_none();
+        if let Some(p) = self.file.plan.as_ref().filter(|p| lost && matches!(p.status, PlanStatus::Proposed | PlanStatus::Revising)) {
+            self.planning.round = Some(p.level);
+        }
+        self.planning.research = 0;
+        self.plan_sync();
+    }
+
+    /// Eine Plan-Runde ist zu Ende (`complete` = die letzte Antwort kam vollständig an): Steht in einer Antwort der Runde
+    /// ein Plan (die neueste zählt – auch eine, die zugleich Werkzeuge aufrief), wird er der aktuelle (vorgeschlagen;
+    /// nach *Änderungen anfragen* als neue Fassung). Sonst (Rückfragen, Fehler, Stopp) wartet ein Plan in Überarbeitung
+    /// wieder auf die Entscheidung.
     pub(super) fn plan_round_ended(&mut self, complete: bool) {
         let Some(level) = self.planning.round else { return };
-        let text = self.file.messages.last().filter(|m| complete && m.role == Role::Assistant && m.error.is_none() && m.tool_calls.is_empty()).map(|m| m.content.trim().to_string());
-        match text.filter(|t| detect(t)) {
-            Some(markdown) => {
+        let msgs = &self.file.messages;
+        let from = super::logic::last_user(msgs).map_or(0, |i| i + 1).min(msgs.len());
+        let found = if complete { msgs[from..].iter().rev().find(|m| m.role == Role::Assistant && m.error.is_none() && detect(&m.content)).map(|m| m.content.trim().to_string()) } else { None };
+        match found {
+            // Derselbe Plan noch einmal erkannt (z. B. Ende nach einem Stopp): bleibt, wie er ist.
+            Some(markdown) if self.file.plan.as_ref().is_none_or(|p| p.markdown != markdown || p.status == PlanStatus::Revising) => {
                 let revision = match &self.file.plan {
                     Some(p) if matches!(p.status, PlanStatus::Proposed | PlanStatus::Revising) => p.revision.max(1) + 1,
                     _ => 1,
                 };
-                self.file.plan = Some(Plan { level, status: PlanStatus::Proposed, markdown, revision, created: super::now_secs(), approved: None, file: None });
+                self.file.plan = Some(Plan { level, status: PlanStatus::Proposed, markdown, revision, created: super::now_secs(), ..Plan::default() });
             }
-            None => {
+            _ => {
                 if let Some(p) = self.file.plan.as_mut().filter(|p| p.status == PlanStatus::Revising) {
                     p.status = PlanStatus::Proposed;
                 }
@@ -520,21 +633,28 @@ impl ChatState {
 
     /// Ein vorgeschlagener Plan, dessen Nachricht nicht mehr im Verlauf steht (bearbeitet, neu erzeugt), fällt weg.
     pub(super) fn plan_sync(&mut self) {
-        let gone = self.file.plan.as_ref().is_some_and(|p| matches!(p.status, PlanStatus::Proposed | PlanStatus::Revising) && !self.file.messages.iter().any(|m| m.role == Role::Assistant && m.content.trim() == p.markdown));
-        if gone {
+        let open = self.file.plan.as_ref().is_some_and(|p| matches!(p.status, PlanStatus::Proposed | PlanStatus::Revising));
+        if open && self.plan_message_index().is_none() {
             self.file.plan = None;
             self.touch();
         }
     }
 
-    /// Wartet ein Plan auf die Entscheidung des Nutzers (und läuft gerade keine Runde)?
+    /// Wartet ein Plan auf die Entscheidung des Nutzers – und ist die Runde ganz zu Ende (auch keine angehaltene Runde
+    /// mit wartenden Aufrufen)? Nur dann gehen die Knöpfe der Karte.
     pub fn plan_decidable(&self) -> bool {
-        !self.busy() && !self.editing && self.file.plan.as_ref().is_some_and(|p| p.status == PlanStatus::Proposed)
+        !self.round_open() && !self.editing && self.file.plan.as_ref().is_some_and(|p| p.status == PlanStatus::Proposed)
     }
 
-    /// *Ausführen*: Plan freigeben, seine Schritte in die To-do-Liste, Plan-Modus aus und die Nachricht `text` als
-    /// normale Runde senden (Schreib-Werkzeuge frei, mit den üblichen Freigaben). `false`, wenn kein Plan wartet oder
-    /// eine Runde läuft. Speichern als Datei macht die App danach ([`save`]).
+    /// Dürfen externe Agenten gerade nichts senden (MCP `plan_pending`)? Ja, solange der Plan-Schalter an ist oder ein Plan
+    /// auf die Entscheidung des Nutzers wartet – ein Agent soll *Ausführen* nicht umgehen.
+    pub fn plan_blocks_agents(&self) -> bool {
+        self.planning.on || self.file.plan.as_ref().is_some_and(|p| matches!(p.status, PlanStatus::Proposed | PlanStatus::Revising))
+    }
+
+    /// *Ausführen*: Plan freigeben, seine Schritte in die To-do-Liste (ohne Schritte bleibt sie, wie sie ist), Plan-Modus
+    /// aus und die Nachricht `text` als normale Runde senden (Schreib-Werkzeuge frei, mit den üblichen Freigaben).
+    /// `false`, wenn kein Plan wartet oder eine Runde läuft. Speichern als Datei macht die App danach ([`save`]).
     pub fn execute_plan(&mut self, text: &str, backend: &dyn ChatBackend, meta: &ChatMeta, cx: &TurnContext, repaint: Repaint) -> bool {
         if !self.plan_decidable() {
             return false;
@@ -542,9 +662,13 @@ impl ChatState {
         let Some(p) = self.file.plan.as_mut() else { return false };
         p.status = PlanStatus::Approved;
         p.approved = Some(super::now_secs());
+        p.finished = false;
         let list = todos(&p.markdown);
-        self.set_todos(list);
+        if !list.is_empty() {
+            self.set_todos(list);
+        }
         self.planning.on = false;
+        self.touch();
         self.send_message(text, None, backend, meta, cx, repaint)
     }
 
@@ -566,7 +690,9 @@ impl ChatState {
         sent
     }
 
-    /// *Verwerfen*: der Plan bleibt als Karte stehen (verworfen), der Plan-Modus geht aus.
+    /// *Verwerfen*: der Plan bleibt als Karte stehen (verworfen), der Plan-Modus geht aus. Nur bei ganz beendeter Runde
+    /// (siehe [`ChatState::plan_decidable`]) – sonst liefen wartende Aufrufe einer angehaltenen Plan-Runde nach *Weiter*
+    /// ohne die Sperre.
     pub fn discard_plan(&mut self) -> bool {
         if !self.plan_decidable() {
             return false;
@@ -677,7 +803,7 @@ mod tests {
         for level in PlanLevel::ALL {
             let t = instructions(&PlanPhase::Research { level, revision: false }, &tools);
             assert!(t.contains(&format!("level {}", level.as_str())), "{t}");
-            assert!(t.contains("# Plan: <short title>") && t.contains("## Steps"), "Format: {t}");
+            assert!(t.contains("# Plan: <short title>") && t.contains("## Steps") && t.contains("fixed markers"), "Format: {t}");
             assert!(t.contains("read_file, grep") && t.contains("list_sessions"), "lesende Werkzeuge genannt: {t}");
             assert!(!t.contains("edit_file, ") && t.contains("plan_mode"), "Schreib-Werkzeuge gesperrt: {t}");
             match level.research_budget() {
@@ -732,16 +858,20 @@ mod tests {
     #[test]
     fn gate_refuses_writes_and_calls_over_the_budget() {
         let call = |n: &str| ToolCall { id: "c".into(), name: n.into(), arguments: json!({}) };
-        let (st, msg) = gate(PlanLevel::Max, &call("edit_file"), 0).unwrap_err();
+        let (st, msg) = gate(PlanLevel::Max, &call("edit_file"), 0, 1).unwrap_err();
         assert_eq!(st, ToolStatus::Denied);
         assert!(msg.contains("\"plan_mode\"") && msg.contains("Execute"), "{msg}");
-        assert!(gate(PlanLevel::Low, &call("read_file"), 4).is_ok());
-        let (_, msg) = gate(PlanLevel::Low, &call("read_file"), 5).unwrap_err();
+        assert!(gate(PlanLevel::Low, &call("read_file"), 4, 1).is_ok());
+        let (_, msg) = gate(PlanLevel::Low, &call("read_file"), 5, 1).unwrap_err();
         assert!(msg.contains("plan_budget") && msg.contains("5 tool calls"), "{msg}");
-        assert!(gate(PlanLevel::Max, &call("grep"), 10_000).is_ok(), "max: keine Grenze");
-        assert_eq!(PlanLevel::Low.step_limit(10), 10);
-        assert_eq!(PlanLevel::High.step_limit(10), 28);
-        assert_eq!(PlanLevel::Max.step_limit(10), u32::MAX);
+        assert!(gate(PlanLevel::Max, &call("grep"), 10_000, 1).is_ok(), "max: keine Grenze");
+        // *Weiter* gibt noch einmal dasselbe Budget frei
+        assert!(gate(PlanLevel::Low, &call("read_file"), 7, 2).is_ok());
+        assert!(gate(PlanLevel::Low, &call("read_file"), 10, 2).is_err());
+        // Die Höchstzahl des Modells spielt in Plan-Runden keine Rolle mehr
+        assert_eq!(PlanLevel::Low.step_limit(), 8);
+        assert_eq!(PlanLevel::High.step_limit(), 28);
+        assert_eq!(PlanLevel::Max.step_limit(), u32::MAX);
     }
 
     #[test]
@@ -752,6 +882,27 @@ mod tests {
         assert!(!detect("Two questions first:\n1. a) yes b) no\n2. Which folder?"));
         assert!(!detect("# Planning questions\n1. a"), "Planning ist nicht Plan");
         assert!(!detect("#Plan without space"));
+        assert!(!detect("## Plan questions\n1. a?"), "Plan questions ist kein Plan");
+        assert!(detect("## Plan (draft)\n1. a") && detect("# Plan – tidy\n1. a"));
+        assert!(!detect("Example:\n```md\n# Plan: x\n## Steps\n1. a\n```\nWhich one?"), "Überschrift im Codeblock");
+        assert!(!detect("    # Plan: indented code"), "eingerückter Codeblock");
+        assert!(detect("~~~\ncode\n~~~\n# Plan: after the code\n## Steps\n1. a"));
+        assert_eq!(steps("# Plan\n## Steps\n1. a\n```sh\n1. not a step\n## Steps\n```\n2. b\n  - sub\n   3. nested\n## Tests\n1. t"), ["a", "b"], "Code und Unterpunkte zählen nicht");
+        // Deutsche und andere Überschriften, Ebenen 1–3, Doppelpunkt, Nummer davor, fette Zeile
+        for (text, want) in [
+            ("# Plan: Aufräumen\n## Schritte\n1. eins\n2. zwei\n## Risiken\n1. r", vec!["eins", "zwei"]),
+            ("# Plan: x\n## Vorgehen:\n1. a\n## Tests\n1. t", vec!["a"]),
+            ("# Plan\n### UMSETZUNG\n- a\n- b", vec!["a", "b"]),
+            ("# Plan\n## Implementation steps\n1. a\n## Risks\n1. r", vec!["a"]),
+            ("# Plan\n## 3. Steps\n1. a\n## 4. Tests\n1. t", vec!["a"]),
+            ("# Plan: x\n**Steps:**\n1. a\n2. b\n\n**Risks:**\n1. r", vec!["a", "b"]),
+            ("# Plan: x\n## Steps\n**Part 1**\n1. a\n**Part 2**\n2. b\n## Tests\n1. t", vec!["a", "b"]),
+        ] {
+            assert!(detect(text), "{text}");
+            assert_eq!(steps(text), want, "{text}");
+        }
+        assert!(detect("Kurz:\n\n## Schritte\n1. a"), "Schritte allein reicht");
+        assert!(detect("**Steps:**\n1. a") && !detect("**Fragen:**\n1. a?"));
         assert_eq!(steps(PLAN_TEXT), ["Read Cargo.toml", "Fix the version", "Run `cargo test`"], "nur oberste Ebene, Fettdruck weg, bis zur nächsten Überschrift");
         // Aufzählung ohne Nummern im Abschnitt, Checkboxen
         assert_eq!(steps("# Plan\n## Steps\n- [ ] one\n- two\n## Risks\n- r"), ["one", "two"]);
@@ -808,6 +959,115 @@ mod tests {
     }
 
     #[test]
+    fn discard_and_clear_history_never_release_queued_calls_of_a_paused_round() {
+        // Plan-Runde hält an der Höchstzahl an, ein schreibender Aufruf wartet in der Schlange.
+        let mut calls: Vec<TurnEvent> = (0..8).map(|i| tc(&format!("r{i}"), "list_sessions", json!({}))).collect();
+        calls.push(tc("w", "send_text", json!({"session": 4, "text": "x"})));
+        calls.push(TurnEvent::Done);
+        for clear in [false, true] {
+            let b = Script::new(vec![vec![TurnEvent::Delta(PLAN_TEXT.into()), TurnEvent::Done], calls.clone(), vec![TurnEvent::Delta("ok".into()), TurnEvent::Done]]);
+            let pol = policy(McpLevel::Control);
+            let mut c = ChatState::new(ChatFile::default(), None);
+            c.set_plan_level(PlanLevel::Low);
+            send(&mut c, &b, "plan");
+            run(&mut c, &b, &pol);
+            assert!(c.plan_decidable(), "Plan wartet");
+            // Weitere Plan-Runde (Schalter noch an): sie hält an, der Plan von vorher wartet weiter
+            send(&mut c, &b, "more research");
+            run(&mut c, &b, &pol);
+            assert!(c.paused && !c.calls.is_empty(), "angehalten mit wartenden Aufrufen");
+            assert!(!c.plan_decidable(), "angehaltene Runde: keine Entscheidung über den Plan");
+            assert!(!c.discard_plan() && !c.execute_plan("go", &b, &ChatMeta::default(), &TurnContext::default(), rp()));
+            if clear {
+                assert!(c.clear_history());
+                assert!(c.calls.is_empty() && !c.paused && c.file.plan.is_none());
+            }
+            // Was auch immer danach kommt: der schreibende Aufruf läuft nie ohne Sperre
+            c.resume();
+            let ran = run(&mut c, &b, &pol);
+            assert!(!ran.contains(&"send_text".to_string()), "{ran:?}");
+            assert!(!c.awaiting_approval(), "nicht einmal zur Freigabe vorgelegt");
+        }
+    }
+
+    #[test]
+    fn plan_next_to_a_tool_call_and_regenerate_after_a_restart_keep_the_plan_mode() {
+        // Plan und Werkzeugaufruf in derselben Antwort, danach nur ein kurzer Text
+        let b = Script::new(vec![
+            vec![TurnEvent::Delta(PLAN_TEXT.into()), tc("r", "list_sessions", json!({})), TurnEvent::Done],
+            vec![TurnEvent::Delta("Done – see the plan above.".into()), TurnEvent::Done],
+        ]);
+        let pol = policy(McpLevel::Read);
+        let mut c = ChatState::new(ChatFile::default(), None);
+        c.toggle_plan();
+        send(&mut c, &b, "plan");
+        run(&mut c, &b, &pol);
+        assert_eq!(c.plan_message_index(), Some(1), "die Antwort mit dem Plan ist die Karte");
+        // Neustart: der Chat kennt die Stufe der letzten Runde nicht mehr; Neu erzeugen bleibt eine Plan-Runde
+        let text = String::from_utf8(crate::chat::store::serialize_capped(&c.file, 1 << 20)).unwrap();
+        let (mut f, _) = crate::chat::store::parse(&text).unwrap();
+        f.messages.truncate(2); // nur Frage und Plan
+        let b = Script::new(vec![vec![TurnEvent::Delta("# Plan: again\n## Steps\n1. x".into()), TurnEvent::Done]]);
+        let mut c = ChatState::new(f, None);
+        assert_eq!(c.planning.round, None);
+        assert!(c.regenerate(&b, &ChatMeta::default(), &TurnContext::default(), rp()));
+        assert_eq!(c.planning.round, Some(PlanLevel::Medium));
+        run(&mut c, &b, &pol);
+        assert_eq!(c.current_plan_markdown(), Some("# Plan: again\n## Steps\n1. x"));
+        assert!(matches!(b.phases()[0], Some(PlanPhase::Research { .. })));
+    }
+
+    #[test]
+    fn revising_never_sticks_and_identical_plans_mark_only_the_newest() {
+        // Laden: „revising“ wartet wieder
+        let (f, _) = crate::chat::store::parse(r##"{"version":1,"plan":{"status":"revising","markdown":"# Plan"}}"##).unwrap();
+        assert_eq!(f.plan.map(|p| p.status), Some(PlanStatus::Proposed));
+        // Eine normale Nachricht während „revising“ (nach einem Neustart oder Stopp) lässt den Plan wieder warten
+        let b = Script::new(vec![vec![TurnEvent::Delta("plain".into()), TurnEvent::Done]]);
+        let mut c = ChatState::new(ChatFile::default(), None);
+        c.file.messages = vec![ChatMsg::new(Role::User, "q"), ChatMsg::new(Role::Assistant, PLAN_TEXT), ChatMsg::new(Role::User, "q2"), ChatMsg::new(Role::Assistant, PLAN_TEXT)];
+        c.file.plan = Some(Plan { markdown: PLAN_TEXT.into(), status: PlanStatus::Revising, ..Plan::default() });
+        assert_eq!(c.plan_message_index(), Some(3), "gleicher Text zweimal: nur die neueste ist die Karte");
+        assert!(c.is_plan_message(3) && !c.is_plan_message(1));
+        send(&mut c, &b, "normal");
+        assert_eq!(c.file.plan.as_ref().map(|p| p.status), Some(PlanStatus::Proposed));
+        run(&mut c, &b, &policy(McpLevel::Read));
+        assert!(c.plan_blocks_agents(), "ein wartender Plan sperrt Agenten-Nachrichten");
+        assert!(c.discard_plan());
+        assert!(!c.plan_blocks_agents());
+        c.toggle_plan();
+        assert!(c.plan_blocks_agents(), "eingeschalteter Plan-Schalter sperrt ebenfalls");
+    }
+
+    #[test]
+    fn execute_without_steps_keeps_the_todos_and_the_execution_phase_ends() {
+        let b = Script::new(vec![vec![TurnEvent::Delta("ok".into()), TurnEvent::Done]]);
+        let mut c = ChatState::new(ChatFile::default(), None);
+        c.file.messages = vec![ChatMsg::new(Role::User, "q"), ChatMsg::new(Role::Assistant, "# Plan: no steps\nJust do it.")];
+        c.file.plan = Some(Plan { markdown: "# Plan: no steps\nJust do it.".into(), ..Plan::default() });
+        let old = vec![ChatTodo { content: "earlier".into(), status: TodoStatus::InProgress }];
+        c.set_todos(old.clone());
+        assert!(c.execute_plan("go", &b, &ChatMeta::default(), &TurnContext::default(), rp()));
+        assert_eq!(c.file.todos, old, "ohne Schritte bleibt die To-do-Liste");
+        assert_eq!(b.phases(), [None], "fremde To-dos: keine Ausführungs-Phase");
+        // Mit Schritten: Ausführung, bis die To-do-Liste ersetzt wird oder eine neue Plan-Runde beginnt
+        let mut c = ChatState::new(ChatFile::default(), None);
+        c.file.plan = Some(Plan { status: PlanStatus::Approved, markdown: PLAN_TEXT.into(), ..Plan::default() });
+        c.set_todos(todos(PLAN_TEXT));
+        assert!(matches!(c.plan_phase(), Some(PlanPhase::Execute { .. })));
+        c.set_todos(vec![ChatTodo { content: "something else".into(), status: TodoStatus::Pending }]);
+        assert_eq!(c.plan_phase(), None, "ersetzte To-do-Liste beendet die Ausführung");
+        c.set_todos(todos(PLAN_TEXT));
+        c.toggle_plan();
+        let b = Script::new(vec![vec![TurnEvent::Delta("Questions first?".into()), TurnEvent::Done]]);
+        send(&mut c, &b, "new plan");
+        run(&mut c, &b, &policy(McpLevel::Read));
+        c.toggle_plan();
+        assert!(c.file.plan.as_ref().is_some_and(|p| p.status == PlanStatus::Approved && p.finished));
+        assert_eq!(c.next_plan_phase(), None, "eine neue Plan-Runde beendete die Ausführung");
+    }
+
+    #[test]
     fn research_budget_refuses_further_reads() {
         let calls: Vec<TurnEvent> = (0..7).map(|i| tc(&format!("r{i}"), "list_sessions", json!({}))).chain([TurnEvent::Done]).collect();
         let b = Script::new(vec![calls, vec![TurnEvent::Delta(PLAN_TEXT.into()), TurnEvent::Done]]);
@@ -818,6 +1078,27 @@ mod tests {
         let budget: Vec<_> = tool_results(&c).into_iter().filter(|(_, r)| r.contains("plan_budget")).collect();
         assert_eq!(budget.len(), 2);
         assert!(c.file.plan.is_some(), "danach schrieb das Modell den Plan");
+        // Kaputte Argumente zählen nicht gegen das Budget
+        let mut calls: Vec<TurnEvent> = (0..3).map(|i| tc(&format!("b{i}"), "read_terminal", json!({"lines": 5 + i}))).collect();
+        calls.extend((0..5).map(|i| tc(&format!("ok{i}"), "list_sessions", json!({"include_exited": i % 2 == 0}))));
+        calls.push(TurnEvent::Done);
+        let b = Script::new(vec![calls, vec![TurnEvent::Delta(PLAN_TEXT.into()), TurnEvent::Done]]);
+        let mut c = ChatState::new(ChatFile::default(), None);
+        c.set_plan_level(PlanLevel::Low);
+        send(&mut c, &b, "plan");
+        assert_eq!(run(&mut c, &b, &policy(McpLevel::Read)).len(), 5, "3× bad_args, danach volle 5 Aufrufe");
+        assert!(tool_results(&c).iter().filter(|(_, r)| r.contains("bad_args")).count() == 3 && !tool_results(&c).iter().any(|(_, r)| r.contains("plan_budget")));
+        // Viele Aufrufe: Budget aus, nach ein paar Ablehnungen hält die Runde an; *Weiter* gibt neues Budget
+        let calls: Vec<TurnEvent> = (0..12).map(|i| tc(&format!("m{i}"), "list_sessions", json!({"include_exited": i % 2 == 0}))).chain([TurnEvent::Done]).collect();
+        let b = Script::new(vec![calls, vec![TurnEvent::Delta(PLAN_TEXT.into()), TurnEvent::Done]]);
+        let mut c = ChatState::new(ChatFile::default(), None);
+        c.set_plan_level(PlanLevel::Low);
+        send(&mut c, &b, "plan");
+        assert_eq!(run(&mut c, &b, &policy(McpLevel::Read)).len(), 5);
+        assert!(c.paused, "nach Budget + 3 angehalten (statt nach der Höchstzahl des Modells)");
+        assert_eq!(c.steps, 8);
+        assert!(c.resume());
+        assert_eq!(run(&mut c, &b, &policy(McpLevel::Read)).len(), 4, "Weiter: noch einmal Budget für die übrigen Aufrufe");
         // Ohne Plan-Modus gilt die normale Höchstzahl und kein Budget
         let calls: Vec<TurnEvent> = (0..7).map(|i| tc(&format!("n{i}"), "list_sessions", json!({}))).chain([TurnEvent::Done]).collect();
         let b = Script::new(vec![calls, vec![TurnEvent::Delta("done".into()), TurnEvent::Done]]);
@@ -901,7 +1182,7 @@ mod tests {
         // Mit Plan: gespeichert und wieder geladen
         let mut f = ChatFile::default();
         f.messages.push(ChatMsg::new(Role::Assistant, PLAN_TEXT));
-        f.plan = Some(Plan { level: PlanLevel::XHigh, status: PlanStatus::Approved, markdown: PLAN_TEXT.into(), revision: 2, created: 10, approved: Some(20), file: Some("plans/1-20.md".into()) });
+        f.plan = Some(Plan { level: PlanLevel::XHigh, status: PlanStatus::Approved, markdown: PLAN_TEXT.into(), revision: 2, created: 10, approved: Some(20), file: Some("plans/1-20.md".into()), finished: true });
         let text = String::from_utf8(crate::chat::store::serialize_capped(&f, 1 << 20)).unwrap();
         assert!(text.contains("\"level\":\"xhigh\"") && text.contains("\"status\":\"approved\""), "{text}");
         let (back, _) = crate::chat::store::parse(&text).unwrap();
@@ -923,7 +1204,7 @@ mod tests {
     fn approved_plans_are_saved_as_markdown_and_exportable() {
         let d = std::env::temp_dir().join(format!("pd-plan-save-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
-        let p = Plan { level: PlanLevel::Max, status: PlanStatus::Approved, markdown: PLAN_TEXT.into(), revision: 3, created: 100, approved: Some(1_763_200_000), file: None };
+        let p = Plan { level: PlanLevel::Max, status: PlanStatus::Approved, markdown: PLAN_TEXT.into(), revision: 3, created: 100, approved: Some(1_763_200_000), ..Plan::default() };
         let rel = save(&d, 7, &p, "My chat").unwrap();
         assert_eq!(rel, "plans/7-1763200000.md");
         let text = std::fs::read_to_string(d.join(&rel)).unwrap();
@@ -933,7 +1214,11 @@ mod tests {
         assert_eq!(save(&d, 7, &p, "x").unwrap(), "plans/7-1763200000-2.md");
         assert_eq!(export_name("My chat: build/fix", &p), "plan-My_chat__build_fix-1763200000.md");
         assert_eq!(export_name("///", &p), "plan-chat-1763200000.md");
-        assert_eq!(file_text(&p, "a --> b").matches("-->").count(), 1, "Titel bricht den Kommentar nicht auf");
+        for t in ["a --> b", "a ---> b", "a -- -> b", "x----"] {
+            assert_eq!(file_text(&p, t).matches("-->").count(), 1, "Titel {t:?} bricht den Kommentar nicht auf");
+            let head = file_text(&p, t).lines().next().unwrap().to_string();
+            assert!(!head["<!--".len()..head.len() - "-->".len()].contains("--"), "{t:?}: {head}");
+        }
         let _ = std::fs::remove_dir_all(&d);
     }
 

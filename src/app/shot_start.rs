@@ -269,53 +269,13 @@ impl App {
             "Cancelled orders should trigger a refund. Please plan this first.",
         );
         let plan = lang.t(
-            "# Plan: Erstattung beim Stornieren
-
-## Ziel
-`cancel_order` löst für bezahlte Bestellungen eine Erstattung aus; doppelte Stornos erstatten nichts.
-
-## Befunde
-- `src/orders.rs`: `cancel_order` setzt nur `cancelled = true`.
-- `src/payments.rs`: `charge` gibt eine Zahlungs-Kennung zurück, eine Erstattung gibt es noch nicht.
-
-## Steps
-1. `src/payments.rs`: `refund(charge_id)` mit eigenem Fehlertyp ergänzen
-2. `src/orders.rs`: Zahlungs-Kennung in `Order` speichern
-3. `src/orders.rs`: `cancel_order` ruft `refund` nur beim ersten Storno auf
-4. `tests/orders.rs`: Tests für Erstattung und doppeltes Storno
-5. `cargo test` ausführen
-
-## Risiken
-- Bestellungen ohne Zahlung: keine Erstattung versuchen.
-
-## Tests
-- `cargo test`",
-            "# Plan: Refund on cancel
-
-## Goal
-`cancel_order` triggers a refund for paid orders; cancelling twice refunds nothing.
-
-## Findings
-- `src/orders.rs`: `cancel_order` only sets `cancelled = true`.
-- `src/payments.rs`: `charge` returns a charge id; there is no refund yet.
-
-## Steps
-1. `src/payments.rs`: add `refund(charge_id)` with its own error type
-2. `src/orders.rs`: store the charge id in `Order`
-3. `src/orders.rs`: `cancel_order` calls `refund` only on the first cancel
-4. `tests/orders.rs`: tests for the refund and a double cancel
-5. Run `cargo test`
-
-## Risks
-- Orders without a payment: do not try a refund.
-
-## Tests
-- `cargo test`",
+            "# Plan: Erstattung beim Stornieren\n\n## Ziel\n`cancel_order` löst für bezahlte Bestellungen eine Erstattung aus; doppelte Stornos erstatten nichts.\n\n## Befunde\n- `src/orders.rs`: `cancel_order` setzt nur `cancelled = true`.\n- `src/payments.rs`: `charge` gibt eine Zahlungs-Kennung zurück, eine Erstattung gibt es noch nicht.\n\n## Schritte\n1. `src/payments.rs`: `refund(charge_id)` mit eigenem Fehlertyp ergänzen\n2. `src/orders.rs`: Zahlungs-Kennung in `Order` speichern\n3. `src/orders.rs`: `cancel_order` ruft `refund` nur beim ersten Storno auf\n4. `tests/orders.rs`: Tests für Erstattung und doppeltes Storno\n5. `cargo test` ausführen\n\n## Risiken\n- Bestellungen ohne Zahlung: keine Erstattung versuchen.\n\n## Tests\n- `cargo test`",
+            "# Plan: Refund on cancel\n\n## Goal\n`cancel_order` triggers a refund for paid orders; cancelling twice refunds nothing.\n\n## Findings\n- `src/orders.rs`: `cancel_order` only sets `cancelled = true`.\n- `src/payments.rs`: `charge` returns a charge id; there is no refund yet.\n\n## Steps\n1. `src/payments.rs`: add `refund(charge_id)` with its own error type\n2. `src/orders.rs`: store the charge id in `Order`\n3. `src/orders.rs`: `cancel_order` calls `refund` only on the first cancel\n4. `tests/orders.rs`: tests for the refund and a double cancel\n5. Run `cargo test`\n\n## Risks\n- Orders without a payment: do not try a refund.\n\n## Tests\n- `cargo test`",
         );
         if let Some(c) = self.entries.get_mut(&id).and_then(|e| e.chat.as_mut()) {
             use crate::chat::{ChatMsg, Role};
             c.file.messages = vec![ChatMsg::new(Role::User, question), ChatMsg::new(Role::Assistant, plan)];
-            c.file.plan = Some(Plan { level: PlanLevel::High, status: PlanStatus::Proposed, markdown: plan.trim().to_string(), revision: 1, created: crate::chat::now_secs(), approved: None, file: None });
+            c.file.plan = Some(Plan { level: PlanLevel::High, status: PlanStatus::Proposed, markdown: plan.trim().to_string(), revision: 1, created: crate::chat::now_secs(), ..Plan::default() });
             c.planning.on = true;
             c.planning.level = PlanLevel::High;
             c.focus_input = false;
