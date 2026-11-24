@@ -32,7 +32,7 @@ Die Schritte im Editor-Reiter nutzen eine Beispieldatei der Tour (`paneldeck-tut
 | Todo-Liste & Expertenmodus | einfache Liste, Expertenmodus, Projekte mit Schlüssel, ein Ticket, Boards, Backlog und Sprints, Suche mit der Abfragesprache |
 | Claude Code im Detail | Claude-Modus, Standards, Budget, Starten, Status, Verlauf, Prompt-Bibliothek, Composer und Warteschlange |
 | Chats mit lokalen Modellen | lokale Server, *Einstellungen → Modelle*, Verbinden, Stufen und Freigaben, ein neuer Chat (geht ohne echtes Modell) |
-| Agenten-Schnittstelle (MCP) | Stufen Aus/Nur lesen/Steuern, in Claude Code eintragen, Systemprompt, Aufrufprotokoll |
+| Agenten-Schnittstelle (MCP) | Stufen Aus/Nur lesen/Steuern, in Claude Code eintragen, Umgebungsvariablen durch Agenten, Systemprompt, Aufrufprotokoll |
 | Profile, Kommandozeile & Datenordner | Shell-Profile, Datenordner, `--data-dir`, `--profile`, Sicherungen, Aufräumen, Updates |
 | Weitere Werkzeuge | Dateibaum, Änderungen, Vorlagen, Prozesse, Themes |
 

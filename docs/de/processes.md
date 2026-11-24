@@ -56,7 +56,7 @@ Der Abschnitt *Prozesse* liegt in der Seitenleiste des Terminal Hubs über den V
 | Gruppe, Reihenfolge | Einträge derselben Gruppe starten und stoppen gemeinsam: beim Starten aufsteigend nach *Reihenfolge* (z. B. Backend 1, Frontend 2), beim Stoppen umgekehrt. *Reihenfolge* ist nur die Reihenfolge des Startens: Der nächste Eintrag startet, sobald der vorige gestartet ist – Paneldeck wartet nicht, bis er bereit ist (z. B. an seinem Port lauscht). |
 | Automatisch starten | *Nie (nur von Hand)* (Standard), *Mit Paneldeck* oder *Wenn das Projekt geöffnet wird* (auch beim Start, wenn es das geöffnete Projekt ist; einmal je Lauf). |
 | Protokolldatei | Die Ausgabe zusätzlich nach `process-logs/<id>-<name>.log` im Datenordner schreiben (standardmäßig aus). Jede Zeile bekommt einen Zeitstempel; ab 5 MB wird rotiert (`.1` … `.3`). |
-| Umgebungsvariablen | Name und Wert. Werte werden **verschlüsselt** gespeichert (Windows-DPAPI, nur für denselben Windows-Benutzer auf demselben Rechner lesbar), nie Agenten gezeigt und nie protokolliert. Beim Bearbeiten behält ein leerer Wert den gespeicherten. |
+| Umgebungsvariablen | Name und Wert. Werte werden **verschlüsselt** gespeichert (Windows-DPAPI, nur für denselben Windows-Benutzer auf demselben Rechner lesbar), nie Agenten gezeigt und nie protokolliert. Beim Bearbeiten behält ein leerer Wert den gespeicherten. Mit einer WSL-Shell kommen sie über `WSLENV` beim Linux-Prozess an (seit 3.2.0). |
 
 Änderungen an einem laufenden Eintrag gelten ab seinem nächsten Start. Löschen lässt sich ein Eintrag nur, wenn er nicht läuft.
 

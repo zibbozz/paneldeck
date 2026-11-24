@@ -38,6 +38,7 @@ mod editor_svc;
 mod prompts;
 mod query;
 mod search;
+mod session_env;
 mod layout;
 mod links;
 mod llm;

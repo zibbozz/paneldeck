@@ -416,6 +416,37 @@ impl App {
         self.activate(id);
     }
 
+    /// Umgebungsvariablen einer Sitzung (#384): Sitzung im Beispielprojekt mit normalen, einer geheimen, einer
+    /// vorangestellten und einer entfernten Variable; die Einstellungen der Sitzung öffnen auf dem Reiter „Umgebung“.
+    fn shot_session_env(&mut self, ctx: &egui::Context) {
+        use crate::session_env::{EnvVar, Mode};
+        let demo = demo_dir(&self.dir);
+        write_demo_project(&demo);
+        self.set_mode(titlebar::Mode::Terminals);
+        let pid = self.active_project;
+        if let Some(p) = self.projects.iter_mut().find(|p| p.id == pid) {
+            p.name = "Acme Shop".into();
+            p.folder = demo.to_string_lossy().to_string();
+        }
+        let mut env = vec![
+            EnvVar::plain("API_URL", "http://localhost:3000"),
+            EnvVar::plain("NODE_ENV", "development"),
+            EnvVar { mode: Mode::Prepend, ..EnvVar::plain("PATH", r"C:\Dev\acme-shop\tools") },
+            EnvVar { remove: true, ..EnvVar::plain("HTTP_PROXY", "") },
+        ];
+        // Beispielwert, verschlüsselt im Datenordner der Aufnahme (geht das nicht, fehlt die Zeile).
+        if let Ok(s) = EnvVar::secret("GITHUB_TOKEN", "ghp_example_only") {
+            env.insert(2, s);
+        }
+        let id = self.new_session(ctx, NewOpts { project: Some(pid), cwd: Some(demo.to_string_lossy().to_string()), name: Some("api-server".into()), env, ..NewOpts::default() });
+        self.shot_name(id, "api-server");
+        self.activate(id);
+        self.open_session_settings(id);
+        if let Some(f) = self.session_settings.as_mut() {
+            f.start_tab = Some(super::opts_tabs::Tab::Environment);
+        }
+    }
+
     /// Ansicht aufbauen (einmal).
     fn shot_setup(&mut self, ctx: &egui::Context, view: &str, arg: &str) {
         let demo = demo_dir(&self.dir);
@@ -521,6 +552,8 @@ impl App {
             }
             // ---- Chats (#355, #356): Verlauf nur im Speicher, kein Server nötig
             "chat-background-command" | "chat-ask-form" => self.shot_chat(ctx, view == "chat-ask-form"),
+            // ---- Umgebungsvariablen (#384)
+            "session-env" => self.shot_session_env(ctx),
             _ => eprintln!("{SHOT_MARK}: unknown view {view}"),
         }
     }

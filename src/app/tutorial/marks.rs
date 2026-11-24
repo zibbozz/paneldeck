@@ -69,6 +69,8 @@ spots! {
     McpLevel = "settings.agents.level",
     McpRegister = "settings.agents.register",
     McpSysprompt = "settings.agents.system_prompt",
+    // Umgebungsvariablen der Sitzungen (#384, 3.2.0)
+    McpSessionEnv = "settings.agents.session_env",
     McpLog = "settings.agents.log",
     ModelsServers = "settings.models.servers",
     ModelsCommands = "settings.models.commands",

@@ -37,8 +37,18 @@ impl App {
                     d.picker.remember(&mut self.settings.wsl_recent);
                     state::save_json(&self.dir.join("settings.json"), &self.settings);
                 }
-                let opts = new_dialog_opts(&d);
+                let mut opts = new_dialog_opts(&d);
                 'create: {
+                    // Umgebungsvariablen (#384): geheime Werte jetzt verschlüsseln (geht das nicht, bleibt der Dialog offen).
+                    match d.env.to_vars(lang) {
+                        Ok(v) => opts.env = v,
+                        Err(e) => {
+                            d.env.note = Some(e.clone());
+                            self.notify_text(e);
+                            self.new_dialog = Some(d);
+                            break 'create;
+                        }
+                    }
                     let want_wt = d.worktree && d.claude && d.repo.is_some() && !d.branch.trim().is_empty();
                     if want_wt && self.pending_wt.is_some() {
                         // Sonst ginge die laufende Anlage verloren (Worktree auf der Platte, aber keine Sitzung).
@@ -205,6 +215,10 @@ impl App {
         // Einstellungen einer Sitzung und Rückfrage „Neu laden?“ (#169, #170).
         // Die Rückfrage zuerst: sie bekommt Esc/Enter, bevor der Einstellungsdialog darunter sie sieht.
         self.reload_ask_ui(ctx, actions, None);
+        // Rückfrage nach geänderten Umgebungsvariablen (#384), global: nur im Hauptfenster.
+        if self.wins.cur == 0 {
+            self.env_ask_dialog(ctx, actions);
+        }
         // Auswahl der Konversation vor einem Start (#302): nur im Hauptfenster, eine zur Zeit.
         if self.wins.cur == 0 {
             self.conv_pick_ui(ctx);
@@ -1181,7 +1195,7 @@ pub(super) fn reset_tab(o: &mut ClaudeOpts, d: &ClaudeOpts, tab: super::opts_tab
             a.max_budget_usd = b.max_budget_usd.clone();
             a.autocompact = b.autocompact.clone();
         }
-        Tab::General => {}
+        Tab::General | Tab::Environment => {}
     }
 }
 
@@ -1224,14 +1238,14 @@ pub(super) fn claude_tab(
         }
         Tab::Access => claude_access_rows(ui, lang, o, salt, place, target, chk),
         Tab::Advanced => claude_advanced_rows(ui, lang, o, salt, place, chk),
-        Tab::General => {}
+        Tab::General | Tab::Environment => {}
     });
     ui.add_space(6.0);
     let i = match tab {
         Tab::Claude => 0,
         Tab::Access => 1,
         Tab::Advanced => 2,
-        Tab::General => return,
+        Tab::General | Tab::Environment => return,
     };
     if super::opts_tabs::reset_button(ui, lang, tab_counts(o, d)[i] > 0) {
         reset_tab(o, d, tab);
@@ -1368,10 +1382,16 @@ pub(super) fn new_dialog_ui(
             if d.claude {
                 infos.extend(claude_tab_infos(&d.copts, &defaults, &chk));
             }
+            infos.push(d.env.tab_info(lang));
             let tab = tabs::strip(ui, lang, SALT, &infos);
             let invalid = tabs::invalid_hint(lang, &infos);
+            let prof_env = profiles.iter().find(|p| p.id == d.profile).map(|p| (crate::session_env::from_profile(&p.env).iter().map(|e| e.name.clone()).collect::<Vec<_>>().join(", "), p.name.clone()));
             tabs::body(ui, SALT, tab, body_h, |ui| match tab {
                 Tab::General => new_dialog_general(ui, d, shells, profiles, claude_mode, wsl_recent, &target, lang),
+                Tab::Environment => {
+                    let opts = super::env_ui::EnvUiOpts { lang, salt: SALT, wsl: matches!(target, folder_picker::Target::Wsl { .. }), claude: d.claude, profile: prof_env.as_ref().map(|(n, p)| (n.as_str(), p.as_str())) };
+                    super::env_ui::env_tab_ui(ui, &mut d.env, opts);
+                }
                 t => {
                     let NewDialog { copts, conv, prompt, .. } = d;
                     claude_tab(
@@ -1407,7 +1427,7 @@ pub(super) fn new_dialog_ui(
             ui.add_space(6.0);
             // Ungültiger oder fehlender WSL-Ordner: Erstellen gesperrt (Grund steht unter dem Ordnerfeld).
             let blocked = d.picker.blocking_error(lang);
-            can_create = opts_ok && blocked.is_none();
+            can_create = opts_ok && blocked.is_none() && d.env.ok(lang);
             ui.horizontal(|ui| {
                 let b = ui.add_enabled(can_create, egui::Button::new(lang.t("Erstellen", "Create")));
                 dlg_mark(ui, "create", &b);
@@ -1645,7 +1665,7 @@ mod layout_tests {
             let mut d = big_dialog();
             let screen = Rect::from_min_size(Pos2::ZERO, size);
             let mut heights = Vec::new();
-            for (n, tab) in [Tab::General, Tab::Claude, Tab::Access, Tab::Advanced].into_iter().enumerate() {
+            for (n, tab) in [Tab::General, Tab::Claude, Tab::Access, Tab::Advanced, Tab::Environment].into_iter().enumerate() {
                 if n > 0 {
                     tabs::set(&ctx, "newdlg", tab);
                 }
@@ -1691,11 +1711,20 @@ mod layout_tests {
         assert!(tab(2).1.starts_with("Access (") && tab(2).2 == Mark::Error, "fehlende Ordner: rot {:?}", tab(2));
         assert_eq!(tab(1).2, Mark::Warn, "bypassPermissions: orange");
         assert_eq!(tab(3).2, Mark::Warn, "eigener System-Prompt und --safe-mode: orange");
-        // Ohne Claude nur „Allgemein“.
+        // Ohne Claude nur „Allgemein“ und „Umgebung“ (#384).
         let mut plain = NewDialog::new("pwsh".into(), false, ClaudeOpts::default());
         let c2 = egui::Context::default();
         frame(&c2, &mut plain, size, 0.0, vec![]);
-        assert!(c2.data(|m| m.get_temp::<(Rect, String, Mark)>(Id::new(("tab_mark", "newdlg".to_string(), 1usize)))).is_none());
+        assert_eq!(c2.data(|m| m.get_temp::<(Rect, String, Mark)>(Id::new(("tab_mark", "newdlg".to_string(), 1usize)))).map(|t| t.1), Some("Environment".to_string()));
+        assert!(c2.data(|m| m.get_temp::<(Rect, String, Mark)>(Id::new(("tab_mark", "newdlg".to_string(), 2usize)))).is_none());
+        // Ein ungültiger Name im Reiter „Umgebung“ sperrt „Erstellen“ und markiert den Reiter rot.
+        plain.env = super::super::env_ui::EnvEditor::of(&[]);
+        plain.env.rows.push(super::super::env_ui::EnvRow { name: "PANELDECK_SESSION".into(), value: "1".into(), ..Default::default() });
+        frame(&c2, &mut plain, size, 0.1, vec![]);
+        frame(&c2, &mut plain, size, 0.2, vec![]);
+        let env_tab = c2.data(|m| m.get_temp::<(Rect, String, Mark)>(Id::new(("tab_mark", "newdlg".to_string(), 1usize)))).unwrap();
+        assert_eq!((env_tab.1.as_str(), env_tab.2), ("Environment (1)", Mark::Error));
+        assert!(c2.data(|m| m.get_temp::<Option<String>>(Id::new("newdlg_invalid"))).flatten().is_some_and(|h| h.contains("Environment")));
         // Tasten: Strg+Tab, Strg+Umschalt+Tab, Alt+Zahl – verbraucht.
         let (_, left) = frame(&ctx, &mut d, size, 0.2, vec![key(Key::Tab, Modifiers::CTRL)]);
         assert_eq!(tabs::current(&ctx, "newdlg", &tabs::session_tabs(true)), Tab::Claude);
