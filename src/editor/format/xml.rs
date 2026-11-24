@@ -13,10 +13,11 @@
 //! **Formatieren:** Elemente, Kommentare und Processing Instructions stehen je in einer Zeile, eingerückt nach
 //! [`Options::indent`]; Leerraum zwischen ihnen wird durch die Einrückung ersetzt (eine Leerzeile zwischen Geschwistern
 //! bleibt als eine Leerzeile erhalten). Kommentare, CDATA, PIs, XML-Deklaration und DOCTYPE (samt internem Subset)
-//! bleiben Zeichen für Zeichen erhalten. Ein Start-Tag kommt in eine Zeile: Attribute in Original-Reihenfolge und
-//! -Anführungszeichen, dazwischen genau ein Leerzeichen. `<a/>` bleibt `<a/>`, `<a></a>` bleibt `<a></a>`
-//! (nur Leerraum dazwischen fällt weg).
-//! **Minifizieren:** wie Formatieren, aber ohne Zeilenumbrüche und Einrückung; Kommentare bleiben (sie können in XML
+//! bleiben Zeichen für Zeichen erhalten. Tags bleiben, wie sie geschrieben sind (Attribute, Reihenfolge,
+//! Anführungszeichen, Leerraum); bei einem mehrzeiligen Start-Tag folgen die Folgezeilen der neuen Einrückung der
+//! ersten Zeile (siehe [`Writer::start_tag`]). `<a/>` bleibt `<a/>`, `<a></a>` bleibt `<a></a>` (nur Leerraum
+//! dazwischen fällt weg).
+//! **Minifizieren:** wie Formatieren, aber ohne Zeilenumbrüche und Einrückung (Tags ganz unverändert); Kommentare bleiben (sie können in XML
 //! Bedeutung haben). **Prüfen:** nur Durchlauf 1. `SortKeys` gibt es für XML nicht (Text unverändert).
 //!
 //! BOM bleibt erhalten, `\r\n` und einzelne `\r` werden wie vom XML-Parser vorgeschrieben zu `\n`.
@@ -162,8 +163,8 @@ enum Tok {
     Eof,
     /// Zeichendaten bis zum nächsten `<`; `ws` = nur Leerraum (Referenzen zählen als Text).
     Text { start: usize, end: usize, ws: bool },
-    /// Start-Tag (Attribute in [`Lexer::attrs`]); `empty` = `<a/>`, `space_before_close` = Leerraum vor `>`/`/>`.
-    Start { start: usize, end: usize, name: (usize, usize), empty: bool, space_before_close: bool, preserve: Option<bool> },
+    /// Start-Tag (Attribute in [`Lexer::attrs`]); `empty` = `<a/>`.
+    Start { start: usize, end: usize, name: (usize, usize), empty: bool, preserve: Option<bool> },
     End { start: usize, name: (usize, usize) },
     /// Kommentar, PI, XML-Deklaration, CDATA, DOCTYPE – werden unverändert übernommen.
     Markup { start: usize, end: usize, kind: Mk },
@@ -371,14 +372,14 @@ impl<'a> Lexer<'a> {
                 None => return bad(start, format!("start tag <{tag}> is not closed with '>'")),
                 Some(b'>') => {
                     self.pos = p + 1;
-                    return Ok(Tok::Start { start, end: p + 1, name, empty: false, space_before_close: had_ws, preserve });
+                    return Ok(Tok::Start { start, end: p + 1, name, empty: false, preserve });
                 }
                 Some(b'/') => {
                     if b.get(p + 1) != Some(&b'>') {
                         return bad(p, format!("expected '>' after '/' in tag <{tag}>"));
                     }
                     self.pos = p + 2;
-                    return Ok(Tok::Start { start, end: p + 2, name, empty: true, space_before_close: had_ws, preserve });
+                    return Ok(Tok::Start { start, end: p + 2, name, empty: true, preserve });
                 }
                 Some(_) => {}
             }
@@ -712,28 +713,57 @@ impl Writer {
         self.after_open = false;
     }
 
-    fn start_tag(&mut self, src: &str, name: &str, attrs: &[Attr], empty: bool, space_before_close: bool) {
-        let o = &mut self.out;
-        o.push('<');
-        o.push_str(name);
-        for a in attrs {
-            o.push(' ');
-            o.push_str(&src[a.name.0..a.name.1]);
-            o.push('=');
-            o.push_str(&src[a.value.0..a.value.1]);
+    /// Start-Tag wie geschrieben. Steht es über mehrere Zeilen, rücken die Folgezeilen um dieselbe Differenz wie die
+    /// erste Zeile (die alte Einrückung wird durch die neue ersetzt); Zeilen innerhalb von Attributwerten bleiben
+    /// unverändert. Ist das nicht eindeutig (Tag stand nicht am Zeilenanfang, Folgezeile weniger oder anders
+    /// eingerückt), bleibt das ganze Tag unverändert.
+    fn start_tag(&mut self, src: &str, start: usize, end: usize, attrs: &[Attr], depth: usize) {
+        let tag = &src[start..end];
+        if self.minify || !tag.contains('\n') {
+            self.out.push_str(tag);
+            return;
         }
-        if empty {
-            o.push_str(if space_before_close { " />" } else { "/>" });
-        } else {
-            o.push('>');
+        let line_start = src[..start].rfind('\n').map_or(0, |i| i + 1);
+        let old = &src[line_start..start];
+        let new = self.unit.repeat(depth);
+        match shift_lines(src, start, end, attrs, old, &new) {
+            Some(shifted) => self.out.push_str(&shifted),
+            None => self.out.push_str(tag),
         }
     }
+}
 
-    fn end_tag(&mut self, name: &str) {
-        self.out.push_str("</");
-        self.out.push_str(name);
-        self.out.push('>');
+/// Folgezeilen von `src[start..end]` (außerhalb der Attributwerte) von der Einrückung `old` auf `new` umstellen;
+/// `None`, wenn das nicht eindeutig geht.
+fn shift_lines(src: &str, start: usize, end: usize, attrs: &[Attr], old: &str, new: &str) -> Option<String> {
+    if !old.bytes().all(is_ws) {
+        return None;
     }
+    let mut out = String::with_capacity(end - start + 64);
+    let mut last = start;
+    let mut a = 0;
+    for (k, _) in src[start..end].match_indices('\n') {
+        let nl = start + k;
+        while a < attrs.len() && attrs[a].value.1 <= nl {
+            a += 1;
+        }
+        if a < attrs.len() && attrs[a].value.0 < nl {
+            continue; // Zeilenumbruch im Attributwert
+        }
+        let ls = nl + 1;
+        let line = src[ls..end].split('\n').next().unwrap_or("");
+        if line.bytes().all(is_ws) {
+            continue; // leere Zeile bleibt
+        }
+        if !line.starts_with(old) {
+            return None;
+        }
+        out.push_str(&src[last..ls]);
+        out.push_str(new);
+        last = ls + old.len();
+    }
+    out.push_str(&src[last..end]);
+    Some(out)
 }
 
 fn emit(src: &str, info: &Info, minify: bool, opts: Options, bom: bool, tick: &mut Ticker) -> Res<String> {
@@ -773,32 +803,32 @@ fn emit(src: &str, info: &Info, minify: bool, opts: Options, bom: bool, tick: &m
                 w.line(depth, false);
                 w.out.push_str(&src[start..end]);
             }
-            Tok::End { name, .. } => {
+            Tok::End { start, .. } => {
                 depth = depth.saturating_sub(1);
                 w.line(depth, true);
-                w.end_tag(lx.name(name));
+                w.out.push_str(&src[start..lx.pos]);
             }
-            Tok::Start { start, end, name, empty, space_before_close, .. } => {
+            Tok::Start { start, end, empty, .. } => {
                 w.line(depth, false);
+                w.start_tag(src, start, end, &lx.attrs, depth);
                 while cur < pre.len() && pre[cur].0 < start {
                     cur += 1;
                 }
                 if cur < pre.len() && pre[cur].0 == start {
-                    // Gemischter Inhalt, Text oder xml:space="preserve": ganzes Element wie geschrieben.
+                    // Gemischter Inhalt, Text oder xml:space="preserve": Inhalt und End-Tag wie geschrieben.
                     let stop = pre[cur].1;
-                    w.out.push_str(&src[start..stop]);
+                    w.out.push_str(&src[end..stop]);
                     lx.pos = stop;
                     cur += 1;
                     continue;
                 }
-                w.start_tag(src, lx.name(name), &lx.attrs, empty, space_before_close);
                 if !empty {
                     let p = lx.skip_ws(end);
                     if bytes[p..].starts_with(b"</") {
                         // Leeres Element (höchstens Leerraum): `<a></a>` in einer Zeile.
                         lx.pos = p;
                         lx.next()?;
-                        w.end_tag(lx.name(name));
+                        w.out.push_str(&src[p..lx.pos]);
                     } else {
                         depth += 1;
                         w.after_open = true;
@@ -862,7 +892,7 @@ mod tests {
     #[test]
     fn format_basic_indentation() {
         let input = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<root><a x=\"1\"  y='2'><b>text</b><c/><d></d><e>  \n </e></a></root>";
-        let want = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<root>\n  <a x=\"1\" y='2'>\n    <b>text</b>\n    <c/>\n    <d></d>\n    <e></e>\n  </a>\n</root>\n";
+        let want = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<root>\n  <a x=\"1\"  y='2'>\n    <b>text</b>\n    <c/>\n    <d></d>\n    <e></e>\n  </a>\n</root>\n";
         assert_eq!(fmt(input), want);
         assert_eq!(fmt_with(input, Indent::Spaces(4), true), want.replace("    ", "        ").replace("\n  <", "\n    <"));
         assert_eq!(fmt_with("<r><a/></r>", Indent::Tab, false), "<r>\n\t<a/>\n</r>");
@@ -917,10 +947,28 @@ mod tests {
     #[test]
     fn format_namespaces_and_attributes() {
         let input = "<x:r xmlns:x=\"urn:x\" xmlns=\"urn:d\"><x:a x:attr=\"1\"/><b\n   one=\"1\"\n   two='2 &amp; &#x41;'\n   three = \"a\nb\"\n   /></x:r>";
-        let want = "<x:r xmlns:x=\"urn:x\" xmlns=\"urn:d\">\n  <x:a x:attr=\"1\"/>\n  <b one=\"1\" two='2 &amp; &#x41;' three=\"a\nb\" />\n</x:r>\n";
+        let want = "<x:r xmlns:x=\"urn:x\" xmlns=\"urn:d\">\n  <x:a x:attr=\"1\"/>\n  <b\n   one=\"1\"\n   two='2 &amp; &#x41;'\n   three = \"a\nb\"\n   />\n</x:r>\n";
         assert_eq!(fmt(input), want);
-        assert_eq!(fmt("<a  >  </a  >"), "<a></a>\n");
+        assert_eq!(fmt("<a  >  </a  >"), "<a  ></a  >\n");
         assert_eq!(fmt("<ä ö=\"ü\"><ß/></ä>"), "<ä ö=\"ü\">\n  <ß/>\n</ä>\n");
+    }
+
+    #[test]
+    fn multi_line_start_tags_follow_the_new_indentation() {
+        // Folgezeilen rücken um dieselbe Differenz wie die erste Zeile; Zeilen in Attributwerten bleiben.
+        let input = "<r>\n<a\n  one=\"1\"\n  two=\"x\n y\"\n/>\n    <b\n      c = '1'\n\n        d=\"2\">\n    </b>\n</r>";
+        let want = "<r>\n  <a\n    one=\"1\"\n    two=\"x\n y\"\n  />\n  <b\n    c = '1'\n\n      d=\"2\"></b>\n</r>\n";
+        assert_eq!(fmt(input), want);
+        assert_eq!(fmt(want), want);
+        assert_eq!(fmt_with("<r>\n<a\n  x=\"1\"/></r>", Indent::Tab, false), "<r>\n\t<a\n\t  x=\"1\"/>\n</r>");
+        // Mehrdeutig (Folgezeile weniger eingerückt als die erste, Tag nicht am Zeilenanfang): unverändert.
+        assert_eq!(fmt("<r>\n    <a\n  x=\"1\"/>\n</r>"), "<r>\n  <a\n  x=\"1\"/>\n</r>\n");
+        assert_eq!(fmt("<r><a\n   x=\"1\"/></r>"), "<r>\n  <a\n   x=\"1\"/>\n</r>\n");
+        assert_eq!(fmt("<r>\n  <a\n   x=\"1\"/>\n</r>"), "<r>\n  <a\n   x=\"1\"/>\n</r>\n");
+        // Auch das Start-Tag eines Elements mit gemischtem Inhalt rückt mit, der Inhalt nicht.
+        assert_eq!(fmt("<r>\n<p\n  class=\"x\">a\n <b>b</b></p></r>"), "<r>\n  <p\n    class=\"x\">a\n <b>b</b></p>\n</r>\n");
+        // Minifizieren lässt Tags ganz unverändert.
+        assert_eq!(mini("<r>\n  <a\n    x=\"1\"/>\n</r>"), "<r><a\n    x=\"1\"/></r>");
     }
 
     #[test]
@@ -959,7 +1007,7 @@ mod tests {
         let input = "<?xml version=\"1.0\"?>\n<!DOCTYPE r [\n <!ENTITY e \"v\">\n]>\n<r>\n  <!-- keep -->\n  <a  x=\"1\" >\n    <b/>\n  </a>\n  <p>Text <i>mixed</i> here</p>\n  <pre xml:space=\"preserve\"> <q/> </pre>\n  <e>   </e>\n  <t> text </t>\n</r>\n";
         assert_eq!(
             mini(input),
-            "<?xml version=\"1.0\"?><!DOCTYPE r [\n <!ENTITY e \"v\">\n]><r><!-- keep --><a x=\"1\"><b/></a><p>Text <i>mixed</i> here</p><pre xml:space=\"preserve\"> <q/> </pre><e></e><t> text </t></r>"
+            "<?xml version=\"1.0\"?><!DOCTYPE r [\n <!ENTITY e \"v\">\n]><r><!-- keep --><a  x=\"1\" ><b/></a><p>Text <i>mixed</i> here</p><pre xml:space=\"preserve\"> <q/> </pre><e></e><t> text </t></r>"
         );
         assert_eq!(text(go(Op::Minify, "<r> <a/> </r>", Options::default())), "<r><a/></r>\n");
         // Minifizieren und wieder formatieren ergibt das Formatierte.
@@ -1087,7 +1135,7 @@ mod tests {
         assert!(once.starts_with('\u{feff}'));
         assert!(once.contains("<p>Text with <b>bold</b> &e; and &#x263A;</p>"));
         assert!(once.contains("  <code xml:space=\"preserve\">  keep   <this/>  </code>\n"));
-        assert!(once.contains("  <x:meta a='1' b=\"2\"/>\n"));
+        assert!(once.contains("  <x:meta  a='1'   b=\"2\"/>\n"));
         assert!(once.contains("    <item>1</item>\n\n    <item>2</item>\n    <item/>\n    <item></item>\n"));
     }
 
@@ -1153,8 +1201,9 @@ mod tests {
             eprintln!("xml {op:?} {} MB: {dt:?}", big.len() >> 20);
             let Outcome::Text(t) = out else { panic!("{op:?} failed") };
             assert!(!t.is_empty());
+            // Allein unter 1 s; die Grenze ist großzügig, weil die ganze Test-Suite parallel läuft.
             if !cfg!(debug_assertions) {
-                assert!(dt.as_secs_f64() < 10.0, "{op:?} took {dt:?}");
+                assert!(dt.as_secs_f64() < 60.0, "{op:?} took {dt:?}");
             }
         }
     }
@@ -1231,7 +1280,11 @@ mod tests {
                 (Outcome::Text(vt), Outcome::Text(ft), Outcome::Text(mt)) => {
                     assert_eq!(vt, &s);
                     assert_eq!(&fmt(ft), ft, "format not idempotent for {s:?}");
-                    assert_eq!(&text(go(Op::Minify, ft, opts)), mt, "minify(format(x)) != minify(x) for {s:?}");
+                    // Mehrzeilige Start-Tags rücken beim Formatieren mit, beim Minifizieren nicht.
+                    if !s.contains(['\n', '\r']) {
+                        assert_eq!(&text(go(Op::Minify, ft, opts)), mt, "minify(format(x)) != minify(x) for {s:?}");
+                    }
+                    assert_eq!(&text(go(Op::Minify, mt, opts)), mt, "minify not idempotent for {s:?}");
                     assert!(matches!(go(Op::Validate, mt, opts), Outcome::Text(_)));
                 }
                 (Outcome::Invalid(e), Outcome::Invalid(e2), Outcome::Invalid(e3)) => {
