@@ -167,7 +167,7 @@ fn home(s: Spot) -> Home {
     match s {
         TabEditor | EditorSearchSettings | EditorAgentSwitches => Home::Settings(super::super::editor_services::SETTINGS_TAB),
         EditorTree => Home::Editor(false),
-        EditorTabBar | EditorSplit | EditorText | EditorFind | EditorStatus | EditorMinimap | EditorSearchFiles => Home::Editor(true),
+        EditorTabBar | EditorSplit | EditorText | EditorFind | EditorStatus | EditorMinimap | EditorSearchFiles | EditorMenuBar => Home::Editor(true),
         TitlebarEditor => Home::Hub,
         ThemeManage => Home::Settings(1),
         ClaudeMode | ClaudeDefaults | ClaudeBudget => Home::Settings(2),
@@ -312,7 +312,11 @@ fn whats_new_lists_the_steps_since_a_version() {
     // Der Editor (#54) kam mit 3.0.0: die Tour „Was ist neu“ für 2.x zeigt ihn, mit dem Schritt der kurzen Tour zuerst.
     let editor = ids("2.7.0", "3.0.0");
     assert!(editor.contains(&"basics.editor") && editor.contains(&"editor.agents") && editor.contains(&"editor.search"), "{editor:?}");
-    assert!(steps::tour("editor").is_some_and(|t| t.steps.iter().all(|s| s.since == "3.0.0")));
+    assert!(steps::tour("editor").is_some_and(|t| t.steps.iter().all(|s| s.since == "3.0.0" || s.id == "editor.format")));
+    // Menüleiste und Formatieren (#381) kamen mit 3.2.0.
+    let fmt = ids("3.1.0", "3.2.0");
+    assert!(fmt.contains(&"editor.format") && !fmt.contains(&"editor.status"), "{fmt:?}");
+    assert_eq!(steps::tour("editor").and_then(|t| t.steps.iter().find(|s| s.id == "editor.format")).map(|s| s.spot), Some(Some(Spot::EditorMenuBar)));
 }
 
 /// Die Schritte im Editor arbeiten in einer eigenen Beispieldatei der Tour im Temp-Ordner, nie in einer des Nutzers.

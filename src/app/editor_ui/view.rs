@@ -60,6 +60,33 @@ pub(super) enum Cmd {
     SetLangMode(u64, String, Option<Mode>),
     /// Standard-Modus für alle übrigen Dateien (Einstellung). Die eigene Wahl im Dokument fällt weg.
     SetDefaultMode(u64, Mode),
+    // ---- Menüleiste und Formatieren (#381)
+    /// Teilung fokussieren (vor jedem Befehl aus ihrer Menüleiste).
+    FocusGroup(u64),
+    /// Befehl des Textfelds auf den aktiven Reiter der Teilung (Rückgängig, Zwischenablage, Zeilen, Vorkommen …).
+    EditOp(u64, super::doc::Op),
+    /// Suchleiste öffnen (`true` = mit Ersetzen).
+    OpenFind(bool),
+    GotoLineAsk,
+    /// Fenster „In Dateien suchen“.
+    FindInFiles,
+    /// Alle ungespeicherten Dateien mit Pfad speichern.
+    SaveAll,
+    ToggleWrap,
+    ToggleMinimap,
+    ToggleTree,
+    /// Befehls-Palette öffnen.
+    OpenPalette,
+    /// Formatieren/Minify/Prüfen/Schlüssel sortieren im aktiven Reiter der Teilung.
+    Format(u64, crate::editor::format::Op),
+    FormatCancel(u64),
+    /// Zur Fehlerstelle springen (Dokument, Zeile, Spalte; 1-basiert).
+    FormatGoto(u64, usize, usize),
+    FormatDismiss(u64),
+    /// Antwort auf die Rückfrage vor *Minify* von JSONC.
+    MinifyConfirm(bool),
+    /// Formatieren beim Speichern für JSON bzw. XML (Einstellung).
+    SetFormatOnSave(crate::editor::format::Kind, bool),
 }
 
 impl super::super::App {
@@ -97,6 +124,12 @@ impl super::super::App {
         let g = self.ed.panes.focused;
         let doc = self.ed.active_doc();
         let binds: Vec<(&str, Option<(Modifiers, Key)>)> = vec![("split_r", self.binding("split_r")), ("split_d", self.binding("split_d"))];
+        // Formatieren (#381) und die Befehls-Palette: Belegung aus Einstellungen → Tastenkürzel.
+        use crate::editor::format::Op as FmtOp;
+        let fmt_binds: Vec<(FmtOp, Option<(Modifiers, Key)>)> =
+            [(FmtOp::Format, "ed_format"), (FmtOp::Minify, "ed_minify"), (FmtOp::Validate, "ed_validate"), (FmtOp::SortKeys, "ed_sort_keys")].into_iter().map(|(o, id)| (o, self.binding(id))).collect();
+        let palette = self.binding("palette");
+        let mut open_palette = false;
         let ctrl = Modifiers::CTRL;
         let cs = Modifiers::CTRL | Modifiers::SHIFT;
         let ca = Modifiers::CTRL | Modifiers::ALT;
@@ -107,6 +140,24 @@ impl super::super::App {
                     && super::super::consume_key_exact(i, *m, *k, false)
                 {
                     cmds.push(Cmd::Split(g, if *id == "split_r" { Dir::Horizontal } else { Dir::Vertical }));
+                }
+            }
+            if let Some((m, k)) = palette
+                && super::super::consume_key_exact(i, m, k, false)
+            {
+                open_palette = true;
+            }
+            if doc.is_some() {
+                for (op, b) in &fmt_binds {
+                    if let Some((m, k)) = b
+                        && super::super::consume_key_exact(i, *m, *k, false)
+                    {
+                        cmds.push(Cmd::Format(g, *op));
+                        // Alt+Umschalt+Buchstabe darf nicht zusätzlich als Text ankommen.
+                        if m.alt && !m.ctrl {
+                            drop_alt_text(i, *k);
+                        }
+                    }
                 }
             }
             let mut take = |m: Modifiers, k: Key| super::super::consume_key_exact(i, m, k, false);
@@ -163,6 +214,9 @@ impl super::super::App {
                 }
             }
         });
+        if open_palette {
+            self.palette = Some(super::super::Palette { query: String::new(), sel: 0 });
+        }
         if let Some(n) = nav
             && let Some(t) = super::super::focus_target(&self.ed.group_rects, g, n)
         {
@@ -240,14 +294,18 @@ impl super::super::App {
                 let untitled = self.ed.docs.get(&id).is_some_and(|d| d.path.is_none());
                 if untitled {
                     self.editor_cmd(ctx, Cmd::SaveAs(id));
-                } else if let Some(d) = self.ed.docs.get_mut(&id) {
-                    match d.save(None, lang) {
-                        Ok(()) => {
-                            d.drop_hot(&dir);
-                            let t = d.title(lang);
-                            self.ed.set_hint(format!("{t}: {}", lang.t("gespeichert", "saved")));
+                } else {
+                    // Formatieren beim Speichern (#381): nie auf Kosten des Speicherns.
+                    let fos = self.ed.format_before_save(id, &prefs, lang);
+                    if let Some(d) = self.ed.docs.get_mut(&id) {
+                        match d.save(None, lang) {
+                            Ok(()) => {
+                                d.drop_hot(&dir);
+                                let t = d.title(lang);
+                                self.ed.set_hint(fos.unwrap_or_else(|| format!("{t}: {}", lang.t("gespeichert", "saved"))));
+                            }
+                            Err(e) => self.notify_text(e),
                         }
-                        Err(e) => self.notify_text(e),
                     }
                 }
             }
@@ -257,6 +315,9 @@ impl super::super::App {
                 let start = d.path.as_ref().and_then(|p| p.parent()).map(|p| p.to_path_buf()).or_else(|| self.ed.root.clone());
                 if let Some(p) = crate::platform::notify::save_any(start.as_deref(), &name) {
                     let other = self.ed.doc_for_path(&p).filter(|o| *o != id);
+                    if let Some(h) = self.ed.format_before_save(id, &prefs, lang) {
+                        self.ed.set_hint(h);
+                    }
                     if let Some(d) = self.ed.docs.get_mut(&id) {
                         match d.save(Some(p.clone()), lang) {
                             Ok(()) => {
@@ -339,7 +400,91 @@ impl super::super::App {
                 self.settings.editor.default_mode = m;
                 self.ed.set_doc_mode(id, None);
             }
+            Cmd::FocusGroup(g) => {
+                if self.ed.panes.groups.contains_key(&g) {
+                    self.ed.panes.focused = g;
+                }
+                self.ed.want_focus = true;
+            }
+            Cmd::EditOp(g, op) => self.ed.menu_edit_op(ctx, g, op),
+            Cmd::OpenFind(replace) => {
+                if self.ed.active_doc().is_some() {
+                    self.ed.find.open(replace);
+                }
+            }
+            Cmd::GotoLineAsk => {
+                if self.ed.active_doc().is_some() {
+                    self.ed.goto = Some(super::find::GotoLine::default());
+                }
+            }
+            Cmd::FindInFiles => {
+                self.editor_svc.search_open = true;
+                self.editor_svc.search.focus = true;
+            }
+            Cmd::SaveAll => self.editor_save_all(&prefs),
+            Cmd::ToggleWrap => self.ed.wrap = !self.ed.wrap,
+            Cmd::ToggleMinimap => self.ed.minimap = !self.ed.minimap,
+            Cmd::ToggleTree => self.ed.tree_open = !self.ed.tree_open,
+            Cmd::OpenPalette => self.palette = Some(super::super::Palette { query: String::new(), sel: 0 }),
+            Cmd::Format(g, op) => {
+                let c = ctx.clone();
+                self.ed.start_format(g, op, false, move || c.request_repaint(), lang);
+            }
+            Cmd::FormatCancel(doc) => self.ed.cancel_format(doc),
+            Cmd::FormatGoto(doc, line, col) => self.ed.format_goto(doc, line, col),
+            Cmd::FormatDismiss(doc) => {
+                self.ed.fmt.notes.remove(&doc);
+            }
+            Cmd::MinifyConfirm(yes) => {
+                if let Some(a) = self.ed.fmt.ask.take()
+                    && yes
+                    && self.ed.panes.groups.get(&a.group).and_then(|g| g.active_tab()).is_some_and(|t| t.doc == a.doc)
+                {
+                    let c = ctx.clone();
+                    self.ed.start_format(a.group, crate::editor::format::Op::Minify, true, move || c.request_repaint(), lang);
+                }
+            }
+            Cmd::SetFormatOnSave(kind, on) => match kind {
+                crate::editor::format::Kind::Xml => self.settings.editor.format_on_save_xml = on,
+                _ => self.settings.editor.format_on_save_json = on,
+            },
         }
+    }
+
+    /// *Datei → Alle speichern*: alle ungespeicherten Dateien mit Pfad (Formatieren beim Speichern wie bei *Speichern*);
+    /// unbenannte Reiter brauchen *Speichern unter*.
+    fn editor_save_all(&mut self, prefs: &super::EditorPrefs) {
+        let lang = self.settings.language;
+        let dir = self.dir.clone();
+        let ids: Vec<u64> = self.ed.docs.iter().filter(|(_, d)| d.dirty() && d.path.is_some()).map(|(id, _)| *id).collect();
+        let mut saved = 0;
+        for id in ids {
+            let _ = self.ed.format_before_save(id, prefs, lang);
+            if let Some(d) = self.ed.docs.get_mut(&id) {
+                match d.save(None, lang) {
+                    Ok(()) => {
+                        d.drop_hot(&dir);
+                        saved += 1;
+                    }
+                    Err(e) => {
+                        let t = d.title(lang);
+                        self.notify_text(format!("{t}: {e}"));
+                    }
+                }
+            }
+        }
+        let untitled = self.ed.docs.values().filter(|d| d.path.is_none() && d.dirty()).count();
+        let mut msg = match lang {
+            Lang::De => format!("{saved} Datei(en) gespeichert"),
+            Lang::En => format!("{saved} file(s) saved"),
+        };
+        if untitled > 0 {
+            msg.push_str(&match lang {
+                Lang::De => format!(" – {untitled} unbenannte(r) Reiter: „Speichern unter …“"),
+                Lang::En => format!(" – {untitled} untitled tab(s): “Save as …”"),
+            });
+        }
+        self.ed.set_hint(msg);
     }
 
     /// Nächster Schritt einer Schließen-Rückfrage: Reiter ohne ungespeicherte Änderungen (oder deren Dokument noch in
@@ -413,7 +558,11 @@ impl super::super::App {
                             self.ed.close_ask = Some(ask);
                             self.editor_close_step(&dir);
                         }
-                    } else if let Some(d) = self.ed.docs.get_mut(&doc) {
+                    } else {
+                        let prefs = self.editor_prefs();
+                        let _ = self.ed.format_before_save(doc, &prefs, lang);
+                    }
+                    if !untitled && let Some(d) = self.ed.docs.get_mut(&doc) {
                         match d.save(None, lang) {
                             Ok(()) => self.editor_close_step(&dir),
                             Err(e) => {
@@ -547,8 +696,22 @@ impl EditorUi {
 
 // -------------------------------------------------------------------------------------------------------- Bausteine
 
+/// Alt+Umschalt+Buchstabe als Kürzel verbraucht: einen Text desselben Buchstabens im selben Bild verwerfen (manche
+/// Tastaturtreiber liefern ihn zusätzlich).
+fn drop_alt_text(i: &mut egui::InputState, k: Key) {
+    let name = k.name();
+    if name.len() == 1
+        && let Some(pos) = i.events.iter().position(|e| matches!(e, egui::Event::Text(t) if t.eq_ignore_ascii_case(name)))
+    {
+        i.events.remove(pos);
+    }
+}
+
 /// Statusleiste, Ordnerbaum und Teilungen zeichnen (ohne Dialoge); sammelt die Befehle in `cmds`.
 pub(super) fn draw(ctx: &egui::Context, ed: &mut EditorUi, theme: &crate::theme::Theme, prefs: &super::EditorPrefs, lang: Lang, cmds: &mut Vec<Cmd>) {
+    // Fertige Formatier-Läufe übernehmen (#381) – vor dem Zeichnen, damit das Bild den neuen Text zeigt.
+    ed.poll_formats(lang);
+    super::format::dialogs(ctx, ed, lang, cmds);
     // Ein Agent hat Reiter oder Teilung gewechselt: Tasten des Nutzers dürfen nicht in dessen Datei landen (#54).
     if std::mem::take(&mut ed.blur)
         && let Some(f) = ctx.memory(|m| m.focused())
@@ -666,11 +829,24 @@ fn show_node(ui: &mut Ui, node: &mut Node, rect: Rect, ed: &mut EditorUi, cx: &G
     }
 }
 
-/// Eine Gruppe: Reiterleiste, Hinweisleisten, ggf. Suchleiste, Textfeld.
+/// Eine Gruppe: Menüleiste (#381), Reiterleiste, Hinweisleisten, Fortschritt/Meldung des Formatierens, ggf.
+/// Suchleiste, Textfeld.
 fn show_group(ui: &mut Ui, g: u64, rect: Rect, ed: &mut EditorUi, cx: &GroupCx, cmds: &mut Vec<Cmd>) {
     ed.group_rects.insert(g, rect);
     let focused = ed.panes.focused == g;
-    let bar = Rect::from_min_size(rect.min, Vec2::new(rect.width(), BAR_H));
+    let mut top = rect.top();
+    if cx.prefs.menu_bar {
+        let mr = Rect::from_min_size(rect.min, Vec2::new(rect.width(), super::menu::MENU_H));
+        let narrow = super::menu::menu_bar(ui, mr, g, ed, cx.prefs, cx.lang, cmds);
+        ed.menu_rects.insert(g, (mr, narrow));
+        if focused {
+            spot_rect(ui, Spot::EditorMenuBar, mr);
+        }
+        top = mr.bottom();
+    } else {
+        ed.menu_rects.remove(&g);
+    }
+    let bar = Rect::from_min_size(Pos2::new(rect.left(), top), Vec2::new(rect.width(), BAR_H));
     tab_bar(ui, g, bar, ed, cx.lang, cmds);
     let mut body = Rect::from_min_max(Pos2::new(rect.left(), bar.bottom()), rect.max);
     let Some((doc_id, idx)) = ed.panes.groups.get(&g).and_then(|grp| grp.active_tab().map(|t| (t.doc, grp.active))) else {
@@ -686,6 +862,17 @@ fn show_group(ui: &mut Ui, g: u64, rect: Rect, ed: &mut EditorUi, cx: &GroupCx, 
         let r = Rect::from_min_size(body.min, Vec2::new(body.width(), INFO_H));
         info_bar(ui, r, doc_id, bar_kind, cx.lang, cmds);
         body.min.y += INFO_H;
+    }
+    // Formatieren (#381): Fortschritt mit *Abbrechen*, danach die Meldung (gültig, Fehler mit *Gehe zu*).
+    if let Some(j) = ed.fmt.job_for(doc_id) {
+        let r = Rect::from_min_size(body.min, Vec2::new(body.width(), super::format::LINE_H));
+        super::format::progress_line(ui, r, doc_id, j, cx.lang, cmds);
+        body.min.y += super::format::LINE_H;
+    }
+    if let Some((n, _)) = ed.fmt.notes.get(&doc_id).cloned() {
+        let r = Rect::from_min_size(body.min, Vec2::new(body.width(), super::format::LINE_H));
+        super::format::note_line(ui, r, doc_id, &n, cx.lang, cmds);
+        body.min.y += super::format::LINE_H;
     }
     // Suchleiste (nur in der fokussierten Gruppe)
     if focused && ed.find.visible {
@@ -782,7 +969,7 @@ fn editor_font(ctx: &egui::Context, size: f32) -> FontId {
 
 impl EditorUi {
     /// Ansicht des Reiters `idx` der Gruppe `g` und das Dokument dazu (getrennt ausgeliehen).
-    fn view_doc_mut(&mut self, g: u64, idx: usize) -> (Option<&mut text::View>, Option<&mut DocEntry>) {
+    pub(super) fn view_doc_mut(&mut self, g: u64, idx: usize) -> (Option<&mut text::View>, Option<&mut DocEntry>) {
         let Some(t) = self.panes.groups.get_mut(&g).and_then(|grp| grp.tabs.get_mut(idx)) else { return (None, None) };
         let doc = t.doc;
         (Some(&mut t.view), self.docs.get_mut(&doc))
@@ -1097,7 +1284,9 @@ fn drag_overlay(ui: &mut Ui, ed: &mut EditorUi, lang: Lang, cmds: &mut Vec<Cmd>)
 /// Ablageziel unter dem Zeiger: Reiterleiste (Position zwischen Reitern) oder Rand/Mitte einer Gruppe.
 pub(super) fn drop_target(ed: &EditorUi, p: Pos2) -> Option<(PaneDrop, Rect)> {
     for (g, (bar, tabs)) in &ed.bar_rects {
-        if bar.contains(p) {
+        // Die Menüleiste darüber (#381) zählt wie die Reiterleiste.
+        let over_menu = ed.menu_rects.get(g).is_some_and(|(m, _)| m.contains(p));
+        if bar.contains(p) || over_menu {
             let idx = tabs.iter().position(|r| p.x < r.center().x).unwrap_or(tabs.len());
             let x = tabs.get(idx).map(|r| r.left()).or_else(|| tabs.last().map(|r| r.right())).unwrap_or(bar.left());
             return Some((PaneDrop::Bar { group: *g, index: idx }, Rect::from_center_size(Pos2::new(x, bar.center().y), Vec2::new(4.0, bar.height()))));
@@ -1107,7 +1296,9 @@ pub(super) fn drop_target(ed: &EditorUi, p: Pos2) -> Option<(PaneDrop, Rect)> {
         if !r.contains(p) {
             continue;
         }
-        let body = Rect::from_min_max(Pos2::new(r.left(), r.top() + BAR_H), r.max);
+        // Unter Menü- und Reiterleiste (die Reiterleiste kennt ihre Lage aus dem letzten Bild).
+        let top = ed.bar_rects.get(g).map(|(b, _)| b.bottom()).unwrap_or(r.top() + BAR_H);
+        let body = Rect::from_min_max(Pos2::new(r.left(), top), r.max);
         let (fx, fy) = ((p.x - body.left()) / body.width().max(1.0), (p.y - body.top()) / body.height().max(1.0));
         let edge = 0.25;
         let half = |dir: Dir, before: bool| -> Rect {

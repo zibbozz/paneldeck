@@ -36,11 +36,22 @@ pub const DEFAULTS: &[(&str, &str)] = &[
     ("close_all", ""),
     // Sitzung neu laden (#169): standardmäßig ohne Kürzel
     ("reload", ""),
+    // Editor: Formatieren (#381). Nicht Strg+Alt+Buchstabe – das ist AltGr auf vielen Tastaturen (AltGr+M = µ auf
+    // deutschen); Alt+Umschalt+F wie „Dokument formatieren“ in VS Code. Schlüssel sortieren ohne Standard.
+    ("ed_format", "Alt+Shift+F"),
+    ("ed_minify", "Alt+Shift+M"),
+    ("ed_validate", "Alt+Shift+V"),
+    ("ed_sort_keys", ""),
 ];
 
 /// Kürzel, die in jedem Bereich gelten (Reiterwechsel) – die übrigen nur im Terminal-Bereich.
 pub fn is_global(id: &str) -> bool {
     id.starts_with("mode_")
+}
+
+/// Kürzel nur des Editor-Reiters (#381) – der Terminal-Bereich lässt diese Tasten den Terminals.
+pub fn is_editor(id: &str) -> bool {
+    id.starts_with("ed_")
 }
 
 pub fn label(id: &str, de: bool) -> &'static str {
@@ -72,6 +83,10 @@ pub fn label(id: &str, de: bool) -> &'static str {
         "mode_editor_alt" => ("Reiter „Editor“ (zweite Belegung)", "“Editor” tab (alternative)"),
         "close_all" => ("Alle Sitzungen schließen", "Close all sessions"),
         "reload" => ("Sitzung neu laden", "Reload session"),
+        "ed_format" => ("Editor: JSON/XML formatieren", "Editor: format JSON/XML"),
+        "ed_minify" => ("Editor: JSON/XML minifizieren", "Editor: minify JSON/XML"),
+        "ed_validate" => ("Editor: JSON/XML prüfen", "Editor: validate JSON/XML"),
+        "ed_sort_keys" => ("Editor: JSON-Schlüssel sortieren", "Editor: sort JSON keys"),
         _ => ("?", "?"),
     };
     if de { d } else { e }
@@ -162,6 +177,19 @@ mod tests {
             assert_ne!(label(id, true), label(id, false), "{id}: Texte gleich in beiden Sprachen");
         }
         assert!(is_global("mode_tasks") && is_global("mode_terminals") && !is_global("new"));
+        assert!(is_editor("ed_format") && !is_editor("editor") && !is_global("ed_format"));
+    }
+
+    /// #381: Die Editor-Kürzel kollidieren nicht mit festen Kürzeln des Editors und nicht mit AltGr (Strg+Alt).
+    #[test]
+    fn editor_format_keys_avoid_altgr_and_fixed_editor_keys() {
+        let fixed = ["Ctrl+N", "Ctrl+O", "Ctrl+Shift+O", "Ctrl+S", "Ctrl+Shift+S", "Ctrl+W", "Ctrl+F4", "Ctrl+B", "Alt+Z", "Ctrl+F", "Ctrl+H", "Ctrl+G", "Ctrl+Shift+F", "Ctrl+Z", "Ctrl+Y", "Ctrl+A", "Ctrl+D", "Ctrl+L", "Ctrl+Shift+L", "Ctrl+Shift+K", "Alt+Up", "Alt+Down", "Alt+Shift+Up", "Alt+Shift+Down"];
+        for (id, d) in DEFAULTS.iter().filter(|(id, d)| is_editor(id) && !d.is_empty()) {
+            let (m, _) = parse(d).unwrap();
+            assert!(!(m.ctrl && m.alt), "{id}: Strg+Alt ist AltGr");
+            assert!(!fixed.contains(d), "{id}: {d} gehört schon dem Editor");
+        }
+        assert_eq!(DEFAULTS.iter().find(|(id, _)| *id == "ed_format").map(|(_, d)| *d), Some("Alt+Shift+F"));
     }
 
     #[test]

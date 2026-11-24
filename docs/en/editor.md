@@ -17,6 +17,15 @@ The **Editor** tab is a plain text editor inside Paneldeck, independent of the t
 - **Split right** / **Split down** like in the Terminals tab, sizes by dragging; **Ctrl+Alt+arrow keys** move the focus between splits.
 - The **same file in two splits** is one document: edits appear in both at once, each split keeps its own scroll position and cursors.
 
+## Menu bar
+*(Since 3.2.0.)* Every split has a slim **menu bar** above its tab bar: **File · Edit · View · Format**. The commands act on the active tab of that split, and the shortcuts are shown on the right of each entry:
+- **File:** New file, Open file …, Open folder …, Save, Save as …, Save all (all unsaved files with a name; untitled tabs need *Save as*), Close tab.
+- **Edit:** Undo, Redo, Cut, Copy, Paste, Select all, Find …, Replace …, Find in files …, Go to line …, Add next occurrence, Select all occurrences, Select line, Delete line, Move line up/down.
+- **View:** Word wrap, Minimap, Folder tree, Split right, Split down, mode *Text* / *Syntax*, Language (built-in languages; all languages in the status bar), Commands (palette).
+- **Format:** the [formatting commands](#formatting-json-and-xml) and *Format JSON/XML on save*.
+
+Entries that do not apply right now are **greyed out**, and hovering says why (e.g. *Not JSON or XML* for a text file, *Nothing to undo*). In a narrow split the four menus fold into one **Menu ▾**. The menu bar can be switched off under *Settings → Editor → Menu bar* (on by default). The command palette (**Ctrl+Shift+P**) also works in the Editor tab and lists the format commands as *Format: …*.
+
 ## Editing
 - **Multiple cursors:** Ctrl+Alt+Up/Down adds a cursor above/below, **Ctrl+D** selects the next occurrence, **Ctrl+Shift+L** all occurrences, **Alt+drag** selects a column; Esc goes back to one cursor.
 - **Ctrl+L** selects the line; moving, duplicating and deleting lines; Tab/Shift+Tab indent and outdent.
@@ -45,6 +54,29 @@ Colouring is incremental and runs in the background, so typing and scrolling nev
 ![Editor tab in Syntax mode: a Rust file and a Markdown file with syntax colours, the status bar shows mode and language](../images/editor-syntax.png)
 
 ![Find bar with a regular expression and Replace](../images/editor-find.png)
+
+## Formatting JSON and XML
+*(Since 3.2.0.)* The **Format** menu has a built-in formatter for JSON and XML – it works **offline**, nothing leaves your computer:
+
+| Command | Shortcut | What it does |
+|---|---|---|
+| Format JSON / Format XML | **Alt+Shift+F** | pretty-print with the document's indentation (from `.editorconfig` or the file's own indentation: spaces or tabs, width) |
+| Minify | **Alt+Shift+M** | remove the whitespace |
+| Validate | **Alt+Shift+V** | check only: *Valid JSON* or the error with line and column |
+| Sort JSON keys | – | sort object keys recursively (alphabetically), then format; JSON only |
+
+- **One undo step:** the result replaces the document directly; **Ctrl+Z** brings back the previous text. The cursor stays on its line.
+- **Selection:** with a selection only the selected text is formatted (lines after the first get the indentation of the line where the selection starts). The selection must be a complete value or element – otherwise you get the validation error and nothing changes.
+- **Errors:** invalid content is never changed. A bar shows *Invalid JSON at line 3, column 17: …* with **Go to**, which puts the cursor on the spot.
+- **Large files:** formatting runs in the background with a progress line (percentage and **Cancel**); the editor stays usable, also in the [large-file mode](#large-files). If you type while it runs, the result is not applied (run it again).
+- **Detection:** by extension (`.json`, `.jsonc`, `.xml`, `.xsd`, `.xsl(t)`, `.svg`, `.csproj`, `.props`, `.targets`, `.resx`, `.plist`, `.xaml`, `.nuspec`, `.config` with XML …), well-known names and the content (`{`/`[` or `<?xml`); for untitled tabs also the language chosen in the status bar.
+- **JSONC** (JSON with comments: `.jsonc`, `tsconfig.json`, `jsconfig.json`, `.vscode/*.json`, or when comments occur): comments (`//`, `/* */`) and trailing commas are **kept** when formatting; **Minify** removes the comments and asks first.
+- **XML is formatted gently:** elements are indented; comments, CDATA, processing instructions and the DOCTYPE are kept; mixed content (text and tags, e.g. XHTML) and `xml:space="preserve"` stay unchanged; attributes stay on one line.
+- **Format on save:** a switch per language – *Format JSON on save* / *Format XML on save* in the Format menu or under *Settings → Editor* – **off by default**. Only files up to 1 MB are formatted on save; larger or invalid files are **saved unchanged** with a hint in the status bar. Autosave does not format.
+- The shortcuts can be changed under *Settings → Shortcuts* (*Editor: format JSON/XML* …). They are not Ctrl+Alt+letter on purpose: on many keyboards that is AltGr (AltGr+M types µ on a German keyboard).
+- Formatting through language servers (*Smart* mode) comes later in addition.
+
+![Editor with the menu bar: a formatted JSON file on the left, an invalid one with “Go to” on the right](../images/editor-format.png)
 
 ## Encoding, line endings, indentation
 - On opening, Paneldeck detects the **encoding** (UTF-8 with or without BOM, UTF-16 LE/BE, Windows-1252) and keeps the **line endings** as they are (LF or CRLF; mixed files keep the majority, with a hint). Both are shown in the status bar and can be switched there (*Change encoding (applies on next save)*, *Change line endings*). A character that does not fit the chosen encoding stops saving with a message – the file stays unchanged.
@@ -89,19 +121,22 @@ Files from **20 MB** (*Settings → Editor → Large files from*) open in large-
 | Default mode | Text | mode of files whose language has no own setting ([Syntax colours](#syntax-colours)) |
 | Mode per language | Default | Text or Syntax for all files of one language |
 | Own mappings | – | file name or extension → language, before the built-in detection |
+| Menu bar | on | the [menu bar](#menu-bar) above every split |
+| Format JSON on save / Format XML on save | off | [format on save](#formatting-json-and-xml) (files up to 1 MB) |
 | **Agents** | all off | see [Agents](#agents) |
 
-Stored in `settings.json` as `editor` ([data format](data-and-backups.md#new-fields-in-300), [new in 3.1.0](data-and-backups.md#new-fields-in-310)).
+Stored in `settings.json` as `editor` ([data format](data-and-backups.md#new-fields-in-300), [new in 3.1.0](data-and-backups.md#new-fields-in-310), [new in 3.2.0](data-and-backups.md#new-fields-in-320)).
 
 ![Settings, Editor tab](../images/editor-settings.png)
 
 ## Agents
 Agents (Claude Code and others via the [agent interface](agent-interface.md#editor), and [chats with local models](chat.md)) can use the editor:
-- **Reading** (`editor_list`, `editor_read`) works from level *Read only* – including unsaved changes.
-- Three switches in *Settings → Editor → Agents*, **all off by default** and only effective at level **Control** (for chats: the level of the model):
+- **Reading** (`editor_list`, `editor_read`) works from level *Read only* – including unsaved changes. So does **validating** JSON/XML (`format_file` with `op: validate`, since 3.2.0).
+- Four switches in *Settings → Editor → Agents*, **all off by default** and only effective at level **Control** (for chats: the level of the model):
   - **Agents may open files** – in a new tab; only local paths, never network/UNC paths (`\\server\share`, `\\wsl.localhost\…`, mapped network drives) or devices. An agent may also open an untitled tab with text.
   - **Agents may edit open files** – the change stays **unsaved**, is marked as made by the agent (*Opened or changed by an agent*) and can be undone.
   - **Agents may save** – only files that are open and already exist; untitled tabs are saved by you only.
+  - **Agents may format** *(since 3.2.0)* – `format_file` formats, minifies or sorts the keys of an open JSON/XML document with the built-in formatter; like an edit the change stays unsaved, is marked as made by the agent and can be undone.
 - Agents never take the keyboard focus: a file an agent opens or shows is not focused, so what you are typing never lands in it by accident.
 - These rules apply to text mode and to the later hex mode alike.
 

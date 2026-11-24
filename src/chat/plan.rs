@@ -224,7 +224,8 @@ pub fn is_read_only(name: &str) -> bool {
 /// `grants` = wie oft das Budget freigegeben ist (1 + *Weiter*). `Err` = Ergebnis-Nachricht für das Modell (Fehler
 /// `plan_mode` bzw. `plan_budget`).
 pub fn gate(level: PlanLevel, call: &ToolCall, research: u32, grants: u32) -> Result<(), (ToolStatus, String)> {
-    if !is_read_only(&call.name) {
+    // Werkzeuge mit lesender und schreibender Form (`format_file`, #381): nur die lesende Form läuft im Plan-Modus.
+    if !is_read_only(&call.name) || crate::mcp::call_level(&call.name, &call.arguments) == Some(McpLevel::Control) {
         let msg = format!(
             "Plan mode: {} changes something and is locked until the user approves the plan (Execute). Use only read-only tools now, then write the plan.",
             crate::mcp::short(&call.name, 60)
@@ -916,6 +917,16 @@ mod tests {
             }
             let expect = d.level == McpLevel::Read || d.name == "wait_for_status";
             assert_eq!(is_read_only(d.name), expect, "{}", d.name);
+        }
+    }
+
+    /// #381: Im Plan-Modus läuft von `format_file` nur `validate`.
+    #[test]
+    fn gate_allows_only_validating_with_format_file() {
+        let fc = |op: &str| ToolCall { id: "c".into(), name: "format_file".into(), arguments: json!({"path": "C:\\a.json", "op": op}) };
+        assert!(gate(PlanLevel::Max, &fc("validate"), 0, 1).is_ok());
+        for op in ["format", "minify", "sort_keys", ""] {
+            assert!(gate(PlanLevel::Max, &fc(op), 0, 1).is_err(), "{op}");
         }
     }
 

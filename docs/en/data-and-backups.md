@@ -210,6 +210,19 @@ All fields are optional; older versions ignore them (see [Images and screenshots
 - `chats/<id>.json` → `plan`: the chat's current plan from [plan mode](chat.md#plan-mode) – `{"level": "low" | "medium" | "high" | "xhigh" | "max", "status": "proposed" | "revising" | "approved" | "discarded", "markdown": "# Plan: …", "revision": 1, "created": 1763200000, "approved": 1763200100, "file": "plans/12-1763200100.md", "finished": true}` (`approved` and `file` only after *Execute*; `finished: true` = the execution of the approved plan is over, e.g. a new plan round started – missing = `false`). A plan read with status `revising` is treated as `proposed`. Only written when there is a plan; an unreadable or empty value means no plan. *Clear history* also clears it. Older versions ignore it.
 - `plans/`: approved plans as Markdown files, `<chat id>-<time>.md`, with a comment line on top (chat, level, revision, time). They are documents for you to keep: closing the chat or deleting its history does not delete them (delete them yourself if they contain anything private), and the format is not a stable interface.
 
+## New fields in 3.2.0
+All fields are optional; older versions ignore them, and missing fields mean the defaults below.
+- `settings.json` → `editor` ([Menu bar](editor.md#menu-bar), [Formatting JSON and XML](editor.md#formatting-json-and-xml)):
+
+  | Field | Default | Meaning |
+  |---|---|---|
+  | `menu_bar` | `true` | menu bar above every editor split; only an explicit `false` switches it off |
+  | `format_on_save_json` | `false` | format JSON (also JSONC) on save (files up to 1 MB) |
+  | `format_on_save_xml` | `false` | format XML on save (files up to 1 MB) |
+  | `agent_format` | `false` | switch *Agents may format* (MCP `format_file` except `validate`); only an explicit `true` switches it on |
+
+- `settings.json` → `keys` → `ed_format`, `ed_minify`, `ed_validate`, `ed_sort_keys`: own shortcuts of the format commands (defaults `Alt+Shift+F`, `Alt+Shift+M`, `Alt+Shift+V`, none).
+
 ## Backups
 *Settings → Data & backup* controls the automatic backups of `paneldeck.db`: by default one copy every 24 hours, keeping two (plus the database itself). If the computer was off when a backup was due, it is made at the next start; several missed ones result in just one. You can choose another backup folder, open it, press **Back up now** (manual copies are never deleted automatically) and **Restore** any copy from the list – the current state is backed up first, Paneldeck then quits and applies the restore at the next start. Before every database update (migration) Paneldeck makes a copy as well, and it never touches a database created by a newer version.
 

@@ -337,6 +337,8 @@ enum Nav {
 
 #[derive(Clone)]
 enum Action {
+    /// Formatier-Befehl des Editors auf den aktiven Reiter (#381, Befehls-Palette).
+    EditorFormat(crate::editor::format::Op),
     /// Eingefügter Text mit mehreren Zeilen wartet auf die Rückfrage (Sitzung, Text, aus abgedocktem Fenster).
     /// Sitzung, Text, aus abgedocktem Fenster, Rückfrage nur wegen möglicher Broadcast-Ziele (`Session::take_paste_ask`).
     PasteAsk(u64, String, bool, bool),
@@ -1645,6 +1647,11 @@ impl App {
         }
     }
 
+    /// Aktuelles Kürzel als Text wie in `keys::DEFAULTS` (`Ctrl+Shift+D`; leer = keins) – für die Menüs des Editors.
+    fn binding_raw(&self, id: &str) -> String {
+        self.binding(id).map(|(m, k)| keys::format(m, k)).unwrap_or_default()
+    }
+
     /// Anzeigetext des aktuellen Kürzels (für Tooltips).
     fn binding_text(&self, id: &str) -> String {
         let s = self.settings.keys.get(id).cloned().or_else(|| keys::DEFAULTS.iter().find(|(i, _)| *i == id).map(|(_, d)| d.to_string())).unwrap_or_default();
@@ -2782,7 +2789,7 @@ impl App {
             return; // gerade wird ein Kürzel aufgenommen
         }
         let mut binds: Vec<(&'static str, Modifiers, Key)> =
-            keys::DEFAULTS.iter().filter(|(id, _)| !keys::is_global(id)).filter_map(|(id, _)| self.binding(id).map(|(m, k)| (*id, m, k))).collect();
+            keys::DEFAULTS.iter().filter(|(id, _)| !keys::is_global(id) && !keys::is_editor(id)).filter_map(|(id, _)| self.binding(id).map(|(m, k)| (*id, m, k))).collect();
         // Spezifischere Kürzel (mehr Modifikatoren) zuerst prüfen.
         binds.sort_by_key(|b| std::cmp::Reverse(b.1.ctrl as u8 + b.1.shift as u8 + b.1.alt as u8));
         let mut fired: Vec<&'static str> = Vec::new();
@@ -3828,6 +3835,7 @@ impl App {
                 self.new_session(ctx, NewOpts { cwd: Some(dir), ..NewOpts::default() });
             }
             Action::OpenPalette => self.palette = Some(Palette { query: String::new(), sel: 0 }),
+            Action::EditorFormat(op) => self.editor_format_active(ctx, op),
             Action::OpenHistory => {
                 self.history_open = true;
                 if self.history_rx.is_none() {
