@@ -91,6 +91,8 @@ enum Pend {
     Create { rx: std::sync::mpsc::Receiver<crate::wsl::DirCheck>, distro: String, path: String },
     /// `run_command` im Terminal eines Chats (#338): wartet, bis die Shell des (frisch gestarteten) Terminals bereit ist.
     AgentRun,
+    /// `format_file` (#381): Lauf im Hilfsthread für dieses Dokument und diesen Befehl.
+    Format { job: crate::editor_svc::format_job::Job, doc: u64, op: crate::editor::format::Op },
 }
 
 pub(super) struct PendingMcp {
@@ -773,6 +775,25 @@ impl App {
                 self.agent_ready(p);
                 continue;
             }
+            let fmt = if let Pend::Format { job, doc, op } = &p.kind { Some((job.poll(), *doc, *op, job.revision)) } else { None };
+            if let Some((polled, doc, op, rev)) = fmt {
+                // Fertig, sonst bis zur Frist warten; danach abbrechen (nichts wird geändert).
+                let r = match polled {
+                    None if Instant::now() < p.deadline => {
+                        self.mcp.pending.push(p);
+                        continue;
+                    }
+                    None => {
+                        if let Pend::Format { job, .. } = &p.kind {
+                            job.cancel();
+                        }
+                        crate::editor_svc::tools::format_reply(&Default::default(), op, &crate::editor_svc::format_job::Done::Cancelled)
+                    }
+                    Some(done) => self.mcp_format_finish(ctx, doc, op, rev, done),
+                };
+                self.mcp_finish(&p.reply, &p.tool, &p.args, p.caller, p.how, r);
+                continue;
+            }
             if let Pend::Create { rx, distro, path } = &p.kind {
                 // Ordnerprüfung fertig (oder Frist um: dann gilt „unbekannt“ und die Sitzung wird trotzdem angelegt).
                 // Lange danach (der Aufrufer hat aufgegeben) wird nichts mehr angelegt.
@@ -905,6 +926,7 @@ impl App {
     /// zuzuordnenden Absender (`how == "orphan"`) – kein Start eines Agenten (#218, wie `paneldeck --open --claude`).
     fn external_access(&self, tool: &str, args: &Value, how: &str) -> Result<(), (String, String)> {
         mcp::check_access(tool, self.settings.mcp_level, self.plan.expert)?;
+        mcp::check_call_level(tool, args, self.settings.mcp_level)?;
         if how == "orphan" && orphan_spawn_forbidden(tool, args) {
             return Err(super::taint::orphan_error());
         }
@@ -1079,6 +1101,24 @@ impl App {
             "theme_list" => Out::Now(Ok(theme_list_json(&self.themes, &self.theme_issues, &self.settings.theme))),
             "theme_get" => Out::Now(theme_get_json(&self.themes, &self.settings.theme, args)),
             // Editor-Reiter (#54): Schalter und Pfadregeln in `editor_svc::tools`.
+            // `format_file` (#381): im Hilfsthread, die Antwort kommt in einem späteren Bild.
+            "format_file" => match self.mcp_format_start(ctx, args) {
+                Ok((job, doc, op)) => {
+                    self.mcp.pending.push(PendingMcp {
+                        reply: reply.clone(),
+                        tool: tool.to_string(),
+                        args: args.clone(),
+                        caller,
+                        how,
+                        session: 0,
+                        deadline: Instant::now() + crate::editor_svc::format_job::AGENT_TIMEOUT,
+                        kind: Pend::Format { job, doc, op },
+                    });
+                    ctx.request_repaint_after(Duration::from_millis(50));
+                    Out::Later
+                }
+                Err(e) => Out::Now(Err(e)),
+            },
             t if crate::editor_svc::tools::TOOLS.contains(&t) => Out::Now(self.mcp_editor(ctx, t, args)),
             "send_text" => Out::Now(self.mcp_send_text(args, caller)),
             "send_keys" => Out::Now(self.mcp_send_keys(args, caller)),
@@ -1950,8 +1990,8 @@ impl App {
 
     /// `Some(Ergebnis)`, wenn ein wartender Aufruf fertig ist (Erfolg, Ende der Sitzung oder Frist).
     fn mcp_check(&self, p: &PendingMcp) -> Option<R> {
-        // `create_session` mit Ordnerprüfung erledigt `poll_mcp` selbst (braucht `&mut self`).
-        if let Pend::Create { .. } = &p.kind {
+        // `create_session` mit Ordnerprüfung und `format_file` erledigt `poll_mcp` selbst (braucht `&mut self`).
+        if let Pend::Create { .. } | Pend::Format { .. } = &p.kind {
             return None;
         }
         // Screenshots hängen an keiner Sitzung (Fenster-Screenshot: Sitzung 0); nur die Frist zählt.
@@ -1987,7 +2027,7 @@ impl App {
                 }
                 None
             }
-            Pend::Shot { .. } | Pend::Create { .. } | Pend::AgentRun => None,
+            Pend::Shot { .. } | Pend::Create { .. } | Pend::AgentRun | Pend::Format { .. } => None,
             Pend::Run { cmd, prompt0, cwd0, start_abs, max_lines, cmd_shell, started, mark0, nested, zsh } => {
                 let Some(s) = &e.live else { return Some(Err(er("session_not_running", tr("Die Sitzung läuft nicht mehr.", "The session is no longer running.")))) };
                 let (advanced, exit, mark) = {

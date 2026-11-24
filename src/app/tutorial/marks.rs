@@ -100,6 +100,8 @@ spots! {
     TabEditor = "settings.tab.editor",
     EditorSearchSettings = "settings.editor.search",
     EditorAgentSwitches = "settings.editor.agents",
+    // Menüleiste je Teilung (#381, 3.2.0)
+    EditorMenuBar = "editor.menu_bar",
 }
 
 /// Wo ein Ziel in diesem Bild lag: ganzes Rechteck und der sichtbare (nicht weggeschnittene) Teil.

@@ -82,24 +82,48 @@ pub enum Outcome {
 
 /// Art aus Pfad und Inhalt erkennen: `.json` → Json (Jsonc, wenn bekannter Dateiname oder Kommentare vorkommen),
 /// `.jsonc`/`.json5`-artige Namen → Jsonc, `.xml`/`.xsd`/`.xsl`/`.xslt`/`.svg`/`.csproj`/`.props`/`.targets`/`.resx`/
-/// `.plist`/`.xaml`/`.config` (wenn XML) → Xml; ohne passende Endung anhand des Inhalts (`{`/`[` bzw. `<?xml`/`<`).
+/// `.plist`/`.xaml`/`.config` (wenn XML) → Xml; bekannte JSON-Dateinamen (`.babelrc`, `.eslintrc`, `.prettierrc`,
+/// `.jshintrc`, `composer.lock`) → Json/Jsonc. Am Inhalt (`{`/`[` bzw. `<?xml`) nur ohne Endung bzw. ohne Pfad
+/// (unbenannter Tab) – eine Datei mit anderer Endung (`Cargo.toml`, `.ini`, `.ps1`, `README.md` mit `[![`) ist nie JSON.
 /// `None`, wenn es weder JSON noch XML ist.
 pub fn detect(path: Option<&Path>, text: &str) -> Option<Kind> {
     let name = path.and_then(|p| p.file_name()).map(|n| n.to_string_lossy().to_lowercase()).unwrap_or_default();
-    let ext = name.rsplit_once('.').map(|(_, e)| e.to_string()).unwrap_or_default();
+    // Endung: nach dem letzten Punkt, aber nicht bei Namen wie `.babelrc` (Punkt nur vorn).
+    let ext = name.rsplit_once('.').filter(|(stem, _)| !stem.is_empty()).map(|(_, e)| e.to_string()).unwrap_or_default();
+    let json_name = matches!(name.as_str(), ".babelrc" | ".eslintrc" | ".prettierrc" | ".jshintrc" | "composer.lock");
     let head = text.trim_start_matches('\u{feff}').trim_start();
     let jsonc_name = name == "tsconfig.json"
         || name == "jsconfig.json"
         || (name.starts_with("tsconfig.") && name.ends_with(".json"))
         || path.and_then(|p| p.parent()).and_then(|d| d.file_name()).is_some_and(|d| d.eq_ignore_ascii_case(".vscode"));
+    // Am Inhalt nur ohne Pfad oder bei Namen ganz ohne Punkt (nicht `.gitconfig` & Co.).
+    let sniff = path.is_none() || !name.contains('.');
     match ext.as_str() {
-        "jsonc" => Some(Kind::Jsonc),
-        "json" => Some(if jsonc_name || json::has_comments(text) { Kind::Jsonc } else { Kind::Json }),
+        _ if json_name => Some(if json::has_comments(text) { Kind::Jsonc } else { Kind::Json }),
+        "jsonc" | "code-workspace" => Some(Kind::Jsonc),
+        "json" | "geojson" | "webmanifest" | "har" => Some(if jsonc_name || json::has_comments(text) { Kind::Jsonc } else { Kind::Json }),
         "xml" | "xsd" | "xsl" | "xslt" | "svg" | "csproj" | "vbproj" | "fsproj" | "props" | "targets" | "resx" | "plist" | "xaml" | "nuspec" => Some(Kind::Xml),
         "config" if head.starts_with('<') => Some(Kind::Xml),
+        _ if !sniff => None,
         _ if head.starts_with("<?xml") => Some(Kind::Xml),
-        _ if head.starts_with('{') || head.starts_with('[') => Some(if json::has_comments(text) { Kind::Jsonc } else { Kind::Json }),
+        _ if looks_like_json(head) => Some(if json::has_comments(text) { Kind::Jsonc } else { Kind::Json }),
         _ => None,
+    }
+}
+
+/// Beginnt der Text wie JSON? `{` bzw. `[` und danach ein Wert oder `]` – nicht `[abschnitt]` (INI) oder `[![` (Markdown).
+fn looks_like_json(head: &str) -> bool {
+    let mut c = head.chars();
+    match c.next() {
+        Some('{') => true,
+        Some('[') => {
+            let rest = c.as_str().trim_start();
+            rest.is_empty()
+                || rest.starts_with(['{', '[', '"', ']', '-'])
+                || rest.starts_with(|ch: char| ch.is_ascii_digit())
+                || ["true", "false", "null"].iter().any(|w| rest.starts_with(w) && !rest[w.len()..].starts_with(|ch: char| ch.is_alphanumeric() || ch == '_'))
+        }
+        _ => false,
     }
 }
 

@@ -210,6 +210,19 @@ Alle Felder sind optional; ältere Versionen ignorieren sie (siehe [Bilder und B
 - `chats/<id>.json` → `plan`: der aktuelle Plan des Chats aus dem [Plan-Modus](chat.md#plan-modus) – `{"level": "low" | "medium" | "high" | "xhigh" | "max", "status": "proposed" | "revising" | "approved" | "discarded", "markdown": "# Plan: …", "revision": 1, "created": 1763200000, "approved": 1763200100, "file": "plans/12-1763200100.md", "finished": true}` (`approved` und `file` erst nach *Ausführen*; `finished: true` = die Ausführung des freigegebenen Plans ist vorbei, z. B. weil eine neue Plan-Runde begann – fehlt = `false`). Ein Plan, der mit Stand `revising` gelesen wird, gilt als `proposed`. Nur geschrieben, wenn es einen Plan gibt; ein unlesbarer oder leerer Wert heißt: kein Plan. *Verlauf leeren* leert ihn mit. Ältere Versionen ignorieren ihn.
 - `plans/`: freigegebene Pläne als Markdown-Dateien, `<Chat-Kennung>-<Zeit>.md`, mit einer Kommentarzeile oben (Chat, Stufe, Fassung, Zeit). Sie sind Dokumente zum Aufheben: Schließen des Chats oder Löschen seines Verlaufs löscht sie nicht (lösche sie selbst, wenn darin etwas Privates steht), und ihr Format ist keine feste Schnittstelle.
 
+## Neue Felder in 3.2.0
+Alle Felder sind optional; ältere Versionen ignorieren sie, fehlende Felder bedeuten die Standards unten.
+- `settings.json` → `editor` ([Menüleiste](editor.md#menüleiste), [JSON und XML formatieren](editor.md#json-und-xml-formatieren)):
+
+  | Feld | Standard | Bedeutung |
+  |---|---|---|
+  | `menu_bar` | `true` | Menüleiste über jeder Teilung des Editors; nur ein ausdrückliches `false` schaltet sie ab |
+  | `format_on_save_json` | `false` | JSON (auch JSONC) beim Speichern formatieren (Dateien bis 1 MB) |
+  | `format_on_save_xml` | `false` | XML beim Speichern formatieren (Dateien bis 1 MB) |
+  | `agent_format` | `false` | Schalter *Agenten dürfen formatieren* (MCP `format_file` außer `validate`); nur ein ausdrückliches `true` schaltet ihn ein |
+
+- `settings.json` → `keys` → `ed_format`, `ed_minify`, `ed_validate`, `ed_sort_keys`: eigene Kürzel der Format-Befehle (Standard `Alt+Shift+F`, `Alt+Shift+M`, `Alt+Shift+V`, keins); zweite Belegungen `ed_format_alt` (`Ctrl+Shift+I`), `ed_minify_alt`, `ed_validate_alt` (keine).
+
 ## Sicherungen
 *Einstellungen → Daten & Sicherung* steuert die automatischen Sicherungen von `paneldeck.db`: Standard ist eine Kopie alle 24 Stunden, behalten werden zwei (zusätzlich zur Datenbank selbst). War der Rechner zur fälligen Zeit aus, wird die Sicherung beim nächsten Start nachgeholt; mehrere verpasste ergeben nur eine. Du kannst einen anderen Sicherungsordner wählen, ihn öffnen, mit **Jetzt sichern** eine Kopie anlegen (manuelle Kopien werden nie automatisch gelöscht) und jede Kopie aus der Liste **wiederherstellen** – dabei wird zuerst der aktuelle Stand gesichert, danach beendet sich Paneldeck und spielt die Wiederherstellung beim nächsten Start ein. Vor jedem Datenbank-Update (Migration) legt Paneldeck ebenfalls eine Kopie an und fasst eine Datenbank einer neueren Version nie an.
 

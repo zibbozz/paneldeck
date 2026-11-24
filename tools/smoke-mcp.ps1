@@ -2278,20 +2278,25 @@ c.close()
   $edB = Join-Path $edDir 'gone.txt'; [IO.File]::WriteAllText($edB, "will be deleted`n", $utf8)
   $edC = Join-Path $edDir 'changed.txt'; [IO.File]::WriteAllText($edC, "one`n", $utf8)
   $edD = Join-Path $edDir 'from-cli.txt'; [IO.File]::WriteAllText($edD, "opened with --edit`n", $utf8)
+  # Formatieren (#381): kompaktes JSON, JSONC mit Kommentar, ungueltiges JSON, XML.
+  $edJ = Join-Path $edDir 'data.json'; [IO.File]::WriteAllText($edJ, "{`"b`":1,`"a`":[1,2]}`n", $utf8)
+  $edJc = Join-Path $edDir 'tsconfig.json'; [IO.File]::WriteAllText($edJc, "{`n  // keep me`n  `"x`": 1,`n}`n", $utf8)
+  $edBad = Join-Path $edDir 'bad.json'; [IO.File]::WriteAllText($edBad, "{`"a`": 1,,}`n", $utf8)
+  $edX = Join-Path $edDir 'doc.xml'; [IO.File]::WriteAllText($edX, "<a><b>1</b><!-- c --></a>`n", $utf8)
   $edBig = Join-Path $edDir 'big.log'
   $sw = New-Object IO.StreamWriter($edBig, $false, $utf8)
   for ($i = 1; $i -le 40000; $i++) { $sw.WriteLine("line $i of a large file generated at runtime for the editor smoke test") }
   $sw.Close()
   # Schalter der Editor-Einstellungen vor jedem Start setzen (settings.json -> editor).
-  $script:edSw = @{ open = $false; edit = $false; save = $false }
+  $script:edSw = @{ open = $false; edit = $false; save = $false; format = $false }
   $script:prestart = {
     $f = "$data\settings.json"; $j = [IO.File]::ReadAllText($f).TrimStart([char]0xFEFF) | ConvertFrom-Json
-    $ed = [pscustomobject]@{ large_file_mb = 1; agent_open = $script:edSw.open; agent_edit = $script:edSw.edit; agent_save = $script:edSw.save }
+    $ed = [pscustomobject]@{ large_file_mb = 1; agent_open = $script:edSw.open; agent_edit = $script:edSw.edit; agent_save = $script:edSw.save; agent_format = [bool]$script:edSw.format }
     $j | Add-Member -Force editor $ed
     [IO.File]::WriteAllText($f, ($j | ConvertTo-Json -Depth 10), (New-Object Text.UTF8Encoding $false))
   }
   # Stufe Lesen: lesen ja, schreiben nein (auch mit eingeschalteten Schaltern).
-  $script:edSw = @{ open = $true; edit = $true; save = $true }
+  $script:edSw = @{ open = $true; edit = $true; save = $true; format = $true }
   Set-Level 'Read' -Empty
   [void](Rpc 'initialize' @{ protocolVersion = '2025-06-18'; capabilities = @{}; clientInfo = @{ name = 'smoke'; version = '1' } })
   Start-Sleep 2
@@ -2300,8 +2305,12 @@ c.close()
   $el = Tool 'editor_list'
   Check 'Editor, Nur lesen: editor_list ohne offene Dokumente, Schalter gemeldet' (-not $el.err -and @($el.data.docs).Count -eq 0 -and $el.data.agents.open -eq $true) $el.text
   Check 'Editor, Nur lesen: editor_open verboten (Stufe)' ((Code (Tool 'editor_open' @{ path = $edA })) -eq 'forbidden')
+  # format_file (#381): validate ab Lesen, alles andere erst bei Steuern.
+  Check 'Format, Nur lesen: format_file in tools/list' ($names -contains 'format_file') ($names -join ',')
+  Check 'Format, Nur lesen: format_file op=format verboten (Stufe)' ((Code (Tool 'format_file' @{ path = $edJ; op = 'format' })) -eq 'forbidden')
+  Check 'Format, Nur lesen: format_file op=validate erlaubt (Datei nicht offen -> not_found)' ((Code (Tool 'format_file' @{ path = $edJ; op = 'validate' })) -eq 'not_found')
   # Stufe Steuern, Schalter aus: forbidden mit Hinweis auf den Schalter.
-  $script:edSw = @{ open = $false; edit = $false; save = $false }
+  $script:edSw = @{ open = $false; edit = $false; save = $false; format = $false }
   Set-Level 'Control' -Empty
   [void](Rpc 'initialize' @{ protocolVersion = '2025-06-18'; capabilities = @{}; clientInfo = @{ name = 'smoke'; version = '1' } })
   Start-Sleep 2
@@ -2311,9 +2320,12 @@ c.close()
   Check 'Editor, Schalter aus: editor_open forbidden mit Hinweis auf den Schalter' ((Code $eo) -eq 'forbidden' -and $eo.text -match 'Agents may open files|Agenten d') $eo.text
   Check 'Editor, Schalter aus: editor_edit forbidden' ((Code (Tool 'editor_edit' @{ doc = 1; old_text = 'a'; new_text = 'b' })) -eq 'forbidden')
   Check 'Editor, Schalter aus: editor_save forbidden' ((Code (Tool 'editor_save' @{ doc = 1 })) -eq 'forbidden')
+  $ff = Tool 'format_file' @{ path = $edJ; op = 'format' }
+  Check 'Format, Schalter aus: format_file op=format forbidden mit Hinweis auf den Schalter' ((Code $ff) -eq 'forbidden' -and $ff.text -match 'Agents may format|Agenten d') $ff.text
+  Check 'Format: format_file ohne op -> bad_args' ((Code (Tool 'format_file' @{ path = $edJ })) -eq 'bad_args')
   Check 'Editor, Schalter aus: Datei unveraendert' ([IO.File]::ReadAllText($edA) -eq "alpha`r`nbeta`r`ngamma`r`n")
   # Steuern, alle Schalter an.
-  $script:edSw = @{ open = $true; edit = $true; save = $true }
+  $script:edSw = @{ open = $true; edit = $true; save = $true; format = $true }
   Set-Level 'Control' -Empty
   [void](Rpc 'initialize' @{ protocolVersion = '2025-06-18'; capabilities = @{}; clientInfo = @{ name = 'smoke'; version = '1' } })
   Start-Sleep 2
@@ -2361,6 +2373,33 @@ c.close()
   $lc = @((Tool 'editor_list').data.docs) | Where-Object { $_.id -eq $oc.data.doc }
   Check 'Editor: Plattenaenderung erkannt (disk = changed)' ($lc.disk -eq 'changed') ($lc | ConvertTo-Json -Compress)
   Check 'Editor: Speichern bei Plattenaenderung -> conflict, Datei bleibt' ((Code (Tool 'editor_save' @{ doc = $oc.data.doc })) -eq 'conflict' -and [IO.File]::ReadAllText($edC) -eq "theirs`n")
+  # format_file (#381): offene JSON/XML-Dokumente, Ergebnis ungespeichert und vom Agenten markiert.
+  $oj = Tool 'editor_open' @{ path = $edJ }
+  $J = $oj.data.doc
+  $fv = Tool 'format_file' @{ path = $edJ; op = 'validate' }
+  Check 'Format: validate -> valid, nichts geaendert' (-not $fv.err -and $fv.data.valid -eq $true -and $fv.data.changed -eq $false -and $fv.data.kind -eq 'json' -and $fv.data.dirty -eq $false) $fv.text
+  $fm = Tool 'format_file' @{ doc = $J; op = 'format' }
+  Check 'Format: format -> geaendert, ungespeichert, vom Agenten markiert' (-not $fm.err -and $fm.data.changed -eq $true -and $fm.data.dirty -eq $true -and $fm.data.agent_edited -eq $true -and $fm.data.lines -gt 2) $fm.text
+  Check 'Format: Datei auf der Platte unveraendert' ([IO.File]::ReadAllText($edJ) -eq "{`"b`":1,`"a`":[1,2]}`n")
+  $fs = Tool 'format_file' @{ doc = $J; op = 'sort_keys' }
+  $tj = (Tool 'editor_read' @{ doc = $J }).data.text
+  Check 'Format: sort_keys sortiert die Schluessel' (-not $fs.err -and $tj.IndexOf('"a"') -lt $tj.IndexOf('"b"')) $tj
+  $fn = Tool 'format_file' @{ doc = $J; op = 'minify' }
+  Check 'Format: minify -> eine Zeile' (-not $fn.err -and ((Tool 'editor_read' @{ doc = $J }).data.text.Trim() -notmatch "`n")) $fn.text
+  [void](Tool 'editor_open' @{ path = $edBad })
+  $fb = Tool 'format_file' @{ path = $edBad; op = 'format' }
+  Check 'Format: ungueltig -> valid false mit Zeile/Spalte, nichts geaendert' (-not $fb.err -and $fb.data.valid -eq $false -and $fb.data.changed -eq $false -and $fb.data.error.line -eq 1 -and $fb.data.error.column -ge 1 -and $fb.data.dirty -eq $false) $fb.text
+  [void](Tool 'editor_open' @{ path = $edJc })
+  Check 'Format: JSONC minify ohne remove_comments -> bad_args' ((Code (Tool 'format_file' @{ path = $edJc; op = 'minify' })) -eq 'bad_args')
+  $fc = Tool 'format_file' @{ path = $edJc; op = 'format' }
+  Check 'Format: JSONC format behaelt den Kommentar' (-not $fc.err -and $fc.data.kind -eq 'jsonc' -and (Tool 'editor_read' @{ doc = $edJc }).data.text -match 'keep me') $fc.text
+  $fcm = Tool 'format_file' @{ path = $edJc; op = 'minify'; remove_comments = $true }
+  Check 'Format: JSONC minify mit remove_comments entfernt ihn' (-not $fcm.err -and (Tool 'editor_read' @{ doc = $edJc }).data.text -notmatch 'keep me') $fcm.text
+  [void](Tool 'editor_open' @{ path = $edX })
+  $fx = Tool 'format_file' @{ path = $edX; op = 'format' }
+  Check 'Format: XML format behaelt den Kommentar' (-not $fx.err -and $fx.data.kind -eq 'xml' -and (Tool 'editor_read' @{ doc = $edX }).data.text -match '<!-- c -->') $fx.text
+  Check 'Format: XML sort_keys -> bad_args' ((Code (Tool 'format_file' @{ path = $edX; op = 'sort_keys' })) -eq 'bad_args')
+  Check 'Format: Text ist weder JSON noch XML -> not_supported' ((Code (Tool 'format_file' @{ path = $edA; op = 'validate' })) -eq 'not_supported')
   # Grosse Datei (zur Laufzeit erzeugt): lesen ja (gedeckelt), bearbeiten nein.
   $og = Tool 'editor_open' @{ path = $edBig }
   Check 'Editor: grosse Datei geoeffnet (large)' (-not $og.err -and $og.data.large -eq $true -and $og.data.lines -ge 40000) $og.text
@@ -2369,6 +2408,7 @@ c.close()
   $rm = Tool 'editor_read' @{ doc = $og.data.doc; limit = 5000 }
   Check 'Editor: editor_read hoechstens 2000 Zeilen / 128 KB' ((($rm.data.end_line - $rm.data.start_line + 1) -le 2000) -and $rm.data.text.Length -le 131072 -and $rm.data.more_below -eq $true) "$($rm.data.start_line)-$($rm.data.end_line)"
   Check 'Editor: grosse Datei nicht bearbeitbar (too_large)' ((Code (Tool 'editor_edit' @{ doc = $og.data.doc; old_text = 'line 1 of'; new_text = 'x' })) -eq 'too_large')
+  Check 'Format: grosse Datei nicht formatierbar (too_large)' ((Code (Tool 'format_file' @{ doc = $og.data.doc; op = 'format' })) -eq 'too_large')
   # --edit aus einer zweiten Instanz: Datei erscheint als Tab (nicht vom Agenten geoeffnet).
   $second = Start-Process "$dir\paneldeck.exe" -PassThru -WindowStyle Hidden -ArgumentList '--edit', "`"$edD`""
   [void]$second.WaitForExit(10000)
@@ -2379,6 +2419,7 @@ c.close()
   # Protokoll ohne Dateiinhalt
   $log = if (Test-Path "$data\mcp-log.jsonl") { [IO.File]::ReadAllText("$data\mcp-log.jsonl") } else { '' }
   Check 'Editor: mcp-log.jsonl nennt editor_*, aber keinen Dateiinhalt' ($log -match 'editor_edit' -and $log -notmatch 'BETA' -and $log -notmatch 'draft') ''
+  Check 'Format: mcp-log.jsonl nennt format_file, aber keinen Dateiinhalt' ($log -match 'format_file' -and $log -notmatch 'keep me') ''
   $script:prestart = $null
 
   Write-Host "== Shell-Integration: Hilfsdateien beim Beenden geloescht (#57)" -ForegroundColor Cyan

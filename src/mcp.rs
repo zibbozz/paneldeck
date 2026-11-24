@@ -619,6 +619,29 @@ pub fn tool_level(name: &str) -> Option<McpLevel> {
     tools().into_iter().find(|t| t.name == name).map(|t| t.level)
 }
 
+/// Mindeststufe eines Aufrufs: wie [`tool_level`], aber nach den Argumenten für Werkzeuge mit lesender und
+/// schreibender Form – `format_file` (#381) liest nur mit `op` = `validate`, alles andere braucht Steuern.
+pub fn call_level(name: &str, args: &Value) -> Option<McpLevel> {
+    let l = tool_level(name)?;
+    Some(if crate::editor_svc::tools::read_only_call(name, args) { l } else { l.max(McpLevel::Control) })
+}
+
+/// Erlaubt die Stufe `level` diesen Aufruf mit seinen Argumenten ([`call_level`])? Ergänzt [`check_access`], das nur
+/// den Namen kennt.
+pub fn check_call_level(name: &str, args: &Value, level: McpLevel) -> Result<(), (String, String)> {
+    match call_level(name, args) {
+        Some(l) if l > level => Err((
+            "forbidden".to_string(),
+            crate::state::t(
+                "Die Stufe „Nur lesen“ erlaubt nur op = validate (Einstellungen → Agenten → Steuern).",
+                "The “Read only” level only allows op = validate (Settings → Agents → Control).",
+            )
+            .to_string(),
+        )),
+        _ => Ok(()),
+    }
+}
+
 /// Systemprompt für Agenten (Vorlagen, Platzhalter, eigene Datei `system-prompt.md`). Die Datei liegt als `src/sysprompt.rs`.
 #[path = "sysprompt.rs"]
 pub mod sysprompt;
@@ -1287,6 +1310,26 @@ pub fn append_log(dir: &std::path::Path, e: &LogEntry) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #381: Mindeststufe nach den Argumenten – `format_file` liest nur mit `validate`.
+    #[test]
+    fn call_level_of_format_file_depends_on_op() {
+        let v = json!({"op": "validate"});
+        assert_eq!(tool_level("format_file"), Some(McpLevel::Read));
+        assert_eq!(call_level("format_file", &v), Some(McpLevel::Read));
+        for op in ["format", "minify", "sort_keys", "nonsense"] {
+            assert_eq!(call_level("format_file", &json!({"op": op})), Some(McpLevel::Control), "{op}");
+        }
+        assert_eq!(call_level("format_file", &json!({})), Some(McpLevel::Control), "ohne op: wie schreibend");
+        assert!(check_call_level("format_file", &v, McpLevel::Read).is_ok());
+        assert_eq!(check_call_level("format_file", &json!({"op": "format"}), McpLevel::Read).unwrap_err().0, "forbidden");
+        assert!(check_call_level("format_file", &json!({"op": "format"}), McpLevel::Control).is_ok());
+        // Andere Werkzeuge: wie ihre Stufe
+        assert_eq!(call_level("editor_edit", &json!({})), Some(McpLevel::Control));
+        assert_eq!(call_level("editor_read", &json!({})), Some(McpLevel::Read));
+        assert_eq!(call_level("nope", &json!({})), None);
+        assert!(check_access("format_file", McpLevel::Read, false).is_ok());
+    }
 
     fn rpc(line: &str, level: McpLevel) -> Option<Value> {
         rpc_hub(line, HubInfo { level, expert: false })

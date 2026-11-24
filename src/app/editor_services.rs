@@ -146,6 +146,38 @@ impl App {
         r
     }
 
+    /// MCP `format_file` (#381) starten: Regeln prüfen (`tools::plan_format`; die Stufe nach `op` prüft der Hub bzw. die
+    /// Werkzeug-Regeln des Chats), dann den Lauf im Hilfsthread. Liefert Lauf, Dokument und Befehl.
+    pub(super) fn mcp_format_start(&mut self, ctx: &egui::Context, args: &Value) -> Result<(crate::editor_svc::format_job::Job, u64, crate::editor::format::Op), (String, String)> {
+        let settings = self.settings.editor.clone();
+        let docs: Vec<DocInfo> = self.editor_list().into_iter().map(doc_info).collect();
+        let (d, op) = tools::plan_format(&docs, &settings, args)?;
+        let confirmed = args.get("remove_comments").and_then(Value::as_bool) == Some(true);
+        let job = self.editor_start_agent_format(ctx, d.id, op, confirmed).map_err(|e| ("internal".to_string(), e))?;
+        Ok((job, d.id, op))
+    }
+
+    /// Ergebnis von `format_file` anwenden (Herkunft Agent; ein inzwischen geändertes Dokument bleibt unverändert) und
+    /// die Antwort bauen.
+    pub(super) fn mcp_format_finish(&mut self, ctx: &egui::Context, doc: u64, op: crate::editor::format::Op, revision: u64, done: crate::editor_svc::format_job::Done) -> Result<Value, (String, String)> {
+        use crate::editor_svc::format_job::Done;
+        if let Done::Changed { edits, .. } = &done {
+            match self.editor_apply_agent_format(doc, revision, edits.clone()) {
+                Ok(()) => ctx.request_repaint(),
+                Err(("conflict", _)) => {
+                    return Err((
+                        "conflict".into(),
+                        state::t("Das Dokument wurde während des Formatierens geändert – nichts wurde übernommen. Bitte noch einmal aufrufen.", "The document changed while formatting – nothing was applied. Please call again.").into(),
+                    ))
+                }
+                Err(("not_found", _)) => return Err(("not_found".into(), state::t("Das Dokument ist nicht mehr offen.", "The document is no longer open.").into())),
+                Err(_) => return Err(("internal".into(), state::t("Die Änderung ließ sich nicht anwenden.", "The change could not be applied.").into())),
+            }
+        }
+        let after = self.editor_list().into_iter().map(doc_info).find(|d| d.id == doc).unwrap_or_default();
+        tools::format_reply(&after, op, &done)
+    }
+
     /// *Einstellungen → Editor*.
     pub(super) fn editor_settings_ui(&mut self, ui: &mut Ui) {
         let lang = self.settings.language;
@@ -188,6 +220,11 @@ impl App {
                 self.settings.editor.autosave_delay_ms = ((secs * 1000.0).round() as u32).clamp(lo, hi);
             }
         });
+        row(ui, lang.t("Menüleiste", "Menu bar"), lang.t("Datei · Bearbeiten · Ansicht · Format über jeder Teilung", "File · Edit · View · Format above every split"), |ui| {
+            style::toggle(ui, &mut self.settings.editor.menu_bar);
+        });
+        ui.add_space(S2);
+        self.editor_format_settings_ui(ui);
         ui.add_space(S2);
         self.editor_languages_ui(ui);
         ui.add_space(S2);
@@ -221,6 +258,25 @@ impl App {
         super::tutorial::spot_since(ui, Spot::EditorSearchSettings, top);
         ui.add_space(S2);
         self.editor_agents_ui(ui);
+    }
+
+    /// Abschnitt „Formatieren“ der Editor-Einstellungen (#381): Formatieren beim Speichern je Sprache (Standard aus).
+    fn editor_format_settings_ui(&mut self, ui: &mut Ui) {
+        let lang = self.settings.language;
+        ui.label(RichText::new(lang.t("Formatieren (JSON, XML)", "Formatting (JSON, XML)")).strong());
+        let (f, m, v) = (self.binding_text("ed_format"), self.binding_text("ed_minify"), self.binding_text("ed_validate"));
+        let text = match lang {
+            Lang::De => format!("Menü Format bzw. {f} (formatieren), {m} (minifizieren), {v} (prüfen); änderbar unter Tastenkürzel. Alles läuft lokal. Eingerückt wird nach .editorconfig bzw. der Einrückung der Datei."),
+            Lang::En => format!("Format menu or {f} (format), {m} (minify), {v} (validate); changeable under Shortcuts. Everything runs locally. Indentation follows .editorconfig or the file's indentation."),
+        };
+        ui.label(RichText::new(text).small().color(style::dim(ui)));
+        let ed = &mut self.settings.editor;
+        row(ui, lang.t("JSON beim Speichern formatieren", "Format JSON on save"), lang.t("Auch JSONC; nur bis 1 MB, ungültige Dateien bleiben unverändert", "Also JSONC; only up to 1 MB, invalid files stay unchanged"), |ui| {
+            style::toggle(ui, &mut ed.format_on_save_json);
+        });
+        row(ui, lang.t("XML beim Speichern formatieren", "Format XML on save"), lang.t("Nur bis 1 MB, ungültige Dateien bleiben unverändert", "Only up to 1 MB, invalid files stay unchanged"), |ui| {
+            style::toggle(ui, &mut ed.format_on_save_xml);
+        });
     }
 
     /// Abschnitt „Sprachen“ der Editor-Einstellungen (#312): Standard-Modus, Modus je Sprache, eigene Zuordnungen.
@@ -345,8 +401,8 @@ impl App {
         let control = self.settings.mcp_level == crate::mcp::McpLevel::Control;
         ui.label(
             RichText::new(lang.t(
-                "Lesen geht ab der Stufe „Nur lesen“ (editor_list, editor_read). Die Schalter gelten nur bei der Stufe „Steuern“ – für externe Agenten unter Einstellungen → Agenten, für Chats die Stufe des Modells. Änderungen eines Agenten bleiben ungespeichert, sind als „vom Agenten“ markiert und lassen sich rückgängig machen.",
-                "Reading works from level “Read only” (editor_list, editor_read). The switches only apply at level “Control” – for external agents under Settings → Agents, for chats the level of the model. Changes by an agent stay unsaved, are marked “by agent” and can be undone.",
+                "Lesen geht ab der Stufe „Nur lesen“ (editor_list, editor_read, format_file mit validate). Die Schalter gelten nur bei der Stufe „Steuern“ – für externe Agenten unter Einstellungen → Agenten, für Chats die Stufe des Modells. Änderungen eines Agenten bleiben ungespeichert, sind als „vom Agenten“ markiert und lassen sich rückgängig machen.",
+                "Reading works from level “Read only” (editor_list, editor_read, format_file with validate). The switches only apply at level “Control” – for external agents under Settings → Agents, for chats the level of the model. Changes by an agent stay unsaved, are marked “by agent” and can be undone.",
             ))
             .small()
             .color(style::dim(ui)),
@@ -363,6 +419,9 @@ impl App {
         });
         row(ui, lang.t("Agenten dürfen speichern", "Agents may save"), lang.t("Nur offene Dateien, die es schon gibt; unbenannte Tabs speichert nur du", "Only open files that already exist; only you save untitled tabs"), |ui| {
             style::toggle(ui, &mut ed.agent_save);
+        });
+        row(ui, lang.t("Agenten dürfen formatieren", "Agents may format"), lang.t("format_file: offene JSON/XML-Dateien; Prüfen geht ab „Nur lesen“ ohne Schalter", "format_file: open JSON/XML files; validating works from “Read only” without a switch"), |ui| {
+            style::toggle(ui, &mut ed.agent_format);
         });
         super::tutorial::spot_since(ui, Spot::EditorAgentSwitches, top);
     }
@@ -436,6 +495,10 @@ impl App {
             large_file_bytes: e.large_file_bytes(),
             autosave: e.autosave.then(|| Duration::from_millis(e.autosave_delay_ms as u64)),
             syntax: super::editor_ui::SyntaxPrefs::from_settings(e),
+            menu_bar: e.menu_bar,
+            format_on_save_json: e.format_on_save_json,
+            format_on_save_xml: e.format_on_save_xml,
+            keys: super::editor_ui::MENU_KEYS.iter().map(|id| (id.to_string(), self.binding_raw(id))).collect(),
         }
     }
 

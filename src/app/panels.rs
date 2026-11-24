@@ -785,10 +785,25 @@ impl App {
     pub(super) fn palette_items(&self) -> Vec<(String, String, Action)> {
         let lang = self.settings.language;
         let f = self.focused;
-        let mut v: Vec<(String, String, Action)> = vec![
+        let mut v: Vec<(String, String, Action)> = Vec::new();
+        // Editor (#381): Formatier-Befehle für den aktiven Reiter, im Editor-Reiter zuerst.
+        if self.mode == titlebar::Mode::Editor && self.ed_has_active_doc() {
+            use crate::editor::format::Op;
+            let kind = self.editor_active_format_kind();
+            let selection = self.editor_active_selection();
+            let pre = lang.t("Format:", "Format:");
+            for (op, id) in [(Op::Format, "ed_format"), (Op::Minify, "ed_minify"), (Op::Validate, "ed_validate"), (Op::SortKeys, "ed_sort_keys")] {
+                if kind == Some(crate::editor::format::Kind::Xml) && op == Op::SortKeys {
+                    continue;
+                }
+                let label = super::editor_ui::format::op_label(op, kind, selection && op != Op::Validate, lang);
+                v.push((format!("{pre} {label}"), self.binding_text(id), Action::EditorFormat(op)));
+            }
+        }
+        v.extend([
             (lang.t("Neue Sitzung (Standard-Shell)", "New session (default shell)").into(), self.binding_text("new"), Action::NewQuick),
             (lang.t("Neue Sitzung …", "New session …").into(), String::new(), Action::NewDialog(false)),
-        ];
+        ]);
         if self.settings.claude_mode {
             v.push((lang.t("Neue Claude-Sitzung …", "New Claude session …").into(), String::new(), Action::NewDialog(true)));
         }

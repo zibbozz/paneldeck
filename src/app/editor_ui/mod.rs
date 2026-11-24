@@ -7,6 +7,8 @@
 //! - `text`: das Textfeld (nur sichtbare Zeilen, Cursor, Auswahl, Maus, Tastatur, Minimap),
 //! - `view`: Bereich zeichnen (Baum, Teilungen, Reiterleisten, Hinweisleisten, Statusleiste, Dialoge),
 //! - `find`: Suchen/Ersetzen-Leiste und „Gehe zu Zeile“,
+//! - `menu`: Menüleiste je Teilung (#381, *Datei · Bearbeiten · Ansicht · Format*),
+//! - `format`: JSON/XML formatieren im Hintergrund, Fortschritt, Meldungen, Formatieren beim Speichern (#381),
 //! - `tree`: Ordnerbaum, `persist`: `editor-state.json`.
 //!
 //! Der Zustand ist für alle Fenster gemeinsam (`App::ed`, nicht in `view_fields!`): Ein weiteres Fenster im Editor-Reiter
@@ -15,6 +17,8 @@
 
 mod doc;
 mod find;
+pub(crate) mod format;
+mod menu;
 mod panes;
 mod persist;
 mod text;
@@ -43,11 +47,31 @@ pub(crate) struct EditorPrefs {
     pub autosave: Option<std::time::Duration>,
     /// Syntax-Modus (#312): Standard-Modus, Modus je Sprache, eigene Zuordnungen.
     pub syntax: SyntaxPrefs,
+    /// Menüleiste je Teilung (#381, Standard an).
+    pub menu_bar: bool,
+    /// Formatieren beim Speichern (#381, Standard aus).
+    pub format_on_save_json: bool,
+    pub format_on_save_xml: bool,
+    /// Tastenkürzel für die Menüs (Kennung → Kürzel wie in `keys::DEFAULTS`, z. B. `ed_format` → `Alt+Shift+F`).
+    pub keys: BTreeMap<String, String>,
 }
+
+/// Kennungen der Kürzel, die die Menüleiste anzeigt.
+pub(crate) const MENU_KEYS: [&str; 7] = ["split_r", "split_d", "palette", "ed_format", "ed_minify", "ed_validate", "ed_sort_keys"];
 
 impl Default for EditorPrefs {
     fn default() -> Self {
-        EditorPrefs { font_size: 14.0, large_file_bytes: crate::editor::DEFAULT_LARGE_FILE_THRESHOLD, autosave: None, syntax: SyntaxPrefs::default() }
+        let keys = MENU_KEYS.iter().filter_map(|id| crate::keys::DEFAULTS.iter().find(|(i, _)| i == id).map(|(i, d)| (i.to_string(), d.to_string()))).collect();
+        EditorPrefs {
+            font_size: 14.0,
+            large_file_bytes: crate::editor::DEFAULT_LARGE_FILE_THRESHOLD,
+            autosave: None,
+            syntax: SyntaxPrefs::default(),
+            menu_bar: true,
+            format_on_save_json: false,
+            format_on_save_xml: false,
+            keys,
+        }
     }
 }
 
@@ -136,6 +160,10 @@ pub(crate) struct EditorUi {
     pub(super) lang_search_focus: bool,
     /// Knöpfe Sprache / Modus der Statusleiste im letzten Bild (Tests).
     pub(super) status_rects: (Option<eframe::egui::Rect>, Option<eframe::egui::Rect>),
+    /// Formatieren (#381): laufende Läufe, Meldungen, Rückfrage.
+    pub(super) fmt: format::FmtState,
+    /// Menüleiste je Teilung im letzten Bild: Fläche und ob sie zusammengeklappt ist (Tests, Tutorial).
+    pub(super) menu_rects: HashMap<u64, (eframe::egui::Rect, bool)>,
 }
 
 impl EditorUi {
@@ -318,6 +346,9 @@ impl EditorUi {
     /// Reiter freigeben: das Dokument verschwindet, wenn es in keinem Reiter mehr offen ist (Hot-Exit-Daten mit).
     pub(super) fn release_doc(&mut self, doc: u64, dir: &Path) {
         if !self.panes.shows(doc) {
+            self.cancel_format(doc);
+            self.fmt.notes.remove(&doc);
+            self.fmt.ask.retain(|a| a.doc != doc);
             if let Some(mut d) = self.docs.remove(&doc) {
                 d.drop_hot(dir);
             }
@@ -450,8 +481,10 @@ impl super::App {
         self.editor_prefs_from_settings()
     }
 
-    /// Jedes Bild im Hauptdurchgang, auch außerhalb des Editor-Reiters: automatisches Speichern.
+    /// Jedes Bild im Hauptdurchgang, auch außerhalb des Editor-Reiters: fertige Formatier-Läufe übernehmen (#381),
+    /// automatisches Speichern.
     pub(crate) fn editor_tick(&mut self, ctx: &eframe::egui::Context) {
+        self.ed.poll_formats(self.settings.language);
         let prefs = self.editor_prefs();
         let Some(delay) = prefs.autosave else { return };
         let lang = self.settings.language;
@@ -605,6 +638,50 @@ impl super::App {
         self.set_mode(super::titlebar::Mode::Editor);
         self.ed.end_agent(mark);
         true
+    }
+
+    /// Hat der aktive Reiter genau eine nicht leere Auswahl (dann formatiert ein Befehl nur sie)?
+    pub(crate) fn editor_active_selection(&self) -> bool {
+        self.ed.focused_view_and_doc().is_some_and(|(v, d)| {
+            let (Some(s), Some(doc)) = (v.sels.as_ref(), d.doc.as_ref()) else { return false };
+            let mut s = s.clone();
+            doc.sync(&mut s);
+            !s.is_multi() && !s.primary().is_empty()
+        })
+    }
+
+    /// Gibt es einen aktiven Reiter (für die Einträge der Befehls-Palette)?
+    pub(crate) fn ed_has_active_doc(&self) -> bool {
+        self.ed.active_doc().is_some()
+    }
+
+    /// Formatieren über die Palette bzw. von außen (#381): Befehl auf den aktiven Reiter der fokussierten Teilung.
+    pub(crate) fn editor_format_active(&mut self, ctx: &eframe::egui::Context, op: crate::editor::format::Op) {
+        let g = self.ed.panes.focused;
+        let lang = self.settings.language;
+        let c = ctx.clone();
+        self.ed.start_format(g, op, false, move || c.request_repaint(), lang);
+    }
+
+    /// Art des aktiven Dokuments für Formatier-Befehle (Palette; `None` = keins oder weder JSON noch XML).
+    pub(crate) fn editor_active_format_kind(&self) -> Option<crate::editor::format::Kind> {
+        self.ed.active_doc().and_then(|id| self.ed.docs.get(&id)).and_then(|d| d.format_kind())
+    }
+
+    /// Lauf für MCP `format_file` starten (#381; der Aufrufer hat Stufe, Schalter und Dokument geprüft).
+    pub(crate) fn editor_start_agent_format(&mut self, ctx: &eframe::egui::Context, doc: u64, op: crate::editor::format::Op, confirmed: bool) -> Result<crate::editor_svc::format_job::Job, String> {
+        let prefs = self.editor_prefs();
+        let c = ctx.clone();
+        self.ed.start_agent_format(doc, op, confirmed, &prefs, move || c.request_repaint())
+    }
+
+    /// Ergebnis eines Agenten-Laufs anwenden: markiert, ungespeichert, ein Rückgängig-Schritt, nie mit Tastatur
+    /// ([`EditorUi::end_agent`]).
+    pub(crate) fn editor_apply_agent_format(&mut self, doc: u64, revision: u64, edits: Vec<crate::editor::TextEdit>) -> Result<(), (&'static str, &'static str)> {
+        let mark = self.ed.begin_agent();
+        let r = self.ed.apply_agent_format(doc, revision, edits);
+        self.ed.end_agent(mark);
+        r
     }
 
     /// Dokument speichern (für `editor_save`; der Aufrufer prüft die Regeln, z. B. nur vorhandene Dateien).
