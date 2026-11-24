@@ -6,8 +6,14 @@
 //!
 //! 1. [`check`] prüft die Wohlgeformtheit (passende Tags, Attribut-Syntax, genau ein Wurzelelement, gültige Namen,
 //!    unmaskierte `<`/`&`, erlaubte Zeichen, Kommentare, Position von XML-Deklaration und DOCTYPE) und merkt sich die
-//!    Elemente, deren Inhalt unverändert bleibt: Inhalt mit Text (gemischter Inhalt wie XHTML `<p>a <b>b</b> c</p>`,
-//!    reiner Text, Referenzen, CDATA) und `xml:space="preserve"` (gilt für den ganzen Teilbaum). Keine Schema-/DTD-Prüfung.
+//!    Elemente, deren Inhalt unverändert bleibt (keine Schema-/DTD-Prüfung):
+//!    - Inhalt mit Text: gemischter Inhalt wie XHTML `<p>a <b>b</b> c</p>`, reiner Text, Referenzen, CDATA;
+//!    - `xml:space="preserve"` (gilt für den ganzen Teilbaum);
+//!    - Leerraum ohne Kinder (`<xsl:text> </xsl:text>`, `<textarea>\n</textarea>`) – nur Leerraum *zwischen* Kindern
+//!      gilt als unbedeutend;
+//!    - Geschwister, die nur durch Leerraum ohne Zeilenumbruch getrennt sind (`<b>a</b> <i>b</i>`);
+//!    - Geschwister ganz ohne Leerraum dazwischen (`</b><i>`), aber nur, wenn das Dokument irgendwo gemischten Inhalt
+//!      hat (dokumentartig wie XHTML). Reines Daten-XML (etwa minifiziert) wird dagegen normal formatiert.
 //! 2. [`emit`] schreibt die Ausgabe.
 //!
 //! **Formatieren:** Elemente, Kommentare und Processing Instructions stehen je in einer Zeile, eingerückt nach
@@ -15,10 +21,10 @@
 //! bleibt als eine Leerzeile erhalten). Kommentare, CDATA, PIs, XML-Deklaration und DOCTYPE (samt internem Subset)
 //! bleiben Zeichen für Zeichen erhalten. Tags bleiben, wie sie geschrieben sind (Attribute, Reihenfolge,
 //! Anführungszeichen, Leerraum); bei einem mehrzeiligen Start-Tag folgen die Folgezeilen der neuen Einrückung der
-//! ersten Zeile (siehe [`Writer::start_tag`]). `<a/>` bleibt `<a/>`, `<a></a>` bleibt `<a></a>` (nur Leerraum
-//! dazwischen fällt weg).
-//! **Minifizieren:** wie Formatieren, aber ohne Zeilenumbrüche und Einrückung (Tags ganz unverändert); Kommentare bleiben (sie können in XML
-//! Bedeutung haben). **Prüfen:** nur Durchlauf 1. `SortKeys` gibt es für XML nicht (Text unverändert).
+//! ersten Zeile (siehe [`Writer::start_tag`]). `<a/>` bleibt `<a/>`, `<a></a>` bleibt `<a></a>`. Ab 100 Ebenen
+//! wird nicht weiter eingerückt ([`MAX_INDENT_DEPTH`]), damit die Ausgabe bei tiefer Verschachtelung nicht quadratisch wächst.
+//! **Minifizieren:** wie Formatieren, aber ohne Zeilenumbrüche und Einrückung (Tags ganz unverändert); Kommentare
+//! bleiben (sie können in XML Bedeutung haben). **Prüfen:** nur Durchlauf 1. `SortKeys` gibt es für XML nicht (Text unverändert).
 //!
 //! BOM bleibt erhalten, `\r\n` und einzelne `\r` werden wie vom XML-Parser vorgeschrieben zu `\n`.
 //! Fehlerpositionen sind 1-basiert, Spalten in Zeichen.
@@ -563,11 +569,73 @@ struct Info {
     top_text: bool,
 }
 
+/// Offenes Element in Durchlauf 1 (bzw. die oberste Ebene einer Auswahl).
 struct Open {
     name: (usize, usize),
     start: usize,
+    /// Text (nicht nur Leerraum), Referenzen oder CDATA direkt im Inhalt.
     has_text: bool,
+    /// `xml:space="preserve"`.
     preserve: bool,
+    /// Kindelemente.
+    elems: bool,
+    /// Kindelemente, Kommentare oder PIs.
+    children: bool,
+    /// Leerraum direkt im Inhalt.
+    ws: bool,
+    /// Direkt davor endete ein Kind (Elemente, Kommentare, PIs); `gap` = Leerraum seitdem (`Some(true)` mit Zeilenumbruch).
+    prev_child: bool,
+    gap: Option<bool>,
+    /// Zwei Geschwister nur durch Leerraum ohne Zeilenumbruch getrennt (`<b>a</b> <i>b</i>`): bedeutsam.
+    inline: bool,
+    /// Zwei Geschwister ohne jeden Leerraum dazwischen (`</b><i>`).
+    tight: bool,
+}
+
+impl Open {
+    fn new(name: (usize, usize), start: usize, preserve: bool) -> Self {
+        Open { name, start, has_text: false, preserve, elems: false, children: false, ws: false, prev_child: false, gap: None, inline: false, tight: false }
+    }
+
+    /// Ein Kind beginnt.
+    fn child(&mut self) {
+        if self.prev_child {
+            match self.gap {
+                None => self.tight = true,
+                Some(false) => self.inline = true,
+                Some(true) => {}
+            }
+        }
+        self.children = true;
+        self.prev_child = false;
+        self.gap = None;
+    }
+
+    /// Ein Kind ist zu Ende.
+    fn child_done(&mut self) {
+        self.prev_child = true;
+        self.gap = None;
+    }
+
+    fn ws_text(&mut self, newline: bool) {
+        self.ws = true;
+        if self.prev_child {
+            self.gap = Some(self.gap.unwrap_or(false) || newline);
+        }
+    }
+
+    fn text(&mut self) {
+        self.has_text = true;
+        self.prev_child = false;
+        self.gap = None;
+    }
+}
+
+fn parent<'s>(stack: &'s mut [Open], top: &'s mut Open) -> &'s mut Open {
+    match stack.last_mut() {
+        Some(o) => o,
+        None => top,
+    }
 }
 
 /// Erstes verbotenes Zeichen (Steuerzeichen außer Tab/LF/CR, U+FFFE, U+FFFF).
@@ -604,6 +672,12 @@ fn structure(src: &str, fragment: bool, tick: &mut Ticker) -> Res<Info> {
     let mut lx = Lexer::new(src, !fragment);
     let mut stack: Vec<Open> = Vec::new();
     let mut preserved = Vec::new();
+    // Elemente mit Geschwistern ohne Leerraum dazwischen: bleiben unverändert, wenn das Dokument gemischten Inhalt hat
+    // (dokumentartig wie XHTML, wo `</b><i>` ≠ `</b>\n<i>`); in Daten-XML ohne gemischten Inhalt werden sie formatiert.
+    let mut tight = Vec::new();
+    let mut doc_mixed = false;
+    // Oberste Ebene (zählt nur bei `fragment`).
+    let mut top = Open::new((0, 0), 0, false);
     let (mut roots, mut doctype, mut top_text) = (0usize, false, false);
     loop {
         tick.at(lx.pos)?;
@@ -611,10 +685,12 @@ fn structure(src: &str, fragment: bool, tick: &mut Ticker) -> Res<Info> {
             Tok::Eof => break,
             Tok::Text { start, end, ws } => {
                 if ws {
+                    let nl = src.as_bytes()[start..end].contains(&b'\n');
+                    parent(&mut stack, &mut top).ws_text(nl);
                     continue;
                 }
                 match stack.last_mut() {
-                    Some(o) => o.has_text = true,
+                    Some(o) => o.text(),
                     None if fragment => top_text = true,
                     None => {
                         let t = &src[start..end];
@@ -627,7 +703,7 @@ fn structure(src: &str, fragment: bool, tick: &mut Ticker) -> Res<Info> {
             Tok::Markup { start, kind, .. } => match kind {
                 Mk::Decl if start != 0 => return bad(start, "the XML declaration is only allowed at the very start of the document"),
                 Mk::CData => match stack.last_mut() {
-                    Some(o) => o.has_text = true,
+                    Some(o) => o.text(),
                     None if fragment => top_text = true,
                     None => return bad(start, "CDATA sections are only allowed inside the root element"),
                 },
@@ -642,6 +718,11 @@ fn structure(src: &str, fragment: bool, tick: &mut Ticker) -> Res<Info> {
                     // Entitäten können im (internen oder externen) Subset deklariert sein – externe werden nie geladen.
                     lx.check_entities = false;
                 }
+                Mk::Comment | Mk::Pi => {
+                    let p = parent(&mut stack, &mut top);
+                    p.child();
+                    p.child_done();
+                }
                 _ => {}
             },
             Tok::Start { start, name, empty, preserve, .. } => {
@@ -651,8 +732,13 @@ fn structure(src: &str, fragment: bool, tick: &mut Ticker) -> Res<Info> {
                     }
                     roots += 1;
                 }
-                if !empty {
-                    stack.push(Open { name, start, has_text: false, preserve: preserve == Some(true) });
+                let p = parent(&mut stack, &mut top);
+                p.child();
+                p.elems = true;
+                if empty {
+                    p.child_done();
+                } else {
+                    stack.push(Open::new(name, start, preserve == Some(true)));
                 }
             }
             Tok::End { start, name } => {
@@ -662,11 +748,25 @@ fn structure(src: &str, fragment: bool, tick: &mut Ticker) -> Res<Info> {
                 if lx.name(o.name) != lx.name(name) {
                     return bad(start, format!("mismatched end tag: expected </{}>, found </{}>", short(lx.name(o.name)), short(lx.name(name))));
                 }
-                if o.has_text || o.preserve {
-                    preserved.push((o.start, lx.pos));
+                if (o.has_text && o.elems) || o.inline {
+                    doc_mixed = true;
                 }
+                // Text, gemischter Inhalt, xml:space="preserve", bedeutsamer Leerraum zwischen Geschwistern sowie
+                // Leerraum ohne Kinder (`<xsl:text> </xsl:text>`, `<textarea>\n</textarea>`) bleiben, wie sie sind.
+                if o.has_text || o.preserve || o.inline || (o.ws && !o.children) {
+                    preserved.push((o.start, lx.pos));
+                } else if o.tight {
+                    tight.push((o.start, lx.pos));
+                }
+                parent(&mut stack, &mut top).child_done();
             }
         }
+    }
+    if doc_mixed {
+        preserved.extend(tight);
+    }
+    if fragment && (top.inline || (top.tight && doc_mixed)) {
+        top_text = true;
     }
     if let Some(o) = stack.last() {
         return bad(o.start, format!("element <{}> is not closed", short(lx.name(o.name))));
@@ -681,6 +781,10 @@ fn structure(src: &str, fragment: bool, tick: &mut Ticker) -> Res<Info> {
 // ---------------------------------------------------------------------------------------------------------------
 // Durchlauf 2: Ausgabe
 // ---------------------------------------------------------------------------------------------------------------
+
+/// Tiefer als 100 Ebenen wird nicht weiter eingerückt (sonst wächst die Ausgabe quadratisch mit der Tiefe:
+/// 10 000 Ebenen ergäben rund 200 MB Leerzeichen).
+const MAX_INDENT_DEPTH: usize = 100;
 
 struct Writer {
     out: String,
@@ -704,7 +808,7 @@ impl Writer {
                     self.out.push('\n');
                 }
             }
-            for _ in 0..depth {
+            for _ in 0..depth.min(MAX_INDENT_DEPTH) {
                 self.out.push_str(&self.unit);
             }
         }
@@ -725,7 +829,7 @@ impl Writer {
         }
         let line_start = src[..start].rfind('\n').map_or(0, |i| i + 1);
         let old = &src[line_start..start];
-        let new = self.unit.repeat(depth);
+        let new = self.unit.repeat(depth.min(MAX_INDENT_DEPTH));
         match shift_lines(src, start, end, attrs, old, &new) {
             Some(shifted) => self.out.push_str(&shifted),
             None => self.out.push_str(tag),
@@ -892,7 +996,7 @@ mod tests {
     #[test]
     fn format_basic_indentation() {
         let input = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<root><a x=\"1\"  y='2'><b>text</b><c/><d></d><e>  \n </e></a></root>";
-        let want = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<root>\n  <a x=\"1\"  y='2'>\n    <b>text</b>\n    <c/>\n    <d></d>\n    <e></e>\n  </a>\n</root>\n";
+        let want = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<root>\n  <a x=\"1\"  y='2'>\n    <b>text</b>\n    <c/>\n    <d></d>\n    <e>  \n </e>\n  </a>\n</root>\n";
         assert_eq!(fmt(input), want);
         assert_eq!(fmt_with(input, Indent::Spaces(4), true), want.replace("    ", "        ").replace("\n  <", "\n    <"));
         assert_eq!(fmt_with("<r><a/></r>", Indent::Tab, false), "<r>\n\t<a/>\n</r>");
@@ -910,7 +1014,7 @@ mod tests {
     #[test]
     fn format_keeps_doctype_with_internal_subset() {
         let doctype = "<!DOCTYPE note [\n  <!ENTITY writer \"Jane > Doe\">\n  <!-- a comment with > and ' -->\n  <?pi in subset > ?>\n  <!ELEMENT note (#PCDATA|to|from)*>\n  <!ATTLIST note lang CDATA 'en'>\n]>";
-        let input = format!("{doctype}\n<note><to>&writer;</to>   <from>Me</from></note>");
+        let input = format!("{doctype}\n<note><to>&writer;</to>\n   <from>Me</from></note>");
         let want = format!("{doctype}\n<note>\n  <to>&writer;</to>\n  <from>Me</from>\n</note>\n");
         assert_eq!(fmt(&input), want);
         let external = "<!DOCTYPE html PUBLIC \"-//W3C//DTD XHTML 1.0 Strict//EN\" \"http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd\">";
@@ -926,12 +1030,14 @@ mod tests {
 
     #[test]
     fn format_keeps_mixed_content() {
-        let input = "<html xmlns=\"http://www.w3.org/1999/xhtml\"><body><p>Hello <b>bold</b>  and <i>it\n </i>.</p>\n<div>\n<p>x</p></div><p><b>a</b> <i>b</i></p></body></html>";
-        let want = "<html xmlns=\"http://www.w3.org/1999/xhtml\">\n  <body>\n    <p>Hello <b>bold</b>  and <i>it\n </i>.</p>\n    <div>\n      <p>x</p>\n    </div>\n    <p>\n      <b>a</b>\n      <i>b</i>\n    </p>\n  </body>\n</html>\n";
-        // `<p><b>a</b> <i>b</i></p>` hat nur Leerraum zwischen den Kindern → kein gemischter Inhalt.
+        let input = "<html xmlns=\"http://www.w3.org/1999/xhtml\"><body><p>Hello <b>bold</b>  and <i>it\n </i>.</p>\n<div>\n<p>x</p></div>\n<p><b>a</b> <i>b</i></p>\n<p>\n<b>a</b>\n<i>b</i></p></body></html>";
+        let want = "<html xmlns=\"http://www.w3.org/1999/xhtml\">\n  <body>\n    <p>Hello <b>bold</b>  and <i>it\n </i>.</p>\n    <div>\n      <p>x</p>\n    </div>\n    <p><b>a</b> <i>b</i></p>\n    <p>\n      <b>a</b>\n      <i>b</i>\n    </p>\n  </body>\n</html>\n";
+        // Leerzeichen ohne Zeilenumbruch zwischen Geschwistern ist bedeutsam; mit Zeilenumbruch wird formatiert.
         assert_eq!(fmt(input), want);
         // Text vor dem ersten Kind, Text erst nach dem letzten Kind.
-        assert_eq!(fmt("<r><p>a<b/></p><q><b/>tail</q></r>"), "<r>\n  <p>a<b/></p>\n  <q><b/>tail</q>\n</r>\n");
+        assert_eq!(fmt("<r>\n<p>a<b/></p>\n<q><b/>tail</q></r>"), "<r>\n  <p>a<b/></p>\n  <q><b/>tail</q>\n</r>\n");
+        // Gemischter Inhalt im Dokument: Geschwister ohne Leerraum (`</p><q>`) bleiben zusammen.
+        assert_eq!(fmt("<r><p>a<b/></p><q><b/>tail</q></r>"), "<r><p>a<b/></p><q><b/>tail</q></r>\n");
         // Referenzen zählen als Text.
         assert_eq!(fmt("<r><p>&#32;<b/></p></r>"), "<r>\n  <p>&#32;<b/></p>\n</r>\n");
     }
@@ -949,7 +1055,8 @@ mod tests {
         let input = "<x:r xmlns:x=\"urn:x\" xmlns=\"urn:d\"><x:a x:attr=\"1\"/><b\n   one=\"1\"\n   two='2 &amp; &#x41;'\n   three = \"a\nb\"\n   /></x:r>";
         let want = "<x:r xmlns:x=\"urn:x\" xmlns=\"urn:d\">\n  <x:a x:attr=\"1\"/>\n  <b\n   one=\"1\"\n   two='2 &amp; &#x41;'\n   three = \"a\nb\"\n   />\n</x:r>\n";
         assert_eq!(fmt(input), want);
-        assert_eq!(fmt("<a  >  </a  >"), "<a  ></a  >\n");
+        assert_eq!(fmt("<a  >  </a  >"), "<a  >  </a  >\n");
+        assert_eq!(fmt("<a  ></a  >"), "<a  ></a  >\n");
         assert_eq!(fmt("<ä ö=\"ü\"><ß/></ä>"), "<ä ö=\"ü\">\n  <ß/>\n</ä>\n");
     }
 
@@ -957,7 +1064,7 @@ mod tests {
     fn multi_line_start_tags_follow_the_new_indentation() {
         // Folgezeilen rücken um dieselbe Differenz wie die erste Zeile; Zeilen in Attributwerten bleiben.
         let input = "<r>\n<a\n  one=\"1\"\n  two=\"x\n y\"\n/>\n    <b\n      c = '1'\n\n        d=\"2\">\n    </b>\n</r>";
-        let want = "<r>\n  <a\n    one=\"1\"\n    two=\"x\n y\"\n  />\n  <b\n    c = '1'\n\n      d=\"2\"></b>\n</r>\n";
+        let want = "<r>\n  <a\n    one=\"1\"\n    two=\"x\n y\"\n  />\n  <b\n    c = '1'\n\n      d=\"2\">\n    </b>\n</r>\n";
         assert_eq!(fmt(input), want);
         assert_eq!(fmt(want), want);
         assert_eq!(fmt_with("<r>\n<a\n  x=\"1\"/></r>", Indent::Tab, false), "<r>\n\t<a\n\t  x=\"1\"/>\n</r>");
@@ -969,6 +1076,40 @@ mod tests {
         assert_eq!(fmt("<r>\n<p\n  class=\"x\">a\n <b>b</b></p></r>"), "<r>\n  <p\n    class=\"x\">a\n <b>b</b></p>\n</r>\n");
         // Minifizieren lässt Tags ganz unverändert.
         assert_eq!(mini("<r>\n  <a\n    x=\"1\"/>\n</r>"), "<r><a\n    x=\"1\"/></r>");
+    }
+
+    #[test]
+    fn whitespace_only_content_is_kept() {
+        // XSLT: Leerraum in xsl:text ist Ausgabe.
+        let x = "<xsl:stylesheet xmlns:xsl=\"http://www.w3.org/1999/XSL/Transform\" version=\"1.0\"><xsl:template match=\"/\"><xsl:text>\n</xsl:text><xsl:text> </xsl:text></xsl:template></xsl:stylesheet>";
+        let want = "<xsl:stylesheet xmlns:xsl=\"http://www.w3.org/1999/XSL/Transform\" version=\"1.0\">\n  <xsl:template match=\"/\">\n    <xsl:text>\n</xsl:text>\n    <xsl:text> </xsl:text>\n  </xsl:template>\n</xsl:stylesheet>\n";
+        assert_eq!(fmt(x), want);
+        assert_eq!(fmt(want), want);
+        assert_eq!(mini(x), x);
+        assert_eq!(mini("<form><textarea> </textarea>\n<tspan>\n</tspan></form>"), "<form><textarea> </textarea><tspan>\n</tspan></form>");
+        // Nur Leerraum zwischen Kindern (auch Kommentaren) ist unbedeutend.
+        assert_eq!(fmt("<a> <!-- c --> </a>"), "<a>\n  <!-- c -->\n</a>\n");
+        assert_eq!(mini("<a> <!-- c -->\n <b/> </a>"), "<a><!-- c --><b/></a>");
+        // Leerzeichen ohne Zeilenumbruch zwischen Kommentar und Element zählt wie zwischen Elementen.
+        assert_eq!(mini("<a> <!-- c --> <b/> </a>"), "<a> <!-- c --> <b/> </a>");
+    }
+
+    #[test]
+    fn inline_siblings_are_kept_together() {
+        // Leerzeichen ohne Zeilenumbruch zwischen Geschwistern: Element bleibt, wie es ist.
+        assert_eq!(fmt("<r>\n<p><b>a</b> <i>b</i></p>\n</r>"), "<r>\n  <p><b>a</b> <i>b</i></p>\n</r>\n");
+        assert_eq!(mini("<r>\n<p><b>a</b> <i>b</i></p>\n</r>"), "<r><p><b>a</b> <i>b</i></p></r>");
+        // Dokument mit gemischtem Inhalt: kein Zeilenumbruch zwischen `</b><i>`.
+        let doc = "<div>\n<p>x <b>y</b></p>\n<p><b>a</b><i>b</i></p>\n</div>";
+        assert_eq!(fmt(doc), "<div>\n  <p>x <b>y</b></p>\n  <p><b>a</b><i>b</i></p>\n</div>\n");
+        // Daten-XML ohne gemischten Inhalt (z. B. minifiziert): wird normal formatiert.
+        assert_eq!(fmt("<r><a>1</a><b><c/><d/></b></r>"), "<r>\n  <a>1</a>\n  <b>\n    <c/>\n    <d/>\n  </b>\n</r>\n");
+        // Auswahl: Text bzw. Inline-Geschwister auf oberster Ebene → unverändert.
+        let opts = Options { indent: Indent::Spaces(2), final_newline: false };
+        let c = AtomicBool::new(false);
+        assert_eq!(text(run_with(Op::Format, "<b>a</b> <i>b</i>", opts, true, &c, &|_| {})), "<b>a</b> <i>b</i>");
+        assert_eq!(text(run_with(Op::Minify, "<b>a</b> <i>b</i>", opts, true, &c, &|_| {})), "<b>a</b> <i>b</i>");
+        assert_eq!(text(run_with(Op::Format, "<a/>\n<b/>", opts, true, &c, &|_| {})), "<a/>\n<b/>");
     }
 
     #[test]
@@ -1007,11 +1148,15 @@ mod tests {
         let input = "<?xml version=\"1.0\"?>\n<!DOCTYPE r [\n <!ENTITY e \"v\">\n]>\n<r>\n  <!-- keep -->\n  <a  x=\"1\" >\n    <b/>\n  </a>\n  <p>Text <i>mixed</i> here</p>\n  <pre xml:space=\"preserve\"> <q/> </pre>\n  <e>   </e>\n  <t> text </t>\n</r>\n";
         assert_eq!(
             mini(input),
-            "<?xml version=\"1.0\"?><!DOCTYPE r [\n <!ENTITY e \"v\">\n]><r><!-- keep --><a  x=\"1\" ><b/></a><p>Text <i>mixed</i> here</p><pre xml:space=\"preserve\"> <q/> </pre><e></e><t> text </t></r>"
+            "<?xml version=\"1.0\"?><!DOCTYPE r [\n <!ENTITY e \"v\">\n]><r><!-- keep --><a  x=\"1\" ><b/></a><p>Text <i>mixed</i> here</p><pre xml:space=\"preserve\"> <q/> </pre><e>   </e><t> text </t></r>"
         );
         assert_eq!(text(go(Op::Minify, "<r> <a/> </r>", Options::default())), "<r><a/></r>\n");
-        // Minifizieren und wieder formatieren ergibt das Formatierte.
-        assert_eq!(fmt(&mini(input)), fmt(input));
+        // Gemischter Inhalt bleibt beim Minifizieren unverändert (`<b>a</b> <i>b</i>` ≠ `<b>a</b><i>b</i>`).
+        assert_eq!(mini("<p><b>a</b> <i>b</i></p>"), "<p><b>a</b> <i>b</i></p>");
+        // Daten-XML: minifizieren und wieder formatieren ergibt das Formatierte.
+        let data = "<r>\n  <!-- c -->\n  <a x=\"1\">\n    <b/>\n    <c>1</c>\n  </a>\n  <d></d>\n</r>\n";
+        assert_eq!(mini(data), "<r><!-- c --><a x=\"1\"><b/><c>1</c></a><d></d></r>");
+        assert_eq!(fmt(&mini(data)), data);
     }
 
     #[test]
@@ -1097,7 +1242,7 @@ mod tests {
         let c = AtomicBool::new(false);
         let opts = Options { indent: Indent::Spaces(2), final_newline: false };
         let f = |op: Op, s: &str| text(run_with(op, s, opts, true, &c, &|_| {}));
-        assert_eq!(f(Op::Format, "<a><b/></a> <c/>"), "<a>\n  <b/>\n</a>\n<c/>");
+        assert_eq!(f(Op::Format, "<a><b/></a>\n <c/>"), "<a>\n  <b/>\n</a>\n<c/>");
         assert_eq!(f(Op::Format, "a <b>x</b> c"), "a <b>x</b> c");
         assert_eq!(f(Op::Format, "<a>&nbsp;</a>"), "<a>&nbsp;</a>");
         assert_eq!(f(Op::Format, ""), "");
@@ -1113,9 +1258,10 @@ mod tests {
             "<!DOCTYPE doc [ <!ENTITY e \"x>y\"> <!-- ] > --> ]>\n",
             "<doc xmlns:x=\"urn:x\">\n\n",
             "<x:meta  a='1'   b=\"2\"/>\n",
-            "    <!-- note -->  <?proc data?>\n",
+            "    <!-- note -->\n  <?proc data?>\n",
             "<p>Text with <b>bold</b> &e; and &#x263A;</p>\n",
-            "<list><item>1</item>\n\n\n<item>2</item><item/>   <item></item></list>\n",
+            "<list><item>1</item>\n\n\n<item>2</item>\n<item/>\n   <item></item></list>\n",
+            "<x:inline><b>a</b> <i>b</i></x:inline>\n",
             "<code xml:space=\"preserve\">  keep   <this/>  </code>\n",
             "<s><![CDATA[ <raw> ]]></s>\n",
             "</doc>\n"
@@ -1137,6 +1283,7 @@ mod tests {
         assert!(once.contains("  <code xml:space=\"preserve\">  keep   <this/>  </code>\n"));
         assert!(once.contains("  <x:meta  a='1'   b=\"2\"/>\n"));
         assert!(once.contains("    <item>1</item>\n\n    <item>2</item>\n    <item/>\n    <item></item>\n"));
+        assert!(once.contains("  <x:inline><b>a</b> <i>b</i></x:inline>\n"));
     }
 
     #[test]
@@ -1216,8 +1363,13 @@ mod tests {
         assert_eq!(mini(&deep), "<a>".repeat(n - 1) + "<a></a>" + &"</a>".repeat(n - 1));
         let flat = text(go(Op::Format, &deep, Options { indent: Indent::Spaces(0), final_newline: false }));
         assert_eq!(flat.lines().count(), 2 * n - 1);
-        // Mit Einrückung (kleiner, die Ausgabe wächst quadratisch).
-        let m = 2_000;
+        // Mit Einrückung: ab MAX_INDENT_DEPTH bleibt sie gleich, die Ausgabe wächst nur linear.
+        let out = fmt(&deep);
+        assert!(out.len() < 3 * deep.len() + 2 * n * (2 * MAX_INDENT_DEPTH + 1), "{} bytes", out.len());
+        assert_eq!(out.lines().nth(50), Some(format!("{}<a>", "  ".repeat(50)).as_str()));
+        assert_eq!(out.lines().nth(5_000), Some(format!("{}<a>", "  ".repeat(MAX_INDENT_DEPTH)).as_str()));
+        assert_eq!(fmt(&out), out);
+        let m = 80;
         let deep2 = format!("{}{}", "<a>".repeat(m), "</a>".repeat(m));
         let out = fmt(&deep2);
         assert_eq!(out.lines().count(), 2 * m - 1);
