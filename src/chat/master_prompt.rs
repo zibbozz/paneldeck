@@ -505,6 +505,18 @@ pub const DOCS: &[ToolDoc] = &[
         ],
     },
     ToolDoc {
+        name: "format_file",
+        purpose: "Built-in JSON/XML formatter for a document open in the Editor tab: validate, format, minify or sort JSON keys.",
+        usage: &[
+            "`op` = validate only checks (valid, or error with line/column); format, minify and sort_keys change the whole document (unsaved, undoable) and need the user's switch \"Agents may format\".",
+            "JSONC minify removes comments: pass `remove_comments` = true. sort_keys is JSON only.",
+        ],
+        examples: &[
+            (r#"{"path": "C:\\work\\app.json", "op": "validate"}"#, "check a file open in the editor"),
+            (r#"{"doc": 2, "op": "format"}"#, "pretty-print document 2"),
+        ],
+    },
+    ToolDoc {
         name: "editor_save",
         purpose: "Saves a document open in the Editor tab to its existing file.",
         usage: &[
@@ -906,6 +918,14 @@ fn approval_text(def: &ToolDef, ask_write: bool) -> &'static str {
     // Agenten-Werkzeuge (#338) haben eigene Regeln (sensible Dateien, Web mit Freigabe auch bei Stufe Lesen).
     if agent::is_agent_tool(def.name) {
         return agent::approval_text(def.name, ask_write);
+    }
+    // `format_file` (#381): die Stufe hängt von `op` ab.
+    if def.name == "format_file" {
+        return if ask_write {
+            "Level: Read for op = validate; format, minify and sort_keys need level Control and the user's approval."
+        } else {
+            "Level: Read for op = validate; format, minify and sort_keys need level Control."
+        };
     }
     if def.level < McpLevel::Control {
         return "Level: Read.";

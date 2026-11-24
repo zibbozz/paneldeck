@@ -91,6 +91,9 @@ fn write_demo_project(dir: &Path) {
         ("src/orders.rs", "//! Orders: create, find and cancel.\n\nuse std::collections::BTreeMap;\n\n#[derive(Clone, Debug, PartialEq)]\npub struct Order {\n    pub id: u64,\n    pub customer: String,\n    pub total_cents: u64,\n    pub cancelled: bool,\n}\n\nimpl Order {\n    pub fn sample() -> Order {\n        Order { id: 1, customer: \"demo\".into(), total_cents: 1999, cancelled: false }\n    }\n}\n\n#[derive(Default)]\npub struct OrderStore {\n    next_id: u64,\n    orders: BTreeMap<u64, Order>,\n}\n\nimpl OrderStore {\n    pub fn create_order(&mut self, customer: &str, total_cents: u64) -> u64 {\n        self.next_id += 1;\n        let id = self.next_id;\n        self.orders.insert(id, Order { id, customer: customer.into(), total_cents, cancelled: false });\n        id\n    }\n\n    pub fn find_order(&self, id: u64) -> Option<&Order> {\n        self.orders.get(&id)\n    }\n\n    pub fn cancel_order(&mut self, id: u64) -> bool {\n        match self.orders.get_mut(&id) {\n            Some(order) if !order.cancelled => {\n                order.cancelled = true;\n                true\n            }\n            _ => false,\n        }\n    }\n}\n"),
         ("src/payments.rs", "//! Payments: charge an order with a saved card.\n\nuse crate::orders::Order;\n\n#[derive(Debug)]\npub enum PaymentError {\n    Declined,\n    Expired,\n}\n\npub fn charge(order: &Order, card: &str) -> Result<String, PaymentError> {\n    if card.ends_with(\"0000\") {\n        return Err(PaymentError::Declined);\n    }\n    Ok(format!(\"ch_{}_{}\", order.id, order.total_cents))\n}\n"),
         ("tests/orders.rs", "use acme_shop::orders::OrderStore;\n\n#[test]\nfn cancel_order_only_once() {\n    let mut store = OrderStore::default();\n    let id = store.create_order(\"bob\", 500);\n    assert!(store.cancel_order(id));\n    assert!(!store.cancel_order(id));\n}\n"),
+        // Formatieren (#381): kompaktes JSON zum Formatieren und eines mit einem Fehler (fehlendes Komma).
+        ("config/shop.json", "{\"name\":\"acme-shop\",\"port\":8080,\"currency\":\"EUR\",\"payments\":{\"provider\":\"demo\",\"retries\":3,\"cards\":[\"visa\",\"mastercard\"]},\"features\":{\"coupons\":true,\"gift_cards\":false}}\n"),
+        ("config/orders.json", "{\n  \"orders\": [\n    { \"id\": 1, \"customer\": \"alice\", \"total_cents\": 4200 },\n    { \"id\": 2, \"customer\": \"bob\" \"total_cents\": 500 }\n  ]\n}\n"),
     ];
     for (name, text) in FILES {
         let p = dir.join(name);
@@ -499,6 +502,14 @@ impl App {
                     self.editor_svc.find.start(demo.clone(), q, move || repaint.request_repaint());
                 }
             }
+            // Menüleiste und Formatieren (#381): links das formatierte JSON, rechts ein Fehler mit „Gehe zu“.
+            "editor-format" => {
+                write_demo_project(&demo);
+                self.set_mode(titlebar::Mode::Editor);
+                self.ed.set_root(&demo);
+                let _ = self.editor_open(&demo.join("config/shop.json"), true, false);
+                self.ed.open_path(&demo.join("config/orders.json"), true);
+            }
             "editor-settings" => {
                 self.set_mode(titlebar::Mode::Editor);
                 self.settings_open = true;
@@ -681,6 +692,16 @@ impl App {
                 f.regex = true;
                 f.replacement = "fn ${1}_purchase".into();
                 f.replace_mode = true;
+            }
+            "editor-format" if n == 10 => {
+                let groups: Vec<(u64, u64)> = self.ed.panes.groups.iter().filter_map(|(g, grp)| grp.active_tab().map(|t| (*g, t.doc))).collect();
+                let lang = self.settings.language;
+                for (g, doc) in groups {
+                    let validate = self.ed.docs.get(&doc).and_then(|d| d.path.as_ref()).is_some_and(|p| p.ends_with("orders.json"));
+                    let op = if validate { crate::editor::format::Op::Validate } else { crate::editor::format::Op::Format };
+                    let c = ctx.clone();
+                    self.ed.start_format(g, op, false, move || c.request_repaint(), lang);
+                }
             }
             "editor-disk-changed" if n == 15 => {
                 // eigene, ungespeicherte Änderung im Puffer und eine fremde auf der Platte

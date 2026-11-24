@@ -154,7 +154,9 @@ impl ToolPolicy {
         let Some(def) = mcp::tools().into_iter().find(|d| d.name == call.name) else {
             return Err((ToolStatus::Error, error_json("unknown_tool", &self.unknown_tool_message(&call.name))));
         };
-        if !self.enabled() || def.level > self.cfg.level || self.cfg.disabled_tools.iter().any(|t| t == def.name) || crate::time::agent::TOOLS.contains(&def.name) {
+        // Stufe nach den Argumenten (`format_file` liest nur mit `op` = `validate`, #381).
+        let level = mcp::call_level(def.name, &call.arguments).unwrap_or(def.level);
+        if !self.enabled() || level > self.cfg.level || self.cfg.disabled_tools.iter().any(|t| t == def.name) || crate::time::agent::TOOLS.contains(&def.name) {
             return Err((ToolStatus::Denied, error_json("forbidden", "This tool is not allowed for this model (Settings → Models).")));
         }
         if !def.group.available(self.expert) {
@@ -178,7 +180,7 @@ impl ToolPolicy {
         if let Some(msg) = spawn_forbidden(&call.name, &call.arguments, &self.origin_sessions) {
             return Err((ToolStatus::Denied, error_json("forbidden", msg)));
         }
-        Ok(def.level >= McpLevel::Control && !approval_free(def.name, &call.arguments))
+        Ok(level >= McpLevel::Control && !approval_free(def.name, &call.arguments))
     }
 
     /// [`ToolPolicy::check`] für ein Agenten-Werkzeug (#338): Stufe, Sperre, angeboten (Projektordner, Einstellungen),
@@ -600,6 +602,18 @@ mod tests {
 
     fn call(name: &str, args: Value) -> ToolCall {
         ToolCall { id: "c".into(), name: name.into(), arguments: args }
+    }
+
+    /// #381: `format_file` mit `validate` gilt als Lesen (ohne Freigabe), alles andere als Steuern (mit Freigabe).
+    #[test]
+    fn format_file_level_follows_the_op() {
+        let read = policy(McpLevel::Read, &[], false);
+        assert_eq!(read.check(&call("format_file", json!({"path": "C:\\a.json", "op": "validate"}))), Ok(false));
+        assert!(read.check(&call("format_file", json!({"path": "C:\\a.json", "op": "format"}))).unwrap_err().1.contains("forbidden"));
+        let ctl = policy(McpLevel::Control, &[], false);
+        assert_eq!(ctl.check(&call("format_file", json!({"path": "C:\\a.json", "op": "minify"}))), Ok(true), "schreibend: Freigabe");
+        assert_eq!(ctl.check(&call("format_file", json!({"path": "C:\\a.json", "op": "validate"}))), Ok(false));
+        assert!(policy(McpLevel::Control, &["format_file"], false).check(&call("format_file", json!({"op": "validate"}))).unwrap_err().1.contains("forbidden"), "abwählbar");
     }
 
     fn names(p: &ToolPolicy) -> Vec<String> {

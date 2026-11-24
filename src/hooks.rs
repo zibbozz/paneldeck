@@ -740,6 +740,11 @@ fn handle_mcp(s: &mut TcpStream, v: &Value, ipc_token: &str, mcp_tx: &std::sync:
         return reply(mcp_err("busy", crate::state::t("Zu viele gleichzeitige Anfragen", "Too many concurrent requests")));
     }
     let args = v.get("args").cloned().unwrap_or_else(|| json!({}));
+    // Werkzeuge mit lesender und schreibender Form (`format_file`, #381): Stufe nach den Argumenten.
+    if let Err((code, message)) = mcp::check_call_level(tool, &args, level) {
+        mcp::ACTIVE.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        return reply(mcp_err(&code, &message));
+    }
     // Wartezeit: bei Werkzeugen mit eigener Frist deren Wert (+ Reserve), sonst kurz.
     let wait = args.get("timeout_secs").and_then(|t| t.as_u64()).map(|t| t.clamp(1, mcp::MAX_WAIT_SECS) + 10).unwrap_or(30);
     let caller = v.get("caller").and_then(|c| c.as_u64());

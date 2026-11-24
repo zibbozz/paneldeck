@@ -432,9 +432,9 @@ fn a_thousand_entries_per_type_stay_smooth() {
         let per = t0.elapsed() / 5;
         assert!(per < std::time::Duration::from_millis(100), "{s:?}: {per:?} je Bild");
     }
-    // auch der Takt mit 1000 Einträgen je Art
-    let t0 = std::time::Instant::now();
+    // auch der Takt mit 1000 Einträgen je Art (Sperre vor dem Messen holen – das Warten auf andere Tests zählt nicht)
     let _g = notify::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let t0 = std::time::Instant::now();
     handle_tick(&mut h.ui, Some(&h.db.conn), now + 1000, Lang::En, &TimeSettings::default(), true);
     let _ = notify::take();
     assert!(t0.elapsed() < std::time::Duration::from_millis(500), "{:?}", t0.elapsed());

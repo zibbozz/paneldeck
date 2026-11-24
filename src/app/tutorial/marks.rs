@@ -107,6 +107,8 @@ spots! {
     TimePresets = "time.presets",
     CalendarViews = "time.calendar.views",
     TimeOptions = "time.options",
+    // Menüleiste je Teilung (#381, 3.2.0)
+    EditorMenuBar = "editor.menu_bar",
 }
 
 /// Wo ein Ziel in diesem Bild lag: ganzes Rechteck und der sichtbare (nicht weggeschnittene) Teil.

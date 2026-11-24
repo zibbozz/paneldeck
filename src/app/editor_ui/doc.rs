@@ -146,8 +146,8 @@ pub(crate) struct DocEntry {
     pub touched: bool,
     /// Lesen im Hintergrund (große Dateien).
     loading: Option<std::sync::mpsc::Receiver<Result<Document, String>>>,
-    /// Auswahlen für Änderungen ohne Ansicht (Agent, Neu laden).
-    scratch: Selections,
+    /// Auswahlen für Änderungen ohne Ansicht (Agent, Neu laden, Formatieren ohne Ansicht).
+    pub(super) scratch: Selections,
     /// Syntax-Modus (#312).
     pub syntax: SyntaxDoc,
 }

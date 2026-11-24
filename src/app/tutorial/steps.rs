@@ -651,6 +651,19 @@ const EDITOR: &[Step] = &[
         need: None,
     },
     Step {
+        id: "editor.format",
+        since: "3.2.0",
+        spot: Some(Spot::EditorMenuBar),
+        title: tx("Menüleiste und Formatieren", "Menu bar and formatting"),
+        body: tx(
+            "Jede Teilung hat oben eine Menüleiste: Datei, Bearbeiten, Ansicht und Format – mit allen Befehlen und ihren Kürzeln; was gerade nicht passt, ist ausgegraut. Format formatiert JSON und XML ({key:ed_format}), minifiziert ({key:ed_minify}), prüft ({key:ed_validate}) und sortiert JSON-Schlüssel – lokal, als ein Rückgängig-Schritt, mit Auswahl nur die Auswahl. Ein Fehler zeigt Zeile und Spalte mit „Gehe zu“. Beim Speichern formatieren lässt sich je Sprache einschalten.",
+            "Every split has a menu bar at the top: File, Edit, View and Format – with all commands and their shortcuts; what does not apply right now is greyed out. Format pretty-prints JSON and XML ({key:ed_format}), minifies ({key:ed_minify}), validates ({key:ed_validate}) and sorts JSON keys – locally, as one undo step, with a selection only the selection. An error shows line and column with “Go to”. Formatting on save can be switched on per language.",
+        ),
+        prep: EDITOR_FILE,
+        done: None,
+        need: None,
+    },
+    Step {
         id: "editor.minimap",
         since: "3.0.0",
         spot: Some(Spot::EditorMinimap),

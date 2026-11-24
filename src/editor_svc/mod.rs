@@ -4,6 +4,8 @@
 //! * [`agent_path`]: welche Pfade ein Agent öffnen darf (lokal, nie Netzwerk-/UNC-Pfade oder Geräte).
 //! * [`tools`]: die MCP-Werkzeuge `editor_list`, `editor_read`, `editor_open`, `editor_edit`, `editor_save` als reine
 //!   Logik gegen die Schnittstelle [`tools::EditorHost`] (die Oberfläche setzt sie um, Tests mit einem Ersatz).
+//! * [`format_job`]: ein Formatier-Lauf (JSON/XML, #381) im Hintergrund mit Fortschritt und Abbruch; liefert Änderungen
+//!   als einen Rückgängig-Schritt (Menüleiste, Kürzel, Palette, Formatieren beim Speichern, MCP `format_file`).
 //! * [`find`]: Suche in Dateien des geöffneten Ordners (Hintergrund-Thread, abbrechbar, gedeckelt; `.gitignore`).
 //! * [`watch`]: Änderungen geöffneter Dateien auf der Platte erkennen (Abfrage von Größe/Zeitstempel im Hintergrund).
 //!
@@ -11,6 +13,7 @@
 
 pub mod agent_path;
 pub mod find;
+pub mod format_job;
 pub mod settings;
 pub mod tools;
 pub mod watch;

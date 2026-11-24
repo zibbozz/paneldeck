@@ -2,6 +2,8 @@
 //! ändern). Fehlt das Feld (ältere Dateien), gelten die Standards; ein falscher Typ eines einzelnen Werts ergibt nur für
 //! diesen Wert den Standard, unbekannte Werte werden ignoriert. Die drei Agenten-Schalter sind immer aus, wenn sie nicht
 //! ausdrücklich `true` sind. Ab 3.1.0 (#312, Syntax-Modus): `default_mode`, `language_modes`, `language_map`.
+//! Ab 3.2.0 (#381): `menu_bar` (Menüleiste je Teilung, Standard an – aus nur bei ausdrücklichem `false`),
+//! `format_on_save_json`, `format_on_save_xml` (Standard aus) und der Agenten-Schalter `agent_format` (Standard aus).
 
 use crate::editor::syntax::{Mode, UserMap};
 use serde::{Deserialize, Serialize};
@@ -53,6 +55,15 @@ pub struct EditorSettings {
     /// Eigene Zuordnungen (Muster → Sprach-Id), vor der eingebauten Erkennung: Dateiname (`Jenkinsfile`) oder Endung
     /// (`*.tpl`, `.tpl`).
     pub language_map: BTreeMap<String, String>,
+    /// Menüleiste (*Datei · Bearbeiten · Ansicht · Format*) über jeder Teilung (#381). Standard an.
+    pub menu_bar: bool,
+    /// JSON (auch JSONC) beim Speichern formatieren (#381). Standard aus.
+    pub format_on_save_json: bool,
+    /// XML beim Speichern formatieren (#381). Standard aus.
+    pub format_on_save_xml: bool,
+    /// Agenten dürfen offene JSON/XML-Dokumente formatieren (MCP `format_file` außer `validate`; ungespeichert, als
+    /// „vom Agenten“ markiert, rückgängig zu machen). Standard aus.
+    pub agent_format: bool,
 }
 
 impl Default for EditorSettings {
@@ -70,18 +81,25 @@ impl Default for EditorSettings {
             default_mode: Mode::Text,
             language_modes: BTreeMap::new(),
             language_map: BTreeMap::new(),
+            menu_bar: true,
+            format_on_save_json: false,
+            format_on_save_xml: false,
+            agent_format: false,
         }
     }
 }
 
-/// Stand der drei Agenten-Schalter für Stellen ohne Zugriff auf die Einstellungen (Werkzeugliste der Chats), wie
-/// `mcp::LEVEL`: Bit 0 öffnen, 1 bearbeiten, 2 speichern, dazu [`DOCS_OPEN`]. Die Oberfläche schreibt ihn jedes Bild
+/// Stand der Agenten-Schalter für Stellen ohne Zugriff auf die Einstellungen (Werkzeugliste der Chats), wie
+/// `mcp::LEVEL`: Bit 0 öffnen, 1 bearbeiten, 2 speichern, dazu [`DOCS_OPEN`] und [`FORMAT`] (formatieren, #381). Die Oberfläche schreibt ihn jedes Bild
 /// ([`publish`]); geprüft wird beim Ausführen trotzdem immer an den Einstellungen selbst.
 pub static AGENT_SWITCHES: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
 
 /// Bit in [`AGENT_SWITCHES`]: Im Editor ist mindestens ein Dokument offen (sonst gibt es für Chats nichts zu lesen,
 /// zu bearbeiten oder zu speichern, und die Werkzeuge kosteten nur Platz im Kontext kleiner Modelle).
 pub const DOCS_OPEN: u8 = 8;
+
+/// Bit in [`AGENT_SWITCHES`]: *Agenten dürfen formatieren* (`agent_format`, #381).
+pub const FORMAT: u8 = 16;
 
 /// Schalter und „Dokumente offen“ veröffentlichen (jedes Bild).
 pub fn publish(s: &EditorSettings, docs_open: bool) {
@@ -90,7 +108,7 @@ pub fn publish(s: &EditorSettings, docs_open: bool) {
 
 /// Schalter als Bits (siehe [`AGENT_SWITCHES`]).
 pub fn switch_bits(s: &EditorSettings) -> u8 {
-    (s.agent_open as u8) | ((s.agent_edit as u8) << 1) | ((s.agent_save as u8) << 2)
+    (s.agent_open as u8) | ((s.agent_edit as u8) << 1) | ((s.agent_save as u8) << 2) | if s.agent_format { FORMAT } else { 0 }
 }
 
 /// Was ein Agent im Editor tun will (je ein Schalter).
@@ -99,6 +117,8 @@ pub enum AgentRight {
     Open,
     Edit,
     Save,
+    /// JSON/XML formatieren (MCP `format_file`, #381).
+    Format,
 }
 
 impl EditorSettings {
@@ -134,6 +154,11 @@ impl EditorSettings {
                 .and_then(Value::as_object)
                 .map(|m| m.iter().filter_map(|(k, v)| Some((clean_pattern(k)?, clean_id(v.as_str()?)?))).take(MAX_LANGUAGE_ENTRIES).collect())
                 .unwrap_or_default(),
+            // Standard an: aus nur bei ausdrücklichem `false`.
+            menu_bar: o.get("menu_bar").and_then(Value::as_bool) != Some(false),
+            format_on_save_json: flag("format_on_save_json"),
+            format_on_save_xml: flag("format_on_save_xml"),
+            agent_format: flag("agent_format"),
         }
     }
 
@@ -159,6 +184,7 @@ impl EditorSettings {
             AgentRight::Open => self.agent_open,
             AgentRight::Edit => self.agent_edit,
             AgentRight::Save => self.agent_save,
+            AgentRight::Format => self.agent_format,
         }
     }
 
@@ -212,16 +238,21 @@ mod tests {
         assert_eq!(d.font, "", "leer = Terminalschrift");
         assert_eq!(d.large_file_mb, 20);
         assert!(!d.autosave && !d.search_include_ignored);
-        assert!(!d.agent_open && !d.agent_edit && !d.agent_save, "Agenten-Schalter sind standardmäßig aus");
+        assert!(!d.agent_open && !d.agent_edit && !d.agent_save && !d.agent_format, "Agenten-Schalter sind standardmäßig aus");
+        assert!(d.menu_bar, "Menüleiste standardmäßig an (#381)");
+        assert!(!d.format_on_save_json && !d.format_on_save_xml, "Formatieren beim Speichern standardmäßig aus");
         assert_eq!(d.large_file_bytes(), 20 * 1024 * 1024);
-        for r in [AgentRight::Open, AgentRight::Edit, AgentRight::Save] {
+        for r in [AgentRight::Open, AgentRight::Edit, AgentRight::Save, AgentRight::Format] {
             assert!(!d.allows(r));
         }
         // Serialisiert mit genau den dokumentierten Feldnamen (öffentliches Datenformat).
         let v = serde_json::to_value(&d).unwrap();
         let mut keys: Vec<&str> = v.as_object().unwrap().keys().map(String::as_str).collect();
         keys.sort();
-        assert_eq!(keys, ["agent_edit", "agent_open", "agent_save", "autosave", "autosave_delay_ms", "default_mode", "font", "language_map", "language_modes", "large_file_mb", "search_exclude", "search_include_ignored"]);
+        assert_eq!(
+            keys,
+            ["agent_edit", "agent_format", "agent_open", "agent_save", "autosave", "autosave_delay_ms", "default_mode", "font", "format_on_save_json", "format_on_save_xml", "language_map", "language_modes", "large_file_mb", "menu_bar", "search_exclude", "search_include_ignored"]
+        );
         assert_eq!(v["default_mode"], "text", "neue Dateien: Text");
         assert!(d.language_modes.is_empty() && d.language_map.is_empty());
     }
@@ -254,6 +285,22 @@ mod tests {
         let v = serde_json::to_value(&s).unwrap();
         assert_eq!(v["language_modes"]["python"], "syntax");
         assert_eq!(v["language_map"]["*.tpl"], "html");
+    }
+
+    #[test]
+    fn format_settings_of_3_2_0_round_trip_and_old_files_load() {
+        // Datei von 3.1.0 ohne die neuen Felder: Menüleiste an, alles andere aus.
+        let old = EditorSettings::from_value(&json!({"font": "", "agent_edit": true}));
+        assert!(old.menu_bar && !old.format_on_save_json && !old.format_on_save_xml && !old.agent_format);
+        assert_eq!(switch_bits(&old) & FORMAT, 0);
+        let s = EditorSettings::from_value(&json!({"menu_bar": false, "format_on_save_json": true, "format_on_save_xml": "yes", "agent_format": true}));
+        assert!(!s.menu_bar && s.format_on_save_json && !s.format_on_save_xml && s.agent_format);
+        assert!(s.allows(AgentRight::Format) && !s.allows(AgentRight::Edit));
+        assert_eq!(switch_bits(&s), FORMAT);
+        // Falscher Typ: Menüleiste bleibt an (Standard).
+        assert!(EditorSettings::from_value(&json!({"menu_bar": 0})).menu_bar);
+        let back = EditorSettings::from_value(&serde_json::to_value(&s).unwrap());
+        assert_eq!(back, s);
     }
 
     #[test]
