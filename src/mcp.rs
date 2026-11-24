@@ -63,6 +63,16 @@ pub fn current_level() -> McpLevel {
     McpLevel::from_u8(LEVEL.load(Ordering::Relaxed))
 }
 
+/// Höchste Stufe, die irgendein Agent in irgendeinem Bereich erreicht (#386, vom UI-Thread gesetzt). `tools/list` zeigt die
+/// Werkzeuge dieser Stufe; welche Stufe ein Aufruf wirklich hat, prüft die UI-Schleife je Aufruf.
+/// Anfangs „Steuern“ (keine zusätzliche Grenze), bis die Oberfläche den ersten Wert veröffentlicht.
+pub static REACH: AtomicU8 = AtomicU8::new(2);
+
+/// Stufe für `_level` (Werkzeugliste, Systemprompt): höchstens die globale Stufe.
+pub fn reach_level() -> McpLevel {
+    current_level().min(McpLevel::from_u8(REACH.load(Ordering::Relaxed)))
+}
+
 /// Expertenmodus an? Vom UI-Thread gesetzt (jedes Frame) wie `LEVEL`; der Hub prüft den Modus selbst, nicht erst die Brücke.
 pub static EXPERT: AtomicBool = AtomicBool::new(false);
 
@@ -250,6 +260,7 @@ pub fn tools() -> Vec<ToolDef> {
                     "prompt": {"type": "string", "description": "First prompt for Claude (only with claude=true)"},
                     "group": {"type": "string", "description": "Folder in the session tree"},
                     "template": {"type": "string", "description": "Name of a terminal template from the user's template library (sidebar -> Templates; case-insensitive). The session gets the template's settings; the other parameters of this call override them. Unknown names and group templates return bad_args with the available terminal templates. Not with kind=\"chat\". \"Continue the last conversation in the folder\" from a template is ignored for agents; the result lists left-out template options in template_ignored"},
+                    "project": {"type": ["string", "integer"], "description": "Sidebar project (name or id from whoami.access.projects) the session is created in; you need Control there. Default: your own session's project; for an agent outside Paneldeck the project shown in the main window, also only with Control (else project_locked/forbidden)"},
                     "placement": placement("Default: the session is created without being shown.")
                 }),
                 &[],
@@ -607,6 +618,35 @@ pub fn tools() -> Vec<ToolDef> {
             group: Group::Expert,
             description: "Expert mode: link a ticket to a terminal session (stored as session:<id>) so the user sees which session works on it. Without `session` your own session is linked (see whoami); otherwise only a session you created yourself. This only records the link - it never types into a terminal.",
             schema: schema(json!({"ticket": ticket.clone(), "session": {"type": "integer", "description": "Session id; default: your own session"}}), &["ticket"]),
+        },
+        // ---- #386 (3.2.0): Projekte anlegen, Papierkorb, eigene Kommentare (Schalter in Einstellungen → Agenten)
+        ToolDef {
+            name: "create_project",
+            level: Control,
+            group: Group::Expert,
+            description: "Expert mode: create a ticket project (key 2-10 letters/digits, name). Only when the user allowed it (Settings -> Agents -> \"Agents may create projects\", else forbidden) and only for an agent running in a Paneldeck session with Control in that session's project: the new project is linked to that project and follows its access level. Sidebar projects are created only by the user; agents never delete projects.",
+            schema: schema(json!({"key": {"type": "string", "description": "Project key, e.g. API (2-10 characters)"}, "name": {"type": "string"}, "description": {"type": "string"}, "color": {"type": "string", "description": "#RRGGBB"}}), &["key", "name"]),
+        },
+        ToolDef {
+            name: "delete_ticket",
+            level: Control,
+            group: Group::Expert,
+            description: "Expert mode: move a ticket to the trash. Only when the user allowed it (Settings -> Agents -> \"Agents may delete tickets/comments\", else forbidden) and with Control in the ticket's project. The ticket disappears from all lists; only the user can restore it or delete it permanently.",
+            schema: schema(json!({"ticket": ticket.clone()}), &["ticket"]),
+        },
+        ToolDef {
+            name: "update_comment",
+            level: Control,
+            group: Group::Expert,
+            description: "Expert mode: replace the text of a comment written by an agent (origin agent in get_ticket; any agent). Comments of the user cannot be changed (forbidden). The change is recorded in the ticket history.",
+            schema: schema(json!({"comment": {"type": "integer", "description": "Comment id from get_ticket"}, "body": {"type": "string", "description": "New text (Markdown)"}}), &["comment", "body"]),
+        },
+        ToolDef {
+            name: "delete_comment",
+            level: Control,
+            group: Group::Expert,
+            description: "Expert mode: move a comment written by an agent (origin agent) to the trash. Only when the user allowed it (Settings -> Agents -> \"Agents may delete tickets/comments\", else forbidden). Comments of the user cannot be deleted (forbidden); only the user can restore or permanently delete trashed comments.",
+            schema: schema(json!({"comment": {"type": "integer", "description": "Comment id from get_ticket"}}), &["comment"]),
         },
     ]
     .into_iter()
@@ -1266,6 +1306,10 @@ pub struct LogEntry {
     /// Bei `how: "chat"`: Modell des Chats.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// Projekt des Ziels (#386, ab 3.2.0): Name des Seitenleisten-Projekts der Sitzung bzw. Schlüssel des Ticket-Projekts;
+    /// fehlt, wenn der Aufruf keines betrifft.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
 }
 
 pub fn short(s: &str, n: usize) -> String {
@@ -1487,6 +1531,9 @@ mod tests {
         assert!(m.contains("read-only"), "{m}");
     }
 
+    /// Werkzeuge der Erweiterung #386: nur mit Steuern und den Schaltern; Löschen geht nur in den Papierkorb, nie für Karten.
+    const SWITCHED_TOOLS: [&str; 4] = ["create_project", "delete_ticket", "update_comment", "delete_comment"];
+
     #[test]
     fn task_tools_are_well_formed_and_never_delete() {
         let mut seen = std::collections::HashSet::new();
@@ -1501,11 +1548,15 @@ mod tests {
             }
             // schreibende Werkzeuge der Aufgaben brauchen die Stufe Steuern, lesende Lesen
             if matches!(t.group, Group::Simple | Group::Expert) {
-                let writes = SIMPLE_TOOLS.contains(&t.name) || EXPERT_WRITE.contains(&t.name);
+                // #386: Projekte anlegen und Löschen in den Papierkorb nur hinter Schaltern der Einstellungen (Steuern)
+                let switched = SWITCHED_TOOLS.contains(&t.name);
+                let writes = SIMPLE_TOOLS.contains(&t.name) || EXPERT_WRITE.contains(&t.name) || switched;
                 assert_eq!(t.level, if writes { McpLevel::Control } else { McpLevel::Read }, "{}", t.name);
-                // Agenten löschen weder Tickets noch Karten und ändern keine Typen/Workflows/Projekte
-                for banned in ["delete", "remove", "drop", "workflow", "type_", "project_"] {
-                    assert!(!t.name.contains(banned), "{}", t.name);
+                // Sonst löschen Agenten weder Tickets noch Karten und ändern keine Typen/Workflows/Projekte
+                if !switched {
+                    for banned in ["delete", "remove", "drop", "workflow", "type_", "project_"] {
+                        assert!(!t.name.contains(banned), "{}", t.name);
+                    }
                 }
             }
         }

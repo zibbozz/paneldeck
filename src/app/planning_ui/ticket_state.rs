@@ -494,6 +494,10 @@ mod tests {
             created_at: String::new(),
             updated_at: String::new(),
             archived: false,
+            private: false,
+            origin: Default::default(),
+            origin_detail: None,
+            trashed: false,
         }
     }
 

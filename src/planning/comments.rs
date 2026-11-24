@@ -5,6 +5,7 @@ use super::history::{self, HistoryField, Source};
 use super::ops::TicketOp;
 use super::ticket_error::{atomic, TRes, TicketError};
 use super::tickets::{get_ticket, touch};
+use super::access::Origin;
 use rusqlite::{params, Connection, OptionalExtension};
 
 /// Längster Kommentar in Zeichen.
@@ -18,22 +19,25 @@ pub struct Comment {
     pub body: String,
     pub created_at: String,
     pub updated_at: String,
+    /// Wer ihn geschrieben hat (#386): Agenten dürfen nur Kommentare mit Herkunft „Agent“ ändern oder löschen.
+    pub origin: Origin,
+    pub origin_detail: Option<String>,
 }
 
-const COLS: &str = "id, ticket_id, body, created_at, updated_at";
+const COLS: &str = "id, ticket_id, body, created_at, updated_at, origin, origin_detail";
 
 fn from_row(r: &rusqlite::Row) -> rusqlite::Result<Comment> {
-    Ok(Comment { id: r.get(0)?, ticket_id: r.get(1)?, body: r.get(2)?, created_at: r.get(3)?, updated_at: r.get(4)? })
+    Ok(Comment { id: r.get(0)?, ticket_id: r.get(1)?, body: r.get(2)?, created_at: r.get(3)?, updated_at: r.get(4)?, origin: Origin::parse(&r.get::<_, String>(5)?), origin_detail: r.get(6)? })
 }
 
 pub fn get_comment(conn: &Connection, id: i64) -> TRes<Comment> {
     conn.query_row(&format!("SELECT {COLS} FROM comments WHERE id = ?1"), [id], from_row).optional()?.ok_or_else(TicketError::not_found)
 }
 
-/// Die Kommentare eines Tickets, älteste zuerst.
+/// Die Kommentare eines Tickets, älteste zuerst (ohne die im Papierkorb, #386).
 pub fn comments_of(conn: &Connection, ticket_id: i64) -> TRes<Vec<Comment>> {
     get_ticket(conn, ticket_id)?;
-    let mut st = conn.prepare(&format!("SELECT {COLS} FROM comments WHERE ticket_id = ?1 ORDER BY id"))?;
+    let mut st = conn.prepare(&format!("SELECT {COLS} FROM comments WHERE ticket_id = ?1 AND trashed_at IS NULL ORDER BY id"))?;
     Ok(st.query_map([ticket_id], from_row)?.collect::<Result<Vec<_>, _>>()?)
 }
 
@@ -55,9 +59,15 @@ fn excerpt(s: &str) -> String {
 /// Schreibt den Kommentar (mit fester Kennung, wenn `c.id > 0`) samt Verlauf. Prüft nichts.
 pub(crate) fn raw_insert(conn: &Connection, c: &Comment, source: &Source, batch: i64) -> TRes<i64> {
     if c.id > 0 {
-        conn.execute("INSERT INTO comments (id, ticket_id, body, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5)", params![c.id, c.ticket_id, c.body, c.created_at, c.updated_at])?;
+        conn.execute(
+            "INSERT INTO comments (id, ticket_id, body, created_at, updated_at, origin, origin_detail) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![c.id, c.ticket_id, c.body, c.created_at, c.updated_at, c.origin.as_str(), c.origin_detail],
+        )?;
     } else {
-        conn.execute("INSERT INTO comments (ticket_id, body, created_at, updated_at) VALUES (?1, ?2, ?3, ?4)", params![c.ticket_id, c.body, c.created_at, c.updated_at])?;
+        conn.execute(
+            "INSERT INTO comments (ticket_id, body, created_at, updated_at, origin, origin_detail) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![c.ticket_id, c.body, c.created_at, c.updated_at, c.origin.as_str(), c.origin_detail],
+        )?;
     }
     let id = if c.id > 0 { c.id } else { conn.last_insert_rowid() };
     history::log(conn, c.ticket_id, source, batch, &HistoryField::Comment, None, Some(&excerpt(&c.body)))?;
@@ -93,7 +103,7 @@ pub fn add_comment(conn: &Connection, ticket_id: i64, body: &str, source: &Sourc
         let body = clean_body(body)?;
         let now = super::common::now();
         let batch = history::next_batch(conn)?;
-        let c = Comment { id: 0, ticket_id, body, created_at: now.clone(), updated_at: now };
+        let c = Comment { id: 0, ticket_id, body, created_at: now.clone(), updated_at: now, origin: Origin::of(source), origin_detail: super::access::origin_detail(source) };
         let id = raw_insert(conn, &c, source, batch)?;
         Ok((id, TicketOp::Comment { comment: get_comment(conn, id)?, present: true, source: source.clone() }))
     })

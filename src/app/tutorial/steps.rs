@@ -1158,6 +1158,19 @@ const MCP: &[Step] = &[
         need: None,
     },
     Step {
+        id: "mcp.access",
+        since: "3.2.0",
+        spot: Some(Spot::AgentAccess),
+        title: tx("Zugriff je Projekt", "Access per project"),
+        body: tx(
+            "Jedes Projekt hat eine eigene Stufe: Ein Agent arbeitet im Projekt seiner Sitzung, andere Projekte erreicht er nur mit „Für alle“. Neue Projekte beginnen gesperrt (Schloss in der Projektleiste). Private Karten, Tags und Tickets sieht nie ein Agent; was Agenten löschen, landet im Papierkorb.",
+            "Every project has its own level: an agent works in its session's project and reaches other projects only with “For all”. New projects start locked (lock in the project bar). Agents never see private cards, tags and tickets; what agents delete ends up in the trash.",
+        ),
+        prep: &[Prep::Terminals, Prep::Palette(false), Prep::NoTools, Prep::Settings(S_AGENTS)],
+        done: None,
+        need: None,
+    },
+    Step {
         id: "mcp.register",
         since: "1.0.0",
         spot: Some(Spot::McpRegister),

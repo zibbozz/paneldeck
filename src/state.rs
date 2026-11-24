@@ -192,6 +192,16 @@ pub struct Settings {
     pub mcp_level: crate::mcp::McpLevel,
     /// Agenten dürfen auch Sitzungen schließen, die sie nicht selbst angelegt haben.
     pub mcp_close_any: bool,
+    /// Zugriff der Agenten auf den Bereich „Allgemein“ (alles ohne Projekt, #386). Fehlt = wie global, für alle.
+    pub agent_general: crate::access::AgentAccess,
+    /// Agenten dürfen Ticket-Projekte anlegen (#386, Standard aus; nur mit Steuern im Heimatprojekt).
+    pub agent_create_projects: bool,
+    /// Agenten dürfen Tickets und eigene Kommentare in den Papierkorb legen (#386, Standard aus; nur mit Steuern).
+    pub agent_delete: bool,
+    /// Neue Todo-Karten sind privat (#386, Standard aus).
+    pub todo_new_private: bool,
+    /// Systemnotizen (von Agenten oder Paneldeck angelegte Karten/Tickets) in den Listen zeigen (#386, Standard an).
+    pub show_system_notes: bool,
     /// Sprache des Systemprompts für Agenten (`initialize`), unabhängig von der Sprache der Oberfläche. Standard: Englisch;
     /// ein ungültiger Wert ergibt Englisch (die Datei bleibt lesbar).
     #[serde(deserialize_with = "crate::mcp::sysprompt::de_lang")]
@@ -404,6 +414,11 @@ impl Default for Settings {
             session_budget: 0.0,
             mcp_level: crate::mcp::McpLevel::Off,
             mcp_close_any: false,
+            agent_general: crate::access::AgentAccess::AS_BEFORE,
+            agent_create_projects: false,
+            agent_delete: false,
+            todo_new_private: false,
+            show_system_notes: true,
             mcp_prompt_lang: Lang::En,
             backup_interval_hours: 24,
             backup_keep: 2,
@@ -703,11 +718,13 @@ pub struct Project {
     pub tree_view: bool,
     /// Ordner dieses Projekts (Pfade mit `/`, auch leere).
     pub folders: Vec<Folder>,
+    /// Zugriff der Agenten (#386). Fehlt (ältere `state.json`) = wie global, für alle; neue Projekte beginnen gesperrt.
+    pub agent_access: crate::access::AgentAccess,
 }
 
 impl Default for Project {
     fn default() -> Self {
-        Self { id: 0, name: String::new(), color: [0x61, 0xaf, 0xef], folder: String::new(), profile: 0, layout: None, focused: 0, tree_view: false, folders: Vec::new() }
+        Self { id: 0, name: String::new(), color: [0x61, 0xaf, 0xef], folder: String::new(), profile: 0, layout: None, focused: 0, tree_view: false, folders: Vec::new(), agent_access: crate::access::AgentAccess::AS_BEFORE }
     }
 }
 

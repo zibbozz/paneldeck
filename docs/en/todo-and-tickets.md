@@ -118,6 +118,18 @@ Since 2.6.0 the **Overview** tab of every expert project has a **Maintenance** b
 
 ![Database category with the database care buttons and the statistics table](../images/maint-database.png)
 
+## Private items and system notes
+Since 3.2.0 you decide what [agents](agent-interface.md#access-per-project) may see of your to-do list and tickets:
+
+- **Project of a card:** the card editor has a **Project** picker – a sidebar project or *General (no project)*. A new card starts in the active project. Agents reach a card only with access to its project (see [Access per project](agent-interface.md#access-per-project)); cards from before 3.2.0 are in *General*.
+- **Private cards:** the **Private** switch in the card editor (tooltip "Agents never see private cards"). The setting **New cards private** (`todo_new_private`, off by default) makes every new card start private. A private card shows *Private* at the bottom right.
+- **Private tags:** *Manage tags* has a **Private** switch per tag ("Private: agents never see cards with this tag") – every card with that tag is private, without switching each card.
+- **Private tickets:** *More actions* in the ticket has **Private (never for agents)** and, for a private ticket, **Make not private**; the ticket view then shows "Private – invisible to agents", and the change is recorded in the history. Converting a private card into a ticket keeps it private; sub-tickets inherit nothing.
+- Agents **never see private items**: not in lists, searches, counts, boards or the calendar, and a direct access answers as if the item did not exist. Only you set or remove *Private*.
+- **System notes:** cards and tickets created by an agent or by Paneldeck carry a badge with their origin (e.g. "Created by an agent · Claude 3"; in the ticket view "System note, created by …"). The switch **System notes: shown / hidden** in the header of the to-do list (setting `show_system_notes`, on by default) shows or hides them in the lists. Everything from before 3.2.0 counts as created by you.
+- **Ticket projects:** a ticket project created by an agent (only with the switch *Agents may create projects*) is marked "Created by an agent". In the form of a ticket project you set its **agent access** (level and *For all*) or link it to a sidebar project – then it follows that project's access ("follows the project"; *No link* gives it its own access). New and imported ticket projects start locked for agents.
+- **Trash:** tickets and comments that agents delete (only with the switch *Agents may delete tickets and their own comments*) are not gone: they land in the **trash** (*Settings → Agents → Trash*) and vanish from all lists. A ticket in the trash shows "In the trash (deleted by an agent)." There you can **Restore** each entry, **Delete permanently** or **Empty trash**. Your own *Delete …* of a ticket stays permanent as before.
+
 ## Export and import
 
 Project backup as JSON, tickets as CSV, type/field templates. The import only accepts Paneldeck's own export format, always creates a **new** project (asking for a new key if it is taken) and never changes existing data. Files over 128 MB are refused.
@@ -143,7 +155,7 @@ In the Terminal Hub (with expert mode on and at least one project) every termina
 The tab shortcuts can be changed under *Settings → Shortcuts*.
 
 ## Agents
-AI agents can read and change the to-do list and tickets through the [agent interface (MCP)](agent-interface.md) – with the tools of the current mode only, under the same rules as the window, and never deleting anything. Every change an agent makes appears in the ticket history with its session name and as a short toast.
+AI agents can read and change the to-do list and tickets through the [agent interface (MCP)](agent-interface.md) – with the tools of the current mode only, under the same rules as the window and only in the projects you allow them (see [Access per project](agent-interface.md#access-per-project)). They never see [private items](#private-items-and-system-notes) and never delete anything – except, only with your switch, tickets and their own comments, which go to the [trash](#private-items-and-system-notes). Every change an agent makes appears in the ticket history with its session name and as a short toast; what agents create is marked as a system note.
 
 ## Where the data lives
 The to-do list, projects and tickets are stored in the local database `paneldeck.db` in the data folder, with automatic backups – see [Data folder and backups](data-and-backups.md).

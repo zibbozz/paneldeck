@@ -156,6 +156,10 @@ pub(super) enum Store {
     Starred,
     /// Archiviert (Wartung, #308). Ohne Bedingung auf `archived` blendet die Abfrage archivierte Tickets aus.
     Archived,
+    /// Privat (#386): nie für Agenten sichtbar (Agenten finden damit nichts).
+    Private,
+    /// Systemnotiz (#386): von einem Agenten oder Paneldeck angelegt.
+    SystemNote,
     ChangedBy,
     Sprint,
     Type(OptionSet),
@@ -438,6 +442,8 @@ pub fn search_schema(conn: &Connection, scope: Scope, lang: Lang) -> SRes<Search
     reg.add(&nm("flagged", "Markiert"), FieldType::Bool, false, Store::Flagged);
     reg.add(&nm("starred", "Stern"), FieldType::Bool, false, Store::Starred);
     reg.add(&nm("archived", "Archiviert"), FieldType::Bool, false, Store::Archived);
+    reg.add(&nm("private", "Privat"), FieldType::Bool, false, Store::Private);
+    reg.add(&nm("systemNote", "Systemnotiz"), FieldType::Bool, false, Store::SystemNote);
     reg.add(&nm("project", "Projekt"), FieldType::Option(project_set.flat_names()), false, Store::Project(project_set));
     if projects.iter().any(|p| p.use_sprints) {
         // Auswahlwerte: die Namen der Sprints (siehe `pending.rs`)

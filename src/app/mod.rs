@@ -33,6 +33,7 @@ use std::time::{Duration, Instant};
 
 /// Kalender (#164): Ansichten, Dialoge; Einstieg `calendar_ui::show` (für den Zeit-Reiter).
 pub(crate) mod calendar_ui;
+mod access_ui;
 mod chat_plan_ui;
 mod chat_images;
 mod chat_images_ui;
@@ -3048,16 +3049,18 @@ impl App {
 
     fn project_bar(&mut self, ui: &mut Ui, actions: &mut Vec<Action>) {
         let lang = self.settings.language;
-        let projects: Vec<(u64, String, [u8; 3], usize)> = self
+        let projects: Vec<(u64, String, [u8; 3], usize, bool)> = self
             .projects
             .iter()
-            .map(|p| (p.id, p.name.clone(), p.color, self.entries.values().filter(|e| e.meta.project == p.id && self.in_win(e)).count()))
+            .map(|p| (p.id, p.name.clone(), p.color, self.entries.values().filter(|e| e.meta.project == p.id && self.in_win(e)).count(), p.agent_access.level == crate::access::AreaLevel::Off))
             .collect();
         let bar = ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing = Vec2::new(4.0, 4.0);
-            for (id, name, c, n) in projects {
+            for (id, name, c, n, locked) in projects {
                 let col = Color32::from_rgb(c[0], c[1], c[2]);
-                let r = style::pill(ui, &name, Some(n), col, id == self.active_project);
+                // Schloss: für Agenten gesperrt (#386).
+                let r = style::pill_ex(ui, &name, Some(n), col, id == self.active_project, locked);
+                let r = if locked { r.on_hover_text(lang.t("Für Agenten gesperrt (Rechtsklick → Zugriff für Agenten …)", "Locked for agents (right-click → Agent access …)")) } else { r };
                 if r.clicked() {
                     actions.push(Action::SwitchProject(id));
                 }
@@ -3068,6 +3071,10 @@ impl App {
                     }
                     if ui.button(lang.t("Standardordner …", "Default folder …")).clicked() {
                         actions.push(Action::ProjectPrompt(id, PromptKind::ProjectFolder));
+                        ui.close();
+                    }
+                    if ui.button(lang.t("Zugriff für Agenten …", "Agent access …")).clicked() {
+                        self.mcp.access_dlg = Some(crate::access::Area::Project(id));
                         ui.close();
                     }
                     if !self.settings.profiles.is_empty() {
@@ -3345,6 +3352,14 @@ impl App {
         }
         .with_origins(origins)
         .with_agent(self.agent_env(id))
+        .with_project_cap(self.chat_project_cap(id))
+    }
+
+    /// Stufe des Projekts eines Chats für seine Paneldeck-Werkzeuge (#386): „wie global“ = wie das Modell; gesperrt = keine.
+    fn chat_project_cap(&self, id: u64) -> crate::mcp::McpLevel {
+        let Some(project) = self.entries.get(&id).map(|e| e.meta.project) else { return crate::mcp::McpLevel::Off };
+        // Obergrenze hier „Steuern“: die Stufe des Modells begrenzt `ToolPolicy` selbst (es gilt das Minimum).
+        self.access_map(crate::mcp::McpLevel::Control).sidebar(crate::access::Caller::Home(project), project)
     }
 
     /// Muss der Chat vor dem Senden einmal nach der Stufe seines Modells fragen? Ja, wenn das Modell Werkzeuge nutzen
@@ -4001,6 +4016,12 @@ impl App {
                             e.meta.project = other;
                         }
                     }
+                    // Karten und verknüpfte Ticket-Projekte ziehen mit; es gilt sofort der Zugriff des Ziels (#386).
+                    if let Some(db) = self.db.as_ref() {
+                        let _ = crate::planning::access::sidebar_project_moved(&db.conn, id, other);
+                        self.tasks.invalidate();
+                    }
+                    self.access_gain_hint(crate::access::Area::Project(id), crate::access::Area::Project(other));
                     if self.active_project == id {
                         self.projects.retain(|p| p.id != id);
                         self.active_project = other;
@@ -4508,6 +4529,7 @@ impl eframe::App for App {
         if self.main_overlay() {
             self.notice_ui(ctx);
             self.toasts_ui(ctx);
+            self.access_dialog_ui(ctx);
             self.time_overlay(ctx);
         }
         self.detached_windows(ctx, &mut actions);

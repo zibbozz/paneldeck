@@ -220,7 +220,7 @@ mod tests {
     use chrono::NaiveDate;
 
     fn ctx(f: &Fx, lang: Lang) -> Ctx<'_> {
-        Ctx { conn: &f.c, lang, source: Source::agent("Builder"), now: NaiveDate::from_ymd_opt(2026, 11, 14).unwrap().and_hms_opt(12, 0, 0).unwrap() }
+        Ctx { conn: &f.c, lang, source: Source::agent("Builder"), now: NaiveDate::from_ymd_opt(2026, 11, 14).unwrap().and_hms_opt(12, 0, 0).unwrap(), view: None, need: Default::default() }
     }
 
     fn ok(f: &Fx, tool: &str, v: Value) -> Done {

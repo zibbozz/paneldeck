@@ -438,7 +438,7 @@ fn poll_respects_the_option_and_remembers_the_last_check() {
 
 fn call(c: &rusqlite::Connection, tool: &str, args: Value) -> Result<crate::planning::agent::Done, crate::planning::agent::ToolError> {
     let z = RuleZone::berlin();
-    let ctx = super::agent::Ctx { conn: c, lang: Lang::En, now: dt("2026-11-22T10:00"), zone: &z };
+    let ctx = super::agent::Ctx { conn: c, lang: Lang::En, now: dt("2026-11-22T10:00"), zone: &z, view: None };
     super::agent::call(&ctx, tool, &args)
 }
 
@@ -858,10 +858,41 @@ fn a_thousand_events_expand_fast_in_the_system_zone_too() {
     let ms = t.elapsed().as_millis();
     assert!(items.len() > 1000);
     assert!(ms < 2500, "Monatsansicht mit 1000 Terminen in der Rechner-Zone: {ms} ms");
-    let ctx = super::agent::Ctx { conn: &c, lang: Lang::En, now: dt("2026-11-22T10:00"), zone: &z };
+    let ctx = super::agent::Ctx { conn: &c, lang: Lang::En, now: dt("2026-11-22T10:00"), zone: &z, view: None };
     let t = std::time::Instant::now();
     for k in 0..5 {
         super::agent::call(&ctx, "list_calendar_events", &json!({"from": "2026-11-01", "to": "2027-10-31", "limit": 500, "offset": k * 500})).unwrap();
     }
     assert!(t.elapsed().as_millis() < 8000, "fünf Seiten eines Jahres: {} ms", t.elapsed().as_millis());
+}
+
+#[test]
+fn agents_see_events_and_sources_only_of_reachable_areas() {
+    use crate::access::AgentView;
+    use crate::mcp::McpLevel;
+    let c = crate::db::open_memory();
+    let pid: i64 = c.query_row("SELECT id FROM projects WHERE system = 0 ORDER BY id LIMIT 1", [], |r| r.get(0)).unwrap_or_else(|_| {
+        crate::planning::projects::create_project(&c, &crate::planning::projects::NewProject::new("CAL", "Cal", "#336699")).unwrap()
+    });
+    let key: String = c.query_row("SELECT key FROM projects WHERE id = ?1", [pid], |r| r.get(0)).unwrap();
+    call(&c, "create_calendar_event", json!({"title": "Open", "start": "2026-11-23T09:00"})).unwrap();
+    call(&c, "create_calendar_event", json!({"title": "Secret", "start": "2026-11-23T10:00", "project": key})).unwrap();
+    let (card, _) = crate::tasks::create_item_ext(&c, "Private due", "", Some("2026-11-24"), &[], &crate::tasks::ItemMeta { private: true, ..Default::default() }).unwrap();
+    let z = RuleZone::berlin();
+    let view = AgentView { card_general: McpLevel::Control, general: McpLevel::Control, ..Default::default() };
+    let ctx = super::agent::Ctx { conn: &c, lang: Lang::En, now: dt("2026-11-22T10:00"), zone: &z, view: Some(&view) };
+    let d = super::agent::call(&ctx, "list_calendar_events", &json!({"from": "2026-11-22", "to": "2026-11-30"})).unwrap();
+    let titles: Vec<&str> = d.result["items"].as_array().unwrap().iter().map(|i| i["title"].as_str().unwrap()).collect();
+    assert_eq!(titles, vec!["Open"], "Termin des gesperrten Projekts und private Karte fehlen");
+    assert_eq!(d.result["total"], 1);
+    let _ = card;
+    // Schreiben in das gesperrte Projekt: project_locked; nur lesen in „Allgemein“: forbidden
+    let e = super::agent::call(&ctx, "create_calendar_event", &json!({"title": "x", "start": "2026-11-23T09:00", "project": key})).unwrap_err();
+    assert_eq!(e.code, crate::access::LOCKED_CODE);
+    let ro = AgentView { general: McpLevel::Read, ..Default::default() };
+    let ctx = super::agent::Ctx { conn: &c, lang: Lang::En, now: dt("2026-11-22T10:00"), zone: &z, view: Some(&ro) };
+    assert_eq!(super::agent::call(&ctx, "create_calendar_event", &json!({"title": "x", "start": "2026-11-23T09:00"})).unwrap_err().code, "forbidden");
+    let locked = AgentView::default();
+    let ctx = super::agent::Ctx { conn: &c, lang: Lang::En, now: dt("2026-11-22T10:00"), zone: &z, view: Some(&locked) };
+    assert_eq!(super::agent::call(&ctx, "create_calendar_event", &json!({"title": "x", "start": "2026-11-23T09:00"})).unwrap_err().code, crate::access::LOCKED_CODE);
 }

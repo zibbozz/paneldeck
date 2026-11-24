@@ -60,6 +60,8 @@ const MIGRATIONS: &[&str] = &[
     crate::time::store::MIGRATION,
     // 12: Kalender (Issue #164): eigene Termine (`cal_events`) und Einstellungen (`cal_settings`), SQL in `calendar/store.rs`
     crate::calendar::store::MIGRATION,
+    // 13: Zugriff der Agenten je Projekt, private Einträge, Herkunft, Papierkorb (Issue #386), SQL in `planning/access.rs`
+    crate::planning::access::MIGRATION,
 ];
 
 /// Schema-Version dieser Programmversion (auch für die Rettung einer beschädigten Datenbank in eine neue Datei).

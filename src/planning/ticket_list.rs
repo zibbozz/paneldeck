@@ -59,8 +59,12 @@ pub struct TicketFilter {
     pub limit: Option<i64>,
     pub offset: i64,
     pub order: TicketOrder,
-    /// Auch archivierte Tickets (Wartung, #308); Standard: nur nicht archivierte.
+    /// Auch archivierte Tickets (Wartung, #308); Standard: nur nicht archivierte. Tickets im Papierkorb (#386) nie.
     pub include_archived: bool,
+    /// Sicht eines Agenten (#386): nur diese Projekte (`Some(leer)` = keins).
+    pub only_projects: Option<Vec<i64>>,
+    /// Sicht eines Agenten (#386): private Tickets ausblenden.
+    pub hide_private: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -88,6 +92,17 @@ pub fn list_tickets(conn: &Connection, project_id: Option<i64>, f: &TicketFilter
     }
     if !f.include_archived {
         push("t.archived = 0".into(), vec![], &mut wh);
+    }
+    push("t.trashed_at IS NULL".into(), vec![], &mut wh);
+    if let Some(only) = &f.only_projects {
+        if only.is_empty() {
+            push("0".into(), vec![], &mut wh);
+        } else {
+            push(format!("t.project_id IN ({})", vec!["?"; only.len()].join(",")), only.iter().map(|i| Sql::Integer(*i)).collect(), &mut wh);
+        }
+    }
+    if f.hide_private {
+        push("t.private = 0".into(), vec![], &mut wh);
     }
     if !f.types.is_empty() {
         push(format!("t.type_id IN ({})", vec!["?"; f.types.len()].join(",")), f.types.iter().map(|i| Sql::Integer(*i)).collect(), &mut wh);

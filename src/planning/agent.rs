@@ -4,7 +4,11 @@
 //! * Die Aufrufer (`app/mcp.rs`) prüfen vorher Stufe und Modus; diese Datei kennt weder Stufen noch Modi.
 //! * Jede Änderung läuft mit der Quelle [`Source`] `Agent` (Detail = Name der Agenten-Sitzung) und liefert zusätzlich eine
 //!   [`Change`] – den einzeiligen Text für den Hinweis („Toast“), den die Anwendung anzeigt.
-//! * **Nie** vorgesehen: Tickets oder Todo-Karten löschen, Typen/Felder/Status/Workflows/Projekte ändern.
+//! * **Nie** vorgesehen: Todo-Karten löschen, Typen/Felder/Status/Workflows/Projekte ändern oder löschen. Ab 3.2.0 (#386)
+//!   gibt es nur mit den Schaltern der Einstellungen: Ticket-Projekte anlegen (`create_project`) sowie Tickets und eigene
+//!   Kommentare (Herkunft Agent) in den Papierkorb legen (`delete_ticket`, `delete_comment`); siehe `agent/scope.rs`.
+//! * Sicht des Agenten (#386, [`Ctx::view`]): nur erreichbare Projekte, nie private Karten/Tags/Tickets, nie der Papierkorb;
+//!   gesperrt = `project_locked`, zu niedrige Stufe = `forbidden`, privat = `not_found`.
 //! * Eingaben sind begrenzt (Längen, Anzahl) und werden über [`normalize_value`](super::values::normalize_value) bzw. die
 //!   Prüfungen der Datenschicht geprüft; es gibt keine freien SQL-Texte. Texte aus Tickets/Kommentaren stehen in den Antworten
 //!   mit dem Hinweis `note`, dass sie nicht vertrauenswürdig sind.
@@ -39,6 +43,7 @@ use serde_json::{json, Map, Value};
 
 mod maintenance;
 mod query;
+mod scope;
 mod sprints;
 #[cfg(test)]
 mod tool_tests;
@@ -85,6 +90,10 @@ pub struct Ctx<'a> {
     pub source: Source,
     /// Lokale Zeit „jetzt“ (für die Zeiterfassung).
     pub now: NaiveDateTime,
+    /// Sicht des Agenten (#386): erreichbare Projekte und Stufen; `None` = uneingeschränkt (Tests, interne Aufrufe).
+    pub view: Option<&'a crate::access::AgentView>,
+    /// Stufe, die der laufende Aufruf braucht (setzt [`call`] aus der Werkzeugliste).
+    pub need: std::cell::Cell<crate::mcp::McpLevel>,
 }
 
 impl Ctx<'_> {
@@ -314,9 +323,13 @@ fn not_found_in(ctx: &Ctx, what_de: &str, what_en: &str, needle: &str, available
 fn project_arg(ctx: &Ctx, a: &Args, k: &str) -> Result<Project, ToolError> {
     let key = a.req_str(k, 64)?;
     match project_by_key(ctx.conn, &key) {
-        Ok(p) => Ok(p),
+        Ok(p) => {
+            ctx.check_project(p.id, ctx.need.get())?;
+            Ok(p)
+        }
         Err(PlanError::NotFound) => {
-            let all: Vec<String> = list_projects(ctx.conn).unwrap_or_default().into_iter().filter(|p| !p.system).map(|p| p.key).collect();
+            // Nie ein für den Agenten unsichtbares Projekt nennen (#386).
+            let all: Vec<String> = list_projects(ctx.conn).unwrap_or_default().into_iter().filter(|p| !p.system && ctx.project_visible(p.id)).map(|p| p.key).collect();
             Err(not_found_in(ctx, "Das Projekt", "project", &key, all))
         }
         Err(e) => pl(ctx, Err(e)),
@@ -324,8 +337,18 @@ fn project_arg(ctx: &Ctx, a: &Args, k: &str) -> Result<Project, ToolError> {
 }
 
 fn ticket_by_key_arg(ctx: &Ctx, key: &str) -> Result<Ticket, ToolError> {
+    ticket_by_key_need(ctx, key, ctx.need.get())
+}
+
+/// Ticket über den Schlüssel mit Prüfung der Sicht (#386): privat/Papierkorb = `not_found`, Projekt gesperrt =
+/// `project_locked`, Stufe unter `need` = `forbidden`.
+fn ticket_by_key_need(ctx: &Ctx, key: &str, need: crate::mcp::McpLevel) -> Result<Ticket, ToolError> {
     match ticket_by_key(ctx.conn, key) {
-        Ok(t) => Ok(t),
+        Ok(t) if ctx.view.is_some() && (t.private || t.trashed) => Err(ctx.err("not_found", format!("Ticket „{key}“ gibt es nicht"), format!("There is no ticket “{key}”"))),
+        Ok(t) => {
+            ctx.check_project(t.project_id, need)?;
+            Ok(t)
+        }
         Err(e) if e.is_not_found() => Err(ctx.err("not_found", format!("Ticket „{key}“ gibt es nicht"), format!("There is no ticket “{key}”"))),
         Err(e) => Err(ticket_err(ctx.lang, e)),
     }
@@ -354,7 +377,11 @@ fn value_out(ctx: &Ctx, f: &Field, v: &Value) -> Value {
             Value::Array(a) => Value::Array(a.iter().map(|x| x.as_i64().and_then(|id| option_name(ctx, f, id)).map(Value::String).unwrap_or_else(|| x.clone())).collect()),
             other => other.clone(),
         },
-        FieldKind::Ticket => v.as_i64().and_then(|id| get_ticket(ctx.conn, id).ok()).map(|t| Value::String(t.key())).unwrap_or_else(|| v.clone()),
+        FieldKind::Ticket => match v.as_i64().and_then(|id| get_ticket(ctx.conn, id).ok()) {
+            Some(t) if ctx.ticket_visible(&t) => Value::String(t.key()),
+            Some(_) => Value::Null,
+            None => v.clone(),
+        },
         FieldKind::Rich | FieldKind::Text => match v {
             Value::String(s) => Value::String(clip(s)),
             other => other.clone(),
@@ -546,7 +573,7 @@ fn threshold_json(ctx: &Ctx, t: &crate::due::DueThreshold) -> Value {
 fn ticket_json(ctx: &Ctx, t: &Ticket) -> Value {
     let ty = get_type(ctx.conn, t.type_id).map(|x| x.display(ctx.lang)).unwrap_or_default();
     let status = t.status_id.and_then(|s| get_status(ctx.conn, s).ok());
-    let parent = t.parent_id.and_then(|p| get_ticket(ctx.conn, p).ok()).map(|p| p.key());
+    let parent = t.parent_id.and_then(|p| get_ticket(ctx.conn, p).ok()).filter(|p| ctx.ticket_visible(p)).map(|p| p.key());
     let due = builtin_text(ctx, t, super::builtin_fields::DUE_KEY);
     let thresholds = super::projects::due_thresholds(ctx.conn, t.project_id).unwrap_or_default();
     let done = status.as_ref().is_some_and(|s| s.category == super::statuses::StatusCategory::Done);
@@ -562,6 +589,7 @@ fn ticket_json(ctx: &Ctx, t: &Ticket) -> Value {
         "flagged": t.flagged,
         "starred": t.starred,
         "archived": t.archived,
+        "origin": t.origin.as_str(),
         "created_at": t.created_at,
         "updated_at": t.updated_at,
         "description": builtin_text(ctx, t, super::builtin_fields::DESCRIPTION_KEY).map(|s| clip(&s)),
@@ -646,13 +674,15 @@ fn project_json(ctx: &Ctx, p: &Project) -> Value {
         "use_sprints": p.use_sprints,
         "use_versions": p.use_versions,
         "ticket_count": count,
+        "agent_level": ctx.view.map(|v| match v.ticket_level(p.id) { crate::mcp::McpLevel::Control => "control", crate::mcp::McpLevel::Read => "read", crate::mcp::McpLevel::Off => "off" }),
+        "created_by_agent": super::access::project_origin(ctx.conn, p.id).map(|o| o.0 == super::access::Origin::Agent).unwrap_or(false),
         "due_thresholds": super::projects::due_thresholds(ctx.conn, p.id).unwrap_or_default().iter().map(|t| threshold_json(ctx, t)).collect::<Vec<_>>(),
     })
 }
 
 fn list_projects_tool(ctx: &Ctx, v: &Value) -> R {
     args(ctx, v, &[])?;
-    let all = pl(ctx, list_projects(ctx.conn))?;
+    let all: Vec<Project> = pl(ctx, list_projects(ctx.conn))?.into_iter().filter(|p| ctx.project_visible(p.id)).collect();
     read(json!({
         "projects": all.iter().map(|p| project_json(ctx, p)).collect::<Vec<_>>(),
         "note": ctx.tx(
@@ -831,6 +861,10 @@ fn search_tickets_tool(ctx: &Ctx, v: &Value) -> R {
     f.limit = Some(limit);
     f.offset = offset;
     f.include_archived = include_archived;
+    if let Some(view) = ctx.view {
+        f.only_projects = Some(view.project_ids());
+        f.hide_private = true;
+    }
     let page = tk(ctx, run_search(ctx.conn, &SearchSpec { project: project.map(|p| p.id), filter: f }))?;
     read(json!({
         "tickets": page.items.iter().map(|t| ticket_json(ctx, t)).collect::<Vec<_>>(),
@@ -857,11 +891,15 @@ fn get_ticket_tool(ctx: &Ctx, v: &Value) -> R {
     let terminals: Vec<String> = links.iter().filter_map(|l| if let LinkTarget::Terminal(s) = &l.target { Some(s.clone()) } else { None }).collect();
     let mut out = with_fields(ctx, &t)?;
     let recent = |len: usize| len.saturating_sub(DETAIL_LIMIT);
+    // Sicht (#386): private, gelöschte und Tickets gesperrter Projekte fehlen auch hier.
+    let children: Vec<Ticket> = children.into_iter().filter(|c| ctx.ticket_visible(c)).collect();
+    let links: Vec<super::links::LinkView> = links.into_iter().filter(|l| scope::link_visible(ctx, l)).collect();
+    let history: Vec<super::history::HistoryEntry> = history.into_iter().filter(|e| scope::history_visible(ctx, e)).collect();
     out["children"] = Value::Array(children.iter().take(LIST_LIMIT).map(|c| ticket_json(ctx, c)).collect());
     out["children_total"] = json!(children.len());
     out["links"] = Value::Array(links.iter().take(LIST_LIMIT).map(|l| link_json(ctx, l)).collect());
     out["linked_terminals"] = json!(terminals);
-    out["comments"] = Value::Array(comments.iter().skip(recent(comments.len())).map(|c| json!({"id": c.id, "body": clip(&c.body), "created_at": c.created_at, "updated_at": c.updated_at})).collect());
+    out["comments"] = Value::Array(comments.iter().skip(recent(comments.len())).map(|c| json!({"id": c.id, "body": clip(&c.body), "origin": c.origin.as_str(), "created_at": c.created_at, "updated_at": c.updated_at})).collect());
     out["comments_total"] = json!(comments.len());
     out["history"] = Value::Array(
         history
@@ -931,7 +969,7 @@ fn create_ticket_tool(ctx: &Ctx, v: &Value) -> R {
     let title = a.req_str("title", 1_000)?;
     let mut n = NewTicket::new(p.id, ty.id, &title);
     if let Some(k) = a.opt_str("parent", 64)?.filter(|k| !k.trim().is_empty()) {
-        n.parent_id = Some(ticket_by_key_arg(ctx, k.trim())?.id);
+        n.parent_id = Some(ticket_by_key_need(ctx, k.trim(), crate::mcp::McpLevel::Read)?.id);
     }
     let fields = pl(ctx, list_fields(ctx.conn, ty.id))?;
     n.values = parse_fields(ctx, &a, &fields)?;
@@ -1054,7 +1092,8 @@ fn link_ticket_tool(ctx: &Ctx, v: &Value) -> R {
         return Err(ctx.bad("Genau eines von to_ticket, url oder branch angeben", "Give exactly one of to_ticket, url or branch"));
     }
     let (kind, target, shown) = if let Some(k) = a.opt_str("to_ticket", 64)? {
-        let other = ticket_by_key_arg(ctx, k.trim())?;
+        // Ziel: mindestens Lesen in seinem Projekt (#386).
+        let other = ticket_by_key_need(ctx, k.trim(), crate::mcp::McpLevel::Read)?;
         (TargetKind::Ticket, Target::Ticket(other.id), other.key())
     } else if let Some(u) = a.opt_str("url", 2_000)? {
         (TargetKind::Url, Target::Url(u.clone()), short(&u, 80))
@@ -1075,7 +1114,7 @@ fn link_ticket_tool(ctx: &Ctx, v: &Value) -> R {
 /// Verknüpft ein Ticket mit einer Terminal-Sitzung (Verknüpfungstyp `terminal`, Ziel `session:<Id>`). Ob der Agent diese Sitzung
 /// verknüpfen darf (eigene oder selbst angelegte), prüft der Aufrufer (`app/mcp.rs`).
 pub fn link_terminal(ctx: &Ctx, ticket_key: &str, session: u64, session_name: &str) -> R {
-    let t = ticket_by_key_arg(ctx, ticket_key)?;
+    let t = ticket_by_key_need(ctx, ticket_key, crate::mcp::McpLevel::Control)?;
     let lt = pl(ctx, link_type_by_key(ctx.conn, "terminal"))?;
     let reference = terminal_ref(session);
     let (id, _op) = tk(ctx, add_link(ctx.conn, t.id, lt.id, Target::Terminal(reference.clone()), &ctx.source))?;
@@ -1112,6 +1151,8 @@ fn todo_json(ctx: &Ctx, it: &tasks::Item, tags: &[tasks::Tag], thresholds: &[cra
         "created_at": it.created_at,
         "updated_at": it.updated_at,
         "done_at": it.done_at,
+        "project": it.project,
+        "origin": it.origin.as_str(),
     })
 }
 
@@ -1136,7 +1177,8 @@ pub fn list_todos_tool(ctx: &Ctx, v: &Value, read_only: bool) -> R {
         }
     }
     let items = if unknown_tag { Vec::new() } else { tasks::list_items(ctx.conn, &ItemFilter { show_done: state != "open", tags: tag_ids }).map_err(|e| task_err(ctx.lang, e))? };
-    let items: Vec<&tasks::Item> = items.iter().filter(|i| state != "done" || i.done).collect();
+    // Sicht (#386): nur Karten erreichbarer Bereiche, nie private (auch nicht über einen privaten Tag).
+    let items: Vec<&tasks::Item> = items.iter().filter(|i| state != "done" || i.done).filter(|i| scope::card_visible(ctx, i, &all_tags)).collect();
     let total = items.len();
     read(json!({
         "todos": items.iter().skip(offset as usize).take(limit as usize).map(|i| todo_json(ctx, i, &all_tags, &th)).collect::<Vec<_>>(),
@@ -1154,7 +1196,9 @@ fn add_todo_tool(ctx: &Ctx, v: &Value) -> R {
     let text = a.opt_str("text", MAX_TEXT_CHARS)?.unwrap_or_default();
     let tags = a.str_list("tags", MAX_TAGS, tasks::MAX_TAG_CHARS)?;
     let due = a.opt_str("due", 32)?;
-    let (item, _op) = tasks::create_item(ctx.conn, &title, &text, due.as_deref(), &tags).map_err(|e| task_err(ctx.lang, e))?;
+    // Die Karte gehört dem Heimatprojekt des Agenten (externe Agenten: „Allgemein“) und braucht dort Steuern (#386).
+    let meta = scope::new_card_meta(ctx)?;
+    let (item, _op) = tasks::create_item_ext(ctx.conn, &title, &text, due.as_deref(), &tags, &meta).map_err(|e| task_err(ctx.lang, e))?;
     let all_tags = tasks::list_tags(ctx.conn).map_err(|e| task_err(ctx.lang, e))?;
     let th = tasks::due_thresholds(ctx.conn).map_err(|e| task_err(ctx.lang, e))?;
     let shown = super::todo_bridge::display_title(&item.title, &item.body);
@@ -1187,6 +1231,7 @@ fn set_todo_done_tool(ctx: &Ctx, v: &Value) -> R {
     let a = args(ctx, v, &["id", "done"])?;
     let id = todo_id(ctx, &a)?;
     let done = a.opt_bool("done")?.unwrap_or(true);
+    scope::check_card(ctx, id)?;
     let op = tasks::set_done(ctx.conn, id, done).map_err(|e| task_err(ctx.lang, e))?;
     let item = tasks::get_item(ctx.conn, id).map_err(|e| task_err(ctx.lang, e))?;
     let all_tags = tasks::list_tags(ctx.conn).map_err(|e| task_err(ctx.lang, e))?;
@@ -1202,7 +1247,7 @@ fn set_todo_done_tool(ctx: &Ctx, v: &Value) -> R {
 // ------------------------------------------------------------------ Einstieg
 
 /// Alle Werkzeuge dieser Datei (ohne `link_terminal`, das die Anwendung selbst aufruft, weil es Sitzungen kennen muss).
-pub const TOOLS: [&str; 19] = [
+pub const TOOLS: [&str; 23] = [
     "list_todos",
     "add_todo",
     "set_todo_done",
@@ -1222,12 +1267,21 @@ pub const TOOLS: [&str; 19] = [
     "log_time",
     "link_ticket",
     "link_terminal",
+    "create_project",
+    "delete_ticket",
+    "update_comment",
+    "delete_comment",
 ];
 
 /// Führt ein Werkzeug aus. `todos_read_only` meldet `list_todos`, dass die Liste im aktuellen Modus nur lesbar ist.
 /// `link_terminal` gehört der Anwendung (siehe [`link_terminal`]).
 pub fn call(ctx: &Ctx, tool: &str, v: &Value, todos_read_only: bool) -> R {
+    ctx.need.set(crate::mcp::tool_level(tool).unwrap_or(crate::mcp::McpLevel::Control));
     match tool {
+        "create_project" => scope::create_project_tool(ctx, v),
+        "delete_ticket" => scope::delete_ticket_tool(ctx, v),
+        "update_comment" => scope::update_comment_tool(ctx, v),
+        "delete_comment" => scope::delete_comment_tool(ctx, v),
         "list_todos" => list_todos_tool(ctx, v, todos_read_only),
         "add_todo" => add_todo_tool(ctx, v),
         "set_todo_done" => set_todo_done_tool(ctx, v),
@@ -1258,7 +1312,7 @@ mod tests {
     use chrono::NaiveDate;
 
     fn ctx(f: &Fx) -> Ctx<'_> {
-        Ctx { conn: &f.c, lang: Lang::En, source: Source::agent("Builder"), now: NaiveDate::from_ymd_opt(2026, 11, 14).unwrap().and_hms_opt(12, 0, 0).unwrap() }
+        Ctx { conn: &f.c, lang: Lang::En, source: Source::agent("Builder"), now: NaiveDate::from_ymd_opt(2026, 11, 14).unwrap().and_hms_opt(12, 0, 0).unwrap(), view: None, need: Default::default() }
     }
 
     fn ok(f: &Fx, tool: &str, v: Value) -> Done {
@@ -1597,7 +1651,9 @@ mod tests {
     #[test]
     fn todo_tools_read_create_and_tick_off_but_never_delete() {
         let f = Fx::new();
-        assert!(!TOOLS.iter().any(|t| t.contains("delete") || t.contains("remove")));
+        // Karten löscht ein Agent nie; Tickets/Kommentare nur in den Papierkorb (#386, Schalter, `scope.rs`).
+        assert!(!TOOLS.iter().any(|t| (t.contains("delete") || t.contains("remove")) && !["delete_ticket", "delete_comment"].contains(t)));
+        assert!(!TOOLS.iter().any(|t| t.contains("todo") && t.contains("delete")));
         let d = ok(&f, "add_todo", json!({"title": "Buy milk", "text": "2 liters", "tags": ["home", "Home", "shop"]}));
         assert_eq!(d.result["todo"]["key"], "TODO-1");
         assert_eq!(d.result["todo"]["tags"].as_array().unwrap().len(), 2);

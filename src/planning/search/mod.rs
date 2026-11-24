@@ -80,11 +80,13 @@ pub struct Ctx {
     pub timeout: Duration,
     /// Auch archivierte Tickets (MCP `include_archived`, Wartung); sonst nur, wenn die Abfrage nach `archived` fragt.
     pub include_archived: bool,
+    /// Sicht eines Agenten (#386): nur diese Projekte, ohne private Tickets. `None` = alles (Oberfläche).
+    pub agent_projects: Option<Vec<i64>>,
 }
 
 impl Ctx {
     pub fn new(today: &str, lang: Lang) -> Ctx {
-        Ctx { today: today.to_string(), terminals: Vec::new(), lang, timeout: DEFAULT_TIMEOUT, include_archived: false }
+        Ctx { today: today.to_string(), terminals: Vec::new(), lang, timeout: DEFAULT_TIMEOUT, include_archived: false, agent_projects: None }
     }
 
     /// Mit dem heutigen Datum der Systemuhr.
@@ -104,6 +106,12 @@ impl Ctx {
 
     pub fn with_archived(mut self, on: bool) -> Ctx {
         self.include_archived = on;
+        self
+    }
+
+    /// Nur für Agenten (#386): Treffer nur aus diesen Projekten und nie private Tickets.
+    pub fn for_agent(mut self, projects: Vec<i64>) -> Ctx {
+        self.agent_projects = Some(projects);
         self
     }
 }

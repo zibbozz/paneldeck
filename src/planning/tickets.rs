@@ -48,6 +48,13 @@ pub struct Ticket {
     pub updated_at: String,
     /// Archiviert (Wartung, ab Schema 10): aus Listen, Boards und Suche ausgeblendet, jederzeit wiederherstellbar.
     pub archived: bool,
+    /// Privat (#386): nie für Agenten sichtbar; setzt nur der Nutzer.
+    pub private: bool,
+    /// Herkunft (#386): Nutzer, Agent (mit Sitzungs-/Modellname in `origin_detail`) oder Paneldeck.
+    pub origin: super::access::Origin,
+    pub origin_detail: Option<String>,
+    /// Im Papierkorb (#386; dann auch `archived`).
+    pub trashed: bool,
 }
 
 impl Ticket {
@@ -57,7 +64,9 @@ impl Ticket {
     }
 }
 
-pub(crate) const COLS: &str = "t.id, t.project_id, p.key, t.number, t.type_id, t.title, t.status_id, t.parent_id, t.rank, t.flagged, t.starred, t.created_at, t.updated_at, t.archived";
+pub(crate) const COLS: &str = "t.id, t.project_id, p.key, t.number, t.type_id, t.title, t.status_id, t.parent_id, t.rank, t.flagged, t.starred, t.created_at, t.updated_at, t.archived, t.private, t.origin, t.origin_detail, t.trashed_at IS NOT NULL";
+/// Anzahl der Spalten in [`COLS`] (für Abfragen mit weiteren Spalten dahinter).
+pub(crate) const COLS_N: usize = 18;
 pub(crate) const FROM: &str = "FROM tickets t JOIN projects p ON p.id = t.project_id";
 
 pub(crate) fn from_row(r: &rusqlite::Row) -> rusqlite::Result<Ticket> {
@@ -76,6 +85,10 @@ pub(crate) fn from_row(r: &rusqlite::Row) -> rusqlite::Result<Ticket> {
         created_at: r.get(11)?,
         updated_at: r.get(12)?,
         archived: r.get::<_, i64>(13)? != 0,
+        private: r.get::<_, i64>(14)? != 0,
+        origin: super::access::Origin::parse(&r.get::<_, String>(15)?),
+        origin_detail: r.get(16)?,
+        trashed: r.get::<_, bool>(17)?,
     })
 }
 
@@ -236,6 +249,7 @@ pub(crate) fn create_ticket_noted(conn: &Connection, n: &NewTicket, source: &Sou
         }
         let batch = history::next_batch(conn)?;
         history::log(conn, id, source, batch, &HistoryField::Created, None, note.as_deref())?;
+        super::access::note_ticket_origin(conn, id, source)?;
         let ticket = get_ticket(conn, id)?;
         let op = TicketOp::Created { snapshot: TicketSnapshot { ticket: ticket.clone(), values: final_values }, present: true, source: source.clone() };
         Ok((ticket, op))

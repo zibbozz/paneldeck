@@ -39,6 +39,10 @@ fn FLAG_RED() -> Color32 {
 /// Was die Oberfläche im Ticket ausgelöst hat; ausgeführt wird erst nach dem Zeichnen.
 #[derive(Debug)]
 pub(super) enum Act {
+    /// Privat-Schalter (#386).
+    Private(bool),
+    /// Aus dem Papierkorb holen (#386).
+    Untrash,
     Back,
     Close,
     /// Schnellmenü („.“) für dieses Ticket öffnen.
@@ -273,6 +277,11 @@ pub(super) fn draw(ui: &mut Ui, vc: &VCx, d: &Detail, view: &mut ViewState) -> V
                     acts.push(Act::Archive(!t.archived));
                     ui.close();
                 }
+                // Privat (#386): nie für Agenten sichtbar.
+                if ui.button(if t.private { lang.t("Nicht mehr privat", "Make not private") } else { lang.t("Privat (nie für Agenten)", "Private (never for agents)") }).clicked() {
+                    acts.push(Act::Private(!t.private));
+                    ui.close();
+                }
                 ui.separator();
                 if ui.button(RichText::new(lang.t("Löschen …", "Delete …")).color(crate::style::ui().error)).clicked() {
                     acts.push(Act::Delete);
@@ -297,8 +306,33 @@ pub(super) fn draw(ui: &mut Ui, vc: &VCx, d: &Detail, view: &mut ViewState) -> V
         });
     });
     ui.add_space(S1);
+    // ---- Papierkorb, privat, Herkunft (#386)
+    if t.trashed {
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new(lang.t("Im Papierkorb (von einem Agenten gelöscht).", "In the trash (deleted by an agent).")).small().color(crate::style::ui().error));
+            if ui.small_button(lang.t("Wiederherstellen", "Restore")).clicked() {
+                acts.push(Act::Untrash);
+            }
+        });
+        ui.add_space(S1);
+    }
+    if t.private || t.origin.is_system() {
+        ui.horizontal_wrapped(|ui| {
+            if t.private {
+                ui.label(RichText::new(lang.t("Privat – für Agenten unsichtbar", "Private – invisible to agents")).small().color(Color32::from_rgb(0x9a, 0x8c, 0xe0)));
+            }
+            if t.origin.is_system() {
+                let who = match &t.origin_detail {
+                    Some(d) => format!("{} ({d})", t.origin.label(lang)),
+                    None => t.origin.label(lang).to_string(),
+                };
+                ui.label(RichText::new(format!("{}: {who}", lang.t("Systemnotiz, angelegt von", "System note, created by"))).small().color(crate::style::dim(ui)));
+            }
+        });
+        ui.add_space(S1);
+    }
     // ---- archiviert (#308): Hinweis und „Wiederherstellen“
-    if t.archived {
+    if t.archived && !t.trashed {
         ui.horizontal_wrapped(|ui| {
             ui.label(RichText::new(lang.t("Archiviert – aus Listen, Boards und Suche ausgeblendet (Suche: archived = true).", "Archived – hidden from lists, boards and search (search: archived = true).")).small().color(Color32::from_rgb(0xe5, 0xa0, 0x4b)));
             if ui.small_button(lang.t("Wiederherstellen", "Restore")).clicked() {
@@ -999,6 +1033,22 @@ impl PlanUi {
                 let r = set_flagged(cx.conn, tid, on, &src);
                 self.t_apply(cx, r);
             }
+            Act::Private(on) => match crate::planning::access::set_ticket_private(cx.conn, tid, on, &src) {
+                Ok(_) => {
+                    self.tickets.invalidate();
+                    self.tickets.detail_dirty = true;
+                }
+                Err(e) => self.msg_error(cx, e.message(lang)),
+            },
+            Act::Untrash => match crate::planning::access::restore_ticket(cx.conn, tid, &src) {
+                Ok(()) => {
+                    self.tickets.invalidate();
+                    self.tickets.detail_dirty = true;
+                    self.tickets.counts_dirty = true;
+                    self.dirty = true;
+                }
+                Err(e) => self.msg_error(cx, e.message(lang)),
+            },
             Act::Archive(on) => match crate::planning::maintenance::actions::set_archived_ui(cx.conn, tid, on) {
                 Ok(_) => {
                     self.tickets.invalidate();

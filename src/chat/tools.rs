@@ -62,6 +62,9 @@ pub struct ToolPolicy {
     /// Editor-Schalter der Agenten (#54, Bits wie `editor_svc::settings::AGENT_SWITCHES`, beim Anlegen gelesen):
     /// schreibende Editor-Werkzeuge bekommt das Modell nur, wenn ihr Schalter an ist.
     pub editor_switches: u8,
+    /// Obergrenze für die Paneldeck-Werkzeuge (#386): die Stufe des Projekts, in dem der Chat liegt („wie global“ = wie das
+    /// Modell). Die eigenen Agenten-Werkzeuge des Chats (Dateien, Befehle) gelten unabhängig davon weiter.
+    pub project_cap: McpLevel,
 }
 
 impl ToolPolicy {
@@ -72,7 +75,7 @@ impl ToolPolicy {
             cfg.level = McpLevel::Off;
         }
         let editor_switches = crate::editor_svc::settings::AGENT_SWITCHES.load(std::sync::atomic::Ordering::Relaxed);
-        ToolPolicy { cfg, tools_supported, expert, origin_sessions: Vec::new(), agent: AgentEnv::default(), editor_switches }
+        ToolPolicy { cfg, tools_supported, expert, origin_sessions: Vec::new(), agent: AgentEnv::default(), editor_switches, project_cap: McpLevel::Control }
     }
 
     /// Dieselbe Momentaufnahme mit anderen Editor-Schaltern (Tests, ohne die globalen Schalter anzufassen).
@@ -80,6 +83,17 @@ impl ToolPolicy {
     pub fn with_editor_switches(mut self, bits: u8) -> Self {
         self.editor_switches = bits;
         self
+    }
+
+    /// Dieselbe Momentaufnahme mit der Stufe des Projekts des Chats (#386): es gilt die niedrigere von Modell und Projekt.
+    pub fn with_project_cap(mut self, cap: McpLevel) -> Self {
+        self.project_cap = cap;
+        self
+    }
+
+    /// Stufe für die Paneldeck-Werkzeuge: die niedrigere von Modell und Projekt (#386).
+    pub fn paneldeck_level(&self) -> McpLevel {
+        self.cfg.level.min(self.project_cap)
     }
 
     /// Dieselbe Momentaufnahme mit den Sitzungen der auslösenden Agenten-Kette.
@@ -116,7 +130,7 @@ impl ToolPolicy {
     }
 
     fn allowed(&self, def: &mcp::ToolDef) -> bool {
-        def.level <= self.cfg.level
+        def.level <= self.paneldeck_level()
             && def.group.available(self.expert)
             && !self.cfg.disabled_tools.iter().any(|t| t == def.name)
             // Editor (#54): schreibende Werkzeuge nur, wenn ihr Schalter an ist (geprüft wird beim Ausführen ohnehin).
@@ -154,7 +168,16 @@ impl ToolPolicy {
         let Some(def) = mcp::tools().into_iter().find(|d| d.name == call.name) else {
             return Err((ToolStatus::Error, error_json("unknown_tool", &self.unknown_tool_message(&call.name))));
         };
-        if !self.enabled() || def.level > self.cfg.level || self.cfg.disabled_tools.iter().any(|t| t == def.name) || crate::time::agent::TOOLS.contains(&def.name) {
+        // Das Projekt des Chats begrenzt die Paneldeck-Werkzeuge (#386): gesperrt = `project_locked`, sonst `forbidden`.
+        if self.enabled() && def.level <= self.cfg.level && def.level > self.project_cap && !self.cfg.disabled_tools.iter().any(|t| t == def.name) {
+            let (code, msg) = if self.project_cap == McpLevel::Off {
+                (crate::access::LOCKED_CODE, "The project of this chat is locked for agents: no Paneldeck tools (only the user can release it in Settings -> Agents).")
+            } else {
+                ("forbidden", "The project of this chat only allows reading for agents (Settings -> Agents).")
+            };
+            return Err((ToolStatus::Denied, error_json(code, msg)));
+        }
+        if !self.enabled() || def.level > self.paneldeck_level() || self.cfg.disabled_tools.iter().any(|t| t == def.name) || crate::time::agent::TOOLS.contains(&def.name) {
             return Err((ToolStatus::Denied, error_json("forbidden", "This tool is not allowed for this model (Settings → Models).")));
         }
         if !def.group.available(self.expert) {
@@ -589,6 +612,21 @@ mod tests {
     fn policy(level: McpLevel, disabled: &[&str], expert: bool) -> ToolPolicy {
         let cfg = LlmModel { level, level_chosen: true, disabled_tools: disabled.iter().map(|s| s.to_string()).collect(), ..LlmModel::named("m") };
         ToolPolicy::new(cfg, None, expert)
+    }
+
+    #[test]
+    fn the_lower_of_model_and_project_level_applies() {
+        let model = LlmModel { level: McpLevel::Control, level_chosen: true, ..LlmModel::named("m") };
+        let p = ToolPolicy::new(model.clone(), None, false).with_project_cap(McpLevel::Read);
+        assert_eq!(p.paneldeck_level(), McpLevel::Read);
+        assert!(names(&p).contains(&"list_sessions".to_string()) && !names(&p).contains(&"send_text".to_string()));
+        assert!(p.check(&call("send_text", json!({"session": 1, "text": "x"}))).unwrap_err().1.contains("forbidden"));
+        let locked = ToolPolicy::new(model.clone(), None, false).with_project_cap(McpLevel::Off);
+        assert!(locked.enabled(), "die eigenen Werkzeuge des Chats bleiben");
+        assert!(!names(&locked).iter().any(|n| crate::mcp::tool_level(n).is_some() && !super::agent::is_agent_tool(n)), "keine Paneldeck-Werkzeuge: {:?}", names(&locked));
+        assert!(locked.check(&call("list_sessions", json!({}))).unwrap_err().1.contains(crate::access::LOCKED_CODE));
+        let low = ToolPolicy::new(LlmModel { level: McpLevel::Read, level_chosen: true, ..LlmModel::named("m") }, None, false).with_project_cap(McpLevel::Control);
+        assert_eq!(low.paneldeck_level(), McpLevel::Read, "das Modell begrenzt auch");
     }
 
     #[test]
