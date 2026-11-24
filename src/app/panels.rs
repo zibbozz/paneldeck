@@ -790,12 +790,13 @@ impl App {
         if self.mode == titlebar::Mode::Editor && self.ed_has_active_doc() {
             use crate::editor::format::Op;
             let kind = self.editor_active_format_kind();
+            let selection = self.editor_active_selection();
             let pre = lang.t("Format:", "Format:");
             for (op, id) in [(Op::Format, "ed_format"), (Op::Minify, "ed_minify"), (Op::Validate, "ed_validate"), (Op::SortKeys, "ed_sort_keys")] {
                 if kind == Some(crate::editor::format::Kind::Xml) && op == Op::SortKeys {
                     continue;
                 }
-                let label = super::editor_ui::format::op_label(op, kind, false, lang);
+                let label = super::editor_ui::format::op_label(op, kind, selection && op != Op::Validate, lang);
                 v.push((format!("{pre} {label}"), self.binding_text(id), Action::EditorFormat(op)));
             }
         }

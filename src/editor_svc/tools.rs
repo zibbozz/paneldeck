@@ -275,6 +275,13 @@ pub fn read_only_call(tool: &str, args: &Value) -> bool {
 /// der Hub (`mcp::call_level`). Liefert Dokument und Befehl; formatiert wird danach im Hintergrund.
 pub fn plan_format(docs: &[DocInfo], s: &EditorSettings, args: &Value) -> Result<(DocInfo, crate::editor::format::Op), (String, String)> {
     use crate::editor::format::Op;
+    // Nur die bekannten Felder (z. B. kein `timeout_secs`: die Brücke wartete sonst kürzer als die Frist des Laufs).
+    if let Some(o) = args.as_object()
+        && let Some(k) = o.keys().find(|k| !["path", "doc", "op", "remove_comments"].contains(&k.as_str()))
+    {
+        let lang = crate::state::lang();
+        return Err(er("bad_args", lang.pick(&format!("Unbekanntes Feld „{k}“ (erlaubt: path, doc, op, remove_comments)."), &format!("Unknown field “{k}” (allowed: path, doc, op, remove_comments).")).to_string()));
+    }
     let op = format_op(args)?;
     bool_arg(args, "remove_comments")?;
     let target = match (args.get("doc").filter(|v| !v.is_null()), str_arg(args, "path")?) {
@@ -1103,6 +1110,7 @@ mod tests {
         assert_eq!(c(plan_format(&docs, &on, &json!({"path": r"C:\w\gone.json", "op": "validate"}))), "not_found");
         assert_eq!(c(plan_format(&docs, &on, &json!({"op": "validate"}))), "bad_args");
         assert_eq!(c(plan_format(&docs, &on, &json!({"doc": 1, "op": "minify", "remove_comments": "yes"}))), "bad_args");
+        assert_eq!(c(plan_format(&docs, &on, &json!({"doc": 1, "op": "validate", "timeout_secs": 1}))), "bad_args", "unbekanntes Feld");
         h.doc_mut(1).info.read_only = true;
         assert_eq!(c(plan_format(&h.docs(), &on, &json!({"doc": 1, "op": "format"}))), "forbidden");
         // Nur `validate` liest bloß.

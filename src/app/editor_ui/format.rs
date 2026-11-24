@@ -53,7 +53,8 @@ pub(crate) struct FmtState {
     pub(super) jobs: Vec<UiJob>,
     /// Meldung je Dokument mit dem Stand (`revision`), für den sie gilt.
     pub(super) notes: HashMap<u64, (Note, u64)>,
-    pub(super) ask: Option<MinifyAsk>,
+    /// Rückfragen vor *Minify* von JSONC, höchstens eine je Dokument (die erste wird gezeigt).
+    pub(super) ask: Vec<MinifyAsk>,
     /// Eigener Formatierer (Tests: langsamer Ersatz für Fortschritt und *Abbrechen*); sonst der eingebaute.
     pub(super) runner: Option<Arc<Runner>>,
 }
@@ -121,8 +122,8 @@ impl DocEntry {
         let rope = doc.rope().clone();
         let final_newline = rope.len_chars() > 0 && rope.char(rope.len_chars() - 1) == '\n';
         let opts = Options { indent: format_job::indent_of(&doc.indent_settings()), final_newline };
-        let kind = self.syntax.lang.as_deref().and_then(format_job::kind_of_language);
-        Some((Request { op, path: self.path.clone(), kind, rope, range, opts, confirmed }, doc.revision()))
+        let lang = self.syntax.lang.clone();
+        Some((Request { op, path: self.path.clone(), lang, rope, range, opts, confirmed, diff_max: format_job::DIFF_MAX_BYTES }, doc.revision()))
     }
 
     /// Änderungen eines Laufs als einen Rückgängig-Schritt anwenden. `sels` = Cursor der Ansicht (sonst die eigenen);
@@ -167,8 +168,8 @@ impl EditorUi {
             self.set_hint(lang.t("Die Datei wird noch geladen.", "The file is still loading.").to_string());
             return;
         };
-        // Eine Auswahl (nur eine) formatiert nur ihren Text.
-        let range = view_sels.as_mut().and_then(|s| {
+        // Eine Auswahl (nur eine) formatiert nur ihren Text; *Prüfen* prüft immer die ganze Datei.
+        let range = view_sels.as_mut().filter(|_| op != Op::Validate).and_then(|s| {
             doc.sync(s);
             (!s.is_multi() && !s.primary().is_empty()).then(|| s.primary().range())
         });
@@ -252,7 +253,11 @@ impl EditorUi {
             Done::Invalid(k, e) => self.note(doc, Note::Invalid(k, e)),
             Done::NotSupported => self.note(doc, Note::Info(lang.t("Weder JSON noch XML.", "Not JSON or XML.").to_string())),
             Done::Unsupported(_) => self.note(doc, Note::Info(lang.t("Schlüssel sortieren gibt es nur für JSON.", "Sorting keys only works for JSON.").to_string())),
-            Done::NeedsConfirm(_) => self.fmt.ask = Some(MinifyAsk { doc, group }),
+            Done::NeedsConfirm(_) => {
+                if !self.fmt.ask.iter().any(|a| a.doc == doc) {
+                    self.fmt.ask.push(MinifyAsk { doc, group });
+                }
+            }
             Done::Cancelled => self.set_hint(lang.t("Formatieren abgebrochen – nichts geändert.", "Formatting cancelled – nothing changed.").to_string()),
         }
     }
@@ -292,33 +297,45 @@ impl EditorUi {
         d.apply_agent_edit(chars, Lang::En).map_err(|_| ("internal", "edit"))
     }
 
-    /// Formatieren beim Speichern (Einstellung je Sprache): synchron, nur bis [`format_job::SAVE_MAX_BYTES`]. Liefert
-    /// einen Hinweis, wenn nicht formatiert wurde (zu groß, ungültig) – gespeichert wird immer.
-    pub(super) fn format_before_save(&mut self, id: u64, prefs: &super::EditorPrefs, lang: Lang) -> Option<String> {
-        if !prefs.format_on_save_json && !prefs.format_on_save_xml {
-            return None;
+    /// Reiter, dessen Cursor beim Formatieren beim Speichern zählen (fokussierte Teilung, sonst irgendeiner).
+    fn save_tab(&self, id: u64) -> Option<(u64, usize)> {
+        self.panes.groups.get(&self.panes.focused).and_then(|g| g.find(id)).map(|i| (self.panes.focused, i)).or_else(|| self.panes.tabs_of(id).first().copied())
+    }
+
+    /// Formatieren beim Speichern (Einstellung je Sprache): synchron, nur bis [`format_job::SAVE_MAX_BYTES`], ab
+    /// [`format_job::SAVE_DIFF_MAX_BYTES`] ohne Zeilenvergleich (ein einziger Ersatz) – so bleibt die Zeit im UI-Thread
+    /// klein. `path` = Ziel von *Speichern unter* (die Art richtet sich nach ihm). Nichts bei schreibgeschützten
+    /// Dateien. Liefert einen Hinweis, wenn nicht formatiert wurde (zu groß, ungültig), und ob formatiert wurde.
+    pub(super) fn format_before_save(&mut self, id: u64, path: Option<&std::path::Path>, prefs: &super::EditorPrefs, lang: Lang) -> (Option<String>, bool) {
+        if !prefs.format_on_save_json && !prefs.format_on_save_xml || self.fmt.job_for(id).is_some() {
+            return (None, false);
         }
-        if self.fmt.job_for(id).is_some() {
-            return None;
+        let Some(d) = self.docs.get(&id) else { return (None, false) };
+        let Some(doc) = d.doc.as_ref() else { return (None, false) };
+        let target = path.map(std::path::Path::to_path_buf).or_else(|| d.path.clone());
+        // Schreibgeschützt: Speichern scheitert ohnehin – das Dokument nicht vorher verändern.
+        if target.as_ref().and_then(|p| std::fs::metadata(p).ok()).is_some_and(|m| m.permissions().readonly()) {
+            return (None, false);
         }
-        let d = self.docs.get(&id)?;
-        let kind = d.format_kind()?;
+        let Some(kind) = format_job::quick_kind(target.as_deref(), doc.rope(), d.syntax.lang.as_deref()) else { return (None, false) };
         let on = match kind {
             Kind::Json | Kind::Jsonc => prefs.format_on_save_json,
             Kind::Xml => prefs.format_on_save_xml,
         };
         if !on {
-            return None;
+            return (None, false);
         }
-        let bytes = d.doc.as_ref()?.len_bytes();
         let name = format_job::kind_name(kind);
-        if bytes > format_job::SAVE_MAX_BYTES {
-            return Some(match lang {
+        if doc.len_bytes() > format_job::SAVE_MAX_BYTES {
+            let h = match lang {
                 Lang::De => format!("Nicht formatiert gespeichert: {name} über 1 MB wird beim Speichern nicht formatiert (Format → {name} formatieren)."),
                 Lang::En => format!("Saved without formatting: {name} over 1 MB is not formatted on save (Format → Format {name})."),
-            });
+            };
+            return (Some(h), false);
         }
-        let (req, _) = d.format_request(Op::Format, None, false)?;
+        let Some((mut req, _)) = d.format_request(Op::Format, None, false) else { return (None, false) };
+        req.path = target;
+        req.diff_max = format_job::SAVE_DIFF_MAX_BYTES;
         let cancel = std::sync::atomic::AtomicBool::new(false);
         let done = match &self.fmt.runner {
             Some(r) => format_job::compute_with(&req, &cancel, &|_| {}, &**r),
@@ -326,18 +343,52 @@ impl EditorUi {
         };
         match done {
             Done::Changed { edits, .. } => {
-                let at = self.panes.groups.get(&self.panes.focused).and_then(|g| g.find(id)).map(|i| (self.panes.focused, i)).or_else(|| self.panes.tabs_of(id).first().copied());
-                let view = at.and_then(|(g, i)| self.panes.groups.get_mut(&g).and_then(|grp| grp.tabs.get_mut(i))).map(|t| &mut t.view);
-                let d = self.docs.get_mut(&id)?;
-                let _ = d.apply_format(view.and_then(|v| v.sels.as_mut()), edits, false, EditOrigin::User);
-                None
+                let at = self.save_tab(id);
+                let EditorUi { panes, docs, .. } = self;
+                let sels = at.and_then(|(g, i)| panes.groups.get_mut(&g).and_then(|grp| grp.tabs.get_mut(i))).and_then(|t| t.view.sels.as_mut());
+                let Some(d) = docs.get_mut(&id) else { return (None, false) };
+                (None, d.apply_format(sels, edits, false, EditOrigin::User).unwrap_or(false))
             }
-            Done::Invalid(k, e) => Some(match lang {
-                Lang::De => format!("Unverändert gespeichert: ungültiges {} in Zeile {}, Spalte {}.", format_job::kind_name(k), e.line, e.column),
-                Lang::En => format!("Saved unchanged: invalid {} at line {}, column {}.", format_job::kind_name(k), e.line, e.column),
-            }),
-            _ => None,
+            Done::Invalid(k, e) => (
+                Some(match lang {
+                    Lang::De => format!("Unverändert gespeichert: ungültiges {} in Zeile {}, Spalte {}.", format_job::kind_name(k), e.line, e.column),
+                    Lang::En => format!("Saved unchanged: invalid {} at line {}, column {}.", format_job::kind_name(k), e.line, e.column),
+                }),
+                false,
+            ),
+            _ => (None, false),
         }
+    }
+
+    /// Speichern mit Formatieren beim Speichern: scheitert das Speichern (schreibgeschützt, Zeichen passt nicht in die
+    /// Kodierung, Platte), wird der Formatier-Schritt zurückgenommen – das Dokument bleibt, wie es war. `Ok(Hinweis)`.
+    pub(super) fn save_with_format(&mut self, id: u64, path: Option<std::path::PathBuf>, prefs: &super::EditorPrefs, lang: Lang) -> Result<Option<String>, String> {
+        let (hint, formatted) = self.format_before_save(id, path.as_deref(), prefs, lang);
+        let Some(d) = self.docs.get_mut(&id) else { return Ok(hint) };
+        match d.save(path, lang) {
+            Ok(()) => Ok(hint),
+            Err(e) => {
+                if formatted {
+                    self.undo_format(id);
+                }
+                Err(e)
+            }
+        }
+    }
+
+    /// Den letzten Schritt (das Formatieren beim Speichern) zurücknehmen.
+    fn undo_format(&mut self, id: u64) {
+        let at = self.save_tab(id);
+        let EditorUi { panes, docs, .. } = self;
+        let view = at.and_then(|(g, i)| panes.groups.get_mut(&g).and_then(|grp| grp.tabs.get_mut(i))).and_then(|t| t.view.sels.as_mut());
+        let Some(d) = docs.get_mut(&id) else { return };
+        let DocEntry { doc, scratch, .. } = d;
+        let Some(doc) = doc.as_mut() else { return };
+        let sels: &mut Selections = match view {
+            Some(s) => s,
+            None => scratch,
+        };
+        doc.undo(sels);
     }
 }
 
@@ -347,7 +398,8 @@ impl EditorUi {
 pub(super) const LINE_H: f32 = 30.0;
 
 /// Fortschrittszeile eines laufenden Laufs: Text, Balken, *Abbrechen*.
-pub(super) fn progress_line(ui: &mut egui::Ui, r: egui::Rect, doc: u64, j: &UiJob, lang: Lang, cmds: &mut Vec<Cmd>) {
+/// `large`: große Datei – das Übernehmen am Ende hält den Editor kurz an (gemessen: etwa 1,5 s bei 200 MB).
+pub(super) fn progress_line(ui: &mut egui::Ui, r: egui::Rect, doc: u64, j: &UiJob, large: bool, lang: Lang, cmds: &mut Vec<Cmd>) {
     let u = style::ui();
     let p = j.job.progress();
     ui.painter().rect_filled(r, 0.0, u.info.gamma_multiply(0.12));
@@ -362,7 +414,10 @@ pub(super) fn progress_line(ui: &mut egui::Ui, r: egui::Rect, doc: u64, j: &UiJo
     }
     ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
         ui.spinner();
-        let text = if cancelling { lang.t("Wird abgebrochen …", "Cancelling …").to_string() } else { progress_text(j.job.op, p, lang) };
+        let mut text = if cancelling { lang.t("Wird abgebrochen …", "Cancelling …").to_string() } else { progress_text(j.job.op, p, lang) };
+        if large && !cancelling && j.job.op != Op::Validate {
+            text.push_str(lang.t(" – große Datei: das Übernehmen hält den Editor am Ende kurz an", " – large file: applying the result pauses the editor briefly at the end"));
+        }
         ui.add(egui::Label::new(text).truncate());
     });
     ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
@@ -404,7 +459,7 @@ pub(super) fn note_line(ui: &mut egui::Ui, r: egui::Rect, doc: u64, n: &Note, la
 
 /// Rückfrage vor *Minify* von JSONC (Kommentare fallen weg).
 pub(super) fn dialogs(ctx: &egui::Context, ed: &EditorUi, lang: Lang, cmds: &mut Vec<Cmd>) {
-    let Some(ask) = ed.fmt.ask else { return };
+    let Some(ask) = ed.fmt.ask.first().copied() else { return };
     let name = ed.docs.get(&ask.doc).map(|d| d.title(lang)).unwrap_or_default();
     let mut choice = None;
     let r = style::modal(Id::new("ed_minify_ask")).show(ctx, |ui| {

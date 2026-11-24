@@ -832,6 +832,14 @@ fn approval_text(def: &ToolDef, ask_write: bool) -> &'static str {
     if agent::is_agent_tool(def.name) {
         return agent::approval_text(def.name, ask_write);
     }
+    // `format_file` (#381): die Stufe hängt von `op` ab.
+    if def.name == "format_file" {
+        return if ask_write {
+            "Level: Read for op = validate; format, minify and sort_keys need level Control and the user's approval."
+        } else {
+            "Level: Read for op = validate; format, minify and sort_keys need level Control."
+        };
+    }
     if def.level < McpLevel::Control {
         return "Level: Read.";
     }

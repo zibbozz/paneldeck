@@ -221,7 +221,7 @@ All fields are optional; older versions ignore them, and missing fields mean the
   | `format_on_save_xml` | `false` | format XML on save (files up to 1 MB) |
   | `agent_format` | `false` | switch *Agents may format* (MCP `format_file` except `validate`); only an explicit `true` switches it on |
 
-- `settings.json` → `keys` → `ed_format`, `ed_minify`, `ed_validate`, `ed_sort_keys`: own shortcuts of the format commands (defaults `Alt+Shift+F`, `Alt+Shift+M`, `Alt+Shift+V`, none).
+- `settings.json` → `keys` → `ed_format`, `ed_minify`, `ed_validate`, `ed_sort_keys`: own shortcuts of the format commands (defaults `Alt+Shift+F`, `Alt+Shift+M`, `Alt+Shift+V`, none); second bindings `ed_format_alt` (`Ctrl+Shift+I`), `ed_minify_alt`, `ed_validate_alt` (none).
 
 ## Backups
 *Settings → Data & backup* controls the automatic backups of `paneldeck.db`: by default one copy every 24 hours, keeping two (plus the database itself). If the computer was off when a backup was due, it is made at the next start; several missed ones result in just one. You can choose another backup folder, open it, press **Back up now** (manual copies are never deleted automatically) and **Restore** any copy from the list – the current state is backed up first, Paneldeck then quits and applies the restore at the next start. Before every database update (migration) Paneldeck makes a copy as well, and it never touches a database created by a newer version.

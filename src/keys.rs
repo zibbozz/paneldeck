@@ -42,6 +42,11 @@ pub const DEFAULTS: &[(&str, &str)] = &[
     ("ed_minify", "Alt+Shift+M"),
     ("ed_validate", "Alt+Shift+V"),
     ("ed_sort_keys", ""),
+    // Zweite Belegung (wie bei `mode_*`): Alt+Umschalt schaltet bei mehreren Eingabesprachen die Sprache um. Strg+Umschalt+I
+    // wie „Dokument formatieren“ in VS Code unter Linux.
+    ("ed_format_alt", "Ctrl+Shift+I"),
+    ("ed_minify_alt", ""),
+    ("ed_validate_alt", ""),
 ];
 
 /// Kürzel, die in jedem Bereich gelten (Reiterwechsel) – die übrigen nur im Terminal-Bereich.
@@ -87,6 +92,9 @@ pub fn label(id: &str, de: bool) -> &'static str {
         "ed_minify" => ("Editor: JSON/XML minifizieren", "Editor: minify JSON/XML"),
         "ed_validate" => ("Editor: JSON/XML prüfen", "Editor: validate JSON/XML"),
         "ed_sort_keys" => ("Editor: JSON-Schlüssel sortieren", "Editor: sort JSON keys"),
+        "ed_format_alt" => ("Editor: JSON/XML formatieren (zweite Belegung)", "Editor: format JSON/XML (alternative)"),
+        "ed_minify_alt" => ("Editor: JSON/XML minifizieren (zweite Belegung)", "Editor: minify JSON/XML (alternative)"),
+        "ed_validate_alt" => ("Editor: JSON/XML prüfen (zweite Belegung)", "Editor: validate JSON/XML (alternative)"),
         _ => ("?", "?"),
     };
     if de { d } else { e }
@@ -190,6 +198,10 @@ mod tests {
             assert!(!fixed.contains(d), "{id}: {d} gehört schon dem Editor");
         }
         assert_eq!(DEFAULTS.iter().find(|(id, _)| *id == "ed_format").map(|(_, d)| *d), Some("Alt+Shift+F"));
+        // Zweite Belegung ohne Alt+Umschalt (Umschalten der Eingabesprache, Review #381).
+        let alt = DEFAULTS.iter().find(|(id, _)| *id == "ed_format_alt").map(|(_, d)| *d).unwrap();
+        let (m, _) = parse(alt).unwrap();
+        assert!(!(m.alt && m.shift) && is_editor("ed_format_alt"));
     }
 
     #[test]

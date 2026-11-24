@@ -348,6 +348,7 @@ impl EditorUi {
         if !self.panes.shows(doc) {
             self.cancel_format(doc);
             self.fmt.notes.remove(&doc);
+            self.fmt.ask.retain(|a| a.doc != doc);
             if let Some(mut d) = self.docs.remove(&doc) {
                 d.drop_hot(dir);
             }
@@ -637,6 +638,16 @@ impl super::App {
         self.set_mode(super::titlebar::Mode::Editor);
         self.ed.end_agent(mark);
         true
+    }
+
+    /// Hat der aktive Reiter genau eine nicht leere Auswahl (dann formatiert ein Befehl nur sie)?
+    pub(crate) fn editor_active_selection(&self) -> bool {
+        self.ed.focused_view_and_doc().is_some_and(|(v, d)| {
+            let (Some(s), Some(doc)) = (v.sels.as_ref(), d.doc.as_ref()) else { return false };
+            let mut s = s.clone();
+            doc.sync(&mut s);
+            !s.is_multi() && !s.primary().is_empty()
+        })
     }
 
     /// Gibt es einen aktiven Reiter (für die Einträge der Befehls-Palette)?

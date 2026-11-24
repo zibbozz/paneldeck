@@ -27,6 +27,9 @@ pub const DIFF_MAX_BYTES: usize = 4 * 1024 * 1024;
 /// Formatieren beim Speichern läuft im UI-Thread – nur bis zu dieser Größe; größere Dateien werden unverändert
 /// gespeichert (mit Hinweis).
 pub const SAVE_MAX_BYTES: usize = 1024 * 1024;
+/// Formatieren beim Speichern: bis zu dieser Größe zeilenweise minimale Änderungen, darüber ein einziger Ersatz – der
+/// Zeilenvergleich liefe sonst im UI-Thread (bis 1,5 s bei 1 MB).
+pub const SAVE_DIFF_MAX_BYTES: usize = 256 * 1024;
 /// Frist eines Laufs für MCP `format_file` (die Brücke wartet 30 s auf die Antwort).
 pub const AGENT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(25);
 
@@ -36,14 +39,17 @@ pub struct Request {
     pub op: Op,
     /// Datei (für die Erkennung über Endung und Dateinamen).
     pub path: Option<PathBuf>,
-    /// Art aus der gewählten Sprache – gilt nur, wenn Pfad und Inhalt nichts ergeben (sonst erkennt der Lauf selbst).
-    pub kind: Option<Kind>,
+    /// In der Statusleiste gewählte Sprache (Id; `None` = nicht gewählt, dann erkennt der Lauf die Art selbst).
+    pub lang: Option<String>,
     pub rope: Rope,
     /// Zeichenbereich der Auswahl; `None` = ganzes Dokument.
     pub range: Option<Range<usize>>,
     pub opts: Options,
     /// JSONC *Minify* wurde bestätigt (Kommentare fallen weg); sonst kommt [`Done::NeedsConfirm`].
     pub confirmed: bool,
+    /// Bis zu dieser Größe (Bytes) zeilenweise minimale Änderungen, darüber ein einziger Ersatz
+    /// ([`DIFF_MAX_BYTES`] im Hintergrund, [`SAVE_DIFF_MAX_BYTES`] beim Speichern).
+    pub diff_max: usize,
 }
 
 /// Ergebnis eines Laufs.
@@ -94,20 +100,26 @@ pub fn kind_name(k: Kind) -> &'static str {
 }
 
 /// Art eines Dokuments für Menüs (billig: Pfad und Anfang des Textes; JSON/JSONC nur ungefähr – genau erkennt der Lauf
-/// mit dem ganzen Text). `lang` = in der Statusleiste gewählte Sprache (Id), wenn Pfad und Inhalt nichts ergeben.
+/// mit dem ganzen Text). `lang` = in der Statusleiste gewählte Sprache ([`resolve_kind`]).
 pub fn quick_kind(path: Option<&std::path::Path>, rope: &Rope, lang: Option<&str>) -> Option<Kind> {
     let end = rope.len_chars().min(4096);
     let head = rope.slice(..end).to_string();
-    format::detect(path, &head).or_else(|| lang.and_then(kind_of_language))
+    resolve_kind(path, &head, lang)
 }
 
-/// Sprach-Id des Syntax-Modus → Art (gilt nur, wenn Pfad und Inhalt nichts ergeben, z. B. ein unbenannter Tab mit
-/// gewählter Sprache).
-pub fn kind_of_language(id: &str) -> Option<Kind> {
-    match id {
-        "json" => Some(Kind::Json),
-        "xml" => Some(Kind::Xml),
-        _ => None,
+/// Art aus Pfad, Text und der in der Statusleiste gewählten Sprache: gewählt `json` → JSON (JSONC bei Kommentaren bzw.
+/// JSONC-Namen), `xml` → XML, eine andere Sprache → nichts (der Nutzer hat gesagt, was es ist); nicht gewählt →
+/// [`format::detect`].
+pub fn resolve_kind(path: Option<&std::path::Path>, text: &str, lang: Option<&str>) -> Option<Kind> {
+    match lang {
+        None => format::detect(path, text),
+        Some("json") => Some(match format::detect(path, text) {
+            Some(k @ (Kind::Json | Kind::Jsonc)) => k,
+            _ if format::json::has_comments(text) => Kind::Jsonc,
+            _ => Kind::Json,
+        }),
+        Some("xml") => Some(Kind::Xml),
+        Some(_) => None,
     }
 }
 
@@ -137,7 +149,7 @@ pub fn compute_with(req: &Request, cancel: &AtomicBool, progress: &dyn Fn(f32), 
     let len = req.rope.len_chars();
     let range = req.range.clone().map(|r| r.start.min(len)..r.end.min(len)).filter(|r| r.start < r.end);
     let full = req.rope.to_string();
-    let Some(kind) = format::detect(req.path.as_deref(), &full).or(req.kind) else {
+    let Some(kind) = resolve_kind(req.path.as_deref(), &full, req.lang.as_deref()) else {
         return Done::NotSupported;
     };
     if !format::supports(kind, req.op) {
@@ -158,7 +170,7 @@ pub fn compute_with(req: &Request, cancel: &AtomicBool, progress: &dyn Fn(f32), 
                 Outcome::Text(_) if req.op == Op::Validate => Done::Valid(kind),
                 Outcome::Text(t) if t == full => Done::Unchanged(kind),
                 Outcome::Text(t) => {
-                    if full.len() <= DIFF_MAX_BYTES {
+                    if full.len() <= req.diff_max {
                         Done::Changed { kind, edits: crate::editor::diff::minimal_edits(&full, &t), whole: false }
                     } else {
                         Done::Changed { kind, edits: vec![TextEdit::new(0..len, t)], whole: true }
@@ -184,7 +196,9 @@ pub fn compute_with(req: &Request, cancel: &AtomicBool, progress: &dyn Fn(f32), 
                 Outcome::Text(_) if req.op == Op::Validate => Done::Valid(kind),
                 Outcome::Text(t) => {
                     let t = t.trim_end_matches('\n');
-                    let body = if req.op == Op::Minify { t.to_string() } else { reindent(t, &base_indent(&req.rope, r.start)) };
+                    // Einrückung der Zeile, in der der Wert beginnt (nicht die Spalte 0 einer ganzen markierten Zeile
+                    // oder das Ende der Zeile davor).
+                    let body = if req.op == Op::Minify { t.to_string() } else { reindent(t, &base_indent(&req.rope, core_start)) };
                     let new = format!("{lead}{body}{trail}");
                     if new == sel { Done::Unchanged(kind) } else { Done::Changed { kind, edits: vec![TextEdit::new(r, new)], whole: false } }
                 }
@@ -329,7 +343,7 @@ mod tests {
     }
 
     fn req(text: &str, op: Op, range: Option<Range<usize>>) -> Request {
-        Request { op, path: Some(PathBuf::from("a.json")), kind: None, rope: Rope::from_str(text), range, opts: Options::default(), confirmed: false }
+        Request { op, path: Some(PathBuf::from("a.json")), lang: None, rope: Rope::from_str(text), range, opts: Options::default(), confirmed: false, diff_max: DIFF_MAX_BYTES }
     }
 
     fn run(r: &Request) -> Done {
@@ -387,12 +401,87 @@ mod tests {
         assert_eq!(run(&r), Done::NeedsConfirm(Kind::Jsonc));
         r.confirmed = true;
         assert_eq!(run(&r), Done::Unchanged(Kind::Jsonc));
-        // Gewählte Art, wenn Pfad und Inhalt nichts ergeben.
+        // Gewählte Sprache geht vor: `json` formatiert auch ohne passende Endung, eine andere Sprache nie.
         let mut r = req("1,2", Op::Format, None);
         r.path = None;
         assert_eq!(run(&r), Done::NotSupported);
-        r.kind = Some(Kind::Json);
-        assert!(matches!(run(&r), Done::Changed { .. }));
+        r.lang = Some("json".into());
+        assert!(matches!(run(&r), Done::Changed { kind: Kind::Json, .. }));
+        let mut r = req("[1,2]", Op::Format, None);
+        r.lang = Some("python".into());
+        assert_eq!(run(&r), Done::NotSupported, "gewählte andere Sprache");
+        // Über `diff_max` ein einziger Ersatz (Formatieren beim Speichern ab 256 KB)
+        let mut r = req("keep\n[1,2]\n", Op::Format, None);
+        r.diff_max = 4;
+        assert!(matches!(run(&r), Done::Changed { whole: true, .. }));
+    }
+
+    /// Review #381: ganze Zeilen ab Spalte 0 (Umschalt+Pfeil runter) bzw. ab dem Ende der Zeile davor markiert – die
+    /// Folgezeilen bekommen die Einrückung der Zeile, in der der Wert beginnt.
+    #[test]
+    fn selection_of_whole_lines_keeps_the_value_indentation() {
+        let text = "{\n    \"a\": 1,\n    [1,2]\n}\n";
+        // ganze Zeile 3 samt Zeilenende, ab Spalte 0
+        let s = text.find("    [").unwrap();
+        let e = text.find("]\n").unwrap() + 2;
+        let d = run(&req(text, Op::Format, Some(s..e)));
+        assert_eq!(apply(text, &d), "{\n    \"a\": 1,\n    [1,\n      2]\n}\n");
+        // ab dem Ende der Zeile davor
+        let s = text.find(",\n    [").unwrap() + 1;
+        let e = text.find(']').unwrap() + 1;
+        let d = run(&req(text, Op::Format, Some(s..e)));
+        assert_eq!(apply(text, &d), "{\n    \"a\": 1,\n    [1,\n      2]\n}\n");
+    }
+
+    /// Review #381: Inhalt erkennt nur bei Dateien ohne Endung bzw. unbenannten Tabs.
+    #[test]
+    fn content_sniffing_only_without_extension() {
+        use std::path::Path;
+        let k = |name: Option<&str>, text: &str| resolve_kind(name.map(Path::new), text, None);
+        assert_eq!(k(Some("Cargo.toml"), "[package]\nname = \"x\"\n"), None);
+        assert_eq!(k(Some("setup.ini"), "[core]\n"), None);
+        assert_eq!(k(Some("build.ps1"), "[CmdletBinding()]\nparam()\n"), None);
+        assert_eq!(k(Some("README.md"), "[![CI](x)](y)\n"), None);
+        assert_eq!(k(Some(".gitconfig"), "[user]\n"), None);
+        assert_eq!(k(Some("a.txt"), "{\"a\": 1}"), None);
+        assert_eq!(k(Some("data.json"), "{}"), Some(Kind::Json));
+        assert_eq!(k(Some("tsconfig.json"), "{}"), Some(Kind::Jsonc));
+        assert_eq!(k(Some(".babelrc"), "{}"), Some(Kind::Json));
+        assert_eq!(k(Some("app.csproj"), "<Project/>"), Some(Kind::Xml));
+        assert_eq!(k(Some("Web.config"), "<configuration/>"), Some(Kind::Xml));
+        // ohne Endung bzw. unbenannt: am Inhalt
+        assert_eq!(k(Some("LICENSE"), "[1, 2]"), Some(Kind::Json));
+        assert_eq!(k(None, "{\"a\": 1}"), Some(Kind::Json));
+        assert_eq!(k(None, "<?xml version=\"1.0\"?><a/>"), Some(Kind::Xml));
+        assert_eq!(k(None, "[section]\nkey = 1"), None, "INI ist kein JSON");
+        assert_eq!(k(None, "[![badge](x)](y)"), None, "Markdown ist kein JSON");
+        assert_eq!(k(None, "[true, null]"), Some(Kind::Json));
+        assert_eq!(k(None, "[tool.poetry]"), None);
+        // gewählte Sprache
+        assert_eq!(resolve_kind(Some(Path::new("a.json")), "{}", Some("rust")), None);
+        assert_eq!(resolve_kind(Some(Path::new("notes.txt")), "<a/>", Some("xml")), Some(Kind::Xml));
+        assert_eq!(resolve_kind(Some(Path::new("tsconfig.json")), "{}", Some("json")), Some(Kind::Jsonc));
+    }
+
+    /// Review #381: Anwenden eines einzigen Ersatzes bei sehr großen Dateien (~200 MB) – Zeit messen
+    /// (`cargo test --release -- --ignored large_whole_replacement --nocapture`).
+    #[test]
+    #[ignore]
+    fn large_whole_replacement_apply_time() {
+        let line = "{\"id\": 123456, \"name\": \"some value here\", \"tags\": [1, 2, 3]},\n";
+        let n = 200 * 1024 * 1024 / line.len();
+        let old: String = std::iter::once("[\n").chain(std::iter::repeat_n(line, n)).chain(std::iter::once("{}]\n")).collect();
+        let new = old.replace(", ", ",\n  ");
+        let mut doc = crate::editor::Document::from_text(&old);
+        let mut sels = doc.new_selections(0);
+        let len = doc.len_chars();
+        let t0 = std::time::Instant::now();
+        doc.break_undo_group();
+        assert!(doc.apply_edits(&mut sels, vec![TextEdit::new(0..len, new)], crate::editor::EditOrigin::User).unwrap());
+        let apply = t0.elapsed();
+        let t1 = std::time::Instant::now();
+        assert!(doc.undo(&mut sels));
+        eprintln!("LARGE {} MB: apply {:?}, undo {:?}", old.len() / (1024 * 1024), apply, t1.elapsed());
     }
 
     #[test]

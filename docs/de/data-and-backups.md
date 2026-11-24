@@ -221,7 +221,7 @@ Alle Felder sind optional; ältere Versionen ignorieren sie, fehlende Felder bed
   | `format_on_save_xml` | `false` | XML beim Speichern formatieren (Dateien bis 1 MB) |
   | `agent_format` | `false` | Schalter *Agenten dürfen formatieren* (MCP `format_file` außer `validate`); nur ein ausdrückliches `true` schaltet ihn ein |
 
-- `settings.json` → `keys` → `ed_format`, `ed_minify`, `ed_validate`, `ed_sort_keys`: eigene Kürzel der Format-Befehle (Standard `Alt+Shift+F`, `Alt+Shift+M`, `Alt+Shift+V`, keins).
+- `settings.json` → `keys` → `ed_format`, `ed_minify`, `ed_validate`, `ed_sort_keys`: eigene Kürzel der Format-Befehle (Standard `Alt+Shift+F`, `Alt+Shift+M`, `Alt+Shift+V`, keins); zweite Belegungen `ed_format_alt` (`Ctrl+Shift+I`), `ed_minify_alt`, `ed_validate_alt` (keine).
 
 ## Sicherungen
 *Einstellungen → Daten & Sicherung* steuert die automatischen Sicherungen von `paneldeck.db`: Standard ist eine Kopie alle 24 Stunden, behalten werden zwei (zusätzlich zur Datenbank selbst). War der Rechner zur fälligen Zeit aus, wird die Sicherung beim nächsten Start nachgeholt; mehrere verpasste ergeben nur eine. Du kannst einen anderen Sicherungsordner wählen, ihn öffnen, mit **Jetzt sichern** eine Kopie anlegen (manuelle Kopien werden nie automatisch gelöscht) und jede Kopie aus der Liste **wiederherstellen** – dabei wird zuerst der aktuelle Stand gesichert, danach beendet sich Paneldeck und spielt die Wiederherstellung beim nächsten Start ein. Vor jedem Datenbank-Update (Migration) legt Paneldeck ebenfalls eine Kopie an und fasst eine Datenbank einer neueren Version nie an.

@@ -966,37 +966,97 @@ fn jsonc_minify_asks_first_and_format_on_save_never_loses_the_save() {
     let g = ed.panes.focused;
     ed.start_format(g, FmtOp::Minify, false, || {}, en);
     settle(&ctx, &mut ed, &mut t);
-    assert_eq!(ed.fmt.ask, Some(super::format::MinifyAsk { doc: id, group: g }), "JSONC: erst fragen");
+    assert_eq!(ed.fmt.ask, vec![super::format::MinifyAsk { doc: id, group: g }], "JSONC: erst fragen");
+    // Eine zweite Anfrage für dasselbe Dokument überschreibt nichts und kommt nicht doppelt.
+    ed.start_format(g, FmtOp::Minify, false, || {}, en);
+    settle(&ctx, &mut ed, &mut t);
+    assert_eq!(ed.fmt.ask.len(), 1);
     assert_eq!(active_text(&ed), "{ \"a\": 1, \"b\": 2 }\n");
     frame(&ctx, &mut ed, vec![], &mut t);
     let esc = Event::Key { key: Key::Escape, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE };
     let cmds = frame(&ctx, &mut ed, vec![esc], &mut t);
     assert!(cmds.contains(&Cmd::MinifyConfirm(false)), "Esc = Abbrechen: {cmds:?}");
-    ed.fmt.ask = None;
+    ed.fmt.ask.clear();
     ed.start_format(g, FmtOp::Minify, true, || {}, en);
     settle(&ctx, &mut ed, &mut t);
     assert_eq!(active_text(&ed), "{\"a\":1,\"b\":2}\n", "bestätigt");
 
     // Formatieren beim Speichern: aus → nichts; an → formatiert; ungültig → unverändert mit Hinweis; zu groß → Hinweis
     let mut prefs = EditorPrefs::default();
-    assert_eq!(ed.format_before_save(id, &prefs, en), None);
+    assert_eq!(ed.format_before_save(id, None, &prefs, en), (None, false));
     assert_eq!(active_text(&ed), "{\"a\":1,\"b\":2}\n");
     prefs.format_on_save_json = true;
-    assert_eq!(ed.format_before_save(id, &prefs, en), None);
+    assert_eq!(ed.format_before_save(id, None, &prefs, en), (None, true));
     assert_eq!(active_text(&ed), "{\"a\":1,\n  \"b\":2}\n");
     prefs.format_on_save_json = false;
     prefs.format_on_save_xml = true;
     let x = write(&dir, "c.xml", "<a>!</a>\n");
     let idx = ed.open_path(&x, false);
     frame(&ctx, &mut ed, vec![], &mut t);
-    let h = ed.format_before_save(idx, &prefs, en).expect("Hinweis");
+    let h = ed.format_before_save(idx, None, &prefs, en).0.expect("Hinweis");
     assert!(h.starts_with("Saved unchanged: invalid XML at line 1, column 4"), "{h}");
     assert_eq!(active_text(&ed), "<a>!</a>\n");
     let big = write(&dir, "big.xml", &format!("<a>{}</a>\n", "x".repeat(crate::editor_svc::format_job::SAVE_MAX_BYTES + 10)));
     let idb = ed.open_path(&big, false);
     frame(&ctx, &mut ed, vec![], &mut t);
     let _ = ed.docs.get_mut(&idb).map(|d| d.ensure_loaded_now(&prefs));
-    assert!(ed.format_before_save(idb, &prefs, en).is_some_and(|h| h.contains("over 1 MB")));
+    assert!(ed.format_before_save(idb, None, &prefs, en).0.is_some_and(|h| h.contains("over 1 MB")));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Review #381: Speichern unter richtet sich nach dem neuen Namen; scheitert das Speichern, wird das Formatieren
+/// zurückgenommen; schreibgeschützte Dateien werden nicht formatiert; *Prüfen* prüft mit Auswahl die ganze Datei.
+#[test]
+fn format_on_save_follows_save_as_and_is_undone_when_the_save_fails() {
+    let dir = test_dir("fmtsave2");
+    let p = write(&dir, "draft.txt", "[1,2]\n");
+    let ctx = egui::Context::default();
+    let mut t = 0.0;
+    let mut ed = EditorUi::default();
+    ed.fmt.runner = Some(fake_fmt());
+    let en = crate::state::Lang::En;
+    let prefs = EditorPrefs { format_on_save_json: true, ..EditorPrefs::default() };
+    let id = ed.open_path(&p, false);
+    frame(&ctx, &mut ed, vec![], &mut t);
+    frame(&ctx, &mut ed, vec![], &mut t);
+    // .txt: kein JSON (kein Raten am Inhalt) → unverändert gespeichert
+    assert_eq!(ed.save_with_format(id, None, &prefs, en), Ok(None));
+    assert_eq!(std::fs::read_to_string(&p).unwrap(), "[1,2]\n");
+    // Speichern unter … .json: formatiert
+    let j = dir.join("data.json");
+    assert_eq!(ed.save_with_format(id, Some(j.clone()), &prefs, en), Ok(None));
+    assert_eq!(std::fs::read_to_string(&j).unwrap(), "[1,\n  2]\n");
+    // Speichern scheitert (Zeichen passt nicht in Windows-1252): das Formatieren wird zurückgenommen
+    let k = write(&dir, "k.json", "[1,\"中\"]\n");
+    let idk = ed.open_path(&k, false);
+    frame(&ctx, &mut ed, vec![], &mut t);
+    let _ = ed.docs.get_mut(&idk).unwrap().set_encoding("windows-1252", en);
+    assert!(ed.save_with_format(idk, None, &prefs, en).is_err());
+    assert_eq!(ed.docs[&idk].text().unwrap(), "[1,\"中\"]\n", "Dokument wie vorher");
+    // Schreibgeschützt: nicht formatieren
+    let r = write(&dir, "ro.json", "[3,4]\n");
+    let orig = std::fs::metadata(&r).unwrap().permissions();
+    let mut perm = orig.clone();
+    perm.set_readonly(true);
+    std::fs::set_permissions(&r, perm).unwrap();
+    let idr = ed.open_path(&r, false);
+    frame(&ctx, &mut ed, vec![], &mut t);
+    assert_eq!(ed.format_before_save(idr, None, &prefs, en), (None, false));
+    assert_eq!(ed.docs[&idr].text().unwrap(), "[3,4]\n");
+    let _ = std::fs::set_permissions(&r, orig);
+    // Prüfen mit Auswahl: die ganze Datei (gültig), nicht nur die Auswahl
+    let v = write(&dir, "v.json", "{\"a\": [1,2]}\n");
+    let idv = ed.open_path(&v, false);
+    frame(&ctx, &mut ed, vec![], &mut t);
+    let g = ed.panes.focused;
+    {
+        let tab = ed.panes.groups.get_mut(&g).unwrap().active_tab_mut().unwrap();
+        let doc = ed.docs[&idv].doc.as_ref().unwrap();
+        tab.view.select_range(doc, 1..4);
+    }
+    ed.start_format(g, FmtOp::Validate, false, || {}, en);
+    settle(&ctx, &mut ed, &mut t);
+    assert_eq!(ed.fmt.notes.get(&idv).map(|n| n.0.clone()), Some(super::format::Note::Valid(Kind::Json)));
     let _ = std::fs::remove_dir_all(&dir);
 }
 

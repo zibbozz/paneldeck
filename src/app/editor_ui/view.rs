@@ -118,7 +118,8 @@ impl super::super::App {
 
     /// Tastenkürzel des Editors (nur im Editor-Reiter). Teilen nutzt die Belegung des Terminal Hub (`split_r`/`split_d`).
     fn editor_keys(&mut self, ctx: &egui::Context, cmds: &mut Vec<Cmd>) {
-        if self.capture_key.is_some() || self.ed.close_ask.is_some() {
+        // Auch nicht, solange die Rückfrage „JSONC minifizieren?“ offen ist (#381).
+        if self.capture_key.is_some() || self.ed.close_ask.is_some() || !self.ed.fmt.ask.is_empty() {
             return;
         }
         let g = self.ed.panes.focused;
@@ -127,7 +128,19 @@ impl super::super::App {
         // Formatieren (#381) und die Befehls-Palette: Belegung aus Einstellungen → Tastenkürzel.
         use crate::editor::format::Op as FmtOp;
         let fmt_binds: Vec<(FmtOp, Option<(Modifiers, Key)>)> =
-            [(FmtOp::Format, "ed_format"), (FmtOp::Minify, "ed_minify"), (FmtOp::Validate, "ed_validate"), (FmtOp::SortKeys, "ed_sort_keys")].into_iter().map(|(o, id)| (o, self.binding(id))).collect();
+            [
+                (FmtOp::Format, "ed_format"),
+                (FmtOp::Minify, "ed_minify"),
+                (FmtOp::Validate, "ed_validate"),
+                (FmtOp::SortKeys, "ed_sort_keys"),
+                // Zweite Belegung (Alt+Umschalt schaltet bei mehreren Eingabesprachen die Sprache um).
+                (FmtOp::Format, "ed_format_alt"),
+                (FmtOp::Minify, "ed_minify_alt"),
+                (FmtOp::Validate, "ed_validate_alt"),
+            ]
+            .into_iter()
+            .map(|(o, id)| (o, self.binding(id)))
+            .collect();
         let palette = self.binding("palette");
         let mut open_palette = false;
         let ctrl = Modifiers::CTRL;
@@ -296,16 +309,15 @@ impl super::super::App {
                     self.editor_cmd(ctx, Cmd::SaveAs(id));
                 } else {
                     // Formatieren beim Speichern (#381): nie auf Kosten des Speicherns.
-                    let fos = self.ed.format_before_save(id, &prefs, lang);
-                    if let Some(d) = self.ed.docs.get_mut(&id) {
-                        match d.save(None, lang) {
-                            Ok(()) => {
+                    match self.ed.save_with_format(id, None, &prefs, lang) {
+                        Ok(fos) => {
+                            if let Some(d) = self.ed.docs.get_mut(&id) {
                                 d.drop_hot(&dir);
                                 let t = d.title(lang);
                                 self.ed.set_hint(fos.unwrap_or_else(|| format!("{t}: {}", lang.t("gespeichert", "saved"))));
                             }
-                            Err(e) => self.notify_text(e),
                         }
+                        Err(e) => self.notify_text(e),
                     }
                 }
             }
@@ -315,13 +327,16 @@ impl super::super::App {
                 let start = d.path.as_ref().and_then(|p| p.parent()).map(|p| p.to_path_buf()).or_else(|| self.ed.root.clone());
                 if let Some(p) = crate::platform::notify::save_any(start.as_deref(), &name) {
                     let other = self.ed.doc_for_path(&p).filter(|o| *o != id);
-                    if let Some(h) = self.ed.format_before_save(id, &prefs, lang) {
-                        self.ed.set_hint(h);
-                    }
-                    if let Some(d) = self.ed.docs.get_mut(&id) {
-                        match d.save(Some(p.clone()), lang) {
-                            Ok(()) => {
-                                d.drop_hot(&dir);
+                    // Formatieren beim Speichern nach der Art des neuen Namens.
+                    if self.ed.docs.contains_key(&id) {
+                        match self.ed.save_with_format(id, Some(p.clone()), &prefs, lang) {
+                            Ok(fos) => {
+                                if let Some(h) = fos {
+                                    self.ed.set_hint(h);
+                                }
+                                if let Some(d) = self.ed.docs.get_mut(&id) {
+                                    d.drop_hot(&dir);
+                                }
                                 super::persist::push_recent(&mut self.ed.recent_files, &p.to_string_lossy());
                                 if other.is_some() {
                                     // Dieselbe Datei war noch in einem anderen Reiter offen: der lädt sie neu.
@@ -436,12 +451,21 @@ impl super::super::App {
                 self.ed.fmt.notes.remove(&doc);
             }
             Cmd::MinifyConfirm(yes) => {
-                if let Some(a) = self.ed.fmt.ask.take()
-                    && yes
-                    && self.ed.panes.groups.get(&a.group).and_then(|g| g.active_tab()).is_some_and(|t| t.doc == a.doc)
-                {
+                if self.ed.fmt.ask.is_empty() {
+                    return;
+                }
+                let a = self.ed.fmt.ask.remove(0);
+                // In der Teilung der Anfrage, sonst in einem Reiter, der das Dokument zeigt.
+                let here = self.ed.panes.groups.get(&a.group).and_then(|g| g.active_tab()).is_some_and(|t| t.doc == a.doc);
+                let at = if here { Some(a.group) } else { self.ed.panes.tabs_of(a.doc).first().map(|&(g, i)| {
+                    if let Some(grp) = self.ed.panes.groups.get_mut(&g) {
+                        grp.active = i;
+                    }
+                    g
+                }) };
+                if yes && let Some(g) = at {
                     let c = ctx.clone();
-                    self.ed.start_format(a.group, crate::editor::format::Op::Minify, true, move || c.request_repaint(), lang);
+                    self.ed.start_format(g, crate::editor::format::Op::Minify, true, move || c.request_repaint(), lang);
                 }
             }
             Cmd::SetFormatOnSave(kind, on) => match kind {
@@ -459,17 +483,16 @@ impl super::super::App {
         let ids: Vec<u64> = self.ed.docs.iter().filter(|(_, d)| d.dirty() && d.path.is_some()).map(|(id, _)| *id).collect();
         let mut saved = 0;
         for id in ids {
-            let _ = self.ed.format_before_save(id, prefs, lang);
-            if let Some(d) = self.ed.docs.get_mut(&id) {
-                match d.save(None, lang) {
-                    Ok(()) => {
+            match self.ed.save_with_format(id, None, prefs, lang) {
+                Ok(_) => {
+                    if let Some(d) = self.ed.docs.get_mut(&id) {
                         d.drop_hot(&dir);
-                        saved += 1;
                     }
-                    Err(e) => {
-                        let t = d.title(lang);
-                        self.notify_text(format!("{t}: {e}"));
-                    }
+                    saved += 1;
+                }
+                Err(e) => {
+                    let t = self.ed.docs.get(&id).map(|d| d.title(lang)).unwrap_or_default();
+                    self.notify_text(format!("{t}: {e}"));
                 }
             }
         }
@@ -560,11 +583,8 @@ impl super::super::App {
                         }
                     } else {
                         let prefs = self.editor_prefs();
-                        let _ = self.ed.format_before_save(doc, &prefs, lang);
-                    }
-                    if !untitled && let Some(d) = self.ed.docs.get_mut(&doc) {
-                        match d.save(None, lang) {
-                            Ok(()) => self.editor_close_step(&dir),
+                        match self.ed.save_with_format(doc, None, &prefs, lang) {
+                            Ok(_) => self.editor_close_step(&dir),
                             Err(e) => {
                                 self.ed.close_ask = None;
                                 self.notify_text(e);
@@ -866,7 +886,8 @@ fn show_group(ui: &mut Ui, g: u64, rect: Rect, ed: &mut EditorUi, cx: &GroupCx, 
     // Formatieren (#381): Fortschritt mit *Abbrechen*, danach die Meldung (gültig, Fehler mit *Gehe zu*).
     if let Some(j) = ed.fmt.job_for(doc_id) {
         let r = Rect::from_min_size(body.min, Vec2::new(body.width(), super::format::LINE_H));
-        super::format::progress_line(ui, r, doc_id, j, cx.lang, cmds);
+        let large = ed.docs.get(&doc_id).is_some_and(|d| d.is_large(cx.prefs));
+        super::format::progress_line(ui, r, doc_id, j, large, cx.lang, cmds);
         body.min.y += super::format::LINE_H;
     }
     if let Some((n, _)) = ed.fmt.notes.get(&doc_id).cloned() {
