@@ -1233,6 +1233,19 @@ const TOOLS: &[Step] = &[
         done: None,
         need: None,
     },
+    Step {
+        id: "tools.theme_background",
+        since: "3.2.0",
+        spot: Some(Spot::ReduceTransparency),
+        title: tx("Eigener Hintergrund", "Your own background"),
+        body: tx(
+            "Ein Theme kann einen Hintergrund haben: ein Bild, einen Farbverlauf, eine Farbe oder ein Muster, dazu Helligkeit, Unschärfe und eine Überlagerung. Du stellst ihn im Theme-Editor unter „Hintergrund“ ein, je Bereich mit eigener Deckkraft. Wird es dir zu unruhig, macht „Transparenz reduzieren“ alle Flächen wieder deckend.",
+            "A theme can have a background: an image, a gradient, a colour or a pattern, plus brightness, blur and an overlay. Set it up in the theme editor under “Background”, with its own opacity per area. If it gets too busy, “Reduce transparency” makes every surface opaque again.",
+        ),
+        prep: &[Prep::Terminals, Prep::Palette(false), Prep::NoTools, Prep::Settings(S_APPEARANCE)],
+        done: None,
+        need: None,
+    },
 ];
 
 /// Alle Touren: zuerst die kurze Tour, dann die Kapitel.
@@ -1249,7 +1262,7 @@ pub(super) static TOURS: &[Tour] = &[
 
 /// Version, mit der das Tutorial erscheint (Schritte dürfen bis zu ihr reichen, auch solange `Cargo.toml` noch davor steht).
 #[cfg_attr(not(test), allow(dead_code))]
-pub(super) const TUTORIAL_VERSION: &str = "3.0.0";
+pub(super) const TUTORIAL_VERSION: &str = "3.2.0";
 
 /// Kennung der Tour „Was ist neu“ (ihre Schritte stellt `whats_new_steps` zusammen).
 pub(super) const WHATS_NEW: &str = "whatsnew";

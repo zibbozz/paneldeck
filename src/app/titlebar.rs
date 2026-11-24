@@ -23,7 +23,8 @@ impl App {
     /// Fensterleiste zeichnen; setzt `self.mode` bei Klick auf einen Reiter.
     pub(super) fn titlebar(&mut self, ctx: &egui::Context) {
         let lang = self.settings.language;
-        let theme = self.theme();
+        // Titelleiste und Reiter folgen der Seitenleiste (Deckkraft des Bereichs, #387).
+        let theme = self.theme_for(crate::theme::background::Area::Sidebar);
         let (maximized, focused) = ctx.input(|i| (i.viewport().maximized.unwrap_or(false), i.viewport().focused.unwrap_or(true)));
         let c = theme.bg;
         let fill = Color32::from_rgba_unmultiplied((c.r() as f32 * 0.78) as u8, (c.g() as f32 * 0.78) as u8, (c.b() as f32 * 0.78) as u8, c.a());

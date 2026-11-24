@@ -29,7 +29,7 @@ Mit `--profile <name>` wird der Unterordner `profiles\<name>` dieses Ordners gen
 | `processes.json` | Einträge der [Prozessliste](processes.md) (siehe [unten](#prozessliste-processesjson)) |
 | `process-logs/` | Protokolldateien von Einträgen der Prozessliste mit eingeschalteter *Protokolldatei* |
 | `prompts.json` | Prompt-Bibliothek |
-| `themes/*.json` | eigene Themes (Beispiel liegt bei; Format und Farbnamen: [Themes](themes.md#dateiformat), optionales Feld `ui` seit 2.6.0, höchstens 1 MB) |
+| `themes/*.json` | eigene Themes (Beispiel liegt bei; Format und Farbnamen: [Themes](themes.md#dateiformat), optionales Feld `ui` seit 2.6.0, optionales Feld `background` seit 3.2.0, höchstens 1 MB) |
 | `system-prompt.md` | deine eigene Vorlage des [Systemprompts für Agenten](agent-interface.md#systemprompt) (nur wenn du eine gespeichert hast); `system-prompt.md.bak` = die vorige Vorlage nach *Auf Standard zurücksetzen* |
 | `clipboard/` | Bilder aus der Zwischenablage (nach 14 Tagen gelöscht) |
 | `claude-hooks*.json` | von Paneldeck erzeugte Hook-Konfiguration |
@@ -209,6 +209,11 @@ Alle Felder sind optional; ältere Versionen ignorieren sie (siehe [Bilder und B
 <!-- Plan-Modus (#358) -->
 - `chats/<id>.json` → `plan`: der aktuelle Plan des Chats aus dem [Plan-Modus](chat.md#plan-modus) – `{"level": "low" | "medium" | "high" | "xhigh" | "max", "status": "proposed" | "revising" | "approved" | "discarded", "markdown": "# Plan: …", "revision": 1, "created": 1763200000, "approved": 1763200100, "file": "plans/12-1763200100.md", "finished": true}` (`approved` und `file` erst nach *Ausführen*; `finished: true` = die Ausführung des freigegebenen Plans ist vorbei, z. B. weil eine neue Plan-Runde begann – fehlt = `false`). Ein Plan, der mit Stand `revising` gelesen wird, gilt als `proposed`. Nur geschrieben, wenn es einen Plan gibt; ein unlesbarer oder leerer Wert heißt: kein Plan. *Verlauf leeren* leert ihn mit. Ältere Versionen ignorieren ihn.
 - `plans/`: freigegebene Pläne als Markdown-Dateien, `<Chat-Kennung>-<Zeit>.md`, mit einer Kommentarzeile oben (Chat, Stufe, Fassung, Zeit). Sie sind Dokumente zum Aufheben: Schließen des Chats oder Löschen seines Verlaufs löscht sie nicht (lösche sie selbst, wenn darin etwas Privates steht), und ihr Format ist keine feste Schnittstelle.
+
+## Neue Felder in 3.2.0
+Alle Felder sind optional; ältere Versionen ignorieren sie, fehlende Felder bedeuten die Standards unten.
+- `themes/*.json` → optionales Objekt `background`: der [eigene Hintergrund](themes.md#hintergrund) des Themes (Bild, Farbverlauf, Farbe oder Muster, Filter, Überlagerung, Bereiche; Format unter [Themes](themes.md#dateiformat)). Bilder stehen als bloße Dateinamen in einem Ordner neben der Theme-Datei, `themes/<datei>/` (Kopien mit höchstens 3840 px). Ein ungültiger Wert fällt auf seinen Standard zurück; das Theme bleibt gültig.
+- `settings.json` → `reduce_transparency` (*Einstellungen → Darstellung → Transparenz reduzieren*, Standard `false`): alle Flächen deckend, kein Hintergrund des Themes.
 
 ## Sicherungen
 *Einstellungen → Daten & Sicherung* steuert die automatischen Sicherungen von `paneldeck.db`: Standard ist eine Kopie alle 24 Stunden, behalten werden zwei (zusätzlich zur Datenbank selbst). War der Rechner zur fälligen Zeit aus, wird die Sicherung beim nächsten Start nachgeholt; mehrere verpasste ergeben nur eine. Du kannst einen anderen Sicherungsordner wählen, ihn öffnen, mit **Jetzt sichern** eine Kopie anlegen (manuelle Kopien werden nie automatisch gelöscht) und jede Kopie aus der Liste **wiederherstellen** – dabei wird zuerst der aktuelle Stand gesichert, danach beendet sich Paneldeck und spielt die Wiederherstellung beim nächsten Start ein. Vor jedem Datenbank-Update (Migration) legt Paneldeck ebenfalls eine Kopie an und fasst eine Datenbank einer neueren Version nie an.

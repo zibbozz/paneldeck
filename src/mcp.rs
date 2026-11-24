@@ -394,7 +394,7 @@ pub fn tools() -> Vec<ToolDef> {
             name: "theme_get",
             level: Read,
             group: Group::Always,
-            description: "Read one theme (default: the active one): name, dark, builtin, file, the terminal colours (fg, bg, cursor, selection, ansi[16]), `colors` with every named interface colour resolved to #rrggbb or #rrggbbaa, and `overrides` with the values the theme sets itself (a colour or a link such as \"@text/20\"; missing names are derived). Read-only. Unknown name: not_found.",
+            description: "Read one theme (default: the active one): name, dark, builtin, file, the terminal colours (fg, bg, cursor, selection, ansi[16]), `colors` with every named interface colour resolved to #rrggbb or #rrggbbaa, and `overrides` with the values the theme sets itself (a colour or a link such as \"@text/20\"; missing names are derived) and `background` (null or the theme's own background as in the file – kind, image file name, mode, anchor, margin, filters, overlay, gradient, pattern, areas – plus mean_brightness 0-1; never image data). Read-only. Unknown name: not_found.",
             schema: schema(json!({"name": {"type": "string", "description": "Theme name from theme_list (default: the active theme)"}}), &[]),
         },
         // ---- Todo-Liste (einfacher Modus) und Projekte/Tickets (Expertenmodus)

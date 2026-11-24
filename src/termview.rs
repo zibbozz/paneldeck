@@ -172,6 +172,21 @@ fn ime_output(ui: &Ui, rect: Rect, inner: Rect, session: &Session, theme: &Theme
 
 /// Einstellung „Blinkender Cursor“ (#183); die App schreibt sie jedes Bild (wie `mcp::LEVEL`).
 pub static CURSOR_BLINK: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+/// Farbe hinter dem Standardhintergrund der Terminals mit eigenem Hintergrund des Themes (#387): Fläche über dem
+/// gefilterten Bild (Mittelwert), `0` = keine. Gegen sie wird der Mindestkontrast der Schrift gerechnet.
+static BACKDROP: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// Farbe hinter den Terminals setzen (`None` = ohne eigenen Hintergrund).
+pub fn set_backdrop(c: Option<Color32>) {
+    let v = c.map(|c| 0x0100_0000 | ((c.r() as u32) << 16) | ((c.g() as u32) << 8) | c.b() as u32).unwrap_or(0);
+    BACKDROP.store(v, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn backdrop() -> Option<Color32> {
+    let v = BACKDROP.load(std::sync::atomic::Ordering::Relaxed);
+    (v != 0).then(|| Color32::from_rgb((v >> 16) as u8, (v >> 8) as u8, v as u8))
+}
 /// Halbe Blinkperiode (Sekunden), wie der Standard von Windows.
 const BLINK_HALF: f64 = 0.53;
 /// Nach so langer Zeit ohne Eingabe hört der Cursor auf zu blinken (spart Neuzeichnen).
@@ -378,7 +393,8 @@ fn paint(
             bg = theme.cursor;
             fg = theme.bg.to_opaque();
         }
-        fg = ensure_contrast(fg, bg);
+        // Standardhintergrund über dem eigenen Hintergrund des Themes: Kontrast gegen die Mischfarbe (#387).
+        fg = ensure_contrast(fg, if bg == theme.bg { backdrop().unwrap_or(bg) } else { bg });
         let cell_rect = Rect::from_min_size(Pos2::new(x, y), Vec2::new(width, cs.y));
         if bg != theme.bg {
             painter.rect_filled(cell_rect, 0.0, bg);

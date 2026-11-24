@@ -663,7 +663,18 @@ fn theme_list_json(themes: &[crate::theme::Theme], issues: &[crate::theme::Issue
 }
 
 /// `theme_get` (#309): Terminal- und alle Oberflächenfarben (aufgelöst) plus die selbst gesetzten Werte.
-fn theme_get_json(themes: &[crate::theme::Theme], active: &str, args: &Value) -> Result<Value, (String, String)> {
+/// Feld `background` von `theme_get` (#387, nur lesen): die Angaben wie in der Datei (Bild nur als Dateiname, nie
+/// Bilddaten) und die mittlere Helligkeit (relative Leuchtdichte 0–1 nach Helligkeit/Überlagerung; `null`, solange sie noch
+/// nicht berechnet ist). `null` ohne Hintergrund.
+fn theme_background_json(t: &crate::theme::Theme, stats: Option<crate::theme::bake::Stats>) -> Value {
+    let Some(b) = &t.background else { return Value::Null };
+    let mut v = crate::theme::background::to_value(b);
+    let mean = stats.map(|s| s.after(b.brightness, crate::theme::bake::overlay_of(t)).mean);
+    v["mean_brightness"] = mean.map(|m| json!((crate::theme::color::luminance(m) * 1000.0).round() / 1000.0)).unwrap_or(Value::Null);
+    v
+}
+
+fn theme_get_json(themes: &[crate::theme::Theme], active: &str, args: &Value, stats: &dyn Fn(&str) -> Option<crate::theme::bake::Stats>) -> Result<Value, (String, String)> {
     use crate::theme::color::to_hex;
     let want = args.get("name").and_then(|v| v.as_str()).map(str::trim).filter(|s| !s.is_empty());
     let active = theme_active(themes, active);
@@ -692,6 +703,7 @@ fn theme_get_json(themes: &[crate::theme::Theme], active: &str, args: &Value) ->
         },
         "colors": colors,
         "overrides": overrides,
+        "background": theme_background_json(t, stats(&t.name)),
         "note": tr(THEME_NOTE.0, THEME_NOTE.1),
     }))
 }
@@ -1077,7 +1089,7 @@ impl App {
             "cleanup_sizes" => Out::Now(Ok(self.cleanup_sizes_json())),
             "list_processes" | "read_process_output" | "start_process" | "stop_process" | "restart_process" => Out::Now(self.mcp_procs(ctx, tool, args)),
             "theme_list" => Out::Now(Ok(theme_list_json(&self.themes, &self.theme_issues, &self.settings.theme))),
-            "theme_get" => Out::Now(theme_get_json(&self.themes, &self.settings.theme, args)),
+            "theme_get" => Out::Now(theme_get_json(&self.themes, &self.settings.theme, args, &|n| self.backdrops.stats_of(n))),
             // Editor-Reiter (#54): Schalter und Pfadregeln in `editor_svc::tools`.
             t if crate::editor_svc::tools::TOOLS.contains(&t) => Out::Now(self.mcp_editor(ctx, t, args)),
             "send_text" => Out::Now(self.mcp_send_text(args, caller)),
@@ -2858,22 +2870,43 @@ mod tests {
         assert!(!l.to_string().contains("secret"), "keine Pfade");
         // Unbekanntes aktives Theme: das Standard-Theme gilt.
         assert_eq!(theme_list_json(&themes, &[], "gone")["active"], themes[0].name.as_str());
-        let g = theme_get_json(&themes, "Mine", &json!({})).unwrap();
+        let none = |_: &str| None;
+        let g = theme_get_json(&themes, "Mine", &json!({}), &none).unwrap();
+        assert_eq!(g["background"], Value::Null, "ohne Hintergrund");
         assert_eq!(g["name"], "Mine");
         assert_eq!(g["overrides"]["border"], "@text/20");
         assert_eq!(g["terminal"]["ansi"].as_array().unwrap().len(), 16);
         assert_eq!(g["colors"].as_object().unwrap().len(), crate::theme::tokens::UI_TOKENS.len());
         assert_eq!(g["colors"]["accent"], "#d97757");
         assert!(g["colors"]["border"].as_str().unwrap().len() == 9, "durchscheinend: #rrggbbaa");
-        let b = theme_get_json(&themes, "Mine", &json!({"name": "Dracula"})).unwrap();
+        let b = theme_get_json(&themes, "Mine", &json!({"name": "Dracula"}), &none).unwrap();
         assert_eq!((b["builtin"].as_bool(), b["active"].as_bool()), (Some(true), Some(false)));
         assert!(b["overrides"].as_object().unwrap().is_empty());
-        assert_eq!(theme_get_json(&themes, "Mine", &json!({"name": "Nope"})).unwrap_err().0, "not_found");
+        assert_eq!(theme_get_json(&themes, "Mine", &json!({"name": "Nope"}), &none).unwrap_err().0, "not_found");
         // Unbekanntes gewähltes Theme: theme_get ohne Namen meldet das Ersatz-Theme wie theme_list als aktiv.
-        let f = theme_get_json(&themes, "gone", &json!({})).unwrap();
+        let f = theme_get_json(&themes, "gone", &json!({}), &none).unwrap();
         assert_eq!((f["name"].as_str(), f["active"].as_bool()), (Some(themes[0].name.as_str()), Some(true)));
-        let f = theme_get_json(&themes, "gone", &json!({"name": themes[0].name})).unwrap();
+        let f = theme_get_json(&themes, "gone", &json!({"name": themes[0].name}), &none).unwrap();
         assert_eq!(f["active"], true);
+        // Hintergrund (#387): Angaben ohne Pfad und ohne Bilddaten, mittlere Helligkeit aus den Kennzahlen.
+        let mut bgt = themes.iter().find(|t| t.name == "Mine").unwrap().clone();
+        let mut b = crate::theme::background::Background::new(crate::theme::background::Kind::Image);
+        b.image = Some("forest.jpg".into());
+        b.brightness = -50;
+        bgt.background = Some(b);
+        bgt.name = "WithBg".into();
+        let mut th2 = themes.clone();
+        th2.push(bgt);
+        let st = |n: &str| (n == "WithBg").then_some(crate::theme::bake::Stats { mean: eframe::egui::Color32::WHITE, bright: eframe::egui::Color32::WHITE, dark: eframe::egui::Color32::WHITE });
+        let w = theme_get_json(&th2, "Mine", &json!({"name": "WithBg"}), &st).unwrap();
+        let bg = &w["background"];
+        assert_eq!((bg["kind"].as_str(), bg["image"].as_str(), bg["mode"].as_str(), bg["anchor"].as_str()), (Some("image"), Some("forest.jpg"), Some("fill"), Some("center")));
+        assert_eq!(bg["areas"]["terminals"]["on"], true);
+        let mb = bg["mean_brightness"].as_f64().unwrap();
+        assert!((0.1..0.3).contains(&mb), "weiß um 50 % abgedunkelt: {mb}");
+        assert!(!w.to_string().contains("secret") && !w.to_string().contains("base64"), "keine Pfade, keine Bilddaten");
+        let w = theme_get_json(&th2, "Mine", &json!({"name": "WithBg"}), &none).unwrap();
+        assert_eq!(w["background"]["mean_brightness"], Value::Null, "noch nicht berechnet");
         // Namen und Fehlertexte kommen aus Dateien: als nicht vertrauenswürdig gekennzeichnet.
         assert!(l["note"].as_str().unwrap().contains("untrusted") || l["note"].as_str().unwrap().contains("vertrauenswürdig"));
         assert!(g["note"].as_str().unwrap().contains("untrusted") || g["note"].as_str().unwrap().contains("vertrauenswürdig"));

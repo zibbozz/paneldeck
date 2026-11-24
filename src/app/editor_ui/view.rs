@@ -67,7 +67,8 @@ impl super::super::App {
     pub(crate) fn editor_view(&mut self, ctx: &egui::Context) {
         let lang = self.settings.language;
         let prefs = self.editor_prefs();
-        let theme = self.theme();
+        // Deckkraft des Bereichs „Editor“ (#387).
+        let theme = self.theme_for(crate::theme::background::Area::Editor);
         let mut cmds: Vec<Cmd> = Vec::new();
         self.editor_keys(ctx, &mut cmds);
         // Dateien aus dem Explorer ablegen: Dateien öffnen, ein Ordner wird die Wurzel.

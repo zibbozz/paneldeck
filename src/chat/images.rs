@@ -140,7 +140,7 @@ fn regular_file(p: &Path) -> bool {
 }
 
 /// Nur ein Bild zur Zeit dekodieren und kodieren (mehrere große Fotos auf einmal könnten sonst den Speicher sprengen).
-fn one_at_a_time<T>(f: impl FnOnce() -> T) -> T {
+pub(crate) fn one_at_a_time<T>(f: impl FnOnce() -> T) -> T {
     static WORK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let _g = WORK.lock().unwrap_or_else(|e| e.into_inner());
     f()
@@ -344,9 +344,16 @@ fn size_ok(w: u32, h: u32) -> bool {
 /// Bild dekodieren (PNG, JPEG, BMP; mit Grenzen für Größe und Speicher). Die EXIF-Ausrichtung wird angewandt; `true`
 /// im Ergebnis heißt, das Bild wurde dabei gedreht oder gespiegelt.
 fn decode(bytes: &[u8]) -> Result<(image::DynamicImage, image::ImageFormat, bool), String> {
+    use image::ImageFormat as F;
+    decode_formats(bytes, &[F::Png, F::Jpeg, F::Bmp], t("Kein unterstütztes Bild (PNG, JPEG oder BMP)", "Not a supported image (PNG, JPEG or BMP)"))
+}
+
+/// Wie [`decode`], aber mit eigener Liste erlaubter Formate und Meldung (Hintergründe der Themes, #387, nehmen auch
+/// WebP). Gleiche Grenzen für Größe und Speicher; bei animierten Bildern das erste Bild.
+pub(crate) fn decode_formats(bytes: &[u8], formats: &[image::ImageFormat], unsupported: &str) -> Result<(image::DynamicImage, image::ImageFormat, bool), String> {
     use image::ImageDecoder;
     let mut r = image::ImageReader::new(std::io::Cursor::new(bytes)).with_guessed_format().map_err(|e| e.to_string())?;
-    let fmt = r.format().filter(|f| matches!(f, image::ImageFormat::Png | image::ImageFormat::Jpeg | image::ImageFormat::Bmp)).ok_or_else(|| t("Kein unterstütztes Bild (PNG, JPEG oder BMP)", "Not a supported image (PNG, JPEG or BMP)").to_string())?;
+    let fmt = r.format().filter(|f| formats.contains(f)).ok_or_else(|| unsupported.to_string())?;
     let mut lim = image::Limits::default();
     lim.max_image_width = Some(MAX_DIM);
     lim.max_image_height = Some(MAX_DIM);
@@ -370,14 +377,14 @@ fn decode(bytes: &[u8]) -> Result<(image::DynamicImage, image::ImageFormat, bool
     Ok((img, fmt, turned))
 }
 
-fn encode_png(img: &image::DynamicImage) -> Result<Vec<u8>, String> {
+pub(crate) fn encode_png(img: &image::DynamicImage) -> Result<Vec<u8>, String> {
     let mut out = Vec::new();
     img.write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png).map_err(|e| e.to_string())?;
     Ok(out)
 }
 
 /// Auf Weiß gelegt (JPEG kennt keine Transparenz).
-fn flatten(img: &image::DynamicImage) -> image::RgbImage {
+pub(crate) fn flatten(img: &image::DynamicImage) -> image::RgbImage {
     if !img.color().has_alpha() {
         return img.to_rgb8();
     }
@@ -390,7 +397,7 @@ fn flatten(img: &image::DynamicImage) -> image::RgbImage {
     })
 }
 
-fn encode_jpeg(img: &image::RgbImage, quality: u8) -> Result<Vec<u8>, String> {
+pub(crate) fn encode_jpeg(img: &image::RgbImage, quality: u8) -> Result<Vec<u8>, String> {
     let mut out = Vec::new();
     image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, quality).encode_image(img).map_err(|e| e.to_string())?;
     Ok(out)

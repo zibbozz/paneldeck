@@ -54,7 +54,7 @@ pub struct Extra {
 }
 
 /// Felder der obersten Ebene, die diese Version liest.
-const KNOWN_FIELDS: &[&str] = &["name", "dark", "fg", "bg", "cursor", "selection", "ansi", "ui"];
+const KNOWN_FIELDS: &[&str] = &["name", "dark", "fg", "bg", "cursor", "selection", "ansi", "ui", "background"];
 
 /// Längster Ausschnitt eines Werts in Meldungen (eine 1-MB-Datei soll keine riesigen Texte erzeugen).
 const SHOW_MAX: usize = 40;
@@ -180,7 +180,19 @@ pub fn parse_str(text: &str) -> Result<Theme, Msg> {
         }
         Some(_) => return Err(Msg::new("„ui“ muss ein Objekt sein", "“ui” must be an object")),
     }
-    let t = Theme { name, dark, fg, bg, cursor, selection, ansi, ui, builtin: false, source: None, extra };
+    // Hintergrund (#387, neu in 3.2.0): ungültige Werte fallen auf ihren Standard zurück, die Datei bleibt gültig. Ist
+    // `background` kein Objekt, gibt es keinen Hintergrund; der Wert bleibt roh erhalten.
+    let background = match obj.get("background") {
+        None | Some(Value::Null) => None,
+        Some(v) => match super::background::parse(v) {
+            Some(b) => Some(b),
+            None => {
+                extra.top.insert("background".into(), v.clone());
+                None
+            }
+        },
+    };
+    let t = Theme { name, dark, fg, bg, cursor, selection, ansi, ui, builtin: false, source: None, extra, background };
     if let Some(c) = find_cycle(&t) {
         let chain = c.join(" → ");
         return Err(Msg::new(format!("Verweise im Kreis: {chain}"), format!("Links form a loop: {chain}")));
@@ -255,6 +267,11 @@ pub fn to_json(t: &Theme) -> String {
     ui.extend(t.extra.ui.iter().filter(|(k, _)| !t.ui.contains_key(k.as_str())).map(|(k, v)| format!("    {}: {}", q(k), val(v, "    "))));
     if !ui.is_empty() {
         top.push(format!("  \"ui\": {{\n{}\n  }}", ui.join(",\n")));
+    }
+    match (&t.background, t.extra.top.get("background")) {
+        (Some(b), _) => top.push(format!("  \"background\": {}", val(&super::background::to_value(b), "  "))),
+        (None, Some(raw)) => top.push(format!("  \"background\": {}", val(raw, "  "))),
+        (None, None) => {}
     }
     top.extend(t.extra.top.iter().filter(|(k, _)| !KNOWN_FIELDS.contains(&k.as_str())).map(|(k, v)| format!("  {}: {}", q(k), val(v, "  "))));
     format!("{{\n{}\n}}\n", top.join(",\n"))
@@ -464,6 +481,33 @@ mod tests {
         let plain = to_json(&crate::theme::all()[0]);
         assert!(!plain.contains("\"ui\""), "{plain}");
         assert!(parse_str(&plain).is_ok(), "{plain}");
+    }
+
+    #[test]
+    fn background_is_optional_tolerant_and_kept() {
+        use crate::theme::background::{Background, Kind};
+        // Alte Dateien: kein Hintergrund, beim Schreiben kein Feld.
+        let t = parse_str(&file("")).unwrap();
+        assert!(t.background.is_none());
+        assert!(!to_json(&t).contains("background"));
+        // Rundreise.
+        let mut t2 = t.clone();
+        let mut b = Background::new(Kind::Image);
+        b.image = Some("wald.jpg".into());
+        t2.background = Some(b);
+        let back = parse_str(&to_json(&t2)).unwrap();
+        assert_eq!(back.background, t2.background);
+        // Ungültige Werte: Theme bleibt gültig, Rohwerte bleiben erhalten.
+        let t3 = parse_str(&file(r##","background":{"kind":"image","image":"C:\\x.png","blur":"viel"}"##)).unwrap();
+        let b3 = t3.background.as_ref().unwrap();
+        assert_eq!((b3.image.as_deref(), b3.blur), (None, 0));
+        let v: Value = serde_json::from_str(&to_json(&t3)).unwrap();
+        assert_eq!((v["background"]["image"].as_str(), v["background"]["blur"].as_str()), (Some("C:\\x.png"), Some("viel")));
+        // Kein Objekt: kein Hintergrund, Wert bleibt.
+        let t4 = parse_str(&file(r##","background":"wald.jpg""##)).unwrap();
+        assert!(t4.background.is_none());
+        let v: Value = serde_json::from_str(&to_json(&t4)).unwrap();
+        assert_eq!(v["background"], "wald.jpg");
     }
 
     #[test]

@@ -108,7 +108,7 @@ pub fn generate(name: &str, seed: Seed) -> Theme {
     ] {
         ui.insert(k.to_string(), link(to));
     }
-    Theme { name: name.to_string(), dark, fg, bg, cursor, selection, ansi, ui, builtin: false, source: None, extra: Default::default() }
+    Theme { name: name.to_string(), dark, fg, bg, cursor, selection, ansi, ui, builtin: false, source: None, extra: Default::default(), background: None }
 }
 
 #[cfg(test)]

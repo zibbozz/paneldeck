@@ -169,7 +169,7 @@ fn home(s: Spot) -> Home {
         EditorTree => Home::Editor(false),
         EditorTabBar | EditorSplit | EditorText | EditorFind | EditorStatus | EditorMinimap | EditorSearchFiles => Home::Editor(true),
         TitlebarEditor => Home::Hub,
-        ThemeManage => Home::Settings(1),
+        ThemeManage | ReduceTransparency => Home::Settings(1),
         ClaudeMode | ClaudeDefaults | ClaudeBudget => Home::Settings(2),
         TabShortcuts => Home::Settings(5),
         TabProfiles => Home::Settings(6),

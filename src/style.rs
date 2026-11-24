@@ -21,6 +21,18 @@ pub const D_BASE: f32 = 0.20;
 
 static ANIMATIONS: AtomicBool = AtomicBool::new(true);
 
+/// Zeigt das gerade gezeichnete Fenster den eigenen Hintergrund des Themes (#387)? Dann füllen Flächen nur einmal in der
+/// Deckkraft ihres Bereichs (keine doppelten Schichten).
+static BACKDROP: AtomicBool = AtomicBool::new(false);
+
+pub fn set_backdrop(on: bool) {
+    BACKDROP.store(on, Ordering::Relaxed);
+}
+
+pub fn backdrop_on() -> bool {
+    BACKDROP.load(Ordering::Relaxed)
+}
+
 /// Zusatz für Animations-Ids: das gerade gezeichnete Paneldeck-Fenster (0 = Hauptfenster, #110). egui führt Animationen
 /// für alle Fenster gemeinsam nach Id; ohne Zusatz kämpften gleiche Knöpfe zweier Fenster um denselben Wert.
 static ID_SALT: AtomicU64 = AtomicU64::new(0);

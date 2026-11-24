@@ -175,6 +175,39 @@ pub fn save_json(_default_name: &str) -> Option<std::path::PathBuf> {
     None
 }
 
+/// Öffnen-Dialog für ein Hintergrundbild eines Themes (#387); anderswo `None`.
+#[cfg(any(windows, unix))]
+pub fn pick_background_image() -> Option<std::path::PathBuf> {
+    rfd::FileDialog::new().add_filter(crate::state::t("Bilder", "Images"), crate::theme::background::IMAGE_EXTENSIONS).pick_file()
+}
+
+#[cfg(not(any(windows, unix)))]
+pub fn pick_background_image() -> Option<std::path::PathBuf> {
+    None
+}
+
+/// Öffnen-Dialog für den Import eines Themes: `.json` oder `.zip` mit Hintergrundbild (#387); anderswo `None`.
+#[cfg(any(windows, unix))]
+pub fn open_theme() -> Option<std::path::PathBuf> {
+    rfd::FileDialog::new().add_filter("Theme", &["json", "zip"]).pick_file()
+}
+
+#[cfg(not(any(windows, unix)))]
+pub fn open_theme() -> Option<std::path::PathBuf> {
+    None
+}
+
+/// Speichern-Dialog für ZIP-Dateien (Theme mit Hintergrundbild, #387); anderswo `None`.
+#[cfg(any(windows, unix))]
+pub fn save_zip(default_name: &str) -> Option<std::path::PathBuf> {
+    rfd::FileDialog::new().set_file_name(default_name).add_filter("ZIP", &["zip"]).save_file()
+}
+
+#[cfg(not(any(windows, unix)))]
+pub fn save_zip(_default_name: &str) -> Option<std::path::PathBuf> {
+    None
+}
+
 /// Öffnen-Dialog für JSON-Dateien (Vorlagen); anderswo `None`.
 #[cfg(any(windows, unix))]
 pub fn open_json() -> Option<std::path::PathBuf> {

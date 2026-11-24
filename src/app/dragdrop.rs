@@ -345,6 +345,7 @@ impl App {
                         tl: &self.tlinks,
                         alt_wheel: self.settings.alt_screen_wheel,
                         hide_key: "",
+                        chat_bg: theme.bg,
                     };
                     show_pane(ui, id, rect, &mut cx);
                 });

@@ -798,6 +798,8 @@ impl App {
         // Eigene Akzentfarbe (Projektfarbe der Todo-Ansicht dieses Fensters); der Stil kommt aus dem Zwischenspeicher.
         self.sync_accent();
         self.ensure_style(ctx);
+        // Eigener Hintergrund des Themes (#387) in der Größe dieses Fensters, unter allen Flächen.
+        self.backdrop_frame(ctx);
         let (close_req, focused, minimized, maximized, outer, inner) = ctx.input(|i| {
             let v = i.viewport();
             (v.close_requested(), v.focused.unwrap_or(false), v.minimized.unwrap_or(false), v.maximized.unwrap_or(false), v.outer_rect, v.inner_rect)
