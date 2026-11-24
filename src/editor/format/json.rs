@@ -8,8 +8,10 @@
 //!   Strenges JSON lehnt Kommentare und Komma am Ende mit Position ab; JSONC erlaubt beides.
 //! - [`Emitter`]: schreibt formatiert oder minifiziert. Kommentare werden gepuffert und nach `,`/`:` bzw. vor dem
 //!   nächsten Token gesetzt: ein Kommentar in eigener Zeile bleibt in eigener Zeile, ein Kommentar am Zeilenende
-//!   bleibt am Zeilenende. Leere Objekte/Arrays werden `{}`/`[]`; eine Leerzeile zwischen Einträgen bzw. vor einem
-//!   Kommentar bleibt erhalten (mehrere werden zu einer). Minifizieren lässt Kommentare und Komma am Ende weg.
+//!   bleibt am Zeilenende; ein Blockkommentar direkt vor einem Eintrag in derselben Zeile (`, /* über a */ "a"`)
+//!   gehört zu diesem Eintrag. Leere Objekte/Arrays werden `{}`/`[]`; eine Leerzeile zwischen Einträgen bzw. vor
+//!   einem Kommentar bleibt erhalten (mehrere werden zu einer). Minifizieren lässt Kommentare und Komma am Ende weg.
+//!   Eingerückt wird höchstens [`MAX_INDENT_LEVELS`] Ebenen tief, damit die Ausgabe nicht quadratisch wächst.
 //! - `SortKeys` sammelt die Tokens, bildet je Container die Einträge (mit ihren Kommentaren davor und am
 //!   Zeilenende), sortiert die Objekteinträge stabil nach dem dekodierten Schlüssel (Unicode-Codepunkte,
 //!   Groß-/Kleinschreibung zählt) und gibt den umgestellten Strom an den Emitter. Array-Reihenfolge bleibt.
@@ -23,6 +25,10 @@ use std::borrow::Cow;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 const BOM: char = '\u{feff}';
+
+/// Höchste Einrückungstiefe der Ausgabe: tiefer verschachtelte Zeilen werden nicht weiter eingerückt. Sonst
+/// wächst die Ausgabe quadratisch mit der Tiefe (10 000 Ebenen `[` wären rund 200 MB nur Einrückung).
+pub const MAX_INDENT_LEVELS: usize = 100;
 
 /// Kommen Kommentare (`//` oder `/* */` außerhalb von Zeichenketten) vor?
 pub fn has_comments(text: &str) -> bool {
@@ -616,7 +622,7 @@ impl<'a> Emitter<'a> {
                     self.out.push('\n');
                 }
                 self.out.push('\n');
-                let n = self.depth * self.unit.len();
+                let n = self.depth.min(MAX_INDENT_LEVELS) * self.unit.len();
                 while self.cache.len() < n {
                     self.cache.push_str(&self.unit);
                 }
@@ -642,13 +648,25 @@ impl<'a> Emitter<'a> {
         self.empty_open = false;
     }
 
-    fn flush(&mut self) {
+    /// Gepufferte Kommentare schreiben. `next`: der folgende Eintragsanfang (Schlüssel/Wert/Container an einer
+    /// Stelle, an der eine neue Zeile beginnt). Blockkommentare, die in derselben Zeile direkt davor stehen, gehören
+    /// zu ihm (`, /* über a */ "a"`): sie kommen mit ihm in die neue Zeile. Ergebnis: ob solche Kommentare
+    /// geschrieben wurden – dann folgt der Eintrag mit einem Leerzeichen.
+    fn flush_before(&mut self, next: Option<Tok>) -> bool {
         if self.pending.is_empty() {
-            return;
+            return false;
         }
         let mut pending = std::mem::take(&mut self.pending);
-        for &c in &pending {
-            let s = if c.nl_before || self.force_nl { Sep::Newline } else { Sep::Space };
+        let mut glue = pending.len();
+        if let Some(t) = next {
+            let mut next_nl = t.nl_before;
+            while glue > 0 && pending[glue - 1].kind == K::BlockComment && !next_nl {
+                glue -= 1;
+                next_nl = pending[glue].nl_before;
+            }
+        }
+        for (j, &c) in pending.iter().enumerate() {
+            let s = if c.nl_before || self.force_nl || j == glue { Sep::Newline } else { Sep::Space };
             self.put(s, c.blank_before);
             let txt = self.text(c);
             if txt.contains('\r') {
@@ -662,8 +680,20 @@ impl<'a> Emitter<'a> {
             self.after_comment = true;
             self.empty_open = false;
         }
+        let glued = glue < pending.len();
         pending.clear();
         self.pending = pending;
+        glued
+    }
+
+    fn flush(&mut self) {
+        self.flush_before(None);
+    }
+
+    /// Kommentare vor einem Schlüssel/Wert/Container schreiben und den Trenner davor liefern.
+    fn flush_for_item(&mut self, t: Tok) -> Sep {
+        let item_start = self.sep == Sep::Newline;
+        if self.flush_before(item_start.then_some(t)) { Sep::Space } else { self.sep }
     }
 
     fn push(&mut self, t: Tok) {
@@ -700,8 +730,7 @@ impl<'a> Emitter<'a> {
                 self.flush();
             }
             K::ObjOpen | K::ArrOpen => {
-                self.flush();
-                let s = self.sep;
+                let s = self.flush_for_item(t);
                 self.write(t, s);
                 self.depth += 1;
                 self.sep = Sep::Newline;
@@ -715,8 +744,7 @@ impl<'a> Emitter<'a> {
                 self.sep = Sep::Tight;
             }
             K::Str | K::Num | K::Lit => {
-                self.flush();
-                let s = self.sep;
+                let s = self.flush_for_item(t);
                 self.write(t, s);
                 self.sep = Sep::Tight;
             }
@@ -803,6 +831,15 @@ fn sort_keys(s: &str, base: usize, jsonc: bool, opts: Options, tick: &mut Ticker
     let mut conts: Vec<Cont> = Vec::new();
     let mut items: Vec<Item> = Vec::new();
     let mut stack: Vec<Frame> = Vec::new();
+    // Blockkommentar, auf den in derselben Zeile (ggf. über weitere solche Kommentare) ein Schlüssel/Wert/Container
+    // folgt: gehört als führender Kommentar zum nächsten Eintrag, nicht zum vorigen (wie im Emitter).
+    let mut glued = vec![false; n];
+    for i in (0..n.saturating_sub(1)).rev() {
+        let next = toks[i + 1];
+        glued[i] = toks[i].kind == K::BlockComment
+            && !next.nl_before
+            && (matches!(next.kind, K::Str | K::Num | K::Lit | K::ObjOpen | K::ArrOpen) || glued[i + 1]);
+    }
     for i in 0..n {
         tick.at(i)?;
         let t = toks[i];
@@ -810,7 +847,11 @@ fn sort_keys(s: &str, base: usize, jsonc: bool, opts: Options, tick: &mut Ticker
         match t.kind {
             K::LineComment | K::BlockComment => {
                 if let Some(f) = stack.last_mut() {
-                    if f.head && !t.nl_before {
+                    if glued[i] {
+                        f.head = false;
+                        f.after_comma = false;
+                        f.cur_start.get_or_insert(iu);
+                    } else if f.head && !t.nl_before {
                         conts[f.slot].head_end = iu + 1;
                     } else if f.after_comma && !t.nl_before && !f.items.is_empty() {
                         if let Some(it) = f.items.last_mut() {
@@ -1224,7 +1265,7 @@ mod tests {
 
     #[test]
     fn jsonc_format_keeps_comments_and_trailing_commas() {
-        let want = "// head\n{\n  // leading a\n  \"a\": 1, // trailing a\n  /* block */\n  \"b\": [ // after open\n    1,\n    2, // after 2\n  ],\n  \"c\": /* inline */ 3,\n  \"d\": {}, // empty\n  \"e\": [ /* inside empty */\n  ],\n  \"f\": 4 // last\n  // dangling\n}\n// tail\n";
+        let want = "// head\n{\n  // leading a\n  \"a\": 1, // trailing a\n  /* block */ \"b\": [ // after open\n    1,\n    2, // after 2\n  ],\n  \"c\": /* inline */ 3,\n  \"d\": {}, // empty\n  \"e\": [ /* inside empty */\n  ],\n  \"f\": 4 // last\n  // dangling\n}\n// tail\n";
         let got = fmtc(JSONC);
         assert_eq!(got, want);
         assert_eq!(fmtc(&got), got);
@@ -1246,7 +1287,13 @@ mod tests {
         assert_eq!(fmtc("/* a */\n1"), "/* a */\n1\n");
         assert_eq!(fmtc("\u{feff}// x\n[]"), "\u{feff}// x\n[]\n");
         // Mehrzeiliger Blockkommentar bleibt wörtlich, CRLF darin wird zu LF; Zeilenkommentar ohne Leerraum am Ende.
-        assert_eq!(fmtc("[1, /* x\r\n   y */ 2 // z  \r\n]"), "[\n  1, /* x\n   y */\n  2 // z\n]\n");
+        assert_eq!(fmtc("[1, /* x\r\n   y */ 2 // z  \r\n]"), "[\n  1,\n  /* x\n   y */ 2 // z\n]\n");
+        // Blockkommentar direkt vor einem Eintrag in derselben Zeile gehört zu diesem Eintrag.
+        assert_eq!(fmtc("{\"b\": 1, /* about a */ \"a\": 2}"), "{\n  \"b\": 1,\n  /* about a */ \"a\": 2\n}\n");
+        assert_eq!(fmtc("[ /* a */ 1, /* b */ /* c */ 2, /* d */ [3]]"), "[\n  /* a */ 1,\n  /* b */ /* c */ 2,\n  /* d */ [\n    3\n  ]\n]\n");
+        // … aber nicht vor `,`, `]` oder hinter `:`.
+        assert_eq!(fmtc("[1 /* x */, 2 /* y */ ]"), "[\n  1, /* x */\n  2 /* y */\n]\n");
+        assert_eq!(fmtc("{\"a\": /* v */ 1}"), "{\n  \"a\": /* v */ 1\n}\n");
         // Komma am Ende in allen Lagen.
         let tc = "{\"a\":[1,2,],\"b\":{\"c\":1,},}";
         assert_eq!(fmtc(tc), "{\n  \"a\": [\n    1,\n    2,\n  ],\n  \"b\": {\n    \"c\": 1,\n  },\n}\n");
@@ -1271,6 +1318,9 @@ mod tests {
         let s = "{ // head\n  \"b\": [ // x\n    {\"d\":1,\"c\":2,}, ],\n  \"a\": 2,\n  // dangling\n}";
         let want = "{ // head\n  \"a\": 2,\n  \"b\": [ // x\n    {\n      \"c\": 2,\n      \"d\": 1,\n    },\n  ],\n  // dangling\n}\n";
         assert_eq!(ok(true, Op::SortKeys, s), want);
+        // Blockkommentar vor dem Schlüssel in derselben Zeile wandert mit diesem Eintrag.
+        assert_eq!(ok(true, Op::SortKeys, "{\"b\": 1, /* about a */ \"a\": 2}"), "{\n  /* about a */ \"a\": 2,\n  \"b\": 1\n}\n");
+        assert_eq!(ok(true, Op::SortKeys, "{ /* about c */ \"c\": 1, \"a\": 2 /* about 2 */ }"), "{\n  \"a\": 2, /* about 2 */\n  /* about c */ \"c\": 1\n}\n");
         let sorted = ok(true, Op::SortKeys, JSONC);
         assert_eq!(ok(true, Op::SortKeys, &sorted), sorted);
         assert_eq!(ok(true, Op::Minify, &sorted), ok(true, Op::Minify, JSONC));
@@ -1385,7 +1435,14 @@ mod tests {
         let tab = Options { indent: Indent::Tab, final_newline: true };
         let out = ok_with(false, Op::Format, &arr, tab);
         assert_eq!(out.lines().count(), 2 * N - 1);
-        assert!(out.lines().nth(N - 1).is_some_and(|l| l == format!("{}[]", "\t".repeat(N - 1))));
+        // Ab MAX_INDENT_LEVELS wächst die Einrückung nicht weiter: die Ausgabe bleibt linear (sonst ~100 MB).
+        assert!(out.lines().nth(N - 1).is_some_and(|l| l == format!("{}[]", "\t".repeat(MAX_INDENT_LEVELS))));
+        assert!(out.lines().nth(MAX_INDENT_LEVELS - 1).is_some_and(|l| l == format!("{}[", "\t".repeat(MAX_INDENT_LEVELS - 1))));
+        assert!(out.len() < 2 * N * (MAX_INDENT_LEVELS + 3), "{} bytes", out.len());
+        let wide = Options { indent: Indent::Spaces(8), final_newline: true };
+        let out = ok_with(false, Op::SortKeys, &obj, wide);
+        assert!(out.len() < N * (8 * MAX_INDENT_LEVELS + 12) * 2, "{} bytes", out.len());
+        assert_eq!(ok_with(false, Op::Format, &out, wide), out);
         // Nicht geschlossen bei voller Tiefe.
         let e = err(false, &"[".repeat(N));
         assert_eq!((e.line, e.column), (1, N + 1));
