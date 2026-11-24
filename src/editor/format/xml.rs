@@ -1449,9 +1449,3 @@ mod tests {
         }
     }
 }
-
-/// Wie [`run`], `fragment` = Auswahl mit mehreren oder keinen Elementen auf oberster Ebene. Vorläufiger Platzhalter
-/// für die Menüleiste (#381) – die echte Umsetzung kommt mit dem XML-Zweig.
-pub fn run_with(op: Op, text: &str, opts: Options, _fragment: bool, cancel: &AtomicBool, progress: &dyn Fn(f32)) -> Outcome {
-    run(op, text, opts, cancel, progress)
-}
