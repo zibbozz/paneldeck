@@ -36,11 +36,19 @@ pub const DEFAULTS: &[(&str, &str)] = &[
     ("close_all", ""),
     // Sitzung neu laden (#169): standardmäßig ohne Kürzel
     ("reload", ""),
+    // Editor (#385): nächste/vorige Änderung im Vergleich und bei den Änderungsmarken – nur im Editor-Reiter.
+    ("ed_next_change", "F7"),
+    ("ed_prev_change", "Shift+F7"),
 ];
 
 /// Kürzel, die in jedem Bereich gelten (Reiterwechsel) – die übrigen nur im Terminal-Bereich.
 pub fn is_global(id: &str) -> bool {
     id.starts_with("mode_")
+}
+
+/// Kürzel, die nur im Editor-Reiter gelten (#385) – der Terminal-Bereich lässt sie den Terminals.
+pub fn is_editor(id: &str) -> bool {
+    id.starts_with("ed_")
 }
 
 pub fn label(id: &str, de: bool) -> &'static str {
@@ -72,6 +80,8 @@ pub fn label(id: &str, de: bool) -> &'static str {
         "mode_editor_alt" => ("Reiter „Editor“ (zweite Belegung)", "“Editor” tab (alternative)"),
         "close_all" => ("Alle Sitzungen schließen", "Close all sessions"),
         "reload" => ("Sitzung neu laden", "Reload session"),
+        "ed_next_change" => ("Editor: nächste Änderung", "Editor: next change"),
+        "ed_prev_change" => ("Editor: vorige Änderung", "Editor: previous change"),
         _ => ("?", "?"),
     };
     if de { d } else { e }

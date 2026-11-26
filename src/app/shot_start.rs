@@ -487,6 +487,25 @@ impl App {
                     self.editor_svc.find.start(demo.clone(), q, move || repaint.request_repaint());
                 }
             }
+            // Vergleich und Änderungsmarken (#385): ungespeicherte Änderungen in orders.rs gegen die gespeicherte Datei.
+            "editor-diff" | "editor-gutter" => {
+                write_demo_project(&demo);
+                self.set_mode(titlebar::Mode::Editor);
+                self.ed.set_root(&demo);
+                if view == "editor-gutter" {
+                    self.settings.editor.change_markers = true;
+                    self.settings.editor.marker_base = crate::editor_svc::settings::MarkerBase::Disk;
+                }
+                let p = demo.join("src/orders.rs");
+                if let Ok(id) = self.editor_open(&p, true, false) {
+                    self.editor_shot_edits(id);
+                    if view == "editor-diff" {
+                        let prefs = self.editor_prefs();
+                        let lang = self.settings.language;
+                        let _ = self.ed.compare(id, super::editor_ui::shot_target_disk(), &prefs, lang);
+                    }
+                }
+            }
             "editor-settings" => {
                 self.set_mode(titlebar::Mode::Editor);
                 self.settings_open = true;
@@ -661,6 +680,12 @@ impl App {
                 f.regex = true;
                 f.replacement = "fn ${1}_purchase".into();
                 f.replace_mode = true;
+            }
+            "editor-gutter" if n == 15 => {
+                let p = demo.join("src/orders.rs");
+                if let Some(id) = self.ed.doc_for_path(&p) {
+                    self.editor_shot_popup(id, 26);
+                }
             }
             "editor-disk-changed" if n == 15 => {
                 // eigene, ungespeicherte Änderung im Puffer und eine fremde auf der Platte

@@ -35,11 +35,38 @@ pub struct Saved {
     pub minimap: bool,
     /// Nächste Nummer für „Unbenannt-N“.
     pub next_untitled: u32,
+    /// Vergleichs-Reiter (#385); Reiter verweisen über `diff` darauf.
+    pub diffs: Vec<SavedDiff>,
+}
+
+/// Ein Vergleich (#385). Seiten mit der Zwischenablage werden nicht gemerkt (ihr Inhalt gehört nicht auf die Platte).
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
+#[serde(default)]
+pub struct SavedDiff {
+    pub id: u64,
+    pub left: SavedSide,
+    pub right: SavedSide,
+    /// `auto`, `split`, `unified`.
+    pub layout: String,
+    pub ignore_ws: bool,
+    pub context: u32,
+    pub show_all: bool,
+}
+
+/// Eine Seite: ein Dokument (`doc`), die Datei auf der Platte (`disk`) oder ein Stand in git (`path` + `rev`:
+/// `HEAD`, `:index` oder eine Revision).
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
+#[serde(default)]
+pub struct SavedSide {
+    pub doc: Option<u64>,
+    pub disk: Option<String>,
+    pub path: Option<String>,
+    pub rev: Option<String>,
 }
 
 impl Default for Saved {
     fn default() -> Self {
-        Saved { version: VERSION, root: None, expanded: Vec::new(), recent_folders: Vec::new(), recent_files: Vec::new(), layout: None, focused: 0, groups: Vec::new(), docs: Vec::new(), tree_open: true, tree_width: 240.0, wrap: false, minimap: true, next_untitled: 1 }
+        Saved { version: VERSION, root: None, expanded: Vec::new(), recent_folders: Vec::new(), recent_files: Vec::new(), layout: None, focused: 0, groups: Vec::new(), docs: Vec::new(), tree_open: true, tree_width: 240.0, wrap: false, minimap: true, next_untitled: 1, diffs: Vec::new() }
     }
 }
 
@@ -77,6 +104,9 @@ pub struct SavedTab {
     pub col: usize,
     /// Oberste sichtbare Zeile.
     pub top: f32,
+    /// Vergleichs-Reiter (#385): Kennung in `Saved::diffs`, und das Dokument der zweiten Seite.
+    pub diff: Option<u64>,
+    pub extra: Option<u64>,
 }
 
 /// Liste der zuletzt geöffneten Einträge: `item` nach vorn, ohne Doppelte (Groß/Klein egal unter Windows), höchstens
@@ -111,8 +141,9 @@ mod tests {
             recent_files: vec!["C:\\proj\\a.txt".into()],
             layout: Some(Node::Split { dir: Dir::Horizontal, ratio: 0.4, a: Box::new(Node::Leaf(1)), b: Box::new(Node::Leaf(2)) }),
             focused: 2,
-            groups: vec![SavedGroup { id: 1, active: 0, tabs: vec![SavedTab { doc: 7, line: 3, col: 4, top: 1.5 }] }, SavedGroup { id: 2, active: 0, tabs: vec![SavedTab { doc: 7, ..Default::default() }] }],
+            groups: vec![SavedGroup { id: 1, active: 0, tabs: vec![SavedTab { doc: 7, line: 3, col: 4, top: 1.5, ..Default::default() }, SavedTab { doc: 7, diff: Some(3), ..Default::default() }] }, SavedGroup { id: 2, active: 0, tabs: vec![SavedTab { doc: 7, ..Default::default() }] }],
             docs: vec![SavedDoc { key: 7, path: Some("C:\\proj\\a.txt".into()), untitled: 0, hot: Some("h1".into()), language: Some("rust".into()), mode: Some("syntax".into()) }],
+            diffs: vec![SavedDiff { id: 3, left: SavedSide { path: Some("a.txt".into()), rev: Some("HEAD".into()), ..Default::default() }, right: SavedSide { doc: Some(7), ..Default::default() }, layout: "split".into(), ignore_ws: true, context: 5, show_all: false }],
             ..Default::default()
         };
         let j = serde_json::to_string(&s).unwrap();

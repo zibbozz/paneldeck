@@ -663,6 +663,32 @@ const EDITOR: &[Step] = &[
         need: None,
     },
     Step {
+        id: "editor.diff",
+        since: "3.2.0",
+        spot: Some(Spot::EditorTabBar),
+        title: tx("Vergleichen", "Compare"),
+        body: tx(
+            "Rechtsklick auf einen Reiter → „Vergleichen mit …“ vergleicht die Datei mit der gespeicherten Fassung, mit git (HEAD, Index, einer Revision), der Zwischenablage oder einer anderen Datei – in einem eigenen Reiter, nebeneinander mit Füllzeilen und Änderungen innerhalb der Zeilen. Die Pfeile zwischen den Seiten übernehmen einen Block (ein Schritt zum Rückgängigmachen), {key:ed_next_change} springt zur nächsten Änderung.",
+            "Right-click a tab → “Compare with …” compares the file with its saved version, with git (HEAD, index, a revision), the clipboard or another file – in a tab of its own, side by side with filler lines and changes within the lines. The arrows between the sides copy a block (one undo step), {key:ed_next_change} jumps to the next change.",
+        ),
+        prep: EDITOR_FILE,
+        done: None,
+        need: None,
+    },
+    Step {
+        id: "editor.markers",
+        since: "3.2.0",
+        spot: Some(Spot::EditorText),
+        title: tx("Änderungsmarken", "Change markers"),
+        body: tx(
+            "Änderungsmarken (Einstellungen → Editor, standardmäßig aus) zeigen am linken Rand, welche Zeilen hinzugekommen, geändert oder entfernt sind – gegen git (nicht gestagt und gestagt in eigenen Farben) oder gegen die gespeicherte Datei. Ein Klick auf eine Marke zeigt die alten Zeilen und setzt sie auf Wunsch zurück.",
+            "Change markers (Settings → Editor, off by default) show in the gutter which lines were added, modified or removed – against git (unstaged and staged in their own colours) or against the saved file. A click on a marker shows the old lines and reverts them if you like.",
+        ),
+        prep: EDITOR_FILE,
+        done: None,
+        need: None,
+    },
+    Step {
         id: "editor.search",
         since: "3.0.0",
         spot: Some(Spot::EditorSearchFiles),

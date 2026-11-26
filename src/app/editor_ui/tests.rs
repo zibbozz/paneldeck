@@ -293,7 +293,6 @@ fn deleted_and_changed_files_show_info_bars() {
     std::fs::write(&p, "changed on disk\n").unwrap();
     assert!(matches!(ed.docs.get_mut(&id).unwrap().disk_changed(&prefs, lang), doc::DiskReaction::Asked));
     assert!(ed.docs[&id].disk_conflict);
-    assert!(!ed.docs[&id].disk_diff(lang).is_empty());
     ed.docs.get_mut(&id).unwrap().keep_mine();
     assert!(!ed.docs[&id].disk_conflict && ed.docs[&id].dirty());
     // Gelöscht
@@ -501,41 +500,6 @@ fn tree_width_survives_minimize_and_a_tiny_window() {
         assert!((w - 240.0).abs() < 0.5, "{size:?}: danach wieder 240 px breit, nicht {w}");
         assert_eq!(ed.tree_width, 240.0);
     }
-}
-
-/// Klicktest 3.0.0 (Blocker): Das Fenster „Unterschied anzeigen“ bleibt mit einem langen Unterschied im Hauptfenster –
-/// Titelleiste (Schließen) und Knöpfe erreichbar, auch wenn das Hauptfenster kleiner wird – und wächst nicht.
-#[test]
-fn diff_window_stays_inside_the_main_window() {
-    let lines: Vec<(char, String)> = (0..3000).map(|i| (if i % 2 == 0 { '+' } else { '-' }, format!("line {i} {}", "x".repeat(300)))).collect();
-    let mono = egui::FontId::monospace(13.0);
-    let ctx = egui::Context::default();
-    let mut n = 0;
-    let mut run = |w: f32, h: f32| {
-        let mut seen = None;
-        let mut rects = Vec::new();
-        for _ in 0..8 {
-            n += 1;
-            let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(w, h))), time: Some(n as f64 * 0.05), ..Default::default() };
-            let _ = ctx.run(input, |ctx| {
-                let mut open = true;
-                let mut cmds = Vec::new();
-                view::diff_window(ctx, "Difference – a.txt".into()).open(&mut open).show(ctx, |ui| {
-                    view::diff_body(ui, 1, &lines, &mono, crate::state::Lang::En, &mut cmds);
-                    seen = Some((ui.min_rect(), ui.max_rect()));
-                });
-            });
-            rects.push(ctx.memory(|m| m.area_rect(Id::new("ed_diff_win"))).expect("Fenster"));
-        }
-        let win = *rects.last().unwrap();
-        assert!(win.min.x >= -0.5 && win.min.y >= -0.5 && win.max.x <= w + 0.5 && win.max.y <= h + 0.5, "{w}×{h}: Fenster {win:?} ragt hinaus");
-        assert!((rects[4].height() - win.height()).abs() < 0.5, "{w}×{h}: Fenster wächst: {rects:?}");
-        let (used, avail) = seen.expect("gezeichnet");
-        assert!(used.max.y <= avail.max.y + 0.5, "{w}×{h}: Knöpfe {used:?} unter dem Fensterrand {avail:?}");
-    };
-    run(1500.0, 960.0);
-    run(1100.0, 700.0);
-    run(1500.0, 960.0);
 }
 
 /// Schmale Teilung: Die Knöpfe der Hinweisleiste bekommen Kurzformen, statt abgeschnitten zu werden.

@@ -260,6 +260,15 @@ pub fn run(t: &Theme, on: impl Fn(Rule) -> bool) -> Vec<Hint> {
             ("code_escape", "bg", TEXT_MIN),
             ("code_heading", "bg", TEXT_MIN),
             ("code_variable", "bg", TEXT_MIN),
+            // Vergleich und Änderungsmarken (#385): Text auf den Zeilen-Hintergründen, Marken auf dem Editor-Hintergrund.
+            ("text", "diff_add_bg", TEXT_MIN),
+            ("text", "diff_remove_bg", TEXT_MIN),
+            ("marker_added", "bg", LARGE_MIN),
+            ("marker_modified", "bg", LARGE_MIN),
+            ("marker_deleted", "bg", LARGE_MIN),
+            ("marker_staged_added", "bg", LARGE_MIN),
+            ("marker_staged_modified", "bg", LARGE_MIN),
+            ("marker_staged_deleted", "bg", LARGE_MIN),
             ("accent", "window_bg", LARGE_MIN),
             ("danger", "window_bg", LARGE_MIN),
             ("info", "window_bg", LARGE_MIN),
@@ -389,6 +398,19 @@ mod tests {
             let bad: Vec<String> = run(&t, |r| r == Rule::Contrast).into_iter().filter(|h| h.tokens.iter().any(|n| n.starts_with("code_"))).map(|h| h.msg.en).collect();
             assert!(bad.is_empty(), "{}: {bad:?}", t.name);
         }
+    }
+
+    #[test]
+    fn builtin_themes_have_visible_change_markers() {
+        for t in crate::theme::all() {
+            let bad: Vec<String> = run(&t, |r| r == Rule::Contrast).into_iter().filter(|h| h.tokens.iter().any(|n| n.starts_with("marker_"))).map(|h| h.msg.en).collect();
+            assert!(bad.is_empty(), "{}: {bad:?}", t.name);
+        }
+        // Gestagte und nicht gestagte Marken sind verschiedene Farben.
+        let u = crate::theme::tokens::ui_colors(&crate::theme::all()[0]);
+        assert_ne!(u.marker_added, u.marker_staged_added);
+        assert_ne!(u.marker_modified, u.marker_staged_modified);
+        assert_ne!(u.marker_deleted, u.marker_staged_deleted);
     }
 
     #[test]

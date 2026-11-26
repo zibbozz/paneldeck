@@ -58,10 +58,42 @@ Das Einfärben arbeitet schrittweise und im Hintergrund, Tippen und Rollen warte
 ## Auf der Platte geänderte Dateien
 Paneldeck bemerkt, wenn ein anderes Programm eine offene Datei ändert (z. B. Claude Code oder ein Agent): Es prüft etwa einmal pro Sekunde Größe und Änderungszeit und reagiert erst, wenn sich die Datei nicht mehr ändert.
 - **Ohne eigene Änderungen** wird die Datei still neu geladen, mit kurzem Hinweis (*von der Platte neu geladen*).
-- **Mit ungespeicherten Änderungen** bietet eine Infoleiste **Meine behalten**, **Von der Platte laden** und **Unterschied anzeigen**.
+- **Mit ungespeicherten Änderungen** bietet eine Infoleiste **Meine behalten**, **Von der Platte laden** und **Unterschied anzeigen** (öffnet einen [Vergleichs-Reiter](#vergleich-und-änderungsmarken): gespeicherte Datei ↔ Editor).
 - Eine **gelöschte** Datei behält ihren Text im Editor und gilt als ungespeichert; Speichern legt sie neu an.
 
 ![Infoleiste „auf der Platte geändert“ mit Meine behalten, Von der Platte laden und Unterschied anzeigen](../images/de/editor-disk-changed.png)
+
+## Vergleich und Änderungsmarken
+*Neu in 3.2.0.* Der Editor vergleicht Dateien wie ein git diff – angelehnt an Sublime Text und Sublime Merge, **alles offline** (nur das lokale `git`).
+
+**Vergleich öffnen** – er öffnet sich als eigener Reiter (*a.json ↔ b.json*):
+- Kontextmenü eines Reiters: **Vergleichen mit …** → *Gespeicherter Datei*, *HEAD*, *Index (gestagt)*, *Revision …*, *Zwischenablage*, *Datei …* oder einer anderen offenen Datei;
+- Ordnerbaum: **Zum Vergleichen auswählen** an einer Datei, dann **Vergleichen mit „a.json“** an einer anderen – oder zwei Dateien mit **Strg+Klick** markieren und **Markierte vergleichen** wählen;
+- Befehlspalette (**Strg+Umschalt+P** im Editor-Reiter): *Vergleichen mit Datei …*, *… gespeicherter Datei*, *… HEAD*, *… dem Index*, *… Revision …*, *… der Zwischenablage*;
+- **Unterschied anzeigen** in der Infoleiste einer auf der Platte geänderten Datei.
+
+**Der Vergleichs-Reiter**
+- Standardmäßig **nebeneinander**, automatisch **untereinander**, wenn die Teilung schmaler als ~700 px ist; die Werkzeugleiste schaltet zwischen *Automatisch*, *Nebeneinander* und *Untereinander*. Beide Seiten rollen gemeinsam; Zeilen, die es nur auf einer Seite gibt, bekommen auf der anderen eine **schraffierte Füllzeile**.
+- Änderungen innerhalb einer Zeile sind **wortweise** hervorgehoben (kurze Wörter bis aufs Zeichen); Zeilen mit sehr vielen Änderungen sind als Ganzes markiert. Syntaxfarben und Zeilennummern auf beiden Seiten (untereinander: alte und neue Spalte); der Zeilenumbruch folgt dem Editor (**Alt+Z**), die Zeilen bleiben auf gleicher Höhe.
+- Unveränderte Bereiche sind mit 3 Kontextzeilen **eingeklappt** (Zahl in der Werkzeugleiste, Vorgabe in den Einstellungen); **↓ 20**, **↑ 20** und **Alle zeigen** klappen sie auf.
+- **Blockpfeile** zwischen den Seiten übernehmen einen Block auf die andere Seite (**→** / **←**, auch **Alt+→** / **Alt+←** für den aktuellen Block). Eine Seite ist bearbeitbar, wenn sie eine Datei ist; git-Stände, die gespeicherte Datei und die Zwischenablage sind schreibgeschützt. Jeder Pfeil ist **ein Rückgängig-Schritt** im selben Dokument wie im normalen Reiter (gemeinsames Rückgängig, Ungespeichert-Punkt, **Strg+S** speichert die fokussierte Seite). **⇄** tauscht die Seiten.
+- **F7** / **Umschalt+F7** springen zur nächsten / vorigen Änderung (einstellbar unter *Einstellungen → Tastenkürzel*). Ein Doppelklick auf eine Zeile öffnet sie im Reiter der Datei.
+- Der Vergleich folgt dem Tippen nach etwa 250 ms; git-Stände werden nach dem Speichern, wenn das Fenster den Fokus bekommt und wenn sich `.git/index` oder `HEAD` ändern, neu gelesen.
+- **Leerraum ignorieren** (standardmäßig aus). Unterschiede bei **Zeilenenden, Kodierung/BOM und Zeilenende am Schluss** stehen in einer Infoleiste über dem Vergleich, nicht als geänderte Zeilen.
+- **Revision …** vergleicht mit HEAD, dem Index, einem Zweig, einem Tag oder einem der letzten 50 Commits der Datei (mit Suche) oder mit einer eingetippten Revision (wird vorher geprüft).
+- Menü **⋯**: *Diff kopieren*, *Block kopieren*, *Als Patch speichern …* (git-kompatibel, `git apply` nimmt ihn), *Alle Zeilen zeigen*.
+- Große Dateien werden im Hintergrund verglichen, mit Fortschritt und **Abbrechen**; an der Zeitgrenze wird das Ergebnis gröber (ein Hinweis sagt es). Über der Grenze für große Dateien und bei **Binärdateien** zeigt der Reiter stattdessen Größe und **SHA-256** beider Seiten.
+- Vergleichs-Reiter kommen nach einem Neustart wieder (außer denen mit der Zwischenablage).
+
+![Vergleichs-Reiter nebeneinander mit Änderungen innerhalb der Zeilen, Füllzeilen und Blockpfeilen](../images/de/editor-diff.png)
+
+**Änderungsmarken** (*Ansicht → Änderungsmarken*, *Einstellungen → Editor*, **standardmäßig aus**) markieren Zeilen am linken Rand des normalen Editors: ein dünner Balken für **hinzugefügte** und **geänderte** Zeilen, ein Dreieck, wo Zeilen **entfernt** wurden, dazu Marken in der Bildlaufleiste und in der Minimap.
+- In einem git-Repository vergleichen die Marken **mit dem Index und HEAD zugleich**: **nicht gestagte** Änderungen (Datei ↔ Index) in Grün/Gelb/Rot, **gestagte** Änderungen (Index ↔ HEAD) in Türkis/Blau/Violett. Außerhalb eines Repositorys – oder mit *Grundlage der Marken: Gespeicherte Datei* – zeigen sie die ungespeicherten Änderungen gegenüber der Datei auf der Platte.
+- Ein **Klick auf eine Marke** öffnet ein kleines Fenster unter der Zeile: die alten Zeilen, **Zurücksetzen** (ein Rückgängig-Schritt), vorige/nächste Änderung und **Im Vergleich öffnen**.
+- **F7** / **Umschalt+F7** springen zwischen den Marken. In großen Dateien gibt es keine Marken.
+- Die Farben sind Farben des Themes (*Editor: Vergleich und Änderungsmarken* im Theme-Editor).
+
+![Änderungsmarken am Rand mit dem Fenster einer Marke: alte Zeilen, Zurücksetzen, vorige/nächste, Im Vergleich öffnen](../images/de/editor-gutter.png)
 
 ## Suche in Dateien
 **Strg+Umschalt+F** öffnet im Editor-Reiter das Fenster *In Dateien suchen*; es durchsucht alle Dateien des offenen Ordners. **F4** / **Umschalt+F4** springen zum nächsten / vorigen Treffer.
@@ -89,15 +121,20 @@ Dateien ab **20 MB** (*Einstellungen → Editor → Große Dateien ab*) öffnen 
 | Standard-Modus | Text | Modus von Dateien, für deren Sprache nichts eingestellt ist ([Syntaxfarben](#syntaxfarben)) |
 | Modus je Sprache | Standard | Text oder Syntax für alle Dateien einer Sprache |
 | Eigene Zuordnungen | – | Dateiname oder Endung → Sprache, vor der eingebauten Erkennung |
+| Änderungsmarken am Rand | aus | [Änderungsmarken](#vergleich-und-änderungsmarken) |
+| Grundlage der Marken | git (Index und HEAD) | oder die gespeicherte Datei |
+| Darstellung im Vergleich | Automatisch | nebeneinander, unter ~700 px untereinander |
+| Kontextzeilen | 3 | unveränderte Zeilen um jede Änderung im Vergleich |
+| Leerraum ignorieren | aus | Vorgabe für neue Vergleiche |
 | **Agenten** | alle aus | siehe [Agenten](#agenten) |
 
-Gespeichert in `settings.json` als `editor` ([Datenformat](data-and-backups.md#neue-felder-in-300), [neu in 3.1.0](data-and-backups.md#neue-felder-in-310)).
+Gespeichert in `settings.json` als `editor` ([Datenformat](data-and-backups.md#neue-felder-in-300), [neu in 3.1.0](data-and-backups.md#neue-felder-in-310); neu in 3.2.0: `change_markers`, `marker_base`, `diff_context`, `diff_ignore_whitespace`, `diff_layout`).
 
 ![Einstellungen, Reiter Editor](../images/de/editor-settings.png)
 
 ## Agenten
 Agenten (Claude Code und andere über die [Agenten-Schnittstelle](agent-interface.md#editor) sowie [Chats mit lokalen Modellen](chat.md)) können den Editor benutzen:
-- **Lesen** (`editor_list`, `editor_read`) geht ab der Stufe *Nur lesen* – auch ungespeicherte Änderungen.
+- **Lesen** (`editor_list`, `editor_read`) geht ab der Stufe *Nur lesen* – auch ungespeicherte Änderungen. **`editor_diff`** (seit 3.2.0, Stufe *Nur lesen*, nur externe Agenten) vergleicht ein Dokument mit seiner gespeicherten Datei, git HEAD/Index oder einem anderen offenen Dokument.
 - Drei Schalter unter *Einstellungen → Editor → Agenten*, **alle standardmäßig aus** und nur bei der Stufe **Steuern** wirksam (für Chats: die Stufe des Modells):
   - **Agenten dürfen Dateien öffnen** – in einem neuen Tab; nur lokale Pfade, nie Netzwerk-/UNC-Pfade (`\\server\freigabe`, `\\wsl.localhost\…`, Netzlaufwerke) oder Geräte. Ein Agent darf auch einen unbenannten Tab mit Text öffnen.
   - **Agenten dürfen offene Dateien bearbeiten** – die Änderung bleibt **ungespeichert**, ist als Änderung des Agenten markiert (*Von einem Agenten geöffnet oder geändert*) und lässt sich rückgängig machen.

@@ -76,6 +76,8 @@ $AllViews = @(
   @{ Name = 'editor-search';       Spec = 'editor-search';       W = 1400; H = 860; Wait = 3 }
   @{ Name = 'editor-syntax';       Spec = 'editor-syntax';       W = 1400; H = 860; Wait = 3 }
   @{ Name = 'editor-settings';     Spec = 'editor-settings';     W = 1100; H = 900 }
+  @{ Name = 'editor-diff';         Spec = 'editor-diff';         W = 1400; H = 860; Wait = 3 }
+  @{ Name = 'editor-gutter';       Spec = 'editor-gutter';       W = 1400; H = 860; Wait = 4 }
   # Chats
   @{ Name = 'chat-images';         Spec = 'chat-images';         W = 1300; H = 860; Wait = 3 }
   # Prozesse

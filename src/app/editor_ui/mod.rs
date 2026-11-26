@@ -7,19 +7,26 @@
 //! - `text`: das Textfeld (nur sichtbare Zeilen, Cursor, Auswahl, Maus, Tastatur, Minimap),
 //! - `view`: Bereich zeichnen (Baum, Teilungen, Reiterleisten, Hinweisleisten, Statusleiste, Dialoge),
 //! - `find`: Suchen/Ersetzen-Leiste und „Gehe zu Zeile“,
-//! - `tree`: Ordnerbaum, `persist`: `editor-state.json`.
+//! - `tree`: Ordnerbaum, `persist`: `editor-state.json`,
+//! - `diff_tab`, `diff_menu`, `marks`: Vergleichs-Reiter, seine Menüeinträge/Revisionsauswahl und die Änderungsmarken am
+//!   Rand (#385, 3.2.0).
 //!
 //! Der Zustand ist für alle Fenster gemeinsam (`App::ed`, nicht in `view_fields!`): Ein weiteres Fenster im Editor-Reiter
 //! zeigt dieselben Dateien und Teilungen. Ein Dokument gibt es genau einmal (`docs`), auch wenn es in mehreren Teilungen
 //! offen ist; jeder Reiter hat seine eigene Ansicht (Cursor, Bildlauf).
 
+mod diff_menu;
+mod diff_tab;
 mod doc;
 mod find;
+mod marks;
 mod panes;
 mod persist;
 mod text;
 mod tree;
 mod view;
+#[cfg(test)]
+mod diff_tests;
 #[cfg(test)]
 mod tests;
 
@@ -43,13 +50,35 @@ pub(crate) struct EditorPrefs {
     pub autosave: Option<std::time::Duration>,
     /// Syntax-Modus (#312): Standard-Modus, Modus je Sprache, eigene Zuordnungen.
     pub syntax: SyntaxPrefs,
+    /// Änderungsmarken am Rand (#385; Standard aus) und ihre Grundlage.
+    pub markers: bool,
+    pub marker_base: crate::editor_svc::settings::MarkerBase,
+    /// Vorgaben neuer Vergleichs-Reiter: Kontextzeilen, Darstellung, Leerraum ignorieren.
+    pub diff_context: usize,
+    pub diff_layout: crate::editor_svc::settings::DiffLayout,
+    pub diff_ignore_ws: bool,
 }
 
 impl Default for EditorPrefs {
     fn default() -> Self {
-        EditorPrefs { font_size: 14.0, large_file_bytes: crate::editor::DEFAULT_LARGE_FILE_THRESHOLD, autosave: None, syntax: SyntaxPrefs::default() }
+        EditorPrefs {
+            font_size: 14.0,
+            large_file_bytes: crate::editor::DEFAULT_LARGE_FILE_THRESHOLD,
+            autosave: None,
+            syntax: SyntaxPrefs::default(),
+            markers: false,
+            marker_base: Default::default(),
+            diff_context: crate::editor_svc::settings::DEFAULT_DIFF_CONTEXT as usize,
+            diff_layout: Default::default(),
+            diff_ignore_ws: false,
+        }
     }
 }
+
+/// Befehl des Editors für die Befehlspalette (#385): von außen undurchsichtig, ausgeführt mit
+/// [`super::App::editor_run_action`].
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct EditorAction(view::Cmd);
 
 /// Einstellungen des Syntax-Modus (#312) aus *Einstellungen → Editor* (`settings.json` → `editor`).
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -111,8 +140,6 @@ pub(crate) struct EditorUi {
     pub(super) find: find::FindBar,
     pub(super) goto: Option<find::GotoLine>,
     pub(super) close_ask: Option<CloseAsk>,
-    /// Fenster „Unterschied anzeigen“ (Datei auf der Platte gegen den Puffer) für dieses Dokument.
-    pub(super) diff_doc: Option<u64>,
     pub(super) drag: Option<TabDrag>,
     /// Kurzer Hinweis (z. B. „neu geladen“), unten in der Statusleiste.
     pub(super) hint: Option<(String, Instant)>,
@@ -136,6 +163,17 @@ pub(crate) struct EditorUi {
     pub(super) lang_search_focus: bool,
     /// Knöpfe Sprache / Modus der Statusleiste im letzten Bild (Tests).
     pub(super) status_rects: (Option<eframe::egui::Rect>, Option<eframe::egui::Rect>),
+    /// Vergleichs-Reiter (#385), Kennung → Zustand.
+    pub(super) diffs: BTreeMap<u64, diff_tab::DiffTab>,
+    next_diff: u64,
+    /// Offenes Fenster einer Änderungsmarke.
+    pub(super) mark_popup: Option<marks::MarkPopup>,
+    /// Fenster „Vergleichen mit Revision …“.
+    pub(super) rev_picker: Option<diff_menu::RevPicker>,
+    /// Wächst nach dem Speichern und wenn das Fenster den Fokus bekommt: Vergleiche und Marken lesen die Stände in
+    /// git und auf der Platte neu.
+    pub(super) generation: u64,
+    pub(super) was_active: bool,
 }
 
 impl EditorUi {
@@ -180,16 +218,30 @@ impl EditorUi {
             self.docs.insert(id, entry);
             self.next_doc = self.next_doc.max(id + 1);
         }
+        for sd in &s.diffs {
+            if let Some(dt) = diff_tab::DiffTab::from_saved(sd, &self.docs) {
+                let id = sd.id.max(1);
+                self.diffs.insert(id, dt);
+                self.next_diff = self.next_diff.max(id + 1);
+            }
+        }
         for g in s.groups {
-            let tabs: Vec<panes::Tab<View>> = g.tabs.into_iter().filter(|t| self.docs.contains_key(&t.doc)).map(|t| panes::Tab { doc: t.doc, view: View::restored(t.line, t.col, t.top) }).collect();
+            let tabs: Vec<panes::Tab<View>> = g
+                .tabs
+                .into_iter()
+                .filter(|t| self.docs.contains_key(&t.doc) && t.diff.is_none_or(|d| self.diffs.contains_key(&d)) && t.extra.is_none_or(|e| self.docs.contains_key(&e)))
+                .map(|t| panes::Tab { doc: t.doc, view: View::restored(t.line, t.col, t.top), diff: t.diff, extra: t.extra.filter(|_| t.diff.is_some()) })
+                .collect();
             self.panes.insert_group(g.id.max(1), panes::Group { tabs, active: g.active });
         }
         self.panes.layout = s.layout;
         self.panes.focused = s.focused;
         self.panes.normalize();
-        // Dokumente ohne Reiter wieder vergessen.
+        // Dokumente und Vergleiche ohne Reiter wieder vergessen.
         let shown = self.panes.docs();
         self.docs.retain(|id, _| shown.contains(id));
+        let diffs = self.panes.diffs();
+        self.diffs.retain(|id, _| diffs.contains(id));
     }
 
     /// Zustand für `editor-state.json` und ungespeicherte Puffer in den Hot-Exit-Speicher schreiben.
@@ -216,7 +268,7 @@ impl EditorUi {
                         .iter()
                         .map(|t| {
                             let (line, col) = self.docs.get(&t.doc).map(|d| t.view.cursor_linecol(d)).unwrap_or(t.view.restore_pos());
-                            persist::SavedTab { doc: t.doc, line, col, top: t.view.top_f32() }
+                            persist::SavedTab { doc: t.doc, line, col, top: t.view.top_f32(), diff: t.diff, extra: t.extra }
                         })
                         .collect(),
                 }
@@ -237,6 +289,7 @@ impl EditorUi {
             wrap: self.wrap,
             minimap: self.minimap,
             next_untitled: self.next_untitled,
+            diffs: self.diffs.iter().filter_map(|(id, d)| d.to_saved(*id)).collect(),
         };
         persist::save(dir, &s);
         doc::prune_hot(dir, &self.docs.values().filter_map(|d| d.hot_key()).collect::<Vec<_>>());
@@ -321,11 +374,210 @@ impl EditorUi {
             if let Some(mut d) = self.docs.remove(&doc) {
                 d.drop_hot(dir);
             }
-            if self.diff_doc == Some(doc) {
-                self.diff_doc = None;
+            if self.mark_popup.as_ref().is_some_and(|p| p.doc == doc) {
+                self.mark_popup = None;
             }
         }
     }
+
+    // ---- Vergleich (#385)
+
+    fn alloc_diff(&mut self) -> u64 {
+        let id = self.next_diff.max(self.diffs.keys().next_back().map(|k| k + 1).unwrap_or(1)).max(1);
+        self.next_diff = id + 1;
+        id
+    }
+
+    /// Vergleich als Reiter der fokussierten Gruppe öffnen (hinter dem aktiven Reiter). Ist derselbe Vergleich schon
+    /// offen, wird sein Reiter aktiv. Liefert die Kennung.
+    pub(super) fn open_diff(&mut self, dt: diff_tab::DiffTab) -> Option<u64> {
+        let (doc, extra) = dt.tab_docs()?;
+        if let Some(id) = self.diffs.iter().find(|(_, d)| d.same_sides(&dt)).map(|(id, _)| *id)
+            && let Some((g, i)) = self.panes.diff_tab(id)
+        {
+            self.panes.focused = g;
+            if let Some(grp) = self.panes.groups.get_mut(&g) {
+                grp.active = i;
+            }
+            self.want_focus = true;
+            return Some(id);
+        }
+        let id = self.alloc_diff();
+        self.diffs.insert(id, dt);
+        self.panes.open_diff(id, doc, extra);
+        self.want_focus = true;
+        Some(id)
+    }
+
+    /// Dokument zu einer Datei: schon offen, sonst neu (noch ohne Reiter – der Vergleich hält es offen).
+    fn doc_for_file(&mut self, path: &Path) -> u64 {
+        match self.doc_for_path(path) {
+            Some(id) => id,
+            None => {
+                let id = self.alloc_doc();
+                self.docs.insert(id, DocEntry::pending(Some(path.to_path_buf()), 0, None));
+                id
+            }
+        }
+    }
+
+    /// Dokument `doc` mit `target` vergleichen: das Ziel links, das Dokument rechts. `Ok(None)`, wenn erst ein Dialog
+    /// gebraucht wird (Datei, Revision – das erledigt der Aufrufer).
+    pub(super) fn compare(&mut self, doc: u64, target: diff_tab::Target, prefs: &EditorPrefs, lang: crate::state::Lang) -> Result<Option<u64>, String> {
+        use crate::editor_svc::git_base::Rev;
+        use diff_tab::{Side, Source, StaticSide, Target};
+        let path = self.docs.get(&doc).ok_or_else(|| lang.t("Kein solches Dokument", "No such document").to_string())?.path.clone();
+        let need = || path.clone().ok_or_else(|| lang.t("Die Datei ist noch nicht gespeichert – es gibt keinen gespeicherten Stand.", "The file has not been saved yet – there is no saved state.").to_string());
+        let git = |rev: Rev| -> Result<Side, String> { Ok(Side::Text(Box::new(StaticSide::new(Source::Git { path: need()?, rev })))) };
+        let left = match target {
+            Target::Disk => Side::Text(Box::new(StaticSide::new(Source::Disk(need()?)))),
+            Target::Head => git(Rev::Head)?,
+            Target::Index => git(Rev::Index)?,
+            Target::Rev(r) => {
+                crate::editor_svc::git_base::check_ref(&r)?;
+                git(Rev::Commit(r))?
+            }
+            Target::Clipboard => {
+                let t = crate::platform::clipboard::get_text().filter(|t| !t.is_empty()).ok_or_else(|| lang.t("Die Zwischenablage enthält keinen Text.", "The clipboard contains no text.").to_string())?;
+                Side::Text(Box::new(StaticSide::clipboard(&t)))
+            }
+            Target::File(p) => {
+                if !p.is_file() {
+                    return Err(format!("{}: {}", lang.t("Datei nicht gefunden", "File not found"), p.display()));
+                }
+                let id = self.doc_for_file(&p);
+                if id == doc {
+                    return Err(lang.t("Eine Datei mit sich selbst vergleichen? Wähle eine andere.", "Compare a file with itself? Choose another one.").to_string());
+                }
+                Side::Doc(id)
+            }
+            Target::Doc(o) if self.docs.contains_key(&o) && o != doc => Side::Doc(o),
+            Target::Doc(_) => return Err(lang.t("Kein solches Dokument", "No such document").to_string()),
+            Target::PickFile => return Ok(None),
+        };
+        Ok(self.open_diff(diff_tab::DiffTab::new(left, diff_tab::Side::Doc(doc), prefs)))
+    }
+
+    /// Zwei Dateien vergleichen (Ordnerbaum): `a` links, `b` rechts.
+    pub(super) fn compare_paths(&mut self, a: &Path, b: &Path, prefs: &EditorPrefs) -> Option<u64> {
+        if !a.is_file() || !b.is_file() {
+            return None;
+        }
+        let (x, y) = (self.doc_for_file(a), self.doc_for_file(b));
+        if x == y {
+            return None;
+        }
+        self.open_diff(diff_tab::DiffTab::new(diff_tab::Side::Doc(x), diff_tab::Side::Doc(y), prefs))
+    }
+
+    /// Vergleichs-Reiter schließen. Ein Dokument, das nur dort offen war und ungespeicherte Änderungen hat (z. B. durch
+    /// einen Blockpfeil), bleibt als normaler Reiter offen – nichts geht verloren.
+    pub(super) fn close_diff(&mut self, g: u64, diff: u64, dir: &Path) {
+        let Some(i) = self.panes.groups.get(&g).and_then(|grp| grp.find_diff(diff)) else { return };
+        let docs: Vec<u64> = {
+            let t = &self.panes.groups[&g].tabs[i];
+            std::iter::once(t.doc).chain(t.extra).collect()
+        };
+        self.panes.close_tab(g, i);
+        self.diffs.remove(&diff);
+        for d in docs {
+            if self.panes.shows(d) {
+                continue;
+            }
+            if self.docs.get(&d).is_some_and(|e| e.dirty()) {
+                if self.panes.groups.contains_key(&g) {
+                    self.panes.focused = g;
+                }
+                self.panes.open(d);
+            } else {
+                self.release_doc(d, dir);
+            }
+        }
+        self.want_focus = true;
+    }
+
+    /// Nach dem Teilen: ein kopierter Vergleichs-Reiter bekommt einen eigenen Vergleich (eigener Bildlauf).
+    pub(super) fn fix_split_diff(&mut self, g: u64) {
+        let Some(t) = self.panes.groups.get(&g).and_then(|grp| grp.active_tab()) else { return };
+        let Some(old) = t.diff else { return };
+        let Some(copy) = self.diffs.get(&old).map(|d| d.duplicate()) else { return };
+        let id = self.alloc_diff();
+        self.diffs.insert(id, copy);
+        if let Some(t) = self.panes.groups.get_mut(&g).and_then(|grp| grp.active_tab_mut()) {
+            t.diff = Some(id);
+        }
+    }
+
+    /// Seiten eines Vergleichs tauschen (der Reiter merkt sich die Dokumente in neuer Reihenfolge).
+    pub(super) fn swap_diff(&mut self, diff: u64) {
+        let Some(dt) = self.diffs.get_mut(&diff) else { return };
+        dt.swap();
+        let docs = dt.tab_docs();
+        if let (Some((g, i)), Some((doc, extra))) = (self.panes.diff_tab(diff), docs)
+            && let Some(t) = self.panes.groups.get_mut(&g).and_then(|grp| grp.tabs.get_mut(i))
+        {
+            t.doc = doc;
+            t.extra = extra;
+        }
+    }
+
+    /// Dokument im aktiven Reiter (im Vergleichs-Reiter: die fokussierte Seite, sonst die andere).
+    pub(super) fn active_file_doc(&self) -> Option<u64> {
+        let t = self.panes.groups.get(&self.panes.focused)?.active_tab()?;
+        match t.diff {
+            None => Some(t.doc),
+            Some(d) => self.diffs.get(&d).and_then(|x| x.focused_doc()),
+        }
+    }
+
+    /// Aktiver Vergleichs-Reiter der fokussierten Gruppe: (Gruppe, Kennung).
+    pub(super) fn active_diff(&self) -> Option<(u64, u64)> {
+        let g = self.panes.focused;
+        self.panes.groups.get(&g)?.active_tab()?.diff.map(|d| (g, d))
+    }
+
+    /// Änderungsmarke in Zeile `line` zurücksetzen: die alten Zeilen wiederherstellen (ein Rückgängig-Schritt). Liefert, ob
+    /// sich etwas geändert hat.
+    pub(super) fn revert_mark(&mut self, doc: u64, line: usize) -> bool {
+        let mut changed = false;
+        if let Some(d) = self.docs.get_mut(&doc)
+            && let Some(m) = d.marks.result.clone()
+            && let Some(k) = m.at(line)
+            && m.hunks[k].revertable
+            && let Some(text) = d.text()
+        {
+            changed = d.apply_user_edit(crate::editor::linemarks::revert_edit(&text, &m.hunks[k]));
+        }
+        self.mark_popup = None;
+        self.want_focus = true;
+        changed
+    }
+
+    /// Nächste bzw. vorige Änderung (F7 / Umschalt+F7): im Vergleichs-Reiter der nächste Block, im normalen Reiter die
+    /// nächste Änderungsmarke (der Cursor springt dorthin). Liefert einen Hinweis, wenn es nichts gibt.
+    pub(super) fn step_change(&mut self, forward: bool, prefs: &EditorPrefs, lang: crate::state::Lang) -> Option<String> {
+        if let Some((_, d)) = self.active_diff() {
+            if let Some(dt) = self.diffs.get_mut(&d) {
+                dt.step(forward);
+            }
+            return None;
+        }
+        let g = self.panes.focused;
+        let t = self.panes.groups.get(&g)?.active_tab()?;
+        let d = self.docs.get(&t.doc)?;
+        let Some(m) = d.marks.result.clone().filter(|_| prefs.markers) else {
+            return Some(lang.t("Keine Änderungsmarken – Ansicht → Änderungsmarken schaltet sie ein.", "No change markers – View → Change markers turns them on.").to_string());
+        };
+        let (line, _) = t.view.cursor_linecol(d);
+        let k = m.step(line, forward)?;
+        let target = m.hunks[k].lines.start;
+        self.goto_line(target, 0);
+        if let Some(p) = self.mark_popup.as_mut().filter(|p| p.group == g) {
+            p.line = target;
+        }
+        None
+    }
+
 
     /// Sprache eines Dokuments wählen (`None` = wieder erkennen; #312).
     pub(super) fn set_doc_language(&mut self, id: u64, lang: Option<String>) {
@@ -594,7 +846,7 @@ impl super::App {
             return false;
         }
         let mark = self.ed.begin_agent();
-        if let Some((g, i)) = self.ed.panes.tabs_of(id).first().copied() {
+        if let Some((g, i)) = self.ed.panes.file_tabs_of(id).first().copied().or_else(|| self.ed.panes.tabs_of(id).first().copied()) {
             self.ed.panes.focused = g;
             if let Some(grp) = self.ed.panes.groups.get_mut(&g) {
                 grp.active = i;
@@ -634,5 +886,55 @@ impl super::App {
             }
             doc::DiskReaction::Asked | doc::DiskReaction::Nothing => {}
         }
+    }
+}
+
+impl super::App {
+    /// Einträge der Befehlspalette im Editor-Reiter (#385): Vergleichen mit …, Änderungsmarken, nächste/vorige Änderung.
+    pub(crate) fn editor_palette_items(&self) -> Vec<(String, String, EditorAction)> {
+        let prefs = self.editor_prefs();
+        let (next, prev) = (self.binding_text("ed_next_change"), self.binding_text("ed_prev_change"));
+        diff_menu::palette_entries(&self.ed, &prefs, self.settings.language, &next, &prev).into_iter().map(|(l, h, c)| (l, h, EditorAction(c))).collect()
+    }
+
+    /// Befehl der Palette ausführen.
+    pub(crate) fn editor_run_action(&mut self, ctx: &eframe::egui::Context, a: EditorAction) {
+        self.editor_cmd(ctx, a.0);
+    }
+}
+
+// ------------------------------------------------------------------------------------------------ Bilder für die Doku
+
+#[cfg(feature = "readme-shots")]
+pub(crate) fn shot_target_disk() -> diff_tab::Target {
+    diff_tab::Target::Disk
+}
+
+#[cfg(feature = "readme-shots")]
+impl super::App {
+    /// Bilder `editor-diff`/`editor-gutter` (#385): ungespeicherte Änderungen in der Beispieldatei `src/orders.rs`.
+    pub(crate) fn editor_shot_edits(&mut self, id: u64) {
+        let Some(d) = self.ed.docs.get_mut(&id) else { return };
+        let Some(old) = d.text() else { return };
+        let new = old
+            .replace("//! Orders: create, find and cancel.", "//! Orders: create, find, cancel and refund.")
+            .replace("    pub total_cents: u64,
+    pub cancelled: bool,", "    pub total_cents: u64,
+    pub currency: String,
+    pub cancelled: bool,")
+            .replace("total_cents: 1999, cancelled: false", "total_cents: 2499, currency: \"EUR\".into(), cancelled: false")
+            .replace("    pub fn find_order(&self, id: u64) -> Option<&Order> {
+        self.orders.get(&id)
+    }
+
+", "");
+        d.apply_user_edit(crate::editor::compare::minimal_edit(&old, &new));
+    }
+
+    /// Fenster der Änderungsmarke unter Zeile `line` (ab 0) zeigen.
+    pub(crate) fn editor_shot_popup(&mut self, id: u64, line: usize) {
+        let g = self.ed.panes.focused;
+        let line = self.ed.docs.get(&id).and_then(|d| d.marks.result.clone()).and_then(|m| m.hunks.iter().map(|h| h.lines.start).min_by_key(|s| s.abs_diff(line))).unwrap_or(line);
+        self.ed.mark_popup = Some(marks::MarkPopup { group: g, doc: id, line });
     }
 }

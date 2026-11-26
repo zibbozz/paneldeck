@@ -2,6 +2,8 @@
 //! ändern). Fehlt das Feld (ältere Dateien), gelten die Standards; ein falscher Typ eines einzelnen Werts ergibt nur für
 //! diesen Wert den Standard, unbekannte Werte werden ignoriert. Die drei Agenten-Schalter sind immer aus, wenn sie nicht
 //! ausdrücklich `true` sind. Ab 3.1.0 (#312, Syntax-Modus): `default_mode`, `language_modes`, `language_map`.
+//! Ab 3.2.0 (#385, Vergleich und Änderungsmarken): `change_markers`, `marker_base`, `diff_context`,
+//! `diff_ignore_whitespace`, `diff_layout`.
 
 use crate::editor::syntax::{Mode, UserMap};
 use serde::{Deserialize, Serialize};
@@ -23,6 +25,50 @@ pub const MAX_EXCLUDE_LEN: usize = 260;
 pub const MAX_LANGUAGE_ENTRIES: usize = 500;
 pub const MAX_LANGUAGE_ID_LEN: usize = 100;
 pub const MAX_PATTERN_LEN: usize = 260;
+/// Standard und Grenzen der Kontextzeilen im Vergleich (#385).
+pub const DEFAULT_DIFF_CONTEXT: u32 = 3;
+pub const DIFF_CONTEXT_RANGE: (u32, u32) = (0, 50);
+
+/// Womit die Änderungsmarken vergleichen (#385): `git` = Index und HEAD zugleich (außerhalb eines Repositorys und für
+/// Dateien, die git nicht kennt, die Datei auf der Platte), `disk` = immer die gespeicherte Datei.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MarkerBase {
+    #[default]
+    Git,
+    Disk,
+}
+
+impl MarkerBase {
+    pub fn from_id(s: &str) -> Option<MarkerBase> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "git" => Some(MarkerBase::Git),
+            "disk" => Some(MarkerBase::Disk),
+            _ => None,
+        }
+    }
+}
+
+/// Darstellung des Vergleichs (#385): `auto` = nebeneinander, in schmalen Teilungen (unter ~700 px) untereinander.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DiffLayout {
+    #[default]
+    Auto,
+    Split,
+    Unified,
+}
+
+impl DiffLayout {
+    pub fn from_id(s: &str) -> Option<DiffLayout> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "auto" => Some(DiffLayout::Auto),
+            "split" => Some(DiffLayout::Split),
+            "unified" => Some(DiffLayout::Unified),
+            _ => None,
+        }
+    }
+}
 
 /// Einstellungen des Editors (`settings.json` → `editor`).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -53,6 +99,16 @@ pub struct EditorSettings {
     /// Eigene Zuordnungen (Muster → Sprach-Id), vor der eingebauten Erkennung: Dateiname (`Jenkinsfile`) oder Endung
     /// (`*.tpl`, `.tpl`).
     pub language_map: BTreeMap<String, String>,
+    /// Änderungsmarken am linken Rand (#385), Standard aus.
+    pub change_markers: bool,
+    /// Grundlage der Änderungsmarken.
+    pub marker_base: MarkerBase,
+    /// Kontextzeilen um Änderungen im Vergleich (Rest eingeklappt).
+    pub diff_context: u32,
+    /// Vorgabe für *Leerraum ignorieren* im Vergleich (Standard aus).
+    pub diff_ignore_whitespace: bool,
+    /// Vorgabe der Darstellung im Vergleich.
+    pub diff_layout: DiffLayout,
 }
 
 impl Default for EditorSettings {
@@ -70,6 +126,11 @@ impl Default for EditorSettings {
             default_mode: Mode::Text,
             language_modes: BTreeMap::new(),
             language_map: BTreeMap::new(),
+            change_markers: false,
+            marker_base: MarkerBase::Git,
+            diff_context: DEFAULT_DIFF_CONTEXT,
+            diff_ignore_whitespace: false,
+            diff_layout: DiffLayout::Auto,
         }
     }
 }
@@ -134,6 +195,11 @@ impl EditorSettings {
                 .and_then(Value::as_object)
                 .map(|m| m.iter().filter_map(|(k, v)| Some((clean_pattern(k)?, clean_id(v.as_str()?)?))).take(MAX_LANGUAGE_ENTRIES).collect())
                 .unwrap_or_default(),
+            change_markers: flag("change_markers"),
+            marker_base: o.get("marker_base").and_then(Value::as_str).and_then(MarkerBase::from_id).unwrap_or_default(),
+            diff_context: num("diff_context", d.diff_context, DIFF_CONTEXT_RANGE),
+            diff_ignore_whitespace: flag("diff_ignore_whitespace"),
+            diff_layout: o.get("diff_layout").and_then(Value::as_str).and_then(DiffLayout::from_id).unwrap_or_default(),
         }
     }
 
@@ -221,7 +287,12 @@ mod tests {
         let v = serde_json::to_value(&d).unwrap();
         let mut keys: Vec<&str> = v.as_object().unwrap().keys().map(String::as_str).collect();
         keys.sort();
-        assert_eq!(keys, ["agent_edit", "agent_open", "agent_save", "autosave", "autosave_delay_ms", "default_mode", "font", "language_map", "language_modes", "large_file_mb", "search_exclude", "search_include_ignored"]);
+        assert_eq!(
+            keys,
+            ["agent_edit", "agent_open", "agent_save", "autosave", "autosave_delay_ms", "change_markers", "default_mode", "diff_context", "diff_ignore_whitespace", "diff_layout", "font", "language_map", "language_modes", "large_file_mb", "marker_base", "search_exclude", "search_include_ignored"]
+        );
+        assert!(!d.change_markers, "Änderungsmarken sind standardmäßig aus (#385)");
+        assert_eq!((v["marker_base"].as_str(), v["diff_layout"].as_str(), d.diff_context), (Some("git"), Some("auto"), 3));
         assert_eq!(v["default_mode"], "text", "neue Dateien: Text");
         assert!(d.language_modes.is_empty() && d.language_map.is_empty());
     }
@@ -254,6 +325,19 @@ mod tests {
         let v = serde_json::to_value(&s).unwrap();
         assert_eq!(v["language_modes"]["python"], "syntax");
         assert_eq!(v["language_map"]["*.tpl"], "html");
+    }
+
+    #[test]
+    fn diff_settings_are_lenient_and_old_files_load() {
+        let old = EditorSettings::from_value(&json!({"font": "", "default_mode": "text"}));
+        assert!(!old.change_markers && !old.diff_ignore_whitespace);
+        assert_eq!((old.marker_base, old.diff_layout, old.diff_context), (MarkerBase::Git, DiffLayout::Auto, DEFAULT_DIFF_CONTEXT));
+        let s = EditorSettings::from_value(&json!({"change_markers": true, "marker_base": "DISK", "diff_context": 999, "diff_ignore_whitespace": true, "diff_layout": "unified"}));
+        assert!(s.change_markers && s.diff_ignore_whitespace);
+        assert_eq!((s.marker_base, s.diff_layout, s.diff_context), (MarkerBase::Disk, DiffLayout::Unified, DIFF_CONTEXT_RANGE.1));
+        let bad = EditorSettings::from_value(&json!({"change_markers": "yes", "marker_base": "head", "diff_context": "x", "diff_layout": 3}));
+        assert_eq!(bad, EditorSettings::default());
+        assert_eq!(EditorSettings::from_value(&serde_json::to_value(&s).unwrap()), s);
     }
 
     #[test]

@@ -177,6 +177,17 @@ Die Namen gehören zur öffentlichen Schnittstelle (sie kommen nur dazu, werden 
 | `code_heading` | Editor: Syntaxfarben | Code: Überschrift, Abschnitt | `@code_function` |
 | `code_variable` | Editor: Syntaxfarben | Code: Variable, Parameter | `@code_tag` |
 | `code_invalid` | Editor: Syntaxfarben | Code: ungültig | `@error` |
+| `diff_add_bg` | Editor: Vergleich und Änderungsmarken | Vergleich: Hintergrund hinzugefügter Zeilen | `@diff_add/15` |
+| `diff_remove_bg` | Editor: Vergleich und Änderungsmarken | Vergleich: Hintergrund entfernter Zeilen | `@diff_remove/15` |
+| `diff_add_word` | Editor: Vergleich und Änderungsmarken | Vergleich: hinzugefügte Wörter in der Zeile | `@diff_add/40` |
+| `diff_remove_word` | Editor: Vergleich und Änderungsmarken | Vergleich: entfernte Wörter in der Zeile | `@diff_remove/40` |
+| `diff_filler` | Editor: Vergleich und Änderungsmarken | Vergleich: Schraffur der Füllzeilen | `@text_dim/35` |
+| `marker_added` | Editor: Vergleich und Änderungsmarken | Änderungsmarke: hinzugefügt (nicht gestagt, ungespeichert) | `@success` |
+| `marker_modified` | Editor: Vergleich und Änderungsmarken | Änderungsmarke: geändert (nicht gestagt, ungespeichert) | `@warning` |
+| `marker_deleted` | Editor: Vergleich und Änderungsmarken | Änderungsmarke: entfernt (nicht gestagt, ungespeichert) | `@error` |
+| `marker_staged_added` | Editor: Vergleich und Änderungsmarken | Änderungsmarke: hinzugefügt (gestagt) | `#56b6c2` (dunkel) / `#0b7285` (hell) |
+| `marker_staged_modified` | Editor: Vergleich und Änderungsmarken | Änderungsmarke: geändert (gestagt) | `#61afef` (dunkel) / `#0969da` (hell) |
+| `marker_staged_deleted` | Editor: Vergleich und Änderungsmarken | Änderungsmarke: entfernt (gestagt) | `#c678dd` (dunkel) / `#8250df` (hell) |
 
 Terminalfarben für Verweise: `fg`, `bg`, `cursor`, `selection`, `ansi0` … `ansi15` (in der Datei: die Felder `fg`, `bg`, `cursor`, `selection` und die Liste `ansi`).
 

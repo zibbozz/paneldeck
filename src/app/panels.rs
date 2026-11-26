@@ -785,10 +785,13 @@ impl App {
     pub(super) fn palette_items(&self) -> Vec<(String, String, Action)> {
         let lang = self.settings.language;
         let f = self.focused;
-        let mut v: Vec<(String, String, Action)> = vec![
+        // Im Editor-Reiter zuerst die Befehle des Editors (#385: Vergleichen, Änderungsmarken, F7).
+        let editor: Vec<(String, String, Action)> = if self.mode == super::titlebar::Mode::Editor && self.wins.cur == 0 { self.editor_palette_items().into_iter().map(|(l, h, a)| (l, h, Action::Editor(a))).collect() } else { Vec::new() };
+        let mut v: Vec<(String, String, Action)> = editor;
+        v.extend([
             (lang.t("Neue Sitzung (Standard-Shell)", "New session (default shell)").into(), self.binding_text("new"), Action::NewQuick),
             (lang.t("Neue Sitzung …", "New session …").into(), String::new(), Action::NewDialog(false)),
-        ];
+        ]);
         if self.settings.claude_mode {
             v.push((lang.t("Neue Claude-Sitzung …", "New Claude session …").into(), String::new(), Action::NewDialog(true)));
         }

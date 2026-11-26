@@ -312,7 +312,10 @@ fn whats_new_lists_the_steps_since_a_version() {
     // Der Editor (#54) kam mit 3.0.0: die Tour „Was ist neu“ für 2.x zeigt ihn, mit dem Schritt der kurzen Tour zuerst.
     let editor = ids("2.7.0", "3.0.0");
     assert!(editor.contains(&"basics.editor") && editor.contains(&"editor.agents") && editor.contains(&"editor.search"), "{editor:?}");
-    assert!(steps::tour("editor").is_some_and(|t| t.steps.iter().all(|s| s.since == "3.0.0")));
+    assert!(steps::tour("editor").is_some_and(|t| t.steps.iter().all(|s| s.since == "3.0.0" || s.since == "3.2.0")));
+    // Vergleich und Änderungsmarken (#385) kamen mit 3.2.0.
+    let diff = ids("3.1.0", "3.2.0");
+    assert!(diff.contains(&"editor.diff") && diff.contains(&"editor.markers"), "{diff:?}");
 }
 
 /// Die Schritte im Editor arbeiten in einer eigenen Beispieldatei der Tour im Temp-Ordner, nie in einer des Nutzers.

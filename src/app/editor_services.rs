@@ -191,6 +191,8 @@ impl App {
         ui.add_space(S2);
         self.editor_languages_ui(ui);
         ui.add_space(S2);
+        self.editor_compare_ui(ui);
+        ui.add_space(S2);
         let top = ui.cursor().min.y;
         ui.label(RichText::new(lang.t("Suche in Dateien", "Search in files")).strong());
         row(
@@ -337,6 +339,69 @@ impl App {
         });
     }
 
+    /// Abschnitt „Vergleich und Änderungsmarken“ (#385): Marken am Rand (Standard aus) und ihre Grundlage, Vorgaben
+    /// neuer Vergleichs-Reiter.
+    fn editor_compare_ui(&mut self, ui: &mut Ui) {
+        use crate::editor_svc::settings::{DiffLayout, MarkerBase, DIFF_CONTEXT_RANGE};
+        let lang = self.settings.language;
+        ui.label(RichText::new(lang.t("Vergleich und Änderungsmarken", "Comparison and change markers")).strong());
+        let (next, prev) = (self.binding_text("ed_next_change"), self.binding_text("ed_prev_change"));
+        let ed = &mut self.settings.editor;
+        row(
+            ui,
+            lang.t("Änderungsmarken am Rand", "Change markers in the gutter"),
+            lang.t("Hinzugefügte, geänderte und entfernte Zeilen; nicht in großen Dateien", "Added, modified and removed lines; not in large files"),
+            |ui| {
+                style::toggle(ui, &mut ed.change_markers);
+            },
+        );
+        row(
+            ui,
+            lang.t("Grundlage der Marken", "Markers compare with"),
+            lang.t("git: nicht gestagt und gestagt in eigenen Farben; außerhalb eines Repositorys die gespeicherte Datei", "git: unstaged and staged in their own colours; outside a repository the saved file"),
+            |ui| {
+                let label = |b: MarkerBase| match b {
+                    MarkerBase::Git => lang.t("git (Index und HEAD)", "git (index and HEAD)"),
+                    MarkerBase::Disk => lang.t("Gespeicherte Datei", "Saved file"),
+                };
+                ui.add_enabled_ui(ed.change_markers, |ui| {
+                    egui::ComboBox::from_id_salt("editor_marker_base").selected_text(label(ed.marker_base)).show_ui(ui, |ui| {
+                        for b in [MarkerBase::Git, MarkerBase::Disk] {
+                            ui.selectable_value(&mut ed.marker_base, b, label(b));
+                        }
+                    });
+                });
+            },
+        );
+        row(ui, lang.t("Darstellung im Vergleich", "Comparison layout"), lang.t("Automatisch: nebeneinander, unter 700 px untereinander", "Automatic: side by side, unified below 700 px"), |ui| {
+            let label = |l: DiffLayout| match l {
+                DiffLayout::Auto => lang.t("Automatisch", "Automatic"),
+                DiffLayout::Split => lang.t("Nebeneinander", "Side by side"),
+                DiffLayout::Unified => lang.t("Untereinander", "Unified"),
+            };
+            egui::ComboBox::from_id_salt("editor_diff_layout").selected_text(label(ed.diff_layout)).show_ui(ui, |ui| {
+                for l in [DiffLayout::Auto, DiffLayout::Split, DiffLayout::Unified] {
+                    ui.selectable_value(&mut ed.diff_layout, l, label(l));
+                }
+            });
+        });
+        row(ui, lang.t("Kontextzeilen", "Context lines"), lang.t("Unveränderte Zeilen um jede Änderung, der Rest ist eingeklappt", "Unchanged lines around each change, the rest is collapsed"), |ui| {
+            ui.add(egui::DragValue::new(&mut ed.diff_context).range(DIFF_CONTEXT_RANGE.0..=DIFF_CONTEXT_RANGE.1).speed(0.2));
+        });
+        row(ui, lang.t("Leerraum ignorieren", "Ignore whitespace"), lang.t("Vorgabe für neue Vergleiche (umschaltbar im Vergleich)", "Default for new comparisons (switchable in the comparison)"), |ui| {
+            style::toggle(ui, &mut ed.diff_ignore_whitespace);
+        });
+        ui.label(
+            RichText::new(if lang == Lang::De {
+                format!("Nächste/vorige Änderung: {next} / {prev} (Einstellungen → Tastenkürzel). Vergleichen: Kontextmenü eines Reiters oder einer Datei im Ordnerbaum, Befehlspalette.")
+            } else {
+                format!("Next/previous change: {next} / {prev} (Settings → Shortcuts). Compare: context menu of a tab or of a file in the folder tree, command palette.")
+            })
+            .small()
+            .color(style::dim(ui)),
+        );
+    }
+
     /// Abschnitt „Agenten“ der Editor-Einstellungen: die drei Schalter (Standard aus, nur bei Stufe Steuern wirksam).
     fn editor_agents_ui(&mut self, ui: &mut Ui) {
         let lang = self.settings.language;
@@ -436,6 +501,11 @@ impl App {
             large_file_bytes: e.large_file_bytes(),
             autosave: e.autosave.then(|| Duration::from_millis(e.autosave_delay_ms as u64)),
             syntax: super::editor_ui::SyntaxPrefs::from_settings(e),
+            markers: e.change_markers,
+            marker_base: e.marker_base,
+            diff_context: e.diff_context as usize,
+            diff_layout: e.diff_layout,
+            diff_ignore_ws: e.diff_ignore_whitespace,
         }
     }
 
@@ -556,6 +626,32 @@ impl EditorHost for BridgeHost<'_> {
 
     fn show(&mut self, doc: u64) {
         self.app.editor_focus(doc);
+    }
+
+    fn base_text(&mut self, doc: u64, base: &str) -> Result<Option<String>, String> {
+        use crate::editor_svc::git_base::{self, Blob, Rev};
+        let info = self.app.editor_list().into_iter().find(|d| d.id == doc).ok_or_else(|| state::t("Das Dokument ist nicht mehr offen.", "The document is no longer open.").to_string())?;
+        let path = info.path.ok_or_else(|| state::t("Ein unbenannter Tab hat keinen gespeicherten Stand.", "An untitled tab has no saved state.").to_string())?;
+        let enc = crate::editor::TextEncoding::from_id(&info.encoding);
+        let max = self.app.settings.editor.large_file_bytes();
+        let decode = |b: &[u8], enc| crate::editor::encoding::decode(b, enc).text;
+        match base {
+            "disk" => match std::fs::metadata(&path) {
+                Ok(m) if m.len() > max => Err(state::t("Die Datei auf der Platte ist zu groß.", "The file on disk is too large.").to_string()),
+                Ok(_) => std::fs::read(&path).map(|b| Some(decode(&b, enc))).map_err(|e| e.to_string()),
+                Err(_) => Ok(None),
+            },
+            "head" | "index" => {
+                let repo = git_base::locate(&path).ok_or_else(|| state::t("Die Datei liegt in keinem git-Repository (oder git fehlt).", "The file is not in a git repository (or git is missing).").to_string())?;
+                let rev = if base == "head" { Rev::Head } else { Rev::Index };
+                match git_base::blobs(&repo, &[rev], max)?.into_iter().next() {
+                    Some(Blob::Bytes(b)) => Ok(Some(decode(&b, None))),
+                    Some(Blob::TooLarge(_)) => Err(state::t("Der Stand in git ist zu groß.", "The state in git is too large.").to_string()),
+                    _ => Ok(None),
+                }
+            }
+            _ => Err("disk, head, index".into()),
+        }
     }
 
     fn save(&mut self, doc: u64) -> Result<(), String> {
