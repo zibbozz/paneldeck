@@ -165,7 +165,7 @@ enum Home {
 fn home(s: Spot) -> Home {
     use Spot::*;
     match s {
-        TabEditor | EditorSearchSettings | EditorAgentSwitches => Home::Settings(super::super::editor_services::SETTINGS_TAB),
+        TabEditor | EditorSearchSettings | EditorAgentSwitches | EditorSaveActions => Home::Settings(super::super::editor_services::SETTINGS_TAB),
         EditorTree => Home::Editor(false),
         EditorTabBar | EditorSplit | EditorText | EditorFind | EditorStatus | EditorMinimap | EditorSearchFiles => Home::Editor(true),
         TitlebarEditor => Home::Hub,
@@ -312,7 +312,8 @@ fn whats_new_lists_the_steps_since_a_version() {
     // Der Editor (#54) kam mit 3.0.0: die Tour „Was ist neu“ für 2.x zeigt ihn, mit dem Schritt der kurzen Tour zuerst.
     let editor = ids("2.7.0", "3.0.0");
     assert!(editor.contains(&"basics.editor") && editor.contains(&"editor.agents") && editor.contains(&"editor.search"), "{editor:?}");
-    assert!(steps::tour("editor").is_some_and(|t| t.steps.iter().all(|s| s.since == "3.0.0")));
+    // Ab 3.2.0 kommen Schritte dazu (z. B. Aktionen beim Speichern, #383); die übrigen der Tour sind von 3.0.0.
+    assert!(steps::tour("editor").is_some_and(|t| t.steps.iter().all(|s| s.since == "3.0.0" || s.since == "3.2.0")));
 }
 
 /// Die Schritte im Editor arbeiten in einer eigenen Beispieldatei der Tour im Temp-Ordner, nie in einer des Nutzers.

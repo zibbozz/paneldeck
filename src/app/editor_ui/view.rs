@@ -75,11 +75,14 @@ impl super::super::App {
         for p in dropped {
             cmds.push(if p.is_dir() { Cmd::SetRoot(p) } else { Cmd::OpenPath(p, false) });
         }
+        // Aktionen beim Speichern (#383): Stand für Statusleiste/Reiter, danach Klicks daraus.
+        self.sa_publish_view();
         draw(ctx, &mut self.ed, &theme, &prefs, lang, &mut cmds);
         self.editor_dialogs(ctx, &mut cmds);
         for c in cmds {
             self.editor_cmd(ctx, c);
         }
+        self.sa_take_clicks();
         if let Some((_, t)) = &self.ed.hint {
             if t.elapsed() > Duration::from_secs(4) {
                 self.ed.hint = None;
@@ -97,6 +100,9 @@ impl super::super::App {
         let g = self.ed.panes.focused;
         let doc = self.ed.active_doc();
         let binds: Vec<(&str, Option<(Modifiers, Key)>)> = vec![("split_r", self.binding("split_r")), ("split_d", self.binding("split_d"))];
+        // *Ohne Aktionen speichern* (#383): eigenes Kürzel, standardmäßig keins.
+        let no_actions = self.binding("save_no_actions");
+        let mut save_plain = false;
         let ctrl = Modifiers::CTRL;
         let cs = Modifiers::CTRL | Modifiers::SHIFT;
         let ca = Modifiers::CTRL | Modifiers::ALT;
@@ -108,6 +114,12 @@ impl super::super::App {
                 {
                     cmds.push(Cmd::Split(g, if *id == "split_r" { Dir::Horizontal } else { Dir::Vertical }));
                 }
+            }
+            if doc.is_some()
+                && let Some((m, k)) = no_actions
+                && super::super::consume_key_exact(i, m, k, false)
+            {
+                save_plain = true;
             }
             let mut take = |m: Modifiers, k: Key| super::super::consume_key_exact(i, m, k, false);
             if let Some(d) = doc {
@@ -163,6 +175,9 @@ impl super::super::App {
                 }
             }
         });
+        if save_plain && let Some(d) = doc {
+            self.sa_save_without(d);
+        }
         if let Some(n) = nav
             && let Some(t) = super::super::focus_target(&self.ed.group_rects, g, n)
         {
@@ -240,40 +255,20 @@ impl super::super::App {
                 let untitled = self.ed.docs.get(&id).is_some_and(|d| d.path.is_none());
                 if untitled {
                     self.editor_cmd(ctx, Cmd::SaveAs(id));
-                } else if let Some(d) = self.ed.docs.get_mut(&id) {
-                    match d.save(None, lang) {
+                } else if self.ed.docs.contains_key(&id) {
+                    match self.editor_save_with(id, None, crate::save_actions::SaveOrigin::User) {
                         Ok(()) => {
-                            d.drop_hot(&dir);
-                            let t = d.title(lang);
-                            self.ed.set_hint(format!("{t}: {}", lang.t("gespeichert", "saved")));
+                            if let Some(d) = self.ed.docs.get_mut(&id) {
+                                d.drop_hot(&dir);
+                                let t = d.title(lang);
+                                self.ed.set_hint(format!("{t}: {}", lang.t("gespeichert", "saved")));
+                            }
                         }
                         Err(e) => self.notify_text(e),
                     }
                 }
             }
-            Cmd::SaveAs(id) => {
-                let Some(d) = self.ed.docs.get(&id) else { return };
-                let name = d.path.as_ref().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| format!("{}.txt", d.title(lang)));
-                let start = d.path.as_ref().and_then(|p| p.parent()).map(|p| p.to_path_buf()).or_else(|| self.ed.root.clone());
-                if let Some(p) = crate::platform::notify::save_any(start.as_deref(), &name) {
-                    let other = self.ed.doc_for_path(&p).filter(|o| *o != id);
-                    if let Some(d) = self.ed.docs.get_mut(&id) {
-                        match d.save(Some(p.clone()), lang) {
-                            Ok(()) => {
-                                d.drop_hot(&dir);
-                                super::persist::push_recent(&mut self.ed.recent_files, &p.to_string_lossy());
-                                if other.is_some() {
-                                    // Dieselbe Datei war noch in einem anderen Reiter offen: der lädt sie neu.
-                                    if let Some(o) = other.and_then(|o| self.ed.docs.get_mut(&o)) {
-                                        let _ = o.reload_from_disk(&prefs);
-                                    }
-                                }
-                            }
-                            Err(e) => self.notify_text(e),
-                        }
-                    }
-                }
-            }
+            Cmd::SaveAs(id) => self.editor_save_as_dialog(id),
             Cmd::Reload(id) => {
                 if let Some(d) = self.ed.docs.get_mut(&id) {
                     let _ = d.reload_from_disk(&prefs);
@@ -338,6 +333,34 @@ impl super::super::App {
             Cmd::SetDefaultMode(id, m) => {
                 self.settings.editor.default_mode = m;
                 self.ed.set_doc_mode(id, None);
+            }
+        }
+    }
+
+    /// *Speichern unter …* (Dateidialog) für ein Dokument; Auslöser „Speichern unter“ der Aktionen beim Speichern.
+    pub(crate) fn editor_save_as_dialog(&mut self, id: u64) {
+        let lang = self.settings.language;
+        let prefs = self.editor_prefs();
+        let dir = self.dir.clone();
+        let Some(d) = self.ed.docs.get(&id) else { return };
+        let name = d.path.as_ref().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| format!("{}.txt", d.title(lang)));
+        let start = d.path.as_ref().and_then(|p| p.parent()).map(|p| p.to_path_buf()).or_else(|| self.ed.root.clone());
+        if let Some(p) = crate::platform::notify::save_any(start.as_deref(), &name) {
+            let other = self.ed.doc_for_path(&p).filter(|o| *o != id);
+            match self.editor_save_with(id, Some(p.clone()), crate::save_actions::SaveOrigin::SaveAs) {
+                Ok(()) => {
+                    if let Some(d) = self.ed.docs.get_mut(&id) {
+                        d.drop_hot(&dir);
+                    }
+                    super::persist::push_recent(&mut self.ed.recent_files, &p.to_string_lossy());
+                    if other.is_some() {
+                        // Dieselbe Datei war noch in einem anderen Reiter offen: der lädt sie neu.
+                        if let Some(o) = other.and_then(|o| self.ed.docs.get_mut(&o)) {
+                            let _ = o.reload_from_disk(&prefs);
+                        }
+                    }
+                }
+                Err(e) => self.notify_text(e),
             }
         }
     }
@@ -413,8 +436,8 @@ impl super::super::App {
                             self.ed.close_ask = Some(ask);
                             self.editor_close_step(&dir);
                         }
-                    } else if let Some(d) = self.ed.docs.get_mut(&doc) {
-                        match d.save(None, lang) {
+                    } else if self.ed.docs.contains_key(&doc) {
+                        match self.editor_save_with(doc, None, crate::save_actions::SaveOrigin::Close) {
                             Ok(()) => self.editor_close_step(&dir),
                             Err(e) => {
                                 self.ed.close_ask = None;
@@ -915,6 +938,8 @@ fn tab_bar(ui: &mut Ui, g: u64, bar: Rect, ed: &mut EditorUi, lang: Lang, cmds: 
             None => ("?".into(), false, false, None),
         })
         .collect();
+    // Aktionen beim Speichern (#383): roter Punkt, bis ein Lauf für die Datei wieder klappt.
+    let failed: Vec<bool> = titles.iter().map(|(.., p)| p.as_ref().is_some_and(|p| ed.on_save.failed.contains(&crate::save_actions::path_key(p)))).collect();
     let widths: Vec<f32> = titles.iter().map(|(t, ..)| (ui.painter().layout_no_wrap(t.clone(), font.clone(), Color32::PLACEHOLDER).size().x + 44.0).clamp(TAB_MIN_W, TAB_MAX_W)).collect();
     let total: f32 = widths.iter().sum();
     // Bildlauf der Leiste, wenn die Reiter nicht passen (Mausrad über der Leiste); der aktive bleibt sichtbar.
@@ -961,7 +986,11 @@ fn tab_bar(ui: &mut Ui, g: u64, bar: Rect, ed: &mut EditorUi, lang: Lang, cmds: 
         painter.line_segment([r.right_top(), r.right_bottom()], Stroke::new(1.0_f32, u.border.gamma_multiply(0.6)));
         let tc = if active { ui.visuals().strong_text_color() } else { ui.visuals().text_color().gamma_multiply(0.8) };
         let tc = if *agent { style::mix(tc, u.info, 0.6) } else { tc };
-        let text_r = Rect::from_min_max(Pos2::new(r.left() + 10.0, r.top()), Pos2::new(r.right() - 26.0, r.bottom()));
+        let lead = if failed[i] { 10.0 } else { 0.0 };
+        if failed[i] {
+            painter.circle_filled(Pos2::new(r.left() + 9.0, r.center().y), 3.5, u.danger);
+        }
+        let text_r = Rect::from_min_max(Pos2::new(r.left() + 10.0 + lead, r.top()), Pos2::new(r.right() - 26.0, r.bottom()));
         let gal = painter.layout_no_wrap(title.clone(), font.clone(), tc);
         painter.with_clip_rect(text_r.intersect(tabs_r)).galley(Pos2::new(text_r.left(), r.center().y - gal.size().y / 2.0), gal, tc);
         // Rechts: Schließen beim Überfahren, sonst Punkt bei ungespeicherten Änderungen
@@ -979,7 +1008,9 @@ fn tab_bar(ui: &mut Ui, g: u64, bar: Rect, ed: &mut EditorUi, lang: Lang, cmds: 
         } else if *dirty {
             painter.circle_filled(close_r.center(), 3.5, tc);
         }
-        resp.clone().on_hover_text(tab_tooltip(path.as_deref(), *dirty, *agent, lang));
+        let tip = tab_tooltip(path.as_deref(), *dirty, *agent, lang);
+        let tip = if failed[i] { format!("{tip}\n{}", lang.t("Aktionen beim Speichern: letzter Lauf mit Fehler", "Actions on save: last run had an error")) } else { tip };
+        resp.clone().on_hover_text(tip);
         if resp.hovered() {
             ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
         }
@@ -1175,6 +1206,14 @@ fn tree_panel(ui: &mut Ui, ed: &mut EditorUi, lang: Lang, cmds: &mut Vec<Cmd>) {
                         TreeOut::OpenSide(p) => Cmd::OpenPath(p, true),
                         TreeOut::CopyPath(p) => Cmd::CopyPath(p),
                         TreeOut::SetRoot(p) => Cmd::SetRoot(p),
+                        TreeOut::RulesFor(p) => {
+                            ed.on_save.clicked = Some(super::super::save_actions_ui::OnSaveClick::RulesFor(p));
+                            continue;
+                        }
+                        TreeOut::NewRule(p, dir) => {
+                            ed.on_save.clicked = Some(super::super::save_actions_ui::OnSaveClick::NewRule(p, dir));
+                            continue;
+                        }
                     });
                 }
             });
@@ -1278,6 +1317,7 @@ fn status_bar(ui: &mut Ui, ed: &mut EditorUi, lang: Lang, prefs: &super::EditorP
             ui.add_space(style::S3);
             ui.label(RichText::new(t).small().color(style::ui().info));
         }
+        on_save_status(ui, ed, doc, lang);
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             let (Some(id), Some((s, ..)), Some(syn)) = (doc, info, syn) else { return };
             language_picker(ui, ed, id, &syn, lang, cmds);
@@ -1304,6 +1344,45 @@ fn status_bar(ui: &mut Ui, ed: &mut EditorUi, lang: Lang, prefs: &super::EditorP
             ui.label(RichText::new(&s.indent).small()).on_hover_text(lang.t("Einrückung (erkannt bzw. aus .editorconfig)", "Indentation (detected or from .editorconfig)"));
         });
     });
+}
+
+/// Aktionen beim Speichern in der Statusleiste (#383): „⟳ 2 Aktionen“ während Läufen, rot bei einem Fehler der aktiven
+/// Datei (Klick öffnet die Ausgabe), „✓“ nach einem erfolgreichen Lauf, „⏸“ bei Pause (Klick setzt fort).
+fn on_save_status(ui: &mut Ui, ed: &mut EditorUi, doc: Option<u64>, lang: Lang) {
+    use super::super::save_actions_ui::OnSaveClick;
+    let v = &ed.on_save;
+    let key = doc.and_then(|d| ed.docs.get(&d)).and_then(|d| d.path.as_ref()).map(|p| crate::save_actions::path_key(p));
+    let last = key.as_ref().and_then(|k| v.last.get(k)).copied();
+    let mut click = None;
+    let u = style::ui();
+    if v.paused {
+        ui.add_space(style::S3);
+        let b = ui.add(egui::Button::new(RichText::new(lang.t("⏸ Aktionen pausiert", "⏸ actions paused")).small().color(u.warning)).frame(false));
+        if b.on_hover_text(lang.t("Aktionen beim Speichern sind bis zum Neustart pausiert – klicken zum Fortsetzen", "Actions on save are paused until restart – click to resume")).clicked() {
+            click = Some(OnSaveClick::Resume);
+        }
+    }
+    if v.running > 0 {
+        ui.add_space(style::S3);
+        let t = format!("⟳ {} {}", v.running, if v.running == 1 { lang.t("Aktion", "action") } else { lang.t("Aktionen", "actions") });
+        let b = ui.add(egui::Button::new(RichText::new(t).small().color(u.info)).frame(false));
+        if b.on_hover_text(lang.t("Aktionen beim Speichern laufen – klicken für die Ausgabe", "Actions on save are running – click for the output")).clicked() {
+            click = Some(OnSaveClick::Output);
+        }
+    } else if let Some(failed) = last {
+        ui.add_space(style::S3);
+        let (t, c, tip) = if failed {
+            (lang.t("✗ Aktionen beim Speichern", "✗ actions on save"), u.danger, lang.t("Der letzte Lauf hatte einen Fehler – klicken für die Ausgabe", "The last run had an error – click for the output"))
+        } else {
+            ("✓", style::dim(ui), lang.t("Aktionen beim Speichern erfolgreich – klicken für die Ausgabe", "Actions on save succeeded – click for the output"))
+        };
+        if ui.add(egui::Button::new(RichText::new(t).small().color(c)).frame(false)).on_hover_text(tip).clicked() {
+            click = Some(OnSaveClick::Output);
+        }
+    }
+    if click.is_some() {
+        ed.on_save.clicked = click;
+    }
 }
 
 /// Anzeigename einer Sprache (reiner Text in der Sprache der Oberfläche).

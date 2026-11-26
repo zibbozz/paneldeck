@@ -100,6 +100,8 @@ spots! {
     TabEditor = "settings.tab.editor",
     EditorSearchSettings = "settings.editor.search",
     EditorAgentSwitches = "settings.editor.agents",
+    // Aktionen beim Speichern (#383, 3.2.0)
+    EditorSaveActions = "settings.editor.save_actions",
 }
 
 /// Wo ein Ziel in diesem Bild lag: ganzes Rechteck und der sichtbare (nicht weggeschnittene) Teil.

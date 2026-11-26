@@ -18,6 +18,10 @@ pub enum TreeOut {
     CopyPath(PathBuf),
     /// Ordner als neue Wurzel.
     SetRoot(PathBuf),
+    /// Aktionen beim Speichern (#383): Regeln für diese Datei zeigen.
+    RulesFor(PathBuf),
+    /// Neue Regel für diese Datei bzw. diesen Ordner (`true`).
+    NewRule(PathBuf, bool),
 }
 
 #[derive(Default)]
@@ -143,6 +147,16 @@ impl Tree {
             }
             if crate::platform::open::FILE_MANAGER && ui.button(if cfg!(windows) { lang.t("Im Explorer anzeigen", "Show in Explorer") } else { lang.t("Im Dateimanager anzeigen", "Show in file manager") }).clicked() {
                 crate::platform::open::show_in_file_manager(&path.to_string_lossy(), is_dir);
+                ui.close();
+            }
+            ui.separator();
+            if !is_dir && ui.button(lang.t("Regeln für diese Datei", "Rules for this file")).clicked() {
+                out.push(TreeOut::RulesFor(path.clone()));
+                ui.close();
+            }
+            let label = if is_dir { lang.t("Aktionen beim Speichern für diesen Ordner …", "Actions on save for this folder …") } else { lang.t("Aktionen beim Speichern für diese Datei …", "Actions on save for this file …") };
+            if ui.button(label).clicked() {
+                out.push(TreeOut::NewRule(path.clone(), is_dir));
                 ui.close();
             }
         });

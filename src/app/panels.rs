@@ -852,6 +852,8 @@ impl App {
         for (i, s) in self.prompts.iter().enumerate() {
             v.push((format!("{} {}", lang.t("Prompt senden:", "Send prompt:"), s.name), String::new(), Action::SendSnippet(i)));
         }
+        // Aktionen beim Speichern im Editor (#383).
+        v.extend(self.sa_palette_items());
         // Tutorial (#143): Tour, Fortsetzen, Kapitel, „Was ist neu“ (nur im Hauptfenster).
         if self.wins.cur == 0 {
             v.extend(self.tut_palette_items());

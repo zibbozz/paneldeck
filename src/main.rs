@@ -33,6 +33,7 @@ mod paths;
 mod planning;
 mod platform;
 mod procs;
+mod save_actions;
 // Dienste des Editor-Reiters (#54): MCP-Werkzeuge, Suche in Dateien, Plattenänderungen, Einstellungen.
 mod editor_svc;
 mod prompts;

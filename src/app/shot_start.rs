@@ -487,6 +487,14 @@ impl App {
                     self.editor_svc.find.start(demo.clone(), q, move || repaint.request_repaint());
                 }
             }
+            // Aktionen beim Speichern (#383): Regel-Dialog über dem Editor.
+            "editor-on-save" => {
+                write_demo_project(&demo);
+                self.set_mode(titlebar::Mode::Editor);
+                self.ed.set_root(&demo);
+                let _ = self.editor_open(&demo.join("src/orders.rs"), true, false);
+                self.shot_save_actions_demo(&demo);
+            }
             "editor-settings" => {
                 self.set_mode(titlebar::Mode::Editor);
                 self.settings_open = true;

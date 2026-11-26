@@ -28,6 +28,8 @@ With `--profile <name>` the subfolder `profiles\<name>` of that folder is used.
 | `plans/` | approved plans of the chats' [plan mode](chat.md#plan-mode) as Markdown files (since 3.1.0) |
 | `processes.json` | entries of the [process list](processes.md) (see [below](#process-list-processesjson)) |
 | `process-logs/` | log files of process-list entries with *Log file* switched on |
+| `save-actions.json` | rules of the editor's [actions on save](editor.md#actions-on-save) (see [below](#actions-on-save-save-actionsjson), since 3.2.0) |
+| `save-action-logs/` | log files of actions on save with *Output to a log file* switched on (since 3.2.0) |
 | `prompts.json` | prompt library |
 | `themes/*.json` | custom themes (an example is included; format and colour names: [Themes](themes.md#file-format), optional field `ui` since 2.6.0, at most 1 MB) |
 | `system-prompt.md` | your own template of the [system prompt for agents](agent-interface.md#system-prompt) (only if you saved one); `system-prompt.md.bak` = the previous template after *Reset to default* |
@@ -41,7 +43,7 @@ With `--profile <name>` the subfolder `profiles\<name>` of that folder is used.
 | `ipc.json` | port and token of the running instance (internal) |
 | `cleanup-pending.json` | clean-up steps scheduled for the next start (internal, see [Clean up](#clean-up); deleted once they ran) |
 
-`settings.json`, `state.json`, `prompts.json`, `themes/*.json`, `system-prompt.md`, `chats/*.json`, `processes.json` and `mcp-log.jsonl` are stable formats: newer versions keep reading older files, and new fields are optional.
+`settings.json`, `state.json`, `prompts.json`, `themes/*.json`, `system-prompt.md`, `chats/*.json`, `processes.json`, `save-actions.json` and `mcp-log.jsonl` are stable formats: newer versions keep reading older files, and new fields are optional.
 
 ## Chat histories
 Each [chat](chat.md) keeps its history in `chats/<id>.json` (`<id>` = the session id; format version 1, since 2.2.0):
@@ -101,6 +103,42 @@ The entries of the [process list](processes.md) (since 2.6.0, format version 1):
 - `env`: a list of `{ "name", "value_protected" }`. The value is **only** stored as `value_protected` = Base64 of a Windows DPAPI blob (current user) – never as plain text; a value that cannot be decrypted (other user or computer) is left out at start with a notice. Names may not contain `=` or spaces, and names starting with `PANELDECK_` are refused.
 - Reading is tolerant: a BOM is allowed, an invalid entry is skipped (the file is first saved as `processes.defekt-<time>.json`), duplicate or missing ids are renumbered. **Unknown fields are kept** when Paneldeck saves (in the entries and at the top level), so newer versions can add fields. The file is written atomically. Paneldeck does not overwrite the file when it could not read it (e.g. locked) or could not back up a damaged file, or when its `version` is newer than the one this Paneldeck knows – changes to the list are then not saved, with a notice.
 - Run states, output and detected addresses are not stored: after a restart every entry is stopped.
+
+## Actions on save (save-actions.json)
+The rules of the editor's [actions on save](editor.md#actions-on-save) (since 3.2.0, format version 1):
+
+```json
+{
+  "version": 1,
+  "enabled": true,
+  "parallel": 2,
+  "rules": [
+    {
+      "id": 1,
+      "name": "Lint",
+      "scope": "pattern",
+      "path": "C:\\work\\web",
+      "patterns": ["src/**/*.ts", "!dist/**"],
+      "actions": [
+        { "kind": "trim_whitespace" },
+        { "kind": "command", "command": "npx eslint --fix ${file}" },
+        { "kind": "copy", "target": "D:\\mirror", "keep_structure": true, "continue_on_error": true }
+      ],
+      "on_autosave": true,
+      "shell": "pwsh",
+      "env": [ { "name": "TOKEN", "value_protected": "AQAAANCMnd8BFdER…" } ],
+      "timeout_secs": 120
+    }
+  ]
+}
+```
+
+- Top level: `enabled` (master switch, default `true`), `parallel` (runs at the same time, 1–8, default `2`), `rules` (in the order they run).
+- Required per rule: `id` (unique number > 0). Everything else is optional; a missing field means its default and is not written: `name`, `enabled` (`true`), `scope` (`"file"`, `"folder"` default, `"pattern"`), `path` (the file, or the rule folder), `patterns` (gitignore syntax, only for `pattern`), `actions`, `on_autosave` / `on_agent_save` (`false`), `stop_after` / `no_parent_rules` (`false`), `shell` (id of a detected shell, empty = PowerShell), `env` (like in `processes.json`: names in plain text, values only as `value_protected` = DPAPI blob of the current user), `cwd` (empty = the rule folder), `timeout_secs` (`60`, 1–3600), `terminal`, `notify_success`, `log_file` (`false`).
+- `actions`: a list of objects with `kind` and its fields – `format`, `trim_whitespace`, `final_newline`, `line_endings` (`eol`: `"lf"`/`"crlf"`), `encoding` (`encoding`: `utf-8`, `utf-8-bom`, `utf-16le`, `utf-16be`, `windows-1252`), `tabs_to_spaces` / `spaces_to_tabs` (`width`, missing = the file's tab width), `command` (`command`), `copy` (`target`, `keep_structure`, default `true`), `send_to_session` (`session` id, `name`, `text`), `restart_process` (`process` id or `group`, `name`), `notify` (`text`); each may have `continue_on_error: true`. An action of an unknown `kind` (from a newer version) is kept and skipped.
+- Reading is tolerant like `processes.json` (BOM allowed, invalid rules skipped after a backup `save-actions.defekt-<time>.json`, duplicate ids renumbered, unknown fields kept, written atomically, a newer `version` is never overwritten). A missing file means no rules.
+- Run results and the output history are not stored (memory only); `save-action-logs/` holds the rotating log files of rules with *Output to a log file*.
+- An export (*Export selected …*) has the same rule objects under `{"paneldeck_save_actions": 1, "rules": [...]}`, without `value_protected`.
 
 ## New fields in 2.2.0
 - `settings.json` → `llm_servers`: the servers of *Settings → Models*, each with `id`, `name`, `kind` (`ollama`/`openai`), `url`, optional `api_key` (Base64 of a Windows DPAPI blob – never plain text; only the same Windows user on the same computer can decrypt it), optional `receive_timeout_secs`, `models` (settings per model: `name`, `level`, `level_chosen`, `disabled_tools`, `ask_write`, `max_steps`, optional `tools`, `context_length`, `temperature`; `level_chosen: true` = the level was chosen in the [level question](chat.md#the-level-question) or under *Settings → Models* – missing or `false` means the model counts as *Off*, whatever `level` says) and `last_models` (the result of the last *Connect*). A server entry that cannot be read (e.g. an unknown `kind` from a newer version) is kept unchanged and shown read-only with *Remove*.
@@ -185,6 +223,10 @@ All fields are optional; older versions ignore them, and missing fields mean the
   | `agent_open`, `agent_edit`, `agent_save` | `false` | the [agent switches](editor.md#agents) (only `true` switches one on; only effective at level *Control*) |
 
 - `hot-exit/`: unsaved editor buffers; `editor-state.json`: open folder, tabs, splits and recent files of the Editor tab (both internal formats; in *Clean up* as *Editor: unsaved buffers* and as part of *Sessions and layout*).
+
+## New fields in 3.2.0
+- New file `save-actions.json` for the editor's [actions on save](editor.md#actions-on-save) (see [above](#actions-on-save-save-actionsjson)) and the folder `save-action-logs/`. Older versions ignore both.
+- Shortcut id `save_no_actions` (*Editor: Save without actions*, no default key) in the shortcut settings.
 
 ## New fields in 3.1.0
 All fields are optional; older versions ignore them, and missing fields mean the defaults below. See [Background commands](chat.md#background-commands).

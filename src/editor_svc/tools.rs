@@ -123,6 +123,11 @@ pub trait EditorHost {
     fn save(&mut self, doc: u64) -> Result<(), String>;
     /// Reiter eines offenen Dokuments zeigen (wechselt in den Editor-Reiter).
     fn show(&mut self, _doc: u64) {}
+    /// Aktionen beim Speichern (#383) des letzten [`EditorHost::save`]: welche Regeln liefen bzw. übersprungen wurden
+    /// (ohne Befehle). `None` = nichts zu melden.
+    fn save_actions_report(&mut self) -> Option<Value> {
+        None
+    }
 }
 
 /// Ergebnis wie im Hub.
@@ -227,7 +232,7 @@ pub fn defs() -> Vec<ToolDef> {
             name: "editor_save",
             level: McpLevel::Control,
             group: Group::Always,
-            description: "Save a document open in the Editor tab to its file (atomically, with the document's encoding and line ends). Needs the user's switch \"Agents may save\" (Settings -> Editor -> Agents), else forbidden. Only files that are open and already exist on disk: untitled tabs and files deleted on disk are refused (forbidden; only the user can choose a file name), as are network/UNC paths and read-only documents. When the file changed on disk while the document has unsaved changes, the call returns conflict - the user decides in the editor (Keep mine / Load from disk). A document without changes returns saved = false.",
+            description: "Save a document open in the Editor tab to its file (atomically, with the document's encoding and line ends). Needs the user's switch \"Agents may save\" (Settings -> Editor -> Agents), else forbidden. Only files that are open and already exist on disk: untitled tabs and files deleted on disk are refused (forbidden; only the user can choose a file name), as are network/UNC paths and read-only documents. When the file changed on disk while the document has unsaved changes, the call returns conflict - the user decides in the editor (Keep mine / Load from disk). A document without changes returns saved = false. The user's actions on save (see list_save_actions) only run on agent saves where a rule allows it; `save_actions` in the result lists the rules that were triggered and those skipped with a reason (commands run afterwards in the background, their output is not returned).",
             schema: schema(json!({"doc": doc}), &["doc"]),
         },
     ]
@@ -248,6 +253,8 @@ pub fn offered_to_chats(name: &str, bits: u8) -> bool {
         "editor_edit" => docs && bits & 2 != 0,
         "editor_save" => docs && bits & 4 != 0,
         "editor_list" | "editor_read" => docs,
+        // Aktionen beim Speichern (#383): nur für externe Agenten (spart Kontext der kleinen Chat-Modelle).
+        "list_save_actions" => false,
         _ => true,
     }
 }
@@ -594,7 +601,12 @@ pub fn save(host: &mut dyn EditorHost, s: &EditorSettings, args: &Value, exists:
         return Ok(json!({"doc": d.id, "saved": false, "path": path.display().to_string(), "note": t("Nichts zu speichern.", "Nothing to save.")}));
     }
     host.save(d.id).map_err(|e| er("internal", e))?;
-    Ok(json!({"doc": d.id, "saved": true, "path": path.display().to_string()}))
+    let mut out = json!({"doc": d.id, "saved": true, "path": path.display().to_string()});
+    // Aktionen beim Speichern (#383): welche Regeln liefen bzw. übersprungen wurden (nie Befehle oder Werte).
+    if let Some(r) = host.save_actions_report() {
+        out["save_actions"] = r;
+    }
+    Ok(out)
 }
 
 /// Ein Werkzeug ausführen (für den Ausführer im Hub).

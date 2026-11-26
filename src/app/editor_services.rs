@@ -191,6 +191,8 @@ impl App {
         ui.add_space(S2);
         self.editor_languages_ui(ui);
         ui.add_space(S2);
+        self.save_actions_settings_ui(ui);
+        ui.add_space(S2);
         let top = ui.cursor().min.y;
         ui.label(RichText::new(lang.t("Suche in Dateien", "Search in files")).strong());
         row(
@@ -559,6 +561,7 @@ impl EditorHost for BridgeHost<'_> {
     }
 
     fn save(&mut self, doc: u64) -> Result<(), String> {
+        self.app.save_actions.last_report = None;
         let r = self.app.editor_save_doc(doc);
         // Eigenes Speichern: neuer Vergleichsstand, sonst meldete die Überwachung es als fremde Änderung.
         if r.is_ok()
@@ -567,5 +570,9 @@ impl EditorHost for BridgeHost<'_> {
             self.app.editor_svc.watch.baseline(&p);
         }
         r
+    }
+
+    fn save_actions_report(&mut self) -> Option<Value> {
+        self.app.save_actions.last_report.take()
     }
 }

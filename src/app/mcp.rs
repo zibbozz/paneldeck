@@ -1076,6 +1076,7 @@ impl App {
             "list_models" => Out::Now(Ok(models_json(&self.settings.llm_servers, self.settings.last_chat_model.as_ref()))),
             "cleanup_sizes" => Out::Now(Ok(self.cleanup_sizes_json())),
             "list_processes" | "read_process_output" | "start_process" | "stop_process" | "restart_process" => Out::Now(self.mcp_procs(ctx, tool, args)),
+            "list_save_actions" => Out::Now(Ok(self.mcp_save_actions())),
             "theme_list" => Out::Now(Ok(theme_list_json(&self.themes, &self.theme_issues, &self.settings.theme))),
             "theme_get" => Out::Now(theme_get_json(&self.themes, &self.settings.theme, args)),
             // Editor-Reiter (#54): Schalter und Pfadregeln in `editor_svc::tools`.

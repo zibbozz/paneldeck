@@ -201,6 +201,8 @@ impl App {
         // Prozessliste (#243): Bearbeiten-Dialog und Rückfrage beim Beenden, nur im Hauptfenster.
         if self.wins.cur == 0 {
             self.procs_dialogs_ui(ctx);
+            // Aktionen beim Speichern (#383): Regel-Dialog, Test-Ansicht, Import, Ausgabe, Rückfrage beim Beenden.
+            self.save_actions_dialogs_ui(ctx);
         }
         // Einstellungen einer Sitzung und Rückfrage „Neu laden?“ (#169, #170).
         // Die Rückfrage zuerst: sie bekommt Esc/Enter, bevor der Einstellungsdialog darunter sie sieht.

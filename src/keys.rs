@@ -36,6 +36,8 @@ pub const DEFAULTS: &[(&str, &str)] = &[
     ("close_all", ""),
     // Sitzung neu laden (#169): standardmäßig ohne Kürzel
     ("reload", ""),
+    // Editor: Ohne Aktionen speichern (#383): standardmäßig ohne Kürzel
+    ("save_no_actions", ""),
 ];
 
 /// Kürzel, die in jedem Bereich gelten (Reiterwechsel) – die übrigen nur im Terminal-Bereich.
@@ -72,6 +74,7 @@ pub fn label(id: &str, de: bool) -> &'static str {
         "mode_editor_alt" => ("Reiter „Editor“ (zweite Belegung)", "“Editor” tab (alternative)"),
         "close_all" => ("Alle Sitzungen schließen", "Close all sessions"),
         "reload" => ("Sitzung neu laden", "Reload session"),
+        "save_no_actions" => ("Editor: Ohne Aktionen speichern", "Editor: Save without actions"),
         _ => ("?", "?"),
     };
     if de { d } else { e }
