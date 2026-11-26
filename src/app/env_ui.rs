@@ -112,6 +112,7 @@ impl EnvEditor {
                     r.value = l.value.clone();
                     r.secret |= l.secret;
                     r.remove = false;
+                    r.mode = l.mode;
                 }
                 None if full => {
                     skipped.push(l.name.clone());
@@ -119,7 +120,7 @@ impl EnvEditor {
                 }
                 None => {
                     self.rows.retain(|r| !r.blank());
-                    self.rows.push(EnvRow { name: l.name.clone(), value: l.value.clone(), secret: l.secret, ..EnvRow::default() });
+                    self.rows.push(EnvRow { name: l.name.clone(), value: l.value.clone(), secret: l.secret, mode: l.mode, ..EnvRow::default() });
                 }
             }
             n += 1;
@@ -334,7 +335,9 @@ pub(super) fn env_tab_ui(ui: &mut Ui, ed: &mut EnvEditor, o: EnvUiOpts) {
             let rm = ui.checkbox(&mut r.remove, "");
             mark(ui, "remove", i, &rm);
             if o.wsl {
-                ui.add_enabled(!r.remove, egui::Checkbox::without_text(&mut r.wsl_path));
+                // Umrechnen gibt es nur für gesetzte Werte (WSLENV); Voranstellen/Anhängen/Entfernen wirken auf Linux.
+                let can = !r.remove && r.mode == Mode::Replace;
+                ui.add_enabled(can, egui::Checkbox::without_text(&mut r.wsl_path)).on_disabled_hover_text(lang.t("Nur bei „Ersetzen“: Voranstellen, Anhängen und Entfernen wirken in WSL auf die Linux-Werte.", "Only with “Replace”: in WSL, prepend, append and remove act on the Linux values."));
             }
             let d = style::icon_btn_small(ui, SIcon::Close, lang.t("Zeile löschen", "Delete row"));
             mark(ui, "delete", i, &d);
@@ -458,6 +461,8 @@ pub(super) struct EnvLive {
     pub(super) why: Option<String>,
     /// Änderungen, die erst nach einem Neustart gelten.
     pub(super) later: Vec<(String, LiveIssue)>,
+    /// Schritte, die der Befehl setzt (danach Stand der Shell, `Entry::env_live`).
+    pub(super) applied: Vec<senv::Op>,
 }
 
 /// Kann jetzt gesetzt werden? Bekannte Shell (Shell-Integration), wartet am Prompt (nichts getippt, nichts läuft, kein
@@ -476,21 +481,30 @@ pub(super) fn live_ready(e: &Entry, lang: Lang) -> Result<(senv::LiveShell, bool
 }
 
 /// Plan für „Jetzt setzen“ aus altem und neuem Stand.
+/// `old` = Stand der laufenden Shell (`Entry::env_live`: beim Start festgehalten, dann um „Jetzt setzen“ ergänzt).
 pub(super) fn live_plan(e: &Entry, old: &[EnvVar], new: &[EnvVar], lang: Lang) -> EnvLive {
     let (ops, mut later) = senv::live_changes(old, new);
     match live_ready(e, lang) {
-        Err(why) => EnvLive { command: None, why: Some(why), later },
+        Err(why) => EnvLive { command: None, why: Some(why), later, applied: Vec::new() },
         Ok((shell, wsl)) => {
-            for o in &ops {
-                if let Some(i) = senv::live_issue(shell, o) {
-                    later.push((o.name.clone(), i));
+            let mut applied = Vec::new();
+            for o in ops {
+                match senv::live_issue(shell, wsl, &o) {
+                    Some(i) => later.push((o.name.clone(), i)),
+                    None => applied.push(o),
                 }
             }
-            let command = senv::live_command(shell, wsl, &ops);
+            let command = senv::live_command(shell, wsl, &applied);
             let why = command.is_none().then(|| lang.t("Nichts davon lässt sich im laufenden Terminal setzen.", "None of it can be set in the running terminal.").to_string());
-            EnvLive { command, why, later }
+            EnvLive { command, why, later, applied }
         }
     }
+}
+
+/// Tasten für „Jetzt setzen“: erst die Eingabezeile leeren (`senv::clear_line_key`, kodiert wie die Tastatur), danach
+/// kommt der Befehl als Text.
+pub(super) fn clear_line_bytes(shell: senv::LiveShell, mode: crate::vtkeys::KeyMode) -> Vec<u8> {
+    crate::vtkeys::key_bytes(senv::clear_line_key(shell), mode).unwrap_or_default()
 }
 
 /// Ergebnis der Rückfrage.
@@ -604,11 +618,18 @@ impl App {
         if e.meta.env == old {
             return;
         }
-        e.env_pending = true;
-        if e.exited() || e.is_chat() {
+        if e.env_locked.is_some() && e.live.is_none() {
+            // Gesperrt (#384 Review): Werte neu eingegeben – Sperre aufheben und gleich starten.
+            e.env_locked = None;
+            e.error = None;
+            self.pending_actions.push(Action::Restart(id));
             return;
         }
-        let live = live_plan(e, &old, &e.meta.env, lang);
+        e.env_pending = !senv::same_set(&e.env_live, &e.meta.env);
+        if e.exited() || e.is_chat() || !e.env_pending {
+            return;
+        }
+        let live = live_plan(e, &e.env_live, &e.meta.env, lang);
         self.env_ask = Some((id, live));
     }
 
@@ -632,12 +653,17 @@ impl App {
                 // Erneut prüfen: in der Zwischenzeit kann ein Programm gestartet worden sein.
                 let ready = self.entries.get(&id).map(|e| live_ready(e, lang));
                 match (ready, &live.command) {
-                    (Some(Ok(_)), Some(cmd)) => {
+                    (Some(Ok((shell, _))), Some(cmd)) => {
                         if let Some(e) = self.entries.get_mut(&id) {
                             if let Some(s) = &e.live {
+                                // Erst die Eingabezeile leeren, damit der Befehl nicht an Getipptem hängt.
+                                s.write_raw(&clear_line_bytes(shell, s.key_mode()));
                                 s.send_text_agent(cmd, true);
                             }
-                            e.env_pending = !live.later.is_empty();
+                            // Stand der Shell fortschreiben; der Punkt bleibt, solange etwas noch nicht gilt.
+                            let new = e.meta.env.clone();
+                            senv::apply_live(&mut e.env_live, &new, &live.applied);
+                            e.env_pending = !senv::same_set(&e.env_live, &e.meta.env);
                         }
                         self.want_focus = Some(id);
                     }
@@ -840,12 +866,12 @@ mod tests {
             out
         };
         let click_at = |p: Pos2| vec![Event::PointerMoved(p), Event::PointerButton { pos: p, button: PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE }, Event::PointerButton { pos: p, button: PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE }];
-        let ok = EnvLive { command: Some(" export A='1'".into()), why: None, later: vec![("TOKEN".into(), LiveIssue::Secret)] };
+        let ok = EnvLive { command: Some(" export A='1'".into()), why: None, later: vec![("TOKEN".into(), LiveIssue::Secret)], applied: vec![] };
         frame(&ok, vec![]);
         frame(&ok, vec![]);
         let set = rect(&ctx, "ask_set", 0).unwrap();
         assert_eq!(frame(&ok, click_at(set.center())), LiveOut::SetNow);
-        let no = EnvLive { command: None, why: Some("busy".into()), later: vec![] };
+        let no = EnvLive { command: None, why: Some("busy".into()), later: vec![], applied: vec![] };
         frame(&no, vec![]);
         frame(&no, vec![]);
         let set = rect(&ctx, "ask_set", 0).unwrap();
@@ -855,6 +881,23 @@ mod tests {
         frame(&no, vec![]);
         let esc = Event::Key { key: Key::Escape, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE };
         assert_eq!(frame(&no, vec![esc]), LiveOut::Later);
+    }
+
+    #[test]
+    fn set_now_clears_the_input_line_first() {
+        use crate::vtkeys::KeyMode;
+        let plain = KeyMode::default();
+        assert_eq!(clear_line_bytes(senv::LiveShell::Posix, plain), vec![0x15], "Strg+U");
+        assert_eq!(clear_line_bytes(senv::LiveShell::Pwsh, plain), vec![0x1b], "Esc");
+        // Unter ConPTY (win32-input-mode) als echtes Tastenereignis kodiert, nicht als nacktes Byte.
+        let win = KeyMode { win32: true, ..KeyMode::default() };
+        let esc = clear_line_bytes(senv::LiveShell::Cmd, win);
+        assert!(esc.starts_with(b"\x1b[") && esc.ends_with(b"_"), "{esc:?}");
+        assert_eq!(esc, crate::vtkeys::key_bytes("esc", win).unwrap());
+        // Import übernimmt den Modus aus `# paneldeck: prepend`.
+        let mut ed = EnvEditor::default();
+        ed.paste_text("# paneldeck: prepend\nPATH=C:\\tools\n", Lang::En);
+        assert_eq!(ed.rows[0].mode, Mode::Prepend);
     }
 
     #[test]

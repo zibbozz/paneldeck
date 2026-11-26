@@ -138,13 +138,19 @@ pub fn check_name(name: &str) -> Result<(), NameError> {
     if n.is_empty() {
         return Err(NameError::Empty);
     }
-    if n.len() > 255 || n.contains('=') || n.chars().any(|c| c.is_control() || c.is_whitespace()) {
+    // `:` und `/` trennen in WSLENV Einträge bzw. Kennzeichen (`X:PATH/l` reichte sonst den Windows-PATH nach WSL).
+    if n.len() > 255 || n.chars().any(|c| matches!(c, '=' | ':' | '/') || !printable(c)) {
         return Err(NameError::Invalid);
     }
     if is_protected(n) {
         return Err(NameError::Protected);
     }
     Ok(())
+}
+
+/// Sichtbares Zeichen? Keine Steuer-, Leer- oder unsichtbaren Formatzeichen (Bidi-Steuerung, Nullbreite, BOM).
+fn printable(c: char) -> bool {
+    !(c.is_control() || c.is_whitespace() || matches!(c, '\u{00AD}' | '\u{061C}' | '\u{180E}' | '\u{200B}'..='\u{200F}' | '\u{2028}'..='\u{202E}' | '\u{2060}'..='\u{206F}' | '\u{FEFF}' | '\u{FFF9}'..='\u{FFFB}'))
 }
 
 /// `PANELDECK_*` oder eine interne Variable (Groß-/Kleinschreibung egal)?
@@ -434,13 +440,18 @@ fn simple_name(n: &str) -> bool {
     matches!(c.next(), Some(f) if f.is_ascii_alphabetic() || f == '_') && c.all(|x| x.is_ascii_alphanumeric() || x == '_')
 }
 
-/// Kann diese Änderung in dieser Shell wörtlich gesetzt werden?
-pub fn live_issue(shell: LiveShell, op: &Op) -> Option<LiveIssue> {
+/// Kann diese Änderung in dieser Shell wörtlich gesetzt werden? `wsl` = die Shell läuft in WSL.
+pub fn live_issue(shell: LiveShell, wsl: bool, op: &Op) -> Option<LiveIssue> {
     if op.secret {
         return Some(LiveIssue::Secret);
     }
     if !simple_name(&op.name) {
         return Some(LiveIssue::Name);
+    }
+    // Git Bash: Listen sind in der Shell POSIX-Listen mit `:`, die Werte aber Windows-Pfade – nur per Neustart (dann
+    // rechnet MSYS die ganze Windows-Liste um).
+    if cfg!(windows) && !wsl && matches!(shell, LiveShell::Posix | LiveShell::Fish) && matches!(op.kind, OpKind::Prepend(_) | OpKind::Append(_)) {
+        return Some(LiveIssue::NeedsRestart);
     }
     let v = match &op.kind {
         OpKind::Set(v) | OpKind::Prepend(v) | OpKind::Append(v) => v.as_str(),
@@ -454,13 +465,14 @@ pub fn live_issue(shell: LiveShell, op: &Op) -> Option<LiveIssue> {
 
 /// Befehl, der die Änderungen in der laufenden Shell setzt – sichtbar, mit führendem Leerzeichen (bleibt so, wo die
 /// Shell das kennt, aus dem Verlauf). Werte werden für die Shell gequotet und nie expandiert. `None`, wenn nichts zu
-/// setzen ist; Schritte mit [`live_issue`] fallen weg (der Aufrufer meldet sie).
+/// setzen ist; Schritte mit [`live_issue`] fallen weg (der Aufrufer meldet sie). Voranstellen/Anhängen prüft in jeder
+/// Shell, ob es die Variable schon gibt (sonst nur der Wert, ohne Trennzeichen und ohne wörtliches `%NAME%`).
 pub fn live_command(shell: LiveShell, wsl: bool, ops: &[Op]) -> Option<String> {
     use crate::quote::{quote, Kind};
     let sep = shell.sep(wsl);
     let parts: Vec<String> = ops
         .iter()
-        .filter(|o| live_issue(shell, o).is_none())
+        .filter(|o| live_issue(shell, wsl, o).is_none())
         .map(|o| {
             let n = &o.name;
             match shell {
@@ -468,15 +480,15 @@ pub fn live_command(shell: LiveShell, wsl: bool, ops: &[Op]) -> Option<String> {
                     let q = |v: &str| quote(Kind::Pwsh, v);
                     match &o.kind {
                         OpKind::Set(v) => format!("$env:{n} = {}", q(v)),
-                        OpKind::Prepend(v) => format!("$env:{n} = {} + $env:{n}", q(&format!("{v}{sep}"))),
-                        OpKind::Append(v) => format!("$env:{n} = $env:{n} + {}", q(&format!("{sep}{v}"))),
+                        OpKind::Prepend(v) => format!("$env:{n} = if ($env:{n}) {{ {} + $env:{n} }} else {{ {} }}", q(&format!("{v}{sep}")), q(v)),
+                        OpKind::Append(v) => format!("$env:{n} = if ($env:{n}) {{ $env:{n} + {} }} else {{ {} }}", q(&format!("{sep}{v}")), q(v)),
                         OpKind::Remove => format!("Remove-Item Env:{n} -ErrorAction SilentlyContinue"),
                     }
                 }
                 LiveShell::Cmd => match &o.kind {
                     OpKind::Set(v) => format!("set \"{n}={v}\""),
-                    OpKind::Prepend(v) => format!("set \"{n}={v}{sep}%{n}%\""),
-                    OpKind::Append(v) => format!("set \"{n}=%{n}%{sep}{v}\""),
+                    OpKind::Prepend(v) => format!("if defined {n} (set \"{n}={v}{sep}%{n}%\") else (set \"{n}={v}\")"),
+                    OpKind::Append(v) => format!("if defined {n} (set \"{n}=%{n}%{sep}{v}\") else (set \"{n}={v}\")"),
                     OpKind::Remove => format!("set \"{n}=\""),
                 },
                 LiveShell::Posix => {
@@ -496,8 +508,8 @@ pub fn live_command(shell: LiveShell, wsl: bool, ops: &[Op]) -> Option<String> {
                         OpKind::Set(v) => format!("set -gx {n} {}", q(v)),
                         OpKind::Prepend(v) if list => format!("set -gx {n} {} ${n}", q(v)),
                         OpKind::Append(v) if list => format!("set -gx {n} ${n} {}", q(v)),
-                        OpKind::Prepend(v) => format!("set -gx {n} {}\"${n}\"", q(&format!("{v}{sep}"))),
-                        OpKind::Append(v) => format!("set -gx {n} \"${n}\"{}", q(&format!("{sep}{v}"))),
+                        OpKind::Prepend(v) => format!("if set -q {n}; and test -n \"${n}\"; set -gx {n} {}\"${n}\"; else; set -gx {n} {}; end", q(&format!("{v}{sep}")), q(v)),
+                        OpKind::Append(v) => format!("if set -q {n}; and test -n \"${n}\"; set -gx {n} \"${n}\"{}; else; set -gx {n} {}; end", q(&format!("{sep}{v}")), q(v)),
                         OpKind::Remove => format!("set -e {n}"),
                     }
                 }
@@ -509,6 +521,30 @@ pub fn live_command(shell: LiveShell, wsl: bool, ops: &[Op]) -> Option<String> {
     }
     let join = if shell == LiveShell::Cmd { " & " } else { "; " };
     Some(format!(" {}", parts.join(join)))
+}
+
+/// Taste, die vor „Jetzt setzen“ die Eingabezeile leert (sonst hinge der Befehl an Getipptem): Strg+U in bash/zsh/fish
+/// (auch WSL), Esc in PowerShell (PSReadLine) und cmd. Kodiert wird sie wie die Tastatur (`vtkeys::key_bytes`).
+pub fn clear_line_key(shell: LiveShell) -> &'static str {
+    match shell {
+        LiveShell::Posix | LiveShell::Fish => "ctrl+u",
+        LiveShell::Pwsh | LiveShell::Cmd => "esc",
+    }
+}
+
+/// Gleiche Variablen (ohne Rücksicht auf die Reihenfolge)?
+pub fn same_set(a: &[EnvVar], b: &[EnvVar]) -> bool {
+    a.len() == b.len() && a.iter().all(|x| b.iter().any(|y| y == x))
+}
+
+/// Stand der Shell nach „Jetzt setzen“: die gesetzten Variablen aus `new` in `live` übernehmen.
+pub fn apply_live(live: &mut Vec<EnvVar>, new: &[EnvVar], applied: &[Op]) {
+    for op in applied {
+        live.retain(|v| !same_name(&v.name, &op.name));
+        if let Some(n) = new.iter().find(|n| same_name(&n.name, &op.name)) {
+            live.push(n.clone());
+        }
+    }
 }
 
 /// Was sich zwischen `old` und `new` geändert hat – als Schritte für das Setzen im laufenden Terminal und die
@@ -563,16 +599,28 @@ pub struct ParsedLine {
     pub secret: bool,
     /// Problem des Namens (dann nicht übernehmbar).
     pub problem: Option<NameError>,
+    /// Modus aus einer Kommentarzeile `# paneldeck: prepend|append` davor ([`to_dotenv`]); sonst ersetzen.
+    pub mode: Mode,
 }
 
 /// `KEY=VALUE`-Zeilen bzw. eine `.env`-Datei lesen: Leerzeilen und `#`-Kommentare fallen weg, `export ` davor wird
 /// ignoriert, Werte in `'…'` bleiben wörtlich, in `"…"` werden `\"`, `\\` und `\n`/`\t` entschlüsselt (Steuerzeichen
-/// bleiben im Wert und werden vom Editor gemeldet); ohne Anführungszeichen endet der Wert vor ` #`.
+/// bleiben im Wert und werden vom Editor gemeldet); ohne Anführungszeichen endet der Wert vor ` #`. Eine Zeile
+/// `# paneldeck: prepend` bzw. `append` gibt der nächsten Variable ihren Modus (so schreibt sie [`to_dotenv`]).
 pub fn parse_lines(text: &str) -> Vec<ParsedLine> {
     let mut out = Vec::new();
+    let mut mode = Mode::Replace;
     for raw in text.lines() {
         let line = raw.trim();
-        if line.is_empty() || line.starts_with('#') {
+        if let Some(c) = line.strip_prefix('#') {
+            match c.trim().strip_prefix("paneldeck:").map(str::trim) {
+                Some("prepend") => mode = Mode::Prepend,
+                Some("append") => mode = Mode::Append,
+                _ => {}
+            }
+            continue;
+        }
+        if line.is_empty() {
             continue;
         }
         let line = line.strip_prefix("export ").map(str::trim_start).unwrap_or(line);
@@ -589,6 +637,7 @@ pub fn parse_lines(text: &str) -> Vec<ParsedLine> {
                     '"' => break,
                     '\\' => match it.next() {
                         Some('n') => s.push('\n'),
+                        Some('r') => s.push('\r'),
                         Some('t') => s.push('\t'),
                         Some(o) => s.push(o),
                         None => s.push('\\'),
@@ -603,19 +652,27 @@ pub fn parse_lines(text: &str) -> Vec<ParsedLine> {
                 None => v.to_string(),
             }
         };
-        out.push(ParsedLine { secret: looks_secret(&name), problem: check_name(&name).err(), name, value });
+        out.push(ParsedLine { secret: looks_secret(&name), problem: check_name(&name).err(), name, value, mode });
+        mode = Mode::Replace;
     }
     out
 }
 
-/// Als `.env` (*Kopieren als .env*): geheime Werte bleiben leer, `remove`-Zeilen fallen weg; Werte mit Leerzeichen,
-/// `#`, `'` oder `"` stehen in `"…"`.
+/// Als `.env` (*Kopieren als .env*): geheime Werte bleiben leer, `remove`-Zeilen fallen weg; Voranstellen/Anhängen
+/// steht als Kommentarzeile `# paneldeck: prepend|append` vor der Variable (der Wert ist nur der Zusatz – andere
+/// `.env`-Leser übergehen den Kommentar, [`parse_lines`] übernimmt den Modus wieder). Werte mit Leer-, Steuerzeichen,
+/// `#`, `'`, `"` oder `\` stehen in `"…"` mit `\\`, `\"`, `\n`, `\r`, `\t`.
 pub fn to_dotenv(vars: &[EnvVar]) -> String {
     let mut s = String::new();
     for e in vars.iter().filter(|e| !e.remove) {
         let v = if e.secret { String::new() } else { e.value.clone() };
-        let needs = v.chars().any(|c| c.is_whitespace() || matches!(c, '#' | '\'' | '"' | '\\'));
-        let v = if needs { format!("\"{}\"", v.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n").replace('\t', "\\t")) } else { v };
+        let needs = v.chars().any(|c| c.is_whitespace() || c.is_control() || matches!(c, '#' | '\'' | '"' | '\\'));
+        let v = if needs { format!("\"{}\"", v.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n").replace('\r', "\\r").replace('\t', "\\t")) } else { v };
+        match e.mode {
+            Mode::Replace => {}
+            Mode::Prepend => s.push_str("# paneldeck: prepend\n"),
+            Mode::Append => s.push_str("# paneldeck: append\n"),
+        }
         s.push_str(&format!("{}={v}\n", e.name));
     }
     s
@@ -689,18 +746,46 @@ pub const AGENT_BLOCKED: &[&str] = &[
     "XDG_*", "TERM", "COLORTERM", "TERM_PROGRAM", "TERM_PROGRAM_VERSION", "WT_SESSION",
     // Claude und Paneldeck
     "ANTHROPIC_*", "CLAUDE_*", "PANELDECK_*",
+    // Review #384: ganze Familien von Start-, Lade- und Konfigurationsvariablen
+    "BASH_*", "NODE_*", "PYTHON*", "BUN_*", "JAVA_*", "GRADLE_*", "MAVEN_*", "*_OPTS", "SSH_*",
+    "HOMEDRIVE", "HOMEPATH", "HOMESHARE", "KUBECONFIG", "AWS_CONFIG_FILE", "AWS_SHARED_CREDENTIALS_FILE", "DOCKER_HOST", "DOCKER_CONFIG", "GCONV_PATH",
 ];
 
-/// Passt `name` zum Muster (`*` als Platzhalter, auch mehrfach; Groß-/Kleinschreibung egal)?
+/// Passt `name` zum Muster (`*` als Platzhalter, auch mehrfach; Groß-/Kleinschreibung egal)? Iterativ mit zwei Zeigern
+/// (letzter `*` als Rücksprungpunkt) – linear in der Länge, kein exponentielles Zurückgehen.
 pub fn glob_match(pattern: &str, name: &str) -> bool {
-    fn m(p: &[u8], n: &[u8]) -> bool {
-        match p.first() {
-            None => n.is_empty(),
-            Some(b'*') => (0..=n.len()).any(|i| m(&p[1..], &n[i..])),
-            Some(c) => n.first().is_some_and(|x| x.eq_ignore_ascii_case(c)) && m(&p[1..], &n[1..]),
+    let (p, n) = (pattern.trim().as_bytes(), name.as_bytes());
+    let (mut i, mut j) = (0usize, 0usize);
+    let mut star: Option<(usize, usize)> = None;
+    while j < n.len() {
+        if i < p.len() && p[i] == b'*' {
+            star = Some((i, j));
+            i += 1;
+        } else if i < p.len() && p[i].eq_ignore_ascii_case(&n[j]) {
+            i += 1;
+            j += 1;
+        } else if let Some((si, sj)) = star {
+            i = si + 1;
+            j = sj + 1;
+            star = Some((si, sj + 1));
+        } else {
+            return false;
         }
     }
-    m(pattern.trim().as_bytes(), name.as_bytes())
+    p[i..].iter().all(|c| *c == b'*')
+}
+
+/// Name, den ein Agent setzen darf: nur ASCII `[A-Za-z_][A-Za-z0-9_]*` (keine Sonderformen wie `BASH_FUNC_x%%`).
+pub fn agent_name_ok(name: &str) -> bool {
+    simple_name(name)
+}
+
+/// Variablen einer Vorlage für eine Sitzung, die ein **Agent** anlegt: ohne die, die ein Agent nie setzen dürfte
+/// ([`agent_blocked`]), und ohne geheime (deren Werte könnte der Agent in seiner Sitzung lesen). Rückgabe: (übernommen,
+/// weggelassene Namen für `template_ignored`).
+pub fn agent_template_env(vars: &[EnvVar]) -> (Vec<EnvVar>, Vec<String>) {
+    let (keep, drop): (Vec<EnvVar>, Vec<EnvVar>) = vars.iter().cloned().partition(|v| !v.secret && !agent_blocked(&v.name));
+    (keep, drop.into_iter().map(|v| v.name).collect())
 }
 
 /// Darf ein Agent diesen Namen nie setzen?
@@ -723,7 +808,12 @@ pub fn agent_vars(env: &serde_json::Value, allow: &[String]) -> Result<Vec<EnvVa
     for (k, v) in map {
         let name = k.trim();
         if let Err(e) = check_name(name) {
-            return Err((format!("env: {} – {name}", e.text(crate::state::Lang::De)), format!("env: {} – {name}", e.text(crate::state::Lang::En))));
+            let shown: String = name.chars().filter(|c| c.is_ascii_graphic()).take(60).collect();
+            return Err((format!("env: {} – {shown}", e.text(crate::state::Lang::De)), format!("env: {} – {shown}", e.text(crate::state::Lang::En))));
+        }
+        if !agent_name_ok(name) {
+            let shown: String = name.chars().filter(|c| c.is_ascii_graphic()).take(60).collect();
+            return Err((format!("env: Namen von Agenten nur aus A–Z, a–z, 0–9 und _ (nicht mit einer Ziffer am Anfang) – {shown}"), format!("env: names from agents only from A–Z, a–z, 0–9 and _ (not starting with a digit) – {shown}")));
         }
         if agent_blocked(name) {
             return Err((format!("env: {name} dürfen Agenten nicht setzen (Pfad-, Start-, Lade-, Proxy-, Git-, Claude- oder Paneldeck-Variable)"), format!("env: agents may not set {name} (path, startup, loader, proxy, Git, Claude or Paneldeck variable)")));
@@ -935,31 +1025,92 @@ mod tests {
         ];
         let p = live_command(LiveShell::Pwsh, false, &ops).unwrap();
         let sep = if cfg!(windows) { ';' } else { ':' };
-        assert_eq!(p, format!(" $env:A = 'it''s $HOME `x`'; $env:PATH = '/opt/bin{sep}' + $env:PATH; Remove-Item Env:GONE -ErrorAction SilentlyContinue"));
+        assert_eq!(p, format!(" $env:A = 'it''s $HOME `x`'; $env:PATH = if ($env:PATH) {{ '/opt/bin{sep}' + $env:PATH }} else {{ '/opt/bin' }}; Remove-Item Env:GONE -ErrorAction SilentlyContinue"));
         assert!(!p.contains("never"), "geheime Werte nie getippt");
         let b = live_command(LiveShell::Posix, true, &ops).unwrap();
         assert_eq!(b, r#" export A='it'\''s $HOME `x`'; export PATH='/opt/bin'"${PATH:+:$PATH}"; unset GONE"#);
         let f = live_command(LiveShell::Fish, true, &ops).unwrap();
         assert_eq!(f, r" set -gx A 'it\'s $HOME `x`'; set -gx PATH '/opt/bin' $PATH; set -e GONE");
+        // cmd: Voranstellen nur, wenn es die Variable gibt (sonst stünde `%PATH%` wörtlich im Wert).
         let c = live_command(LiveShell::Cmd, false, &ops[1..]).unwrap();
-        assert_eq!(c, format!(" set \"PATH=/opt/bin{sep}%PATH%\" & set \"GONE=\""));
+        assert_eq!(c, format!(" if defined PATH (set \"PATH=/opt/bin{sep}%PATH%\") else (set \"PATH=/opt/bin\") & set \"GONE=\""));
         // cmd: `%`, `!` und `"` ließen sich nicht wörtlich setzen.
-        assert_eq!(live_issue(LiveShell::Cmd, &ops[0]), None);
+        assert_eq!(live_issue(LiveShell::Cmd, false, &ops[0]), None);
         let pct = Op { name: "A".into(), kind: OpKind::Set("100%".into()), secret: false, wsl_path: false };
-        assert_eq!(live_issue(LiveShell::Cmd, &pct), Some(LiveIssue::Value));
-        assert_eq!(live_issue(LiveShell::Pwsh, &pct), None);
-        assert_eq!(live_issue(LiveShell::Posix, &Op { name: "A-B".into(), ..pct.clone() }), Some(LiveIssue::Name));
-        assert_eq!(live_issue(LiveShell::Posix, &Op { kind: OpKind::Set("a\nb".into()), ..pct.clone() }), Some(LiveIssue::Value));
-        assert_eq!(live_issue(LiveShell::Posix, &ops[3]), Some(LiveIssue::Secret));
+        assert_eq!(live_issue(LiveShell::Cmd, false, &pct), Some(LiveIssue::Value));
+        assert_eq!(live_issue(LiveShell::Pwsh, false, &pct), None);
+        assert_eq!(live_issue(LiveShell::Posix, true, &Op { name: "A-B".into(), ..pct.clone() }), Some(LiveIssue::Name));
+        assert_eq!(live_issue(LiveShell::Posix, true, &Op { kind: OpKind::Set("a\nb".into()), ..pct.clone() }), Some(LiveIssue::Value));
+        assert_eq!(live_issue(LiveShell::Posix, true, &ops[3]), Some(LiveIssue::Secret));
         assert_eq!(live_command(LiveShell::Posix, false, &ops[3..]), None);
-        // Append in allen Shells
+        // Git Bash (Windows, nicht WSL): Voranstellen/Anhängen nur per Neustart (Windows-Pfade in einer `:`-Liste).
+        let gb = live_issue(LiveShell::Posix, false, &ops[1]);
+        assert_eq!(gb, if cfg!(windows) { Some(LiveIssue::NeedsRestart) } else { None });
+        assert_eq!(live_issue(LiveShell::Posix, false, &ops[0]), None, "Ersetzen geht auch in Git Bash");
+        // Append in allen Shells – auch, wenn es die Variable noch nicht gibt (kein Trennzeichen davor)
         let app = [Op { name: "L".into(), kind: OpKind::Append("z".into()), secret: false, wsl_path: false }];
         assert_eq!(live_command(LiveShell::Posix, true, &app).unwrap(), r#" export L="${L:+$L:}"'z'"#);
-        assert_eq!(live_command(LiveShell::Fish, true, &app).unwrap(), r#" set -gx L "$L"':z'"#);
-        assert!(live_command(LiveShell::Pwsh, false, &app).unwrap().contains("$env:L = $env:L + '"));
+        assert_eq!(live_command(LiveShell::Fish, true, &app).unwrap(), r#" if set -q L; and test -n "$L"; set -gx L "$L"':z'; else; set -gx L 'z'; end"#);
+        assert_eq!(live_command(LiveShell::Pwsh, false, &app).unwrap(), format!(" $env:L = if ($env:L) {{ $env:L + '{sep}z' }} else {{ 'z' }}"));
+        assert_eq!(live_command(LiveShell::Cmd, false, &app).unwrap(), format!(" if defined L (set \"L=%L%{sep}z\") else (set \"L=z\")"));
+        let pre = [Op { name: "L".into(), kind: OpKind::Prepend("a".into()), secret: false, wsl_path: false }];
+        assert_eq!(live_command(LiveShell::Fish, true, &pre).unwrap(), r#" if set -q L; and test -n "$L"; set -gx L 'a:'"$L"; else; set -gx L 'a'; end"#);
+        // Eingabezeile vorher leeren: Strg+U bzw. Esc, so kodiert wie die Tastatur.
+        let mode = crate::vtkeys::KeyMode::default();
+        assert_eq!(crate::vtkeys::key_bytes(clear_line_key(LiveShell::Posix), mode).unwrap(), vec![0x15]);
+        assert_eq!(crate::vtkeys::key_bytes(clear_line_key(LiveShell::Fish), mode).unwrap(), vec![0x15]);
+        assert_eq!(crate::vtkeys::key_bytes(clear_line_key(LiveShell::Pwsh), mode).unwrap(), vec![0x1b]);
+        assert_eq!(crate::vtkeys::key_bytes(clear_line_key(LiveShell::Cmd), mode).unwrap(), vec![0x1b]);
         for i in [LiveIssue::Secret, LiveIssue::Name, LiveIssue::Value, LiveIssue::NeedsRestart] {
             assert_ne!(i.text(Lang::De), i.text(Lang::En));
         }
+    }
+
+    #[test]
+    fn names_that_break_wslenv_are_refused_and_glob_is_linear() {
+        for n in ["X:PATH", "A/l", "A=B", "A\u{200B}B", "A\u{202E}B", "\u{FEFF}A", "A\tB"] {
+            assert_eq!(check_name(n), Err(NameError::Invalid), "{n:?}");
+        }
+        assert!(check_name("my-var.1").is_ok(), "Bindestrich und Punkt gehen für den Nutzer");
+        // Agenten: nur ASCII-Bezeichner, große Sperrlisten-Familien
+        assert!(agent_name_ok("APP_MODE") && agent_name_ok("_x1") && !agent_name_ok("1A") && !agent_name_ok("A-B") && !agent_name_ok("BASH_FUNC_x%%") && !agent_name_ok("ÄPP"));
+        for n in ["BASH_FUNC_ls", "NODE_ENV", "PYTHONWARNINGS", "BUN_INSTALL", "JAVA_HOME", "GRADLE_USER_HOME", "MAVEN_OPTS", "SBT_OPTS", "HOMEDRIVE", "HOMEPATH", "HOMESHARE", "KUBECONFIG", "AWS_CONFIG_FILE", "AWS_SHARED_CREDENTIALS_FILE", "DOCKER_HOST", "DOCKER_CONFIG", "GCONV_PATH", "GIT_DIR", "GIT_SSH", "SSH_AUTH_SOCK", "ssh_foo"] {
+            assert!(agent_blocked(n), "{n}");
+            assert!(agent_vars(&serde_json::json!({ n: "x" }), &[]).is_err(), "{n}");
+        }
+        let e = agent_vars(&serde_json::json!({"BASH_FUNC_x%%": "() { id; }"}), &[]).unwrap_err().1;
+        assert!(!e.contains("id;"), "{e}");
+        assert!(!agent_blocked("APP_MODE") && !agent_blocked("API_URL"));
+        // Glob: zwei Zeiger, viele `*` und ein langer Name bleiben schnell
+        let long = "A".repeat(255);
+        let many = format!("{}B", "*A".repeat(60));
+        let t = std::time::Instant::now();
+        assert!(!glob_match(&many, &long));
+        assert!(glob_match(&"*".repeat(100), &long) && glob_match("A*A", &long) && !glob_match("A*B", &long));
+        assert!(t.elapsed() < std::time::Duration::from_millis(200), "{:?}", t.elapsed());
+        assert!(glob_match("*_OPTS", "MAVEN_OPTS") && glob_match("a*b*c", "AxbyC") && !glob_match("a*b*c", "AxbyCd") && glob_match("", "") && !glob_match("", "A"));
+    }
+
+    #[test]
+    fn agent_started_templates_never_get_secret_or_blocked_variables() {
+        let vars = vec![EnvVar::plain("APP_MODE", "dev"), secret("DB_PASSWORD", "s3cr3t"), EnvVar::plain("NODE_OPTIONS", "--require x"), EnvVar { name: "PLAIN_BUT_SECRET".into(), secret: true, ..EnvVar::default() }];
+        let (keep, dropped) = agent_template_env(&vars);
+        assert_eq!(keep.iter().map(|v| v.name.as_str()).collect::<Vec<_>>(), ["APP_MODE"]);
+        assert_eq!(dropped, ["DB_PASSWORD", "NODE_OPTIONS", "PLAIN_BUT_SECRET"]);
+    }
+
+    #[test]
+    fn live_state_follows_set_now() {
+        let spawned = vec![EnvVar::plain("A", "1"), EnvVar::plain("B", "1")];
+        let new = vec![EnvVar::plain("B", "1"), EnvVar::plain("A", "2"), EnvVar::plain("C", "3"), secret("TOKEN", "x")];
+        let (ops, later) = live_changes(&spawned, &new);
+        let mut live = spawned.clone();
+        apply_live(&mut live, &new, &ops);
+        assert!(!same_set(&live, &new), "geheimer Wert fehlt noch in der Shell");
+        assert_eq!(later, [("TOKEN".to_string(), LiveIssue::Secret)]);
+        // Nur noch das Geheimnis ist offen: ohne es stimmen Shell und Einstellung überein.
+        assert!(same_set(&live, &new[..3]));
+        assert!(same_set(&[EnvVar::plain("A", "1"), EnvVar::plain("B", "2")], &[EnvVar::plain("B", "2"), EnvVar::plain("A", "1")]));
     }
 
     #[test]
@@ -1001,6 +1152,13 @@ mod tests {
         let back = parse_lines(&env);
         assert_eq!(back[0].value, "x y");
         assert_eq!(back[2].value, r#"a"b\c"#);
+        // Modus als Kommentarzeile, `\r` maskiert – und beides kommt beim Einlesen zurück.
+        let modes = vec![EnvVar { mode: Mode::Prepend, ..EnvVar::plain("PATH", r"C:\tools") }, EnvVar { mode: Mode::Append, ..EnvVar::plain("L", "z") }, EnvVar::plain("CR", "a\rb")];
+        let env = to_dotenv(&modes);
+        assert_eq!(env, "# paneldeck: prepend\nPATH=\"C:\\\\tools\"\n# paneldeck: append\nL=z\nCR=\"a\\rb\"\n");
+        assert!(!env.contains('\r'));
+        let back = parse_lines(&env);
+        assert_eq!(back.iter().map(|l| (l.name.as_str(), l.value.as_str(), l.mode)).collect::<Vec<_>>(), [("PATH", r"C:\tools", Mode::Prepend), ("L", "z", Mode::Append), ("CR", "a\rb", Mode::Replace)]);
     }
 
     #[test]

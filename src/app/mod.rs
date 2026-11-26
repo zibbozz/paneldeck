@@ -151,13 +151,15 @@ struct Entry {
     env_locked: Option<crate::session_env::Locked>,
     /// Geänderte Umgebungsvariablen gelten erst nach einem Neustart (#384, oranger Punkt in der Kopfzeile).
     env_pending: bool,
+    /// Variablen, die die laufende Shell hat: beim Start festgehalten, nach „Jetzt setzen“ fortgeschrieben (#384).
+    env_live: Vec<crate::session_env::EnvVar>,
 }
 
 impl Entry {
     fn new(meta: SessionMeta) -> Self {
         let launched_claude = meta.claude && meta.kind != SessionKind::Chat;
         let launched_opts = if launched_claude { meta.claude_opts_eff().0 } else { Default::default() };
-        Entry { meta, live: None, error: None, status: ClaudeStatus::Unknown, status_msg: String::new(), attention: false, live_cwd: String::new(), start_cwd: String::new(), hook_seen: false, queue_active: false, perm_since: None, budget_warned: false, shell_eff: String::new(), shell_flavor: None, chat: None, session_key: String::new(), hook_conv: Default::default(), hook_keyed: false, launched_claude, launched_opts, launch_note: None, progress: None, track: Default::default(), pick_pending: false, env_locked: None, env_pending: false }
+        Entry { meta, live: None, error: None, status: ClaudeStatus::Unknown, status_msg: String::new(), attention: false, live_cwd: String::new(), start_cwd: String::new(), hook_seen: false, queue_active: false, perm_since: None, budget_warned: false, shell_eff: String::new(), shell_flavor: None, chat: None, session_key: String::new(), hook_conv: Default::default(), hook_keyed: false, launched_claude, launched_opts, launch_note: None, progress: None, track: Default::default(), pick_pending: false, env_locked: None, env_pending: false, env_live: Vec::new() }
     }
     /// Chat-Sitzung mit geladenem Verlauf (kein Terminal, keine PTY).
     fn new_chat(meta: SessionMeta, chat: ChatState) -> Self {
@@ -2169,6 +2171,7 @@ impl App {
         };
         entry.env_locked = None;
         entry.env_pending = false;
+        entry.env_live = entry.meta.env.clone();
         // WSL: nur gesetzte Werte gehen über WSLENV; Voranstellen/Anhängen/Entfernen wirken auf die Linux-Werte und gehen
         // deshalb als sichtbarer Befehl (führendes Leerzeichen) vor den Startbefehl – geheime nie, die fehlen mit Hinweis.
         let mut wsl_live: Vec<crate::session_env::Op> = Vec::new();
@@ -2253,9 +2256,35 @@ impl App {
         } else {
             entry.shell_flavor = None;
         }
-        let live_shell = entry.shell_flavor.map(crate::session_env::LiveShell::of).unwrap_or(crate::session_env::LiveShell::Posix);
-        if let Some(cmd) = crate::session_env::live_command(live_shell, true, &wsl_live) {
-            initial = Some(format!("{cmd}\r{}", initial.unwrap_or_default()));
+        // Voranstellen/Anhängen/Entfernen in WSL (#384 Review): in der Syntax der erkannten Login-Shell (fish eigene);
+        // ohne erkannte Shell oder für nicht wörtlich setzbare Schritte nicht – mit Hinweis, nie still.
+        if !wsl_live.is_empty() {
+            let lang = self.settings.language;
+            let mut left: Vec<String> = Vec::new();
+            match entry.shell_flavor.map(crate::session_env::LiveShell::of) {
+                None => left.extend(wsl_live.iter().map(|o| o.name.clone())),
+                Some(sh) => {
+                    for o in &wsl_live {
+                        if let Some(i) = crate::session_env::live_issue(sh, true, o) {
+                            left.push(format!("{} ({})", o.name, i.text(lang)));
+                        }
+                    }
+                    if let Some(cmd) = crate::session_env::live_command(sh, true, &wsl_live) {
+                        initial = Some(format!("{cmd}\r{}", initial.unwrap_or_default()));
+                    }
+                }
+            }
+            if !left.is_empty() {
+                self.spawn_notes.borrow_mut().push(format!(
+                    "{} ({}): {}",
+                    lang.t(
+                        "Voranstellen/Anhängen/Entfernen in WSL braucht eine erkannte Shell (Shell-Integration) und wörtlich setzbare Werte – weggelassen",
+                        "Prepend/append/remove in WSL needs a detected shell (shell integration) and values that can be set literally – left out",
+                    ),
+                    entry.display_name(),
+                    left.join(", ")
+                ));
+            }
         }
         entry.track.launch_lines = claude_status::launch_lines(initial.as_deref());
         match Session::spawn(
@@ -5452,6 +5481,10 @@ fn shell_is_wsl(spec: Option<&ShellSpec>, shell_id: &str) -> bool {
 /// `WSLENV` mit `name` (und Kennzeichen wie `/p`) am Ende; ein früherer Eintrag desselben Namens fällt weg (sonst gälte
 /// womöglich der ohne `/p`, etwa ein `ZDOTDIR` aus dem Profil).
 fn wslenv_with(wslenv: &str, name: &str, flag: &str) -> String {
+    // Ein Name mit `:`, `/` oder `=` zerlegte WSLENV (z. B. `X:PATH/l`): nie eintragen (#384 Review).
+    if name.is_empty() || name.contains([':', '/', '=']) || name.chars().any(|c| c.is_control() || c.is_whitespace()) {
+        return wslenv.to_string();
+    }
     let mut parts: Vec<&str> = wslenv.split(':').filter(|p| !p.is_empty() && p.split('/').next() != Some(name)).collect();
     let add = format!("{name}{flag}");
     parts.push(&add);

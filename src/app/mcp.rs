@@ -1609,7 +1609,8 @@ impl App {
         let resume_mode = item.map(|it| it.resume_mode());
         // Variablen der Vorlage (#384) bis auf die, die ein Agent nie setzen dürfte (die Datei kann weitergegeben sein);
         // die des Agenten gehen vor.
-        let (tpl_env, tpl_env_ignored): (Vec<_>, Vec<_>) = item.map(|it| it.env.clone()).unwrap_or_default().into_iter().partition(|v| !crate::session_env::agent_blocked(&v.name));
+        // Geheime Variablen der Vorlage auch nicht (Review #384): der Agent könnte ihre Werte in seiner Sitzung lesen.
+        let (tpl_env, tpl_env_ignored) = crate::session_env::agent_template_env(&item.map(|it| it.env.clone()).unwrap_or_default());
         let env = crate::session_env::merge(&tpl_env, &agent_env);
         let id = self.new_session(ctx, NewOpts { shell_id: shell, cwd, name, claude, claude_opts: Some(copts), prompt, group, resume_mode, profile: tpl_profile, quiet: true, window: Some(window), project: Some(project), env, ..NewOpts::default() });
         debug_assert!(!before.contains(&id));
@@ -1634,7 +1635,7 @@ impl App {
             // Optionen der Vorlage, die für Agenten nie gelten (immer da, leer = nichts weggelassen), dazu Variablen der
             // Vorlage, die ein Agent nie setzen dürfte („env:NAME“, #384).
             let mut ignored: Vec<String> = it.agent_ignored().iter().map(|s| s.to_string()).collect();
-            ignored.extend(tpl_env_ignored.iter().map(|v| format!("env:{}", v.name)));
+            ignored.extend(tpl_env_ignored.iter().map(|n| format!("env:{n}")));
             v["template_ignored"] = json!(ignored);
         }
         Ok(Ok(v))
