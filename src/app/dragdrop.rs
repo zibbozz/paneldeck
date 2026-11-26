@@ -304,6 +304,9 @@ impl App {
                 .with_transparent(true);
             let mut close = false;
             ctx.show_viewport_immediate(vid, builder, |ctx, _class| {
+                // Abgedockte Fenster zeigen keinen eigenen Hintergrund des Themes (#387).
+                crate::style::set_backdrop(false);
+                crate::termview::set_backdrop(None);
                 if ctx.input(|i| i.viewport().close_requested()) {
                     close = true;
                 }

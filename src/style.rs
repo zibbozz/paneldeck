@@ -270,7 +270,9 @@ pub fn build_style(style: &mut egui::Style, theme: &Theme, opacity: f32, accent:
         base
     };
     let dark = theme.dark;
-    let a = opacity.clamp(0.3, 1.0);
+    // Mit eigenem Hintergrund des Themes (#387) darf die Seitenleiste durchscheinender sein als der Regler (30 %); Titelleiste
+    // und Design-Prüfung nutzen denselben Wert.
+    let a = opacity.clamp(0.0, 1.0);
     let fade = |c: Color32| c.gamma_multiply(a);
 
     let mut v = if dark { egui::Visuals::dark() } else { egui::Visuals::light() };

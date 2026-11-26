@@ -669,6 +669,17 @@ fn theme_list_json(themes: &[crate::theme::Theme], issues: &[crate::theme::Issue
 fn theme_background_json(t: &crate::theme::Theme, stats: Option<crate::theme::bake::Stats>) -> Value {
     let Some(b) = &t.background else { return Value::Null };
     let mut v = crate::theme::background::to_value(b);
+    // Dateinamen nur als bloßer, gültiger Name; ein ungültiger Wert der Datei (Pfad o. Ä.) wird nie zurückgegeben.
+    v["image"] = b.image.as_ref().map(|s| json!(s)).unwrap_or(Value::Null);
+    if b.extra.contains_key("image") {
+        v["image_invalid"] = json!(true);
+    }
+    if b.extra.contains_key("pattern") {
+        v["pattern"] = Value::Null;
+        v["pattern_invalid"] = json!(true);
+    } else if let Some(p) = b.pattern.as_ref() {
+        v["pattern"]["image"] = p.image.as_ref().map(|s| json!(s)).unwrap_or(Value::Null);
+    }
     let mean = stats.map(|s| s.after(b.brightness, crate::theme::bake::overlay_of(t)).mean);
     v["mean_brightness"] = mean.map(|m| json!((crate::theme::color::luminance(m) * 1000.0).round() / 1000.0)).unwrap_or(Value::Null);
     v
@@ -2907,6 +2918,15 @@ mod tests {
         assert!(!w.to_string().contains("secret") && !w.to_string().contains("base64"), "keine Pfade, keine Bilddaten");
         let w = theme_get_json(&th2, "Mine", &json!({"name": "WithBg"}), &none).unwrap();
         assert_eq!(w["background"]["mean_brightness"], Value::Null, "noch nicht berechnet");
+        // Ungültiger Bildwert (Pfad): nie zurückgegeben, nur markiert.
+        let mut bad = th2.last().unwrap().clone();
+        bad.name = "BadBg".into();
+        bad.background = crate::theme::background::parse(&json!({"kind": "image", "image": "C:\\secret\\x.png", "pattern": {"image": "../y.png"}}));
+        th2.push(bad);
+        let w = theme_get_json(&th2, "Mine", &json!({"name": "BadBg"}), &none).unwrap();
+        assert_eq!((w["background"]["image"].clone(), w["background"]["image_invalid"].clone()), (Value::Null, json!(true)));
+        assert_eq!((w["background"]["pattern"].clone(), w["background"]["pattern_invalid"].clone()), (Value::Null, json!(true)));
+        assert!(!w.to_string().contains("secret") && !w.to_string().contains("y.png"));
         // Namen und Fehlertexte kommen aus Dateien: als nicht vertrauenswürdig gekennzeichnet.
         assert!(l["note"].as_str().unwrap().contains("untrusted") || l["note"].as_str().unwrap().contains("vertrauenswürdig"));
         assert!(g["note"].as_str().unwrap().contains("untrusted") || g["note"].as_str().unwrap().contains("vertrauenswürdig"));

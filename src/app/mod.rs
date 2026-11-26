@@ -4416,7 +4416,7 @@ impl eframe::App for App {
         self.apply_font(ctx);
         // Eigener Hintergrund des Themes (#387): zuerst, damit er unter allen Flächen liegt.
         self.backdrop_frame(ctx);
-        self.backdrop_tick();
+        self.backdrop_tick(self.theme_ui.editor.is_some());
         ctx.options_mut(|o| o.zoom_with_keyboard = false);
         if (ctx.zoom_factor() - self.settings.ui_scale).abs() > 0.001 {
             ctx.set_zoom_factor(self.settings.ui_scale);

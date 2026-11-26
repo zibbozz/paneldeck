@@ -155,7 +155,7 @@ pub fn spec_for(t: &Theme, w: u32, h: u32, ppp: f32, src: &dyn Fn(&str) -> Optio
                 angle: g.angle % 360,
                 center: g.center,
                 radius: g.radius.max(1),
-                stops: g.stops.iter().map(|s| (s.pos.min(100), rgba(spec_color(t, &s.color)))).collect(),
+                stops: sorted_stops(g.stops.iter().map(|s| (s.pos.min(100), rgba(spec_color(t, &s.color)))).collect()),
             },
             None => Layer::None,
         },
@@ -178,6 +178,13 @@ pub fn spec_for(t: &Theme, w: u32, h: u32, ppp: f32, src: &dyn Fn(&str) -> Optio
         blur: b.blur.min(40),
         overlay: b.overlay.as_ref().map(|o| (rgba(spec_color(t, &o.color)), o.opacity.min(100))),
     })
+}
+
+/// Stopps nach Lage sortiert (stabil: gleiche Lage behält die Reihenfolge) – Verlauf, Vorschau und Prüfung stimmen so
+/// auch dann mit der Leiste überein, wenn die Datei oder der Editor sie ungeordnet hat.
+pub fn sorted_stops(mut s: Vec<(u8, [u8; 4])>) -> Vec<(u8, [u8; 4])> {
+    s.sort_by_key(|x| x.0);
+    s
 }
 
 /// Überlagerung als Farbe mit Deckkraft (für [`post`]).
@@ -265,9 +272,26 @@ pub fn file_name_for(original: &str, ext: &str, taken: &[String]) -> String {
 }
 
 /// Zuletzt gelesene Quellbilder (Datei, Stempel → Bild); höchstens drei.
+/// Höchstens so viele Bytes an Quellbildern im Zwischenspeicher (ein 3840 × 2160-Bild hat etwa 33 MB).
+const SOURCE_CACHE_BYTES: usize = 80 * 1024 * 1024;
+
+/// Zwischenspeicher der Quellbilder leeren (kein Hintergrund zu sehen und kein Theme-Editor offen).
+pub fn clear_sources() {
+    if let Some(c) = SOURCES.get() {
+        c.lock().unwrap_or_else(|e| e.into_inner()).clear();
+    }
+}
+
+/// Bytes im Zwischenspeicher (für Tests).
+#[cfg(test)]
+fn cached_bytes() -> usize {
+    source_cache().lock().unwrap_or_else(|e| e.into_inner()).iter().map(|x| x.2.as_raw().len()).sum()
+}
+
+static SOURCES: OnceLock<Mutex<Vec<(PathBuf, (u64, u64), Arc<RgbaImage>)>>> = OnceLock::new();
+
 fn source_cache() -> &'static Mutex<Vec<(PathBuf, (u64, u64), Arc<RgbaImage>)>> {
-    static C: OnceLock<Mutex<Vec<(PathBuf, (u64, u64), Arc<RgbaImage>)>>> = OnceLock::new();
-    C.get_or_init(|| Mutex::new(Vec::new()))
+    SOURCES.get_or_init(|| Mutex::new(Vec::new()))
 }
 
 /// Quellbild lesen (aus dem Zwischenspeicher, sonst von der Platte; höchstens [`MAX_SIDE`] je Seite).
@@ -284,8 +308,19 @@ pub fn load(src: &Src) -> Result<Arc<RgbaImage>, String> {
             let bytes = crate::chat::images::read_limited(path)?;
             let img = crate::chat::images::one_at_a_time(|| decode(&bytes).map(|(i, _, _)| Arc::new(shrink(i).to_rgba8())))?;
             let mut c = source_cache().lock().unwrap_or_else(|e| e.into_inner());
+            c.retain(|(p, _, _)| p != path);
             c.insert(0, (path.clone(), *stamp, img.clone()));
-            c.truncate(3);
+            // Nach Bytes begrenzen (das neueste bleibt immer).
+            let mut total = 0usize;
+            let mut keep = 0usize;
+            for (i, e) in c.iter().enumerate() {
+                total += e.2.as_raw().len();
+                if i > 0 && total > SOURCE_CACHE_BYTES {
+                    break;
+                }
+                keep = i + 1;
+            }
+            c.truncate(keep.max(1));
             Ok(img)
         }
     }
@@ -378,6 +413,10 @@ fn draw_image(out: &mut RgbaImage, s: &BakeSpec, r: R, src: &RgbaImage) {
 }
 
 fn lerp_stops(stops: &[(u8, [u8; 4])], t: f32) -> [f32; 4] {
+    // Unsortierte Stopps (Aufrufer außerhalb von `spec_for`) wie sortierte behandeln.
+    if stops.windows(2).any(|w| w[0].0 > w[1].0) {
+        return lerp_stops(&sorted_stops(stops.to_vec()), t);
+    }
     let pick = |c: [u8; 4]| [c[0] as f32, c[1] as f32, c[2] as f32, c[3] as f32];
     let Some(first) = stops.first() else { return [0.0; 4] };
     if t <= first.0 as f32 / 100.0 {
@@ -774,6 +813,47 @@ mod tests {
         g.center = [25, 50];
         let out = bake(&spec_of(b, 200, 100, None)).unwrap();
         assert!(px(&out, 50, 50)[0] <= 3 && px(&out, 199, 0)[0] > 150);
+    }
+
+    #[test]
+    fn unsorted_stops_render_like_sorted_ones() {
+        let mut b = Background::new(Kind::Gradient);
+        let g = b.gradient.as_mut().unwrap();
+        g.angle = 90;
+        // Wie nach „+“ im Editor: Stopp bei 50 hinter dem bei 100.
+        g.stops = vec![Stop { pos: 0, color: Spec::Hex(Color32::BLACK) }, Stop { pos: 100, color: Spec::Hex(Color32::WHITE) }, Stop { pos: 50, color: Spec::Hex(Color32::from_rgb(255, 0, 0)) }];
+        let s = spec_of(b.clone(), 200, 4, None);
+        let Layer::Gradient { stops, .. } = &s.layer else { panic!() };
+        assert_eq!(stops.iter().map(|x| x.0).collect::<Vec<_>>(), [0, 50, 100]);
+        let out = bake(&s).unwrap();
+        let mid = px(&out, 100, 0);
+        assert!(mid[0] > 240 && mid[1] < 15, "Mitte rot: {mid:?}");
+        assert!(px(&out, 199, 0)[1] > 240, "rechts weiß");
+        // Auch direkt gerufen.
+        let direct = lerp_stops(&[(100, [255; 4]), (0, [0, 0, 0, 255])], 0.25);
+        assert!((direct[0] - 63.75).abs() < 0.5, "{direct:?}");
+    }
+
+    #[test]
+    fn source_cache_is_capped_and_can_be_emptied() {
+        let dir = std::env::temp_dir().join(format!("paneldeck-test-bgcache-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let big = image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(3000, 2000, image::Rgb([5, 5, 5])));
+        let mut srcs = Vec::new();
+        for i in 0..5 {
+            let p = dir.join(format!("{i}.jpg"));
+            std::fs::write(&p, crate::chat::images::encode_jpeg(&big.to_rgb8(), 50).unwrap()).unwrap();
+            srcs.push(Src::file(p).unwrap());
+        }
+        for s in &srcs {
+            load(s).unwrap();
+        }
+        assert!(cached_bytes() <= SOURCE_CACHE_BYTES, "{}", cached_bytes());
+        assert!(cached_bytes() > 0);
+        clear_sources();
+        assert_eq!(cached_bytes(), 0);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

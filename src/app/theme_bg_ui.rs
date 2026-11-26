@@ -36,11 +36,15 @@ enum Target {
 
 type ImportSlot = Arc<Mutex<Option<Result<(String, bake::Prepared), String>>>>;
 
+type TakeSlot = Arc<Mutex<Option<(Background, Vec<Pending>)>>>;
+
 /// Zustand des Reiters im Editor.
 #[derive(Default)]
 pub(super) struct BgState {
     pub(super) pending: Vec<Pending>,
     import: Option<(Target, ImportSlot)>,
+    /// „Hintergrund übernehmen von …“: Bilder werden im Hintergrund gelesen.
+    take: Option<TakeSlot>,
     preview: Option<(u64, Slot)>,
     tex: Option<(u64, egui::TextureHandle)>,
     pub(super) stats: Option<Stats>,
@@ -48,6 +52,11 @@ pub(super) struct BgState {
     sel_stop: usize,
     next_id: u64,
     spec_buf: std::collections::HashMap<&'static str, (String, String)>,
+    /// Stand, für den die Vorschau zuletzt angefordert wurde (Theme, Zahl der gewählten Bilder) – nur bei einer Änderung
+    /// werden Angaben gebaut und Dateien aufgelöst.
+    last: Option<(Theme, usize)>,
+    /// Aufgelöste Dateien des Themes (Datei des Themes, Name → Quelle).
+    srcs: std::collections::HashMap<(Option<std::path::PathBuf>, String), Option<Src>>,
 }
 
 impl BgState {
@@ -57,76 +66,110 @@ impl BgState {
         b.files().into_iter().filter_map(|n| self.pending.iter().find(|p| p.name == n).map(|p| (p.name.clone(), p.bytes.as_ref().clone()))).collect()
     }
 
-    /// Quelle eines Bildnamens: gewählt (Speicher bzw. Datei eines anderen Themes) oder im Ordner des Themes.
-    fn src_of(&self, t: &Theme, name: &str) -> Option<Src> {
+    /// Quelle eines Bildnamens: gewählt (Speicher bzw. Datei eines anderen Themes) oder im Ordner des Themes (einmal
+    /// aufgelöst und gemerkt).
+    fn src_of(&mut self, t: &Theme, name: &str) -> Option<Src> {
         if let Some(p) = self.pending.iter().find(|p| p.name == name) {
             return Some(p.src.clone());
         }
-        super::super::backdrop::file_src(t.source.as_deref(), name)
+        self.srcs.entry((t.source.clone(), name.to_string())).or_insert_with(|| super::super::backdrop::file_src(t.source.as_deref(), name)).clone()
+    }
+
+    /// Wie [`BgState::src_of`], aber ohne Platte (für die Anzeige: nur Bekanntes).
+    fn known(&self, t: &Theme, name: &str) -> Option<bool> {
+        if self.pending.iter().any(|p| p.name == name) {
+            return Some(true);
+        }
+        self.srcs.get(&(t.source.clone(), name.to_string())).map(|s| s.is_some())
     }
 }
 
-/// Vorschau des bearbeiteten Hintergrunds berechnen lassen und abholen (kein eigenes Neuzeichnen).
+/// Textur der Vorschau (für die große Vorschau rechts).
+pub(super) fn preview_texture(ed: &Editor) -> Option<egui::TextureId> {
+    ed.bg.tex.as_ref().map(|t| t.1.id())
+}
+
+/// Stopps nach Lage sortieren; `sel` zeigt danach auf denselben Stopp.
+pub(super) fn sort_stops(g: &mut background::Gradient, sel: &mut usize) {
+    let mut v: Vec<(usize, Stop)> = std::mem::take(&mut g.stops).into_iter().enumerate().collect();
+    v.sort_by_key(|(_, s)| s.pos);
+    *sel = v.iter().position(|(i, _)| *i == *sel).unwrap_or(0);
+    g.stops = v.into_iter().map(|(_, s)| s).collect();
+}
+
+/// Vorschau des bearbeiteten Hintergrunds berechnen lassen und abholen (kein eigenes Neuzeichnen). Angaben und Dateien
+/// nur nach einer Änderung.
 pub(super) fn tick_preview(ed: &mut Editor, ctx: &egui::Context) {
-    let t = ed.theme.clone();
     let st = &mut ed.bg;
     if let Some((_, slot)) = &st.preview {
         if let Some(r) = bake::take(slot) {
-            let (key, _) = st.preview.take().unwrap_or((0, Arc::new(Mutex::new(None))));
-            if let Ok(b) = r {
-                let img = egui::ColorImage::from_rgba_unmultiplied([b.img.width() as usize, b.img.height() as usize], b.img.as_raw());
-                st.tex = Some((key, ctx.load_texture("pd-theme-bg-preview", img, egui::TextureOptions::LINEAR)));
-                st.stats = Some(b.stats);
+            if let Some((key, _)) = st.preview.take() {
+                if let Ok(b) = r {
+                    let img = egui::ColorImage::from_rgba_unmultiplied([b.img.width() as usize, b.img.height() as usize], b.img.as_raw());
+                    st.tex = Some((key, ctx.load_texture("pd-theme-bg-preview", img, egui::TextureOptions::LINEAR)));
+                    st.stats = Some(b.stats);
+                }
             }
         }
     }
-    if t.background.is_none() {
+    if ed.theme.background.is_none() {
         st.tex = None;
         st.stats = None;
         st.preview = None;
+        st.last = None;
+    } else if st.last.as_ref().is_none_or(|(t, n)| *t != ed.theme || *n != st.pending.len()) {
+        let t = ed.theme.clone();
+        st.last = Some((t.clone(), st.pending.len()));
+        let files: Vec<(String, Option<Src>)> = t.background.as_ref().map(|b| b.files().into_iter().map(|n| (n.to_string(), st.src_of(&t, n))).collect()).unwrap_or_default();
+        if let Some(spec) = bake::spec_for(&t, PREVIEW.0, PREVIEW.1, PREVIEW.0 as f32 / PREVIEW_WINDOW_PT, &|n| files.iter().find(|(k, _)| k == n).and_then(|(_, s)| s.clone())) {
+            let key = spec.look_key();
+            let shown = st.tex.as_ref().map(|x| x.0) == Some(key);
+            let running = st.preview.as_ref().map(|x| x.0) == Some(key);
+            if !shown && !running {
+                st.preview = Some((key, bake::submit(PREVIEW_WHO, spec)));
+            }
+        }
+    }
+    // Übernommener Hintergrund fertig gelesen?
+    if let Some(done) = st.take.as_ref().and_then(|s| s.lock().unwrap_or_else(|e| e.into_inner()).take()) {
+        st.take = None;
+        let (b, pend) = done;
+        st.pending.extend(pend);
+        let now = ctx.input(|i| i.time);
+        ed.edit(now, false, |t| t.background = Some(b));
         return;
     }
-    let spec = bake::spec_for(&t, PREVIEW.0, PREVIEW.1, PREVIEW.0 as f32 / PREVIEW_WINDOW_PT, &|n| st.src_of(&t, n));
-    let Some(spec) = spec else { return };
-    let key = spec.look_key();
-    let shown = st.tex.as_ref().map(|x| x.0) == Some(key);
-    let running = st.preview.as_ref().map(|x| x.0) == Some(key);
-    if !shown && !running {
-        st.preview = Some((key, bake::submit(PREVIEW_WHO, spec)));
-    }
     // Gewähltes Bild fertig aufbereitet?
-    if let Some((target, slot)) = &st.import {
-        let done = slot.lock().unwrap_or_else(|e| e.into_inner()).take();
-        if let Some(r) = done {
-            let target = *target;
-            st.import = None;
-            match r {
-                Ok((orig, prep)) => {
-                    let mut taken = crate::theme::bg_files::names_in_folder(t.source.as_deref());
-                    taken.extend(st.pending.iter().map(|p| p.name.clone()));
-                    let name = bake::file_name_for(&orig, prep.ext, &taken);
-                    st.next_id += 1;
-                    let id = 0x1000_0000 + st.next_id;
-                    st.pending.push(Pending { name: name.clone(), bytes: Arc::new(prep.bytes), src: Src::Mem { id, img: prep.img } });
-                    st.error = None;
-                    let now = ctx.input(|i| i.time);
-                    ed.edit(now, false, |t| {
-                        let b = t.background.get_or_insert_with(|| Background::new(Kind::Image));
-                        b.clear_invalid();
-                        match target {
-                            Target::Image => {
-                                b.kind = Kind::Image;
-                                b.image = Some(name);
-                            }
-                            Target::Tile => {
-                                b.kind = Kind::Pattern;
-                                b.pattern.get_or_insert_with(Pattern::default).image = Some(name);
-                            }
+    let done = st.import.as_ref().and_then(|(_, slot)| slot.lock().unwrap_or_else(|e| e.into_inner()).take());
+    if let Some(r) = done {
+        let target = st.import.as_ref().map(|x| x.0).unwrap_or(Target::Image);
+        st.import = None;
+        match r {
+            Ok((orig, prep)) => {
+                let mut taken = crate::theme::bg_files::names_in_folder(ed.theme.source.as_deref());
+                taken.extend(st.pending.iter().map(|p| p.name.clone()));
+                let name = bake::file_name_for(&orig, prep.ext, &taken);
+                st.next_id += 1;
+                let id = 0x1000_0000 + st.next_id;
+                st.pending.push(Pending { name: name.clone(), bytes: Arc::new(prep.bytes), src: Src::Mem { id, img: prep.img } });
+                st.error = None;
+                let now = ctx.input(|i| i.time);
+                ed.edit(now, false, |t| {
+                    let b = t.background.get_or_insert_with(|| Background::new(Kind::Image));
+                    b.clear_invalid();
+                    match target {
+                        Target::Image => {
+                            b.kind = Kind::Image;
+                            b.image = Some(name);
                         }
-                    });
-                }
-                Err(e) => st.error = Some(e),
+                        Target::Tile => {
+                            b.kind = Kind::Pattern;
+                            b.pattern.get_or_insert_with(Pattern::default).image = Some(name);
+                        }
+                    }
+                });
             }
+            Err(e) => st.error = Some(e),
         }
     }
 }
@@ -144,16 +187,14 @@ fn pick(st: &mut BgState, target: Target) {
     st.import = Some((target, slot));
 }
 
-/// Hintergrund eines anderen Themes übernehmen (Bilder werden beim Speichern kopiert).
-fn take_from(ed: &mut Editor, other: &Theme, now: f64) {
-    let Some(b) = other.background.clone() else { return };
-    let mut b = b;
+/// Hintergrund eines anderen Themes übernehmen: Namen werden hier vergeben, die Bilder im Hintergrund gelesen (sie werden
+/// beim Speichern kopiert).
+fn take_from(ed: &mut Editor, other: &Theme) {
+    let Some(mut b) = other.background.clone() else { return };
     let mut taken = crate::theme::bg_files::names_in_folder(ed.theme.source.as_deref());
     taken.extend(ed.bg.pending.iter().map(|p| p.name.clone()));
+    let mut copies: Vec<(String, String)> = Vec::new();
     for name in b.files().into_iter().map(|s| s.to_string()).collect::<Vec<_>>() {
-        let Some(path) = other.source.as_deref().and_then(|s| background::resolve_file(s, &name)) else { continue };
-        let Ok(bytes) = crate::chat::images::read_limited(&path) else { continue };
-        let Some(src) = Src::file(path.clone()) else { continue };
         let ext = std::path::Path::new(&name).extension().and_then(|e| e.to_str()).unwrap_or("png").to_ascii_lowercase();
         let new = bake::file_name_for(&name, &ext, &taken);
         taken.push(new.clone());
@@ -163,9 +204,22 @@ fn take_from(ed: &mut Editor, other: &Theme, now: f64) {
         if let Some(p) = b.pattern.as_mut().filter(|p| p.image.as_deref() == Some(name.as_str())) {
             p.image = Some(new.clone());
         }
-        ed.bg.pending.push(Pending { name: new, bytes: Arc::new(bytes), src });
+        copies.push((name, new));
     }
-    ed.edit(now, false, |t| t.background = Some(b));
+    let source = other.source.clone();
+    let slot: TakeSlot = Arc::new(Mutex::new(None));
+    let s2 = slot.clone();
+    std::thread::spawn(move || {
+        let mut pend = Vec::new();
+        for (name, new) in copies {
+            let Some(path) = source.as_deref().and_then(|s| background::resolve_file(s, &name)) else { continue };
+            let Ok(bytes) = crate::chat::images::read_limited(&path) else { continue };
+            let Some(src) = Src::file(path) else { continue };
+            pend.push(Pending { name: new, bytes: Arc::new(bytes), src });
+        }
+        *s2.lock().unwrap_or_else(|e| e.into_inner()) = Some((b, pend));
+    });
+    ed.bg.take = Some(slot);
 }
 
 /// Farbwert (Hex oder Verweis) bearbeiten: Farbknopf + Textfeld (`#rrggbb[aa]`, `@name`, `@name/40`).
@@ -198,7 +252,7 @@ fn file_label(st: &BgState, t: &Theme, name: Option<&str>, lang: Lang) -> (Strin
     match name {
         None => (lang.t("kein Bild gewählt", "no image chosen").to_string(), false),
         Some(n) if st.pending.iter().any(|p| p.name == n) => (format!("{n} ({})", lang.t("neu, wird beim Speichern kopiert", "new, copied when saving")), true),
-        Some(n) if st.src_of(t, n).is_some() => (n.to_string(), true),
+        Some(n) if st.known(t, n) != Some(false) => (n.to_string(), true),
         Some(n) => (format!("{n} – {}", lang.t("fehlt, es gilt die Grundfarbe", "missing, the base colour applies")), false),
     }
 }
@@ -239,7 +293,7 @@ fn preview(ui: &mut Ui, st: &BgState, t: &Theme, global: f32, lang: Lang) {
 }
 
 /// Stopp-Leiste des Verlaufs: zeigt den Verlauf, Stopps ziehen, anklicken wählt.
-fn stop_bar(ui: &mut Ui, g: &mut background::Gradient, t: &Theme, sel: &mut usize) -> bool {
+fn stop_bar(ui: &mut Ui, g: &mut background::Gradient, t: &Theme, sel: &mut usize) -> (bool, bool) {
     let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width().min(300.0), 34.0), Sense::hover());
     let bar = Rect::from_min_max(rect.min, Pos2::new(rect.max.x, rect.min.y + 18.0));
     let p = ui.painter();
@@ -252,7 +306,7 @@ fn stop_bar(ui: &mut Ui, g: &mut background::Gradient, t: &Theme, sel: &mut usiz
         let c = sample(g, t, tt);
         p.rect_filled(Rect::from_min_max(Pos2::new(x0, bar.top()), Pos2::new(x1, bar.bottom())), 0.0, crate::theme::color::over(c, base));
     }
-    let mut changed = false;
+    let (mut changed, mut stopped) = (false, false);
     for i in 0..g.stops.len() {
         let x = bar.left() + bar.width() * g.stops[i].pos as f32 / 100.0;
         let h = Rect::from_center_size(Pos2::new(x, bar.bottom() + 8.0), Vec2::new(12.0, 14.0));
@@ -260,6 +314,7 @@ fn stop_bar(ui: &mut Ui, g: &mut background::Gradient, t: &Theme, sel: &mut usiz
         if resp.clicked() || resp.drag_started() {
             *sel = i;
         }
+        stopped |= resp.drag_stopped();
         if resp.dragged() {
             let pos = ((resp.interact_pointer_pos().map(|q| q.x).unwrap_or(x) - bar.left()) / bar.width() * 100.0).round().clamp(0.0, 100.0) as u8;
             if pos != g.stops[i].pos {
@@ -271,7 +326,7 @@ fn stop_bar(ui: &mut Ui, g: &mut background::Gradient, t: &Theme, sel: &mut usiz
         let tri = vec![Pos2::new(x, bar.bottom()), Pos2::new(x - 6.0, bar.bottom() + 12.0), Pos2::new(x + 6.0, bar.bottom() + 12.0)];
         ui.painter().add(egui::Shape::convex_polygon(tri, crate::theme::color::over(background::spec_color(t, &g.stops[i].color), base), Stroke::new(1.5_f32, col)));
     }
-    changed
+    (changed, stopped)
 }
 
 fn sample(g: &background::Gradient, t: &Theme, pos: f32) -> Color32 {
@@ -316,13 +371,13 @@ fn body(ed: &mut Editor, ui: &mut Ui, lang: Lang, now: f64) {
             }
         });
         if let Some(o) = pick_other {
-            take_from(ed, &o, now);
+            take_from(ed, &o);
         }
     }
     if let Some(e) = &ed.bg.error {
         ui.label(RichText::new(e).small().color(style::ui().error));
     }
-    if ed.bg.import.is_some() {
+    if ed.bg.import.is_some() || ed.bg.take.is_some() {
         ui.label(RichText::new(lang.t("Bild wird aufbereitet …", "Preparing the image …")).small().color(style::dim(ui)));
     }
     let Some(mut b) = ed.theme.background.clone() else { return };
@@ -406,8 +461,11 @@ fn body(ed: &mut Editor, ui: &mut Ui, lang: Lang, now: f64) {
             }
             let sel = &mut ed.bg.sel_stop;
             *sel = (*sel).min(g.stops.len().saturating_sub(1));
-            if stop_bar(ui, g, &t, sel) {
-                merge = true;
+            // Während des Ziehens bleibt die Reihenfolge (die Griffe behalten ihre Kennung); beim Loslassen wird sortiert.
+            let (dragging, stopped) = stop_bar(ui, g, &t, sel);
+            merge |= dragging;
+            if stopped {
+                sort_stops(g, sel);
             }
             ui.horizontal(|ui| {
                 if ui.add_enabled(g.stops.len() < 4, egui::Button::new("+")).on_hover_text(lang.t("Stopp hinzufügen (höchstens 4)", "Add a stop (at most 4)")).clicked() {
@@ -415,6 +473,7 @@ fn body(ed: &mut Editor, ui: &mut Ui, lang: Lang, now: f64) {
                     let color = Spec::Hex(sample(g, &t, pos as f32));
                     g.stops.push(Stop { pos, color });
                     *sel = g.stops.len() - 1;
+                    sort_stops(g, sel);
                 }
                 if ui.add_enabled(g.stops.len() > 2, egui::Button::new("−")).on_hover_text(lang.t("Gewählten Stopp entfernen (mindestens 2)", "Remove the chosen stop (at least 2)")).clicked() {
                     g.stops.remove(*sel);
@@ -458,8 +517,8 @@ fn body(ed: &mut Editor, ui: &mut Ui, lang: Lang, now: f64) {
             merge |= ui.add(egui::Slider::new(&mut p.scale, 25..=400).suffix(" %").text(lang.t("Größe", "Size"))).dragged();
             ui.horizontal(|ui| {
                 ui.label(lang.t("Versatz", "Offset"));
-                ui.add(egui::DragValue::new(&mut p.offset[0]).range(-2000..=2000).prefix("x "));
-                ui.add(egui::DragValue::new(&mut p.offset[1]).range(-2000..=2000).prefix("y "));
+                merge |= ui.add(egui::DragValue::new(&mut p.offset[0]).range(-2000..=2000).prefix("x ")).dragged();
+                merge |= ui.add(egui::DragValue::new(&mut p.offset[1]).range(-2000..=2000).prefix("y ")).dragged();
             });
         }
     }
@@ -467,7 +526,7 @@ fn body(ed: &mut Editor, ui: &mut Ui, lang: Lang, now: f64) {
     ui.label(RichText::new(lang.t("Abstand (oben, rechts, unten, links)", "Margin (top, right, bottom, left)")).small().color(style::dim(ui)));
     ui.horizontal(|ui| {
         for m in b.margin.iter_mut() {
-            ui.add(egui::DragValue::new(m).range(0..=2000).suffix(" pt"));
+            merge |= ui.add(egui::DragValue::new(m).range(0..=2000).suffix(" pt")).dragged();
         }
     });
     merge |= ui.add(egui::Slider::new(&mut b.opacity, 0..=100).suffix(" %").text(lang.t("Deckkraft", "Opacity"))).on_hover_text(lang.t("Unter 100 % scheint der Desktop durch", "Below 100 % the desktop shows through")).dragged();
@@ -540,5 +599,37 @@ mod tests {
         let g = background::Gradient::default();
         let mid = sample(&g, &t, 50.0);
         assert_ne!(mid, sample(&g, &t, 0.0));
+    }
+
+    #[test]
+    fn stops_are_sorted_and_the_selection_follows() {
+        let mut g = background::Gradient::default();
+        g.stops.push(Stop { pos: 50, color: Spec::Hex(Color32::RED) });
+        let mut sel = 2;
+        sort_stops(&mut g, &mut sel);
+        assert_eq!(g.stops.iter().map(|s| s.pos).collect::<Vec<_>>(), [0, 50, 100]);
+        assert_eq!((sel, &g.stops[sel].color), (1, &Spec::Hex(Color32::RED)), "Auswahl folgt dem Stopp");
+        // Gezogen über einen anderen Stopp hinaus.
+        g.stops[0].pos = 80;
+        let mut sel = 0;
+        sort_stops(&mut g, &mut sel);
+        assert_eq!(g.stops.iter().map(|s| s.pos).collect::<Vec<_>>(), [50, 80, 100]);
+        assert_eq!(sel, 1);
+    }
+
+    #[test]
+    fn the_preview_is_only_rebuilt_after_a_change() {
+        let ctx = egui::Context::default();
+        let mut t = crate::theme::all()[0].clone();
+        t.background = Some(Background::new(Kind::Gradient));
+        let mut e = Editor::new(t.clone(), t);
+        let _ = ctx.run(egui::RawInput::default(), |ctx| tick_preview(&mut e, ctx));
+        let first = e.bg.last.clone();
+        assert!(first.is_some());
+        let _ = ctx.run(egui::RawInput::default(), |ctx| tick_preview(&mut e, ctx));
+        assert!(e.bg.last == first, "unverändert");
+        e.theme.background.as_mut().unwrap().blur = 4;
+        let _ = ctx.run(egui::RawInput::default(), |ctx| tick_preview(&mut e, ctx));
+        assert!(e.bg.last.as_ref().is_some_and(|(t, _)| t.background.as_ref().unwrap().blur == 4));
     }
 }

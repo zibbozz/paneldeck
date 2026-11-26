@@ -1846,7 +1846,7 @@ c.close()
   }
   Check 'theme_get: background.mean_brightness berechnet (0-1)' $mbOk $tb.text
   $tbad = Tool 'theme_get' @{ name = 'Smoke Bad Background' }
-  Check 'theme_get: ungueltiger Bildpfad laedt, bleibt roh erhalten, kein Pfad aufgeloest' ($tbad.data.background.kind -eq 'image' -and [string]$tbad.data.background.image -eq '..\..\secret.png' -and $tbad.data.background.mode -eq 'zoom' -and $tbad.text -notmatch [regex]::Escape($dir)) $tbad.text
+  Check 'theme_get: ungueltiger Bildpfad laedt, wird nicht zurueckgegeben, nur markiert' ($tbad.data.background.kind -eq 'image' -and $null -eq $tbad.data.background.image -and $tbad.data.background.image_invalid -eq $true -and $tbad.text -notmatch 'secret' -and $tbad.data.background.mode -eq 'zoom' -and $tbad.text -notmatch [regex]::Escape($dir)) $tbad.text
   $script:prestart = $null
 
   Write-Host "== Minimierte Bereiche (#142, #162): Wiederherstellung, kaputtes Layout, focus_session mit placement" -ForegroundColor Cyan

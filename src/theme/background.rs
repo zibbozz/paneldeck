@@ -378,11 +378,17 @@ impl Background {
 // ---------------------------------------------------------------------------------------------------------------
 // Dateinamen und Pfade
 
-/// Gerätename unter Windows (auch mit Endung, „con.png“).
+/// Gerätename unter Windows (auch mit Endung, „con.png“): CON, PRN, AUX, NUL, CONIN$, CONOUT$, COM1–9, LPT1–9 und
+/// COM¹²³/LPT¹²³ (hochgestellte Ziffern zählen für Windows ebenfalls).
 fn reserved(stem: &str) -> bool {
-    let s = stem.to_ascii_lowercase();
-    let b = s.as_bytes();
-    matches!(s.as_str(), "con" | "prn" | "aux" | "nul") || (b.len() == 4 && (s.starts_with("com") || s.starts_with("lpt")) && (b'1'..=b'9').contains(&b[3]))
+    let s = stem.trim_end_matches([' ', '.']).to_lowercase();
+    if matches!(s.as_str(), "con" | "prn" | "aux" | "nul" | "conin$" | "conout$") {
+        return true;
+    }
+    let mut ch = s.chars();
+    let head: String = ch.by_ref().take(3).collect();
+    let rest: Vec<char> = ch.collect();
+    (head == "com" || head == "lpt") && rest.len() == 1 && matches!(rest[0], '1'..='9' | '¹' | '²' | '³')
 }
 
 /// Ist `s` ein bloßer, sicherer Dateiname eines Bildes? Keine Trenner (`/`, `\`), kein `:` (Laufwerk, Datenstrom),
@@ -790,7 +796,7 @@ mod tests {
         }
         for bad in [
             "", "..", "../x.png", "..\\x.png", "a/b.png", "a\\b.png", "C:x.png", "C:\\x.png", "\\\\server\\share\\x.png", "/etc/x.png", "x.png:stream", " x.png", "x.png ", ".hidden.png", "x.", "x", "x.gif", "x.svg",
-            "con.png", "NUL.jpg", "com1.png", "lpt9.webp", "a..b.png", "x\u{0}.png", "x?.png", "x*.png",
+            "con.png", "NUL.jpg", "com1.png", "lpt9.webp", "a..b.png", "x\u{0}.png", "x?.png", "x*.png", "COM¹.png", "com².jpg", "LPT³.webp", "lpt¹.bmp", "CONIN$.png", "conout$.jpg", "Con.tar.png",
         ] {
             assert!(!safe_file_name(bad), "{bad:?}");
         }

@@ -91,6 +91,21 @@ pub fn remove_folder(source: &Path) {
     let _ = std::fs::remove_dir(&dir);
 }
 
+/// Vor dem Anlegen einer neuen Theme-Datei `source`: Gibt es die Datei noch nicht, gehört ein vorhandener Bilderordner
+/// gleichen Namens (z. B. von einem gelöschten Theme oder aus einem Aufräumen) zu keinem Theme – seine Bilder werden
+/// entfernt, damit sie nicht in einem neuen Theme wieder auftauchen.
+pub fn clear_stale(source: &Path) {
+    if std::fs::symlink_metadata(source).is_err() {
+        remove_folder(source);
+    }
+}
+
+/// Hat das gespeicherte Theme Bilder im Ordner (ohne sie zu lesen)?
+pub fn has_files(t: &Theme) -> bool {
+    let (Some(b), Some(src)) = (&t.background, &t.source) else { return false };
+    b.files().into_iter().any(|n| super::background::resolve_file(src, n).is_some())
+}
+
 /// Dateinamen im Ordner des Themes (für freie Namen neuer Bilder).
 pub fn names_in_folder(source: Option<&Path>) -> Vec<String> {
     let Some(dir) = source.and_then(folder_of).filter(|d| real_dir(d)) else { return Vec::new() };
@@ -234,6 +249,10 @@ mod tests {
         assert_eq!(imp.files.len(), 1);
         assert_eq!(imp.files[0].0, "a.png");
         assert!(imp.theme.source.is_none());
+        assert!(has_files(&t));
+        let mut gone = t.clone();
+        gone.background.as_mut().unwrap().image = Some("missing.png".into());
+        assert!(!has_files(&gone) && !has_files(&crate::theme::all()[0]));
         // Ohne Bilder bleibt der Export eine JSON-Datei; JSON-Import wie bisher.
         file::write(&d.join("plain.json"), &crate::theme::all()[0]).unwrap();
         assert!(read_import(&d.join("plain.json")).unwrap().files.is_empty());
@@ -285,6 +304,16 @@ mod tests {
         assert!(d.join("a").join("notes.txt").exists(), "fremde Dateien bleiben");
         remove_folder(&d.join("b.json"));
         assert!(!d.join("b").exists(), "leer → entfernt");
+        // Übrig gebliebener Ordner ohne Theme-Datei: wird vor einem neuen Theme gleichen Namens geleert.
+        write_files(&d.join("c.json"), &[("stale.png".into(), b"s".to_vec())]).unwrap();
+        clear_stale(&d.join("c.json"));
+        assert!(!d.join("c").join("stale.png").exists());
+        write_files(&d.join("a.json"), &[("keep.png".into(), b"k".to_vec())]).unwrap();
+        std::fs::write(&a, "{}").unwrap();
+        clear_stale(&a);
+        assert!(d.join("a").join("keep.png").exists(), "Theme-Datei vorhanden: nichts löschen");
+        std::fs::remove_file(d.join("a").join("keep.png")).unwrap();
+        std::fs::remove_file(&a).unwrap();
         assert!(write_files(&a, &[("../x.png".into(), b"x".to_vec())]).is_err());
         let mut names = names_in_folder(Some(&a));
         names.sort();
