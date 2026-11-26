@@ -427,7 +427,7 @@ impl DocEntry {
     /// Text-Aktionen beim Speichern (#383) vor dem Schreiben: Text-Änderungen als ein rückgängig machbarer Schritt,
     /// Zeilenenden/Kodierung als Format. Je Aktion `Ok(None)`, `Ok(Some(hinweis))` (nichts geändert, z. B. kein JSON)
     /// oder `Err(fehler)`. Große Dateien bekommen keine Text-Änderungen (nur Format).
-    pub fn apply_save_builtins(&mut self, list: &[crate::save_actions::Builtin], prefs: &super::EditorPrefs, lang: Lang) -> Vec<(crate::save_actions::Builtin, Result<Option<String>, String>)> {
+    pub fn apply_save_builtins(&mut self, list: &[crate::save_actions::Builtin], prefs: &super::EditorPrefs, lang: Lang, keep_lines: &[usize]) -> Vec<(crate::save_actions::Builtin, Result<Option<String>, String>)> {
         use crate::save_actions::{builtin, Builtin};
         let large = self.is_large(prefs);
         let path = self.path.clone();
@@ -445,7 +445,7 @@ impl DocEntry {
                     core::IndentStyle::Tabs => builtin::Indent::Tab,
                     core::IndentStyle::Spaces(n) => builtin::Indent::Spaces(n),
                 };
-                let cx = builtin::TextCx { path: path.as_deref(), tab_width: d.tab_width(), indent };
+                let cx = builtin::TextCx { path: path.as_deref(), tab_width: d.tab_width(), indent, keep_lines };
                 let a = builtin::apply_text(&d.text(), &text_list, cx, lang);
                 if !a.changed.is_empty() {
                     d.replace_all_text(&mut self.scratch, &a.text, EditOrigin::User);

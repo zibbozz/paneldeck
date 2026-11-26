@@ -57,6 +57,8 @@ pub struct TextCx<'a> {
     pub tab_width: usize,
     /// Einrückung des Dokuments (für das Formatieren).
     pub indent: Indent,
+    /// Zeilen (ab 0), deren Leerraum am Ende bleibt (Cursor beim automatischen Speichern, wie in VS Code).
+    pub keep_lines: &'a [usize],
 }
 
 /// Ergebnis von [`apply_text`].
@@ -77,7 +79,7 @@ pub fn apply_text(text: &str, list: &[Builtin], cx: TextCx, lang: Lang) -> Appli
     let mut out = Applied::default();
     for b in list {
         let next = match b {
-            Builtin::TrimWhitespace => Some(trim_trailing(&cur)),
+            Builtin::TrimWhitespace => Some(trim_trailing_except(&cur, cx.keep_lines)),
             Builtin::FinalNewline => Some(final_newline(&cur)),
             Builtin::TabsToSpaces(w) => Some(tabs_to_spaces(&cur, width(*w, cx.tab_width))),
             Builtin::SpacesToTabs(w) => Some(spaces_to_tabs(&cur, width(*w, cx.tab_width))),
@@ -121,13 +123,19 @@ fn width(own: u8, doc: usize) -> usize {
 }
 
 /// Leerzeichen und Tabs am Ende jeder Zeile entfernen.
+#[cfg(test)]
 pub fn trim_trailing(text: &str) -> String {
+    trim_trailing_except(text, &[])
+}
+
+/// Wie [`trim_trailing`], aber die Zeilen `keep` (ab 0) bleiben unverändert.
+pub fn trim_trailing_except(text: &str, keep: &[usize]) -> String {
     let mut out = String::with_capacity(text.len());
     for (i, line) in text.split('\n').enumerate() {
         if i > 0 {
             out.push('\n');
         }
-        out.push_str(line.trim_end_matches([' ', '\t']));
+        out.push_str(if keep.contains(&i) { line } else { line.trim_end_matches([' ', '\t']) });
     }
     out
 }
@@ -176,12 +184,17 @@ mod tests {
     use super::*;
 
     fn cx() -> TextCx<'static> {
-        TextCx { path: None, tab_width: 4, indent: Indent::Spaces(2) }
+        TextCx { path: None, tab_width: 4, indent: Indent::Spaces(2), keep_lines: &[] }
     }
 
     #[test]
     fn text_actions() {
         assert_eq!(trim_trailing("a  \n\tb\t\n  \nc "), "a\n\tb\n\nc");
+        // Automatisches Speichern: die Zeile mit dem Cursor behält ihren Leerraum.
+        assert_eq!(trim_trailing_except("a  \nb  \nc ", &[1]), "a\nb  \nc");
+        let keep = [0usize];
+        let a = apply_text("x  \ny  ", &[Builtin::TrimWhitespace], TextCx { keep_lines: &keep, ..cx() }, Lang::En);
+        assert_eq!(a.text, "x  \ny");
         assert_eq!(final_newline("a"), "a\n");
         assert_eq!(final_newline("a\n"), "a\n");
         assert_eq!(final_newline(""), "");

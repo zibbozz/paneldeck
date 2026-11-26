@@ -45,6 +45,11 @@ pub fn is_global(id: &str) -> bool {
     id.starts_with("mode_")
 }
 
+/// Kürzel, die nur im Editor-Reiter gelten (dort ausgewertet); im Terminal-Bereich gehören die Tasten dem Terminal.
+pub fn is_editor_only(id: &str) -> bool {
+    id == "save_no_actions"
+}
+
 pub fn label(id: &str, de: bool) -> &'static str {
     let (d, e) = match id {
         "new" => ("Neue Sitzung", "New session"),
@@ -141,6 +146,13 @@ pub fn pretty(s: &str, de: bool) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// *Ohne Aktionen speichern* gilt nur im Editor-Reiter (im Terminal-Bereich gehören die Tasten dem Terminal).
+    #[test]
+    fn editor_only_shortcuts() {
+        assert!(is_editor_only("save_no_actions") && !is_global("save_no_actions"));
+        assert!(!is_editor_only("new") && label("save_no_actions", false) != "?");
+    }
 
     #[test]
     fn roundtrip() {

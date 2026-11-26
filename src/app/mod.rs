@@ -2791,7 +2791,7 @@ impl App {
             return; // gerade wird ein Kürzel aufgenommen
         }
         let mut binds: Vec<(&'static str, Modifiers, Key)> =
-            keys::DEFAULTS.iter().filter(|(id, _)| !keys::is_global(id)).filter_map(|(id, _)| self.binding(id).map(|(m, k)| (*id, m, k))).collect();
+            keys::DEFAULTS.iter().filter(|(id, _)| !keys::is_global(id) && !keys::is_editor_only(id)).filter_map(|(id, _)| self.binding(id).map(|(m, k)| (*id, m, k))).collect();
         // Spezifischere Kürzel (mehr Modifikatoren) zuerst prüfen.
         binds.sort_by_key(|b| std::cmp::Reverse(b.1.ctrl as u8 + b.1.shift as u8 + b.1.alt as u8));
         let mut fired: Vec<&'static str> = Vec::new();
@@ -2850,7 +2850,6 @@ impl App {
                 "next" => Action::Cycle(1),
                 "close_all" => Action::CloseAll(closing::CloseScope::All),
                 "reload" => Action::RequestReload(f),
-                "save_no_actions" => Action::SaveActions(SaPaletteCmd::SaveWithout),
                 _ => Action::Cycle(-1),
             });
         }

@@ -64,6 +64,31 @@ pub fn dir_exists_quick(path: &str, wait: std::time::Duration) -> Option<bool> {
     rx.recv_timeout(wait).ok()
 }
 
+/// Pfad für eine Shell umrechnen, die Linux-Pfade erwartet (Git Bash, WSL), mit WSL-Freigaben: Ein Pfad
+/// `\\wsl$\<Distro>\…` bzw. `\\wsl.localhost\<Distro>\…` wird in einer WSL-Shell derselben Distribution (`distro`, ohne
+/// Groß/Klein; `None` = unbekannt, gilt als passend) zum Linux-Pfad (`/home/…`); in einer anderen Distribution ist das
+/// ein Fehler (Text für Menschen); Git Bash bekommt `//wsl.localhost/…`. Alles andere wie [`convert`]. Wiederverwendbar
+/// für alle Stellen, die Windows-Pfade an WSL geben (#383).
+pub fn to_shell_path(shell_id: &str, distro: Option<&str>, path: &str) -> Result<String, String> {
+    if let Some((d, linux)) = crate::wsl::unc_to_linux(path) {
+        if shell_id.starts_with("wsl") {
+            return match distro {
+                Some(own) if !own.eq_ignore_ascii_case(&d) => Err(format!(
+                    "{} {d} {} {own}",
+                    crate::state::t("Die Datei liegt in der WSL-Distribution", "The file is in the WSL distribution"),
+                    crate::state::t("– die Shell der Regel startet", "– the rule's shell starts")
+                )),
+                _ => Ok(linux),
+            };
+        }
+        if shell_id == "gitbash" {
+            return Ok(path.replace('\\', "/"));
+        }
+        return Ok(path.to_string());
+    }
+    Ok(convert(shell_id, path))
+}
+
 /// Pfad für die Shell umrechnen (ohne Quoting).
 pub fn convert(shell_id: &str, path: &str) -> String {
     if shell_id.starts_with("wsl") {

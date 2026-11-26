@@ -128,6 +128,19 @@ pub trait EditorHost {
     fn save_actions_report(&mut self) -> Option<Value> {
         None
     }
+    /// Liegt der Pfad im Datenordner von Paneldeck (`save-actions.json`, `processes.json`, `settings.json` …)? Dort öffnet,
+    /// ändert und speichert kein Agent etwas – sonst könnte er über den Editor Regeln oder Einstellungen schreiben.
+    fn protected(&self, _path: &Path) -> bool {
+        false
+    }
+}
+
+/// Fehler für Dateien im Datenordner.
+fn data_folder_refused() -> (String, String) {
+    er("forbidden", t(
+        "Dateien im Datenordner von Paneldeck (Regeln, Einstellungen, Prozessliste …) öffnet, ändert und speichert kein Agent – das macht nur der Nutzer in Paneldeck.",
+        "Agents cannot open, change or save files in Paneldeck's data folder (rules, settings, process list …) – only the user does that, in Paneldeck.",
+    ))
 }
 
 /// Ergebnis wie im Hub.
@@ -452,6 +465,9 @@ pub fn open(host: &mut dyn EditorHost, s: &EditorSettings, args: &Value) -> R {
             }
             let checked = agent_path::check_file(p)?;
             let raw = Path::new(p.trim());
+            if host.protected(&checked) || host.protected(raw) {
+                return Err(data_folder_refused());
+            }
             if let Some(d) = host.docs().into_iter().find(|d| d.path.as_deref().is_some_and(|dp| agent_path::same_file(dp, &checked) || agent_path::same_file(dp, raw))) {
                 if show {
                     // Zeigen ohne zweiten Tab und ohne die Markierung „von einem Agenten geöffnet“.
@@ -559,6 +575,9 @@ pub fn plan_edit(text: &str, args: &Value) -> Result<(Vec<TextEdit>, usize), (St
 pub fn edit(host: &mut dyn EditorHost, s: &EditorSettings, args: &Value) -> R {
     require(s, AgentRight::Edit)?;
     let d = resolve(&host.docs(), args)?;
+    if d.path.as_deref().is_some_and(|p| host.protected(p)) {
+        return Err(data_folder_refused());
+    }
     if d.read_only {
         return Err(er("forbidden", t("Das Dokument ist schreibgeschützt.", "The document is read-only.")));
     }
@@ -586,6 +605,9 @@ pub fn save(host: &mut dyn EditorHost, s: &EditorSettings, args: &Value, exists:
     let Some(path) = d.path.clone() else {
         return Err(er("forbidden", t("Einen unbenannten Tab speichert nur der Nutzer (er wählt den Dateinamen).", "Only the user can save an untitled tab (they choose the file name).")));
     };
+    if host.protected(&path) {
+        return Err(data_folder_refused());
+    }
     // Nur lokale Dateien – auch wenn der Nutzer selbst eine Netzwerkdatei geöffnet hat.
     agent_path::check_syntax(&path.to_string_lossy())?;
     if d.disk == DiskState::Deleted || !exists(&path) {
@@ -639,6 +661,8 @@ pub(crate) mod fake {
         pub docs: Vec<FakeDoc>,
         pub next: u64,
         pub shown: Vec<u64>,
+        /// Datenordner (geschützt für Agenten).
+        pub protected: Option<PathBuf>,
     }
 
     impl FakeHost {
@@ -673,6 +697,10 @@ pub(crate) mod fake {
     }
 
     impl EditorHost for FakeHost {
+        fn protected(&self, path: &Path) -> bool {
+            self.protected.as_deref().is_some_and(|d| path.starts_with(d))
+        }
+
         fn docs(&self) -> Vec<DocInfo> {
             self.docs.iter().map(|d| d.info.clone()).collect()
         }
@@ -922,6 +950,25 @@ mod tests {
         }
         // Zahlen als Text sind erlaubt (manche Modelle schicken sie so)
         assert_eq!(p(t, json!({"start_line": "1", "end_line": "1", "text": "A"})).unwrap(), "A\nb\nc");
+    }
+
+    #[test]
+    fn the_data_folder_is_off_limits_for_agents() {
+        let data = if cfg!(windows) { r"C:\pd\paneldeck-data" } else { "/pd/paneldeck-data" };
+        let rules = PathBuf::from(data).join("save-actions.json");
+        let mut h = FakeHost::with_file(&rules.to_string_lossy(), "{}");
+        h.protected = Some(PathBuf::from(data));
+        let s = all_on();
+        assert_eq!(code(edit(&mut h, &s, &json!({"doc": 1, "old_text": "{}", "new_text": "{\"rules\":[]}"}))), "forbidden");
+        h.doc_mut(1).info.dirty = true;
+        assert_eq!(code(save(&mut h, &s, &json!({"doc": 1}), |_| true)), "forbidden");
+        // Öffnen: schon die Pfadangabe im Datenordner wird abgelehnt (vor der Prüfung auf der Platte, wenn es sie gibt).
+        let tmp = crate::editor::test_dir("agent-data");
+        let f = tmp.join("settings.json");
+        std::fs::write(&f, "{}").unwrap();
+        let mut h2 = FakeHost { next: 1, protected: Some(tmp.clone()), ..Default::default() };
+        let r = open(&mut h2, &s, &json!({"path": f.to_string_lossy()}));
+        assert_eq!(code(r), "forbidden");
     }
 
     #[test]

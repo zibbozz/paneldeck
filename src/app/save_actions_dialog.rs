@@ -59,7 +59,7 @@ impl RuleEditor {
         if !Path::new(&r.path).is_absolute() {
             return Err(lang.t("Der Pfad muss absolut sein.", "The path must be absolute.").into());
         }
-        r.patterns = self.patterns.lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect();
+        r.patterns = self.patterns.lines().map(matching::normalize_pattern).filter(|l| !l.is_empty()).collect();
         if r.scope == Scope::Pattern {
             if r.patterns.is_empty() {
                 return Err(lang.t("Bitte mindestens ein Muster eingeben (z. B. *.json).", "Please enter at least one pattern (e.g. *.json).").into());
@@ -121,6 +121,8 @@ pub(super) struct TestView {
     pub file: Option<PathBuf>,
     /// Nur diese Regel (aus dem Regel-Dialog: der ungespeicherte Stand).
     pub rule: Option<Box<Rule>>,
+    /// Berechneter Plan und Zeilen (Schlüssel: Datei, Regeln, Pause) – nicht jedes Bild neu (Entschlüsseln!).
+    cache: Option<(u64, matching::Plan, Vec<(u64, String, Vec<String>)>)>,
 }
 
 /// Vorschau beim Import.
@@ -228,6 +230,9 @@ pub(super) struct DialogCx<'a> {
     pub groups: &'a [String],
     /// *Jetzt ausführen* möglich (gespeicherte Regel, offene Datei).
     pub can_run: bool,
+    /// Quoting der gewählten Shell (Prüfung der Befehle) und ob es cmd ist.
+    pub quote: crate::quote::Kind,
+    pub cmd: bool,
 }
 
 /// Knöpfe des Regel-Dialogs.
@@ -391,11 +396,25 @@ pub(super) fn rule_editor_body(ui: &mut Ui, ed: &mut RuleEditor, cx: &DialogCx) 
                 }
             });
             rows.push(resp.response.rect);
-            if let ActionKind::Command { command } = &a.kind {
-                let q = vars::quoted_vars(command);
-                if !q.is_empty() {
-                    ui.label(RichText::new(format!("{} {}", lang.t("Anführungszeichen um Variablen entfernen (sie werden selbst gequotet):", "Remove the quotes around variables (they are quoted automatically):"), q.join(", "))).small().color(style::ui().warning));
+            match &a.kind {
+                ActionKind::Command { command } => {
+                    if let Err(e) = vars::check_command(command, cx.quote) {
+                        ui.label(RichText::new(e).small().color(style::ui().danger));
+                    }
+                    if cx.cmd {
+                        let bare = vars::cmd_unquoted_env(command);
+                        if !bare.is_empty() {
+                            ui.label(RichText::new(format!("{} {}", lang.t("cmd setzt diese Variablen ungequotet ein – als \"%NAME%\" schreiben:", "cmd inserts these variables unquoted – write them as \"%NAME%\":"), bare.join(", "))).small().color(style::ui().warning));
+                        }
+                    }
                 }
+                ActionKind::SendToSession { text, .. } => {
+                    let names: Vec<String> = ed.env.iter().map(|e| e.name.trim().to_string()).collect();
+                    if let Some(n) = vars::secret_used(text, &|v| names.iter().any(|s| s.eq_ignore_ascii_case(v))) {
+                        ui.label(RichText::new(format!("{} {n}", lang.t("Geheime Variablen gehen nicht an Sitzungen:", "Secret variables are not sent to sessions:"))).small().color(style::ui().danger));
+                    }
+                }
+                _ => {}
             }
         }
         if let Some(i) = drag_start {
@@ -574,7 +593,7 @@ impl App {
     /// Test-Ansicht öffnen (Datei vorbelegt, sonst die aktive Datei des Editors).
     pub(super) fn sa_open_test(&mut self, file: Option<PathBuf>) {
         let file = file.or_else(|| self.ed.active_doc().and_then(|id| self.ed.docs.get(&id)).and_then(|d| d.path.clone()));
-        self.save_actions.ui.test = Some(TestView { file, rule: None });
+        self.save_actions.ui.test = Some(TestView { file, rule: None, cache: None });
     }
 
     /// Einträge für das Menü *Datei* der Menüleiste des Editors (und andere Menüs): *Aktionen beim Speichern …*,
@@ -851,7 +870,10 @@ impl App {
         let active_file = self.ed.active_doc().and_then(|id| self.ed.docs.get(&id)).and_then(|d| d.path.clone());
         let esc = ctx.input(|i| i.key_pressed(Key::Escape)) && !egui::Popup::is_any_open(ctx);
         let win = style::fit_to_screen(ctx, style::movable(ctx, Id::new("sa_rule_editor"), egui::Window::new(title)), [640.0, 720.0], [480.0, 360.0]).collapsible(false);
-        let cx = DialogCx { lang, shells: &shells, sessions: &sessions, processes: &processes, groups: &groups, can_run: active_file.is_some() && !ed.is_new };
+        let target = procs::resolve_shell(&ed.rule.shell, &self.shells).map(vars::Target::of);
+        let quote = target.as_ref().map(|t| t.quote).unwrap_or(crate::quote::Kind::Pwsh);
+        let cmd = target.as_ref().is_some_and(|t| t.flavor == procs::Flavor::Cmd);
+        let cx = DialogCx { lang, shells: &shells, sessions: &sessions, processes: &processes, groups: &groups, can_run: active_file.is_some() && !ed.is_new, quote, cmd };
         let mut out = DialogOut::default();
         win.show(ctx, |ui| out = rule_editor_body(ui, &mut ed, &cx));
         let DialogOut { save, cancel, test, run_now, delete } = out;
@@ -866,7 +888,7 @@ impl App {
         }
         if test {
             match ed.build(lang) {
-                Ok(r) => self.save_actions.ui.test = Some(TestView { file: active_file.clone(), rule: Some(Box::new(r)) }),
+                Ok(r) => self.save_actions.ui.test = Some(TestView { file: active_file.clone(), rule: Some(Box::new(r)), cache: None }),
                 Err(e) => ed.error = Some(e),
             }
         }
@@ -910,35 +932,23 @@ impl App {
                 None => cfg.rules.push((**r).clone()),
             }
         }
-        let plan = tv.file.as_ref().map(|f| matching::plan(&cfg, f, SaveOrigin::User, Switches { paused: self.save_actions.paused, without_actions: false }));
-        let mut lines: Vec<(u64, String, Vec<String>)> = Vec::new();
-        if let (Some(p), Some(f)) = (&plan, &tv.file) {
-            for pr in &p.rules {
-                let Some(def) = cfg.rule(pr.rule) else { continue };
-                let vctx = vars::Ctx { file: f.clone(), rule_folder: def.folder(), workspace: self.editor_root() };
-                let mut out = Vec::new();
-                for a in &pr.post {
-                    out.push(match &a.kind {
-                        ActionKind::Command { command } => match self.sa_prepare(def, command, &vctx) {
-                            Ok(p) => {
-                                let mut s = format!("{} ({}): {}", lang.t("Befehl", "Command"), p.shell.label, p.display);
-                                for n in &p.notes {
-                                    s.push_str(&format!("\n    ⚠ {n}"));
-                                }
-                                s
-                            }
-                            Err(e) => format!("{} ✗ {e}", lang.t("Befehl", "Command")),
-                        },
-                        ActionKind::Copy { target, keep_structure } => match sa::copy::destination(f, &def.folder(), target, *keep_structure) {
-                            Ok(d) => format!("{} → {}", lang.t("Kopieren", "Copy"), d.display()),
-                            Err(e) => format!("{} ✗ {}", lang.t("Kopieren", "Copy"), e.text(lang)),
-                        },
-                        k => k.label(lang),
-                    });
-                }
-                lines.push((pr.rule, pr.name.clone(), out));
-            }
+        let key = {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            tv.file.hash(&mut h);
+            cfg.to_json().to_string().hash(&mut h);
+            self.save_actions.paused.hash(&mut h);
+            self.editor_root().hash(&mut h);
+            h.finish()
+        };
+        if tv.cache.as_ref().is_none_or(|c| c.0 != key) {
+            let (plan, lines) = self.sa_test_compute(&cfg, tv.file.as_deref());
+            tv.cache = Some((key, plan, lines));
         }
+        let (plan, lines) = match &tv.cache {
+            Some((_, p, l)) if tv.file.is_some() => (Some(p.clone()), l.clone()),
+            _ => (None, Vec::new()),
+        };
         let name_of = |id: u64| cfg.rule(id).map(|r| r.display_name()).unwrap_or_default();
         style::fit_to_screen(ctx, style::movable(ctx, Id::new("sa_test"), egui::Window::new(lang.t("Regeln für diese Datei", "Rules for this file"))), [620.0, 460.0], [360.0, 240.0]).collapsible(false).open(&mut open).show(ctx, |ui| {
             ui.horizontal(|ui| {
@@ -996,6 +1006,42 @@ impl App {
         }
     }
 
+    /// Plan und Zeilen der Test-Ansicht (Befehlszeilen mit Hinweisen, Kopierziele).
+    fn sa_test_compute(&self, cfg: &sa::Config, file: Option<&Path>) -> (matching::Plan, Vec<(u64, String, Vec<String>)>) {
+        let lang = self.settings.language;
+        let mut lines: Vec<(u64, String, Vec<String>)> = Vec::new();
+        let Some(f) = file else { return (matching::Plan::default(), lines) };
+        let owned = f.to_path_buf();
+        let f = &owned;
+        let p = matching::plan(cfg, f, SaveOrigin::User, Switches { paused: self.save_actions.paused, without_actions: false });
+        for pr in &p.rules {
+            let Some(def) = cfg.rule(pr.rule) else { continue };
+            let vctx = vars::Ctx { file: f.clone(), rule_folder: def.folder(), workspace: self.editor_root() };
+            let mut out = Vec::new();
+            for a in &pr.post {
+                out.push(match &a.kind {
+                    ActionKind::Command { command } => match self.sa_prepare(def, command, &vctx) {
+                        Ok(p) => {
+                            let mut s = format!("{} ({}): {}", lang.t("Befehl", "Command"), p.shell.label, p.display);
+                            for n in &p.notes {
+                                s.push_str(&format!("\n    ⚠ {n}"));
+                            }
+                            s
+                        }
+                        Err(e) => format!("{} ✗ {e}", lang.t("Befehl", "Command")),
+                    },
+                    ActionKind::Copy { target, keep_structure } => match sa::copy::destination(f, &def.folder(), target, *keep_structure) {
+                        Ok(d) => format!("{} → {}", lang.t("Kopieren", "Copy"), d.display()),
+                        Err(e) => format!("{} ✗ {}", lang.t("Kopieren", "Copy"), e.text(lang)),
+                    },
+                    k => k.label(lang),
+                });
+            }
+            lines.push((pr.rule, pr.name.clone(), out));
+        }
+        (p, lines)
+    }
+
     /// Vorschau beim Import: alle Befehle zeigen; importierte Regeln kommen ausgeschaltet an.
     fn sa_import_ui(&mut self, ctx: &egui::Context) {
         let Some(mut iv) = self.save_actions.ui.import.take() else { return };
@@ -1007,6 +1053,20 @@ impl App {
                 for (i, r) in iv.rules.iter().enumerate() {
                     ui.checkbox(&mut iv.chosen[i], RichText::new(r.display_name()).strong());
                     ui.label(RichText::new(scope_text(r, lang)).small().color(style::dim(ui)));
+                    let mut trig = Vec::new();
+                    if r.on_autosave {
+                        trig.push(lang.t("auch beim automatischen Speichern", "also on autosave"));
+                    }
+                    if r.on_agent_save {
+                        trig.push(lang.t("auch wenn ein Agent speichert", "also when an agent saves"));
+                    }
+                    if !trig.is_empty() {
+                        ui.label(RichText::new(trig.join(" · ")).small().color(style::ui().warning));
+                    }
+                    let unknown: Vec<String> = r.actions.iter().filter(|a| matches!(a.kind, ActionKind::Unknown(_))).map(|a| a.kind.kind()).collect();
+                    if !unknown.is_empty() {
+                        ui.label(RichText::new(format!("{} {}", lang.t("Unbekannte Aktionen (werden übersprungen):", "Unknown actions (skipped):"), unknown.join(", "))).small().color(style::ui().warning));
+                    }
                     for c in sa::exchange::commands_of(r) {
                         ui.label(RichText::new(format!("   {c}")).monospace().small());
                     }
@@ -1164,7 +1224,7 @@ mod tests {
             let sessions = vec![(3u64, "Build".to_string())];
             let processes = vec![(2u64, "web".to_string())];
             let groups = vec!["Backend".to_string()];
-            let cx = DialogCx { lang, shells: &shells, sessions: &sessions, processes: &processes, groups: &groups, can_run: true };
+            let cx = DialogCx { lang, shells: &shells, sessions: &sessions, processes: &processes, groups: &groups, can_run: true, quote: crate::quote::Kind::Pwsh, cmd: false };
             let ctx = egui::Context::default();
             let mut t = 0.0;
             for _ in 0..3 {

@@ -101,8 +101,23 @@ struct Active {
     step: Option<Step>,
     /// Fehler in diesem Lauf.
     errors: usize,
-    /// *Abbrechen* für den ganzen Lauf.
+    /// *Abbrechen* für den ganzen Lauf (und wann).
     cancelled: bool,
+    cancel_at: Option<Instant>,
+    /// Verlaufseinträge dieses Laufs und das schlechteste Ergebnis je Regel.
+    records: Vec<u64>,
+    results: HashMap<u64, RunStatus>,
+}
+
+/// Rang eines Ergebnisses (höher = schlechter) für das Gesamtergebnis einer Regel.
+fn rank(s: RunStatus) -> u8 {
+    match s {
+        RunStatus::Running => 0,
+        RunStatus::Ok => 1,
+        RunStatus::Skipped => 2,
+        RunStatus::Cancelled => 3,
+        RunStatus::Failed | RunStatus::TimeLimit => 4,
+    }
 }
 
 /// Was die Statusleiste des Editors zeigt (von der App jedes Bild gesetzt, `EditorUi::on_save`).
@@ -174,9 +189,9 @@ impl SaState {
         self.meta.locked.as_deref()
     }
 
-    /// Laufen Befehle (für die Rückfrage beim Beenden)?
+    /// Laufen oder warten Läufe (für die Rückfrage beim Beenden) – auch zwischen zwei Schritten?
     pub fn any_active(&self) -> bool {
-        self.active.iter().any(|a| matches!(a.step, Some(Step::Hidden { .. }) | Some(Step::Visible { .. }) | Some(Step::Copy { .. })))
+        !self.active.is_empty() || self.queue.waiting() > 0
     }
 
     /// Laufende und wartende Läufe.
@@ -187,8 +202,14 @@ impl SaState {
     fn record(&mut self, r: RunRecord) -> u64 {
         let id = r.id;
         self.history.push_front(r);
+        // Die ältesten abgeschlossenen fallen weg – laufende nie (ihr Ergebnis kommt noch).
         while self.history.len() > sa::HISTORY_RUNS {
-            self.history.pop_back();
+            match self.history.iter().rposition(|x| x.status != RunStatus::Running) {
+                Some(i) => {
+                    self.history.remove(i);
+                }
+                None => break,
+            }
         }
         id
     }
@@ -285,7 +306,7 @@ impl App {
         }
         let limit = self.save_actions.cfg.parallel();
         for job in self.save_actions.queue.take_ready(limit) {
-            self.save_actions.active.push(Active { job, rule_ix: 0, action_ix: 0, rule_failed: false, step: None, errors: 0, cancelled: false });
+            self.save_actions.active.push(Active { job, rule_ix: 0, action_ix: 0, rule_failed: false, step: None, errors: 0, cancelled: false, cancel_at: None, records: Vec::new(), results: HashMap::new() });
         }
         let mut i = 0;
         let mut waiting = false;
@@ -334,7 +355,7 @@ impl App {
             }
             if a.rule_failed && !action.continue_on_error {
                 let label = action.kind.label(self.settings.language);
-                let id = self.save_actions.new_record(&file, &rule, label, String::new());
+                let id = self.sa_new_rec(i, &file, &rule, label, String::new());
                 let msg = self.settings.language.t("Nach einem Fehler in dieser Regel übersprungen", "Skipped after an error in this rule").to_string();
                 self.sa_finish_record(id, RunStatus::Skipped, None, Vec::new(), Some(msg));
                 continue;
@@ -362,6 +383,13 @@ impl App {
                     false
                 }
                 Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    // Abgebrochen: höchstens 5 s auf das Ende warten (atomar – es bleibt kein halbes Ziel), dann gilt es
+                    // als abgebrochen.
+                    if self.save_actions.active[i].cancel_at.is_some_and(|t| t.elapsed() >= procs::STOP_GRACE) {
+                        self.sa_action_failed(i);
+                        self.sa_finish_record(record, RunStatus::Cancelled, None, Vec::new(), Some(lang.t("Abgebrochen", "Cancelled").into()));
+                        return false;
+                    }
                     self.save_actions.active[i].step = Some(Step::Copy { rx, record });
                     true
                 }
@@ -435,6 +463,13 @@ impl App {
         }
     }
 
+    /// Verlaufseintrag für einen laufenden Lauf (Ergebnis zählt für seine Regel).
+    fn sa_new_rec(&mut self, i: usize, file: &Path, rule: &PlannedRule, action: String, command: String) -> u64 {
+        let id = self.save_actions.new_record(file, rule, action, command);
+        self.save_actions.active[i].records.push(id);
+        id
+    }
+
     fn sa_action_failed(&mut self, i: usize) {
         let a = &mut self.save_actions.active[i];
         a.rule_failed = true;
@@ -483,7 +518,12 @@ impl App {
         r.message = msg;
         let (rule, name, file, action) = (r.rule, r.rule_name.clone(), r.file.clone(), r.action.clone());
         let detail = r.message.clone().unwrap_or_default();
-        self.save_actions.last.insert(rule, (status, sa::now_secs()));
+        if let Some(a) = self.save_actions.active.iter_mut().find(|a| a.records.contains(&record)) {
+            let e = a.results.entry(rule).or_insert(RunStatus::Ok);
+            if rank(status) > rank(*e) {
+                *e = status;
+            }
+        }
         if status.error() {
             let fname = file.file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_default();
             let text = format!("{} {fname} – {name}: {action} {} ({detail})", lang.t("Beim Speichern:", "On save:"), status.label(lang));
@@ -501,6 +541,11 @@ impl App {
         self.save_actions.queue.finished(&a.job.key);
         let failed = a.errors > 0 || !a.job.failed_rules.is_empty();
         self.save_actions.file_failed.insert(a.job.key.clone(), failed);
+        // Ein Ergebnis je Regel des Laufs (vor dem Schreiben gescheiterte Text-Aktionen zählen mit).
+        let now = sa::now_secs();
+        for (rule, st) in rule_results(&a.job, &a.results, a.cancelled) {
+            self.save_actions.last.insert(rule, (st, now));
+        }
         if !failed && !a.cancelled {
             let fname = a.job.file.file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_default();
             for pr in &a.job.rules {
@@ -515,7 +560,7 @@ impl App {
     fn sa_start_action(&mut self, ctx: &egui::Context, i: usize, rule: &PlannedRule, action: &sa::Action, file: &Path) {
         let lang = self.settings.language;
         let Some(def) = self.save_actions.cfg.rule(rule.rule).cloned() else {
-            let id = self.save_actions.new_record(file, rule, action.kind.label(lang), String::new());
+            let id = self.sa_new_rec(i, file, rule, action.kind.label(lang), String::new());
             self.sa_finish_record(id, RunStatus::Skipped, None, Vec::new(), Some(lang.t("Regel gibt es nicht mehr", "The rule no longer exists").into()));
             return;
         };
@@ -525,12 +570,12 @@ impl App {
                 let prepared = self.sa_prepare(&def, command, &vctx);
                 match prepared {
                     Err(e) => {
-                        let id = self.save_actions.new_record(file, rule, action.kind.label(lang), command.clone());
+                        let id = self.sa_new_rec(i, file, rule, action.kind.label(lang), command.clone());
                         self.sa_action_failed(i);
                         self.sa_finish_record(id, RunStatus::Failed, None, Vec::new(), Some(e));
                     }
                     Ok(p) => {
-                        let id = self.save_actions.new_record(file, rule, action.kind.label(lang), p.display.clone());
+                        let id = self.sa_new_rec(i, file, rule, action.kind.label(lang), p.display.clone());
                         if !p.notes.is_empty() {
                             if let Some(r) = self.save_actions.rec_mut(id) {
                                 r.message = Some(p.notes.join(" · "));
@@ -556,12 +601,12 @@ impl App {
                 let folder = def.folder();
                 match sa::copy::destination(file, &folder, target, *keep_structure) {
                     Err(e) => {
-                        let id = self.save_actions.new_record(file, rule, action.kind.label(lang), target.clone());
+                        let id = self.sa_new_rec(i, file, rule, action.kind.label(lang), target.clone());
                         self.sa_action_failed(i);
                         self.sa_finish_record(id, RunStatus::Failed, None, Vec::new(), Some(e.text(lang).into()));
                     }
                     Ok(dest) => {
-                        let id = self.save_actions.new_record(file, rule, action.kind.label(lang), format!("→ {}", dest.display()));
+                        let id = self.sa_new_rec(i, file, rule, action.kind.label(lang), format!("→ {}", dest.display()));
                         let (tx, rx) = std::sync::mpsc::channel();
                         let (src, d) = (file.to_path_buf(), dest.clone());
                         let c = ctx.clone();
@@ -579,14 +624,14 @@ impl App {
                 }
             }
             ActionKind::SendToSession { session, name, text } => {
-                let id = self.save_actions.new_record(file, rule, action.kind.label(lang), format!("→ {name}"));
+                let id = self.sa_new_rec(i, file, rule, action.kind.label(lang), format!("→ {name}"));
                 match self.sa_send_to_session(*session, text, &def, &vctx) {
                     Ok(()) => self.sa_finish_record(id, RunStatus::Ok, None, Vec::new(), None),
                     Err(hint) => self.sa_finish_record(id, RunStatus::Skipped, None, Vec::new(), Some(hint)),
                 }
             }
             ActionKind::RestartProcess { process, group, name } => {
-                let id = self.save_actions.new_record(file, rule, action.kind.label(lang), name.clone());
+                let id = self.sa_new_rec(i, file, rule, action.kind.label(lang), name.clone());
                 let ids: Vec<u64> = if group.trim().is_empty() {
                     self.procs.defs.iter().filter(|d| d.id == *process).map(|d| d.id).collect()
                 } else {
@@ -603,7 +648,7 @@ impl App {
                 }
             }
             ActionKind::Notify { text } => {
-                let id = self.save_actions.new_record(file, rule, action.kind.label(lang), String::new());
+                let id = self.sa_new_rec(i, file, rule, action.kind.label(lang), String::new());
                 let secret: Vec<String> = def.env_names();
                 let lookup = crate::terminal::child_env_lookup(self.settings.inherit_env, &[]);
                 let shown = vars::expand_text(text, &vctx, &lookup, &|n| secret.iter().any(|s| s.eq_ignore_ascii_case(n)));
@@ -635,15 +680,15 @@ impl App {
         env.extend(vals);
         if target.flavor == procs::Flavor::Wsl {
             let existing = std::env::var("WSLENV").ok();
-            env.push(("WSLENV".into(), vctx.wslenv(existing.as_deref())));
+            env.push(("WSLENV".into(), vctx.wslenv(existing.as_deref(), &rule.env_names())));
         }
         let env_now = env.clone();
         let lookup = crate::terminal::child_env_lookup(self.settings.inherit_env, &env_now);
         let secret_names = rule.env_names();
         let secret = |n: &str| secret_names.iter().any(|s| s.eq_ignore_ascii_case(n));
         let cmd_lookup: &dyn Fn(&str) -> Option<String> = &lookup;
-        let line = vars::expand_command(template, vctx, &target, Some(cmd_lookup), &lookup, &secret, false);
-        let display = vars::expand_command(template, vctx, &target, None, &lookup, &secret, true);
+        let line = vars::expand_command(template, vctx, &target, Some(cmd_lookup), &lookup, &secret, false)?;
+        let display = vars::expand_command(template, vctx, &target, None, &lookup, &secret, true)?;
         if line.contains('\n') || line.contains('\r') {
             return Err(lang.t("Der Befehl muss eine Zeile sein", "The command must be one line").into());
         }
@@ -658,9 +703,11 @@ impl App {
         if !bad.is_empty() {
             notes.push(format!("{} {}", lang.t("Nicht entschlüsselbar (Wert neu eingeben):", "Could not be decrypted (enter the value again):"), bad.join(", ")));
         }
-        let quoted = vars::quoted_vars(template);
-        if !quoted.is_empty() {
-            notes.push(format!("{} {}", lang.t("Variablen werden selbst gequotet – Anführungszeichen darum entfernen:", "Variables are quoted automatically – remove the quotes around:"), quoted.join(", ")));
+        if target.flavor == procs::Flavor::Cmd {
+            let bare = vars::cmd_unquoted_env(template);
+            if !bare.is_empty() {
+                notes.push(format!("{} {}", lang.t("cmd setzt diese Variablen ungequotet ein – als \"%NAME%\" schreiben:", "cmd inserts these variables unquoted – write them as \"%NAME%\":"), bare.join(", ")));
+            }
         }
         Ok(Prepared { flavor: target.flavor, shell, spec, env, cwd, display, notes })
     }
@@ -721,11 +768,16 @@ impl App {
             return Err(lang.t("Die Sitzung wartet nicht an ihrem Prompt (oder ohne Shell-Integration) – nichts gesendet", "The session is not waiting at its prompt (or has no shell integration) – nothing sent").into());
         }
         let shell = self.shell_by_id(&e.eff_shell().to_string());
-        let target = shell.as_ref().map(vars::Target::of).unwrap_or(vars::Target { flavor: procs::Flavor::Pwsh, quote: crate::quote::Kind::Pwsh, shell_id: String::new() });
+        let target = shell.as_ref().map(vars::Target::of).unwrap_or(vars::Target { flavor: procs::Flavor::Pwsh, quote: crate::quote::Kind::Pwsh, shell_id: String::new(), distro: None });
         let (vals, _) = rule_env(rule);
         let lookup = crate::terminal::child_env_lookup(self.settings.inherit_env, &vals);
         let names = rule.env_names();
-        let line = vars::expand_command(template, vctx, &target, None, &lookup, &|n| names.iter().any(|s| s.eq_ignore_ascii_case(n)), false);
+        let secret = |n: &str| names.iter().any(|s| s.eq_ignore_ascii_case(n));
+        // Geheime Werte landeten sichtbar im Terminal und im Verlauf.
+        if let Some(n) = vars::secret_used(template, &secret) {
+            return Err(format!("{} {}", lang.t("Geheime Variablen gehen nicht an Sitzungen (sie stünden sichtbar im Terminal):", "Secret variables are not sent to sessions (they would be visible in the terminal):"), n));
+        }
+        let line = vars::expand_command(template, vctx, &target, None, &lookup, &secret, false)?;
         if line.trim().is_empty() || line.contains('\n') {
             return Err(lang.t("Der Text muss genau eine Zeile sein", "The text must be exactly one line").into());
         }
@@ -749,20 +801,32 @@ impl App {
             Some(t) => matching::plan(&self.save_actions.cfg, t, origin, Switches { paused: self.save_actions.paused, without_actions: without }),
             None => Plan::default(),
         };
+        // Automatisches Speichern: Leerraum in Zeilen mit einem Cursor bleibt (man tippt dort gerade).
+        let keep_lines: Vec<usize> = if origin == SaveOrigin::Autosave {
+            match self.ed.docs.get(&id) {
+                Some(d) => self.ed.panes.tabs_of(id).into_iter().filter_map(|(g, i)| self.ed.panes.groups.get(&g).and_then(|grp| grp.tabs.get(i)).map(|t| t.view.cursor_linecol(d).0)).collect(),
+                None => Vec::new(),
+            }
+        } else {
+            Vec::new()
+        };
         let d = self.ed.docs.get_mut(&id).ok_or_else(|| lang.t("Kein solches Dokument", "No such document").to_string())?;
         // Vor dem Schreiben: Text-Aktionen (ein rückgängig machbarer Schritt).
         let mut failed_rules: Vec<(u64, String)> = Vec::new();
         let mut pre_notes: Vec<(u64, Builtin, String, bool)> = Vec::new();
         if !plan.builtins.is_empty() {
             let list: Vec<Builtin> = plan.builtins.iter().map(|(b, ..)| b.clone()).collect();
-            for (b, res) in d.apply_save_builtins(&list, &prefs, lang) {
-                let Some((_, rule, cont)) = plan.builtins.iter().find(|(x, ..)| *x == b) else { continue };
+            for (b, res) in d.apply_save_builtins(&list, &prefs, lang, &keep_lines) {
+                let Some((_, rule, _)) = plan.builtins.iter().find(|(x, ..)| *x == b) else { continue };
                 match res {
                     Ok(Some(note)) => pre_notes.push((*rule, b.clone(), note, false)),
                     Ok(None) => {}
                     Err(e) => {
-                        if !cont {
-                            failed_rules.push((*rule, e.clone()));
+                        // Gilt für jede Regel, die diese Aktion ohne „Bei Fehler weiter“ hat.
+                        for pr in &plan.rules {
+                            if pr.builtins.iter().any(|(x, cont)| *x == b && !cont) {
+                                failed_rules.push((pr.rule, e.clone()));
+                            }
                         }
                         pre_notes.push((*rule, b.clone(), e, true));
                     }
@@ -773,23 +837,28 @@ impl App {
         // Nach dem Schreiben.
         let file = target.unwrap_or_default();
         for (rule, b, note, err) in pre_notes {
-            let pr = plan.rules.iter().find(|r| r.rule == rule).cloned().unwrap_or(PlannedRule { rule, name: String::new(), post: Vec::new(), builtins: Vec::new() });
+            let pr = plan.rules.iter().find(|r| r.rule == rule).cloned().unwrap_or(PlannedRule { rule, name: String::new(), post: Vec::new(), builtins: Vec::new(), pos: 0 });
             let rid = self.save_actions.new_record(&file, &pr, b.label(lang), String::new());
             self.sa_finish_record(rid, if err { RunStatus::Failed } else { RunStatus::Skipped }, None, Vec::new(), Some(note));
         }
-        self.save_actions.last_report = Some(report_json(&plan, &failed_rules, &self.save_actions.cfg));
+        // Bericht für `editor_save` nur, wenn es überhaupt Regeln gibt.
+        self.save_actions.last_report = (!self.save_actions.cfg.rules.is_empty()).then(|| report_json(&plan, &failed_rules, &self.save_actions.cfg));
         let key = sa::path_key(&file);
-        let has_post = plan.rules.iter().any(|r| !r.post.is_empty());
-        if has_post {
-            for r in &plan.rules {
-                self.save_actions.last.insert(r.rule, (RunStatus::Running, sa::now_secs()));
-            }
+        let now = sa::now_secs();
+        // Regeln nur mit Text-Aktionen: Ergebnis jetzt; Regeln mit Aktionen danach: „läuft“ bis zum Ende des Laufs.
+        for r in &plan.rules {
+            let st = if !r.post.is_empty() {
+                RunStatus::Running
+            } else if failed_rules.iter().any(|(x, _)| *x == r.rule) {
+                RunStatus::Failed
+            } else {
+                RunStatus::Ok
+            };
+            self.save_actions.last.insert(r.rule, (st, now));
+        }
+        if plan.rules.iter().any(|r| !r.post.is_empty()) {
             self.save_actions.queue.submit(Job { id: 0, file, key, rules: plan.rules.clone(), origin, failed_rules });
         } else if !plan.builtins.is_empty() {
-            for r in &plan.rules {
-                let st = if failed_rules.iter().any(|(x, _)| *x == r.rule) { RunStatus::Failed } else { RunStatus::Ok };
-                self.save_actions.last.insert(r.rule, (st, sa::now_secs()));
-            }
             self.save_actions.file_failed.insert(key, !failed_rules.is_empty());
         }
         Ok(())
@@ -805,11 +874,15 @@ impl App {
                 && let Some(def) = self.save_actions.cfg.rule(r)
             {
                 // Auch eine Regel, die gerade nicht passt (z. B. im Dialog noch nicht gespeichert): so, wie sie ist.
-                plan.rules.push(PlannedRule { rule: r, name: def.display_name(), post: def.actions.iter().filter(|a| !a.kind.modifies() && !matches!(a.kind, ActionKind::Unknown(_))).cloned().collect(), builtins: Vec::new() });
+                let pos = self.save_actions.cfg.rules.iter().position(|x| x.id == r).unwrap_or(0);
+                plan.rules.push(PlannedRule { rule: r, name: def.display_name(), post: def.actions.iter().filter(|a| !a.kind.modifies() && !matches!(a.kind, ActionKind::Unknown(_))).cloned().collect(), builtins: Vec::new(), pos });
             }
         }
         let n = plan.rules.iter().map(|r| r.post.len()).sum();
         if n > 0 {
+            for r in plan.rules.iter().filter(|r| !r.post.is_empty()) {
+                self.save_actions.last.insert(r.rule, (RunStatus::Running, sa::now_secs()));
+            }
             self.save_actions.queue.submit(Job { id: 0, file: file.to_path_buf(), key: sa::path_key(file), rules: plan.rules, origin: SaveOrigin::User, failed_rules: Vec::new() });
         }
         n
@@ -818,8 +891,10 @@ impl App {
     /// Alles abbrechen (wartende verwerfen, laufende Befehle anhalten).
     pub(super) fn sa_cancel_all(&mut self) {
         self.save_actions.queue.clear_waiting();
+        let now = Instant::now();
         for a in &mut self.save_actions.active {
             a.cancelled = true;
+            a.cancel_at.get_or_insert(now);
         }
     }
 
@@ -832,6 +907,7 @@ impl App {
             };
             if mine {
                 a.cancelled = true;
+                a.cancel_at.get_or_insert(Instant::now());
             }
         }
     }
@@ -882,16 +958,15 @@ impl App {
 
     /// Namen der laufenden Befehle (Rückfrage beim Beenden).
     pub(super) fn sa_active_names(&self) -> Vec<String> {
-        self.save_actions
-            .active
-            .iter()
-            .filter(|a| a.step.is_some())
-            .filter_map(|a| {
-                let r = a.job.rules.get(a.rule_ix)?;
-                let f = a.job.file.file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_default();
-                Some(format!("{} – {f}", r.name))
-            })
-            .collect()
+        let lang = self.settings.language;
+        let label = |j: &Job, ix: usize| {
+            let f = j.file.file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_default();
+            let r = j.rules.get(ix).or_else(|| j.rules.last()).map(|r| r.name.clone()).unwrap_or_default();
+            format!("{r} – {f}")
+        };
+        let mut out: Vec<String> = self.save_actions.active.iter().map(|a| label(&a.job, a.rule_ix)).collect();
+        out.extend(self.save_actions.queue.waiting_jobs().map(|j| format!("{} ({})", label(j, 0), lang.t("wartet", "waiting"))));
+        out
     }
 
     pub(super) fn sa_quit_ui(&mut self, ctx: &egui::Context) {
@@ -957,6 +1032,23 @@ enum Spawned {
     Visible(u64),
 }
 
+/// Ein Ergebnis je Regel eines fertigen Laufs (nur Regeln mit Aktionen nach dem Schreiben): das schlechteste ihrer
+/// Aktionen; vor dem Schreiben gescheiterte Text-Aktionen zählen als Fehler; ohne Aktion im Lauf (abgebrochen) =
+/// abgebrochen.
+fn rule_results(job: &Job, results: &HashMap<u64, RunStatus>, cancelled: bool) -> Vec<(u64, RunStatus)> {
+    job.rules
+        .iter()
+        .filter(|r| !r.post.is_empty())
+        .map(|pr| {
+            let mut st = results.get(&pr.rule).copied().unwrap_or(if cancelled { RunStatus::Cancelled } else { RunStatus::Ok });
+            if job.failed_rules.iter().any(|(x, _)| *x == pr.rule) {
+                st = RunStatus::Failed;
+            }
+            (pr.rule, st)
+        })
+        .collect()
+}
+
 /// Strg+C bzw. Baum beenden.
 fn sa_effects(s: &Session, fx: Vec<procs::Effect>) {
     for e in fx {
@@ -978,7 +1070,7 @@ fn sa_effects(s: &Session, fx: Vec<procs::Effect>) {
 pub(super) fn report_json(plan: &Plan, failed: &[(u64, String)], cfg: &Config) -> Value {
     let name = |id: u64| cfg.rule(id).map(|r| r.display_name()).unwrap_or_default();
     json!({
-        "triggered": plan.rules.iter().map(|r| json!({"id": r.rule, "name": r.name, "actions": r.builtins.iter().map(|b| b.kind().to_string()).chain(r.post.iter().map(|a| a.kind.kind())).collect::<Vec<_>>(), "failed_before_write": failed.iter().any(|(x, _)| *x == r.rule)})).collect::<Vec<_>>(),
+        "triggered": plan.rules.iter().map(|r| json!({"id": r.rule, "name": r.name, "actions": r.builtins.iter().map(|(b, _)| b.kind().to_string()).chain(r.post.iter().map(|a| a.kind.kind())).collect::<Vec<_>>(), "failed_before_write": failed.iter().any(|(x, _)| *x == r.rule)})).collect::<Vec<_>>(),
         "skipped": plan.skipped.iter().map(|(id, n, why)| json!({"id": id, "name": n, "reason": why.code(), "detail": why.text(Lang::En, name)})).collect::<Vec<_>>(),
         "builtins": plan.builtins.iter().map(|(b, ..)| b.kind()).collect::<Vec<_>>(),
         "note": "Commands run in the background after saving; their output is untrusted data and is not returned here.",
@@ -1052,6 +1144,25 @@ mod tests {
         assert_eq!(v["rules"][0]["actions"], json!(["command", "copy", "send_to_session", "notify"]));
         assert_eq!(v["rules"][0]["last_result"]["status"], "failed");
         assert_eq!(v["rules"][0]["patterns"], json!(["*.php"]));
+    }
+
+    #[test]
+    fn one_result_per_rule_and_running_records_are_never_evicted() {
+        let pr = |rule: u64, post: bool| PlannedRule { rule, name: String::new(), post: if post { vec![sa::Action::new(ActionKind::Notify { text: "x".into() })] } else { vec![] }, builtins: vec![], pos: 0 };
+        let job = Job { id: 1, file: PathBuf::from("f"), key: "f".into(), rules: vec![pr(1, true), pr(2, true), pr(3, false), pr(4, true)], origin: SaveOrigin::User, failed_rules: vec![(4, "trim".into())] };
+        let results: HashMap<u64, RunStatus> = [(1, RunStatus::Failed), (2, RunStatus::Ok)].into_iter().collect();
+        assert_eq!(rule_results(&job, &results, false), vec![(1, RunStatus::Failed), (2, RunStatus::Ok), (4, RunStatus::Failed)]);
+        assert_eq!(rule_results(&job, &HashMap::new(), true)[0], (1, RunStatus::Cancelled));
+        // Verlauf: der laufende Eintrag bleibt, auch wenn mehr als 100 dazukommen.
+        let mut st = SaState::default();
+        let p = pr(1, true);
+        let first = st.new_record(Path::new("f"), &p, "a".into(), String::new());
+        for _ in 0..(sa::HISTORY_RUNS + 20) {
+            let id = st.new_record(Path::new("f"), &p, "a".into(), String::new());
+            st.rec_mut(id).unwrap().status = RunStatus::Ok;
+        }
+        assert_eq!(st.history.len(), sa::HISTORY_RUNS);
+        assert!(st.history.iter().any(|r| r.id == first && r.status == RunStatus::Running));
     }
 
     #[test]

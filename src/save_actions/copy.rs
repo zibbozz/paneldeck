@@ -47,23 +47,93 @@ pub fn check_target(target: &str, rule_folder: &Path) -> Result<PathBuf, CopyRef
         Err((code, _)) if code == "forbidden" => return Err(CopyRefusal::Device),
         Err(_) => return Err(CopyRefusal::NotAbsolute),
     }
-    let tp = PathBuf::from(t);
-    if is_inside(&tp, rule_folder) {
+    let tp = normalize(Path::new(t));
+    let real = resolve(&tp)?;
+    let (rf, rf_real) = rule_folders(rule_folder);
+    if is_inside(&tp, &rf) || is_inside(&real, &rf_real) {
         return Err(CopyRefusal::InsideRuleFolder);
     }
-    Ok(tp)
+    Ok(real)
+}
+
+/// `.` und `..` auflösen (nur der Text, ohne die Platte).
+pub fn normalize(p: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut out: Vec<Component> = Vec::new();
+    for c in p.components() {
+        match c {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if matches!(out.last(), Some(Component::Normal(_))) {
+                    out.pop();
+                }
+            }
+            c => out.push(c),
+        }
+    }
+    out.iter().collect()
+}
+
+/// Kanonischer Pfad ohne `\\?\`; `\\?\UNC\…` und andere Freigaben = Netzwerk. `None` = gibt es nicht.
+fn canonical(p: &Path) -> Result<Option<PathBuf>, CopyRefusal> {
+    let Ok(c) = std::fs::canonicalize(p) else { return Ok(None) };
+    let s = c.to_string_lossy().to_string();
+    if s.to_ascii_lowercase().starts_with(r"\\?\unc\") {
+        return Err(CopyRefusal::Network);
+    }
+    let plain = s.strip_prefix(r"\\?\").unwrap_or(&s).to_string();
+    if crate::pathfmt::is_remote(&plain) {
+        return Err(CopyRefusal::Network);
+    }
+    Ok(Some(PathBuf::from(plain)))
+}
+
+/// Wirklicher Ort eines (vielleicht noch nicht vorhandenen) Pfads: der nächste vorhandene Vorfahr kanonisch (Links,
+/// Junctions, Laufwerke), der Rest angehängt. Netzwerk → Fehler.
+pub fn resolve(p: &Path) -> Result<PathBuf, CopyRefusal> {
+    let p = normalize(p);
+    let mut rest: Vec<std::ffi::OsString> = Vec::new();
+    let mut cur = Some(p.as_path());
+    while let Some(c) = cur {
+        if let Some(real) = canonical(c)? {
+            let mut out = real;
+            for r in rest.iter().rev() {
+                out.push(r);
+            }
+            return Ok(out);
+        }
+        match c.file_name() {
+            Some(n) => rest.push(n.to_os_string()),
+            None => break,
+        }
+        cur = c.parent();
+    }
+    Ok(p)
+}
+
+/// Regelordner als Text (normalisiert) und – wenn lokal – sein wirklicher Ort (ein Netzwerkordner wird nicht angefasst).
+fn rule_folders(rule_folder: &Path) -> (PathBuf, PathBuf) {
+    let rf = normalize(rule_folder);
+    let real = if crate::pathfmt::is_remote(&rf.to_string_lossy()) { rf.clone() } else { resolve(&rf).unwrap_or_else(|_| rf.clone()) };
+    (rf, real)
 }
 
 /// Zielpfad für `src`: `target` + (Pfad relativ zum Regelordner bzw. Dateiname).
 pub fn destination(src: &Path, rule_folder: &Path, target: &str, keep_structure: bool) -> Result<PathBuf, CopyRefusal> {
     let t = check_target(target, rule_folder)?;
     let rel = if keep_structure { relative(src, rule_folder).filter(|r| !r.as_os_str().is_empty()) } else { None };
-    let dest = match rel {
+    let dest = normalize(&match rel {
         Some(r) => t.join(r),
         None => t.join(src.file_name().unwrap_or_default()),
-    };
-    if path_key(&dest) == path_key(src) {
+    });
+    let real_src = resolve(src).unwrap_or_else(|_| normalize(src));
+    if path_key(&dest) == path_key(src) || path_key(&dest) == path_key(&real_src) {
         return Err(CopyRefusal::SameFile);
+    }
+    // Das fertige Ziel darf nie im Regelordner liegen (z. B. Ziel = Ordner über dem Regelordner mit Ordnerstruktur).
+    let (rf, rf_real) = rule_folders(rule_folder);
+    if is_inside(&dest, &rf) || is_inside(&dest, &rf_real) {
+        return Err(CopyRefusal::InsideRuleFolder);
     }
     Ok(dest)
 }
@@ -116,6 +186,43 @@ mod tests {
         // Datei-Regel: Regelordner = Ordner der Datei, das Ziel darf nicht die Quelle sein.
         let r2 = src.parent().unwrap();
         assert_eq!(destination(&src, r2, &src.parent().unwrap().to_string_lossy(), false), Err(CopyRefusal::InsideRuleFolder));
+    }
+
+    /// `..`, Ordner über dem Regelordner mit Ordnerstruktur und Links/Junctions in den Regelordner.
+    #[test]
+    fn final_destination_is_checked_after_resolving() {
+        let tmp = crate::editor::test_dir("sa-copy3");
+        let rule = tmp.join("app");
+        let src = rule.join("app").join("x.txt");
+        std::fs::create_dir_all(src.parent().unwrap()).unwrap();
+        std::fs::write(&src, "x").unwrap();
+        let sep = std::path::MAIN_SEPARATOR;
+        // `..` führt zurück in den Regelordner.
+        let back = format!("{}{sep}out{sep}..{sep}app{sep}dist", tmp.display());
+        assert_eq!(check_target(&back, &rule), Err(CopyRefusal::InsideRuleFolder));
+        assert_eq!(normalize(Path::new(&back)), rule.join("dist"));
+        // Ziel = Ordner über dem Regelordner, Ordnerstruktur `app\x.txt` → `<tmp>\app\x.txt` liegt im Regelordner.
+        assert_eq!(destination(&src, &rule, &tmp.to_string_lossy(), true), Err(CopyRefusal::InsideRuleFolder));
+        // Ohne Ordnerstruktur liegt `<tmp>\x.txt` daneben: erlaubt.
+        assert!(destination(&src, &rule, &tmp.to_string_lossy(), false).is_ok());
+        // Ein Link auf den Regelordner zählt wie der Regelordner.
+        let link = tmp.join("link");
+        let made = if cfg!(windows) {
+            std::process::Command::new("cmd").args(["/c", "mklink", "/J"]).arg(&link).arg(&rule).output().map(|o| o.status.success()).unwrap_or(false)
+        } else {
+            #[cfg(unix)]
+            {
+                std::os::unix::fs::symlink(&rule, &link).is_ok()
+            }
+            #[cfg(not(unix))]
+            {
+                false
+            }
+        };
+        if made {
+            assert_eq!(check_target(&link.join("sub").to_string_lossy(), &rule), Err(CopyRefusal::InsideRuleFolder));
+            assert_eq!(check_target(&link.to_string_lossy(), &rule), Err(CopyRefusal::InsideRuleFolder));
+        }
     }
 
     #[test]

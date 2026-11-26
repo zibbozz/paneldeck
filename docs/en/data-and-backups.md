@@ -226,7 +226,8 @@ All fields are optional; older versions ignore them, and missing fields mean the
 
 ## New fields in 3.2.0
 - New file `save-actions.json` for the editor's [actions on save](editor.md#actions-on-save) (see [above](#actions-on-save-save-actionsjson)) and the folder `save-action-logs/`. Older versions ignore both.
-- Shortcut id `save_no_actions` (*Editor: Save without actions*, no default key) in the shortcut settings.
+- Shortcut id `save_no_actions` (*Editor: Save without actions*, no default key, Editor tab only) in the shortcut settings.
+- `processes.json` → optional top-level `next_id`: the next id for a new entry, so the id of a deleted entry is never given to a new one (actions on save remember processes by id). Older versions keep the field.
 
 ## New fields in 3.1.0
 All fields are optional; older versions ignore them, and missing fields mean the defaults below. See [Background commands](chat.md#background-commands).

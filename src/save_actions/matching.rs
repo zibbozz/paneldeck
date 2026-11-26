@@ -69,8 +69,11 @@ pub struct PlannedRule {
     pub name: String,
     /// Aktionen nach dem Schreiben (Befehl, Kopieren, Paneldeck), in Listenreihenfolge.
     pub post: Vec<Action>,
-    /// Die Text-Aktionen dieser Regel (für die Meldung; ausgeführt werden sie gesammelt in [`Plan::builtins`]).
-    pub builtins: Vec<Builtin>,
+    /// Die Text-Aktionen dieser Regel mit „Bei Fehler weiter“ (für Meldung und Fehler; ausgeführt werden sie gesammelt
+    /// in [`Plan::builtins`]).
+    pub builtins: Vec<(Builtin, bool)>,
+    /// Stelle der Regel in der Liste (Reihenfolge beim Zusammenführen wartender Läufe).
+    pub pos: usize,
 }
 
 /// Was beim Speichern einer Datei passiert.
@@ -118,7 +121,7 @@ pub fn rule_matches(rule: &Rule, file: &Path) -> bool {
 
 /// Muster wie `.gitignore` (relativ zum Ordner) gegen einen relativen Pfad prüfen. Ohne Muster passt nichts.
 pub fn patterns_match(patterns: &[String], folder: &Path, rel: &Path) -> bool {
-    let lines: Vec<&str> = patterns.iter().map(|s| s.trim()).filter(|s| !s.is_empty() && !s.starts_with('#')).collect();
+    let lines: Vec<String> = patterns.iter().map(|s| normalize_pattern(s)).filter(|s| !s.is_empty() && !s.starts_with('#')).collect();
     if lines.is_empty() {
         return false;
     }
@@ -132,9 +135,18 @@ pub fn patterns_match(patterns: &[String], folder: &Path, rel: &Path) -> bool {
     gi.matched_path_or_any_parents(folder.join(rel), false).is_ignore()
 }
 
+/// Muster bereinigen: Leerraum außen weg; unter Windows `\` als Trenner (wie im Explorer) zu `/` (in `.gitignore` wäre
+/// `\` ein Maskierzeichen).
+pub fn normalize_pattern(p: &str) -> String {
+    let p = p.trim();
+    if cfg!(windows) { p.replace('\\', "/") } else { p.to_string() }
+}
+
 /// Fehler eines Musters (für die Oberfläche), `None` = in Ordnung.
+
 pub fn pattern_error(pattern: &str) -> Option<String> {
-    let p = pattern.trim();
+    let p = normalize_pattern(pattern);
+    let p = p.as_str();
     if p.is_empty() || p.starts_with('#') {
         return None;
     }
@@ -177,6 +189,7 @@ pub fn plan(cfg: &Config, file: &Path, origin: SaveOrigin, sw: Switches) -> Plan
     let blockers: Vec<(u64, std::path::PathBuf)> = matching.iter().filter(|r| r.enabled && r.no_parent_rules).map(|r| (r.id, r.folder())).collect();
     let mut stopped_by: Option<u64> = None;
     for r in matching {
+        let pos = cfg.rules.iter().position(|x| x.id == r.id).unwrap_or(usize::MAX);
         let name = r.display_name();
         if !r.enabled {
             out.skipped.push((r.id, name, SkipReason::Disabled));
@@ -195,11 +208,11 @@ pub fn plan(cfg: &Config, file: &Path, origin: SaveOrigin, sw: Switches) -> Plan
             out.skipped.push((r.id, name, SkipReason::Trigger(origin)));
             continue;
         }
-        let mut pr = PlannedRule { rule: r.id, name, post: Vec::new(), builtins: Vec::new() };
+        let mut pr = PlannedRule { rule: r.id, name, post: Vec::new(), builtins: Vec::new(), pos };
         for a in &r.actions {
             match &a.kind {
                 ActionKind::Builtin(b) => {
-                    pr.builtins.push(b.clone());
+                    pr.builtins.push((b.clone(), a.continue_on_error));
                     if !out.builtins.iter().any(|(x, ..)| x == b) {
                         out.builtins.push((b.clone(), r.id, a.continue_on_error));
                     }
@@ -256,6 +269,8 @@ mod tests {
         assert!(!rule_matches(&rule(1, Scope::Pattern, &b, &["*.ts"], "x"), &PathBuf::from(if cfg!(windows) { r"C:\other\a.ts" } else { "/other/a.ts" })));
         if cfg!(windows) {
             assert!(rule_matches(&rule(1, Scope::Pattern, &b, &["*.JSON"], "x"), &b.join("Package.json")), "Windows: ohne Groß/Klein");
+            assert!(rule_matches(&rule(1, Scope::Pattern, &b, &[r"src\**\*.ts"], "x"), &ts), "Windows: Backslash als Trenner");
+            assert_eq!(normalize_pattern(r" src\a "), "src/a");
         }
         assert!(pattern_error("src/{a").is_some(), "offene Alternative");
         assert!(pattern_error("*.ts").is_none());

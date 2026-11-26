@@ -45,6 +45,18 @@ impl Queue {
         job.id = self.next;
         let id = job.id;
         if let Some(w) = self.waiting.iter_mut().find(|w| w.key == job.key) {
+            // Regeln beider Läufe (Vereinigung, Listenreihenfolge); der neue Stand der Datei gewinnt.
+            let mut rules = job.rules.clone();
+            let mut failed = job.failed_rules.clone();
+            for r in &w.rules {
+                if !rules.iter().any(|x| x.rule == r.rule) {
+                    rules.push(r.clone());
+                    failed.extend(w.failed_rules.iter().filter(|(x, _)| *x == r.rule).cloned());
+                }
+            }
+            rules.sort_by_key(|r| r.pos);
+            job.rules = rules;
+            job.failed_rules = failed;
             *w = job;
             return (id, Submitted::Replaced);
         }
@@ -89,6 +101,11 @@ impl Queue {
         n
     }
 
+    /// Wartende Läufe (Rückfrage beim Beenden).
+    pub fn waiting_jobs(&self) -> impl Iterator<Item = &Job> {
+        self.waiting.iter()
+    }
+
     pub fn waiting(&self) -> usize {
         self.waiting.len()
     }
@@ -109,7 +126,7 @@ mod tests {
     use super::*;
 
     fn job(key: &str, tag: &str) -> Job {
-        Job { id: 0, file: PathBuf::from(key), key: key.into(), rules: vec![PlannedRule { rule: 1, name: tag.into(), post: vec![], builtins: vec![] }], origin: SaveOrigin::User, failed_rules: vec![] }
+        Job { id: 0, file: PathBuf::from(key), key: key.into(), rules: vec![PlannedRule { rule: 1, name: tag.into(), post: vec![], builtins: vec![], pos: 0 }], origin: SaveOrigin::User, failed_rules: vec![] }
     }
 
     #[test]
@@ -130,6 +147,26 @@ mod tests {
         assert_eq!(next[0].rules[0].name, "v4");
         q.finished("a");
         assert_eq!((q.running(), q.waiting()), (0, 0));
+    }
+
+    /// Ein ersetzter wartender Lauf verliert keine Regeln: Vereinigung in Listenreihenfolge, neuester Stand gewinnt.
+    #[test]
+    fn replacing_a_waiting_run_merges_the_rules() {
+        let pr = |rule: u64, pos: usize, name: &str| PlannedRule { rule, name: name.into(), post: vec![], builtins: vec![], pos };
+        let mut q = Queue::default();
+        q.submit(job("a", "running"));
+        q.take_ready(2);
+        let mut j1 = job("a", "");
+        j1.rules = vec![pr(3, 2, "c-old"), pr(1, 0, "a-old")];
+        j1.failed_rules = vec![(3, "x".into())];
+        q.submit(j1);
+        let mut j2 = job("a", "");
+        j2.rules = vec![pr(1, 0, "a-new"), pr(2, 1, "b-new")];
+        assert_eq!(q.submit(j2).1, Submitted::Replaced);
+        q.finished("a");
+        let next = q.take_ready(2).remove(0);
+        assert_eq!(next.rules.iter().map(|r| (r.rule, r.name.as_str())).collect::<Vec<_>>(), [(1, "a-new"), (2, "b-new"), (3, "c-old")]);
+        assert_eq!(next.failed_rules, vec![(3, "x".to_string())]);
     }
 
     #[test]

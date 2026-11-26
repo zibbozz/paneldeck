@@ -226,7 +226,8 @@ Alle Felder sind optional; ältere Versionen ignorieren sie, fehlende Felder bed
 
 ## Neue Felder in 3.2.0
 - Neue Datei `save-actions.json` für die [Aktionen beim Speichern](editor.md#aktionen-beim-speichern) des Editors (siehe [oben](#aktionen-beim-speichern-save-actionsjson)) und der Ordner `save-action-logs/`. Ältere Versionen ignorieren beides.
-- Kürzel-Kennung `save_no_actions` (*Editor: Ohne Aktionen speichern*, ohne Standardtaste) in den Einstellungen der Tastenkürzel.
+- Kürzel-Kennung `save_no_actions` (*Editor: Ohne Aktionen speichern*, ohne Standardtaste, nur im Editor-Reiter) in den Einstellungen der Tastenkürzel.
+- `processes.json` → optional auf oberster Ebene `next_id`: die nächste Kennung für einen neuen Eintrag, damit die Kennung eines gelöschten Eintrags nie an einen neuen geht (Aktionen beim Speichern merken sich Prozesse per Kennung). Ältere Versionen behalten das Feld.
 
 ## Neue Felder in 3.1.0
 Alle Felder sind optional; ältere Versionen ignorieren sie, fehlende Felder bedeuten die Standardwerte unten. Siehe [Befehle im Hintergrund](chat.md#befehle-im-hintergrund).

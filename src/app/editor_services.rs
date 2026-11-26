@@ -575,4 +575,9 @@ impl EditorHost for BridgeHost<'_> {
     fn save_actions_report(&mut self) -> Option<Value> {
         self.app.save_actions.last_report.take()
     }
+
+    /// Datenordner (und der Ordner der laufenden Instanz bei Profilen) – nie für Agenten (#383).
+    fn protected(&self, path: &Path) -> bool {
+        crate::save_actions::is_inside(path, &self.app.dir) || crate::save_actions::is_inside(&crate::save_actions::copy::normalize(path), &self.app.dir)
+    }
 }
