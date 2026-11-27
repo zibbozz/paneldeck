@@ -43,7 +43,7 @@ pub use board::{board_source_ids, board_view, board_view_with, move_card, move_c
 pub use compile::{compile, Compiled, MAX_DEPTH, MAX_NODES, MAX_SQL_LEN};
 pub use error::{Feature, Problem, SRes, SearchError};
 pub use rows::{TicketRow, PRIORITY_FIELD_KEY};
-pub use schema::{schema_for, search_schema, Conflict, SearchSchema, CHANGED_BY};
+pub use schema::{schema_for, search_schema, search_schema_only, Conflict, SearchSchema, CHANGED_BY};
 pub use seed::{seed_demo, SeedError, SeededDemo};
 
 use crate::planning::views::filters::get_filter;
@@ -80,11 +80,13 @@ pub struct Ctx {
     pub timeout: Duration,
     /// Auch archivierte Tickets (MCP `include_archived`, Wartung); sonst nur, wenn die Abfrage nach `archived` fragt.
     pub include_archived: bool,
+    /// Sicht eines Agenten (#386): nur diese Projekte, ohne private Tickets. `None` = alles (Oberfläche).
+    pub agent_projects: Option<Vec<i64>>,
 }
 
 impl Ctx {
     pub fn new(today: &str, lang: Lang) -> Ctx {
-        Ctx { today: today.to_string(), terminals: Vec::new(), lang, timeout: DEFAULT_TIMEOUT, include_archived: false }
+        Ctx { today: today.to_string(), terminals: Vec::new(), lang, timeout: DEFAULT_TIMEOUT, include_archived: false, agent_projects: None }
     }
 
     /// Mit dem heutigen Datum der Systemuhr.
@@ -104,6 +106,12 @@ impl Ctx {
 
     pub fn with_archived(mut self, on: bool) -> Ctx {
         self.include_archived = on;
+        self
+    }
+
+    /// Nur für Agenten (#386): Treffer nur aus diesen Projekten und nie private Tickets.
+    pub fn for_agent(mut self, projects: Vec<i64>) -> Ctx {
+        self.agent_projects = Some(projects);
         self
     }
 }
@@ -160,7 +168,8 @@ pub fn prepare(conn: &Connection, ctx: &Ctx, scope: Scope, jql: &str) -> SRes<(S
     if len > MAX_QUERY_CHARS {
         return Err(SearchError::TooLong { len, max: MAX_QUERY_CHARS });
     }
-    let schema = search_schema(conn, scope, ctx.lang)?;
+    // Sicht eines Agenten (#386): nur Schema-Teile erreichbarer Projekte.
+    let schema = schema::search_schema_only(conn, scope, ctx.lang, ctx.agent_projects.as_deref())?;
     let query = parse(jql).map_err(|errors| SearchError::Parse { input: jql.to_string(), errors })?;
     let issues = validate(&query, &schema.schema);
     if !issues.is_empty() {

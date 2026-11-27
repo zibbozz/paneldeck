@@ -37,17 +37,21 @@ pub(super) fn restore_once_applies(remember: bool, update_restart: bool) -> bool
 /// zuletzt aktiven Projekts (Darstellung der Seitenleiste). `lang` = gespeicherte Sprache (Name des Standardprojekts).
 pub(super) fn forget(saved: SavedState, lang: Lang) -> SavedState {
     let tree_view = saved.projects.iter().find(|p| p.id == saved.active_project).or(saved.projects.first()).is_some_and(|p| p.tree_view);
-    let project = Project { id: 1, name: lang.t("Standard", "Default").to_string(), tree_view, ..Project::default() };
+    // Neue Kennung (#386): das frische Standardprojekt erbt keine Karten oder Verknüpfungen der verworfenen Projekte.
+    // Ein Zustand ohne Projekte (sehr alter Stand) beginnt wie bisher bei 1.
+    let id = saved.project_id_floor();
+    let project = Project { id, name: lang.t("Standard", "Default").to_string(), tree_view, ..Project::default() };
     SavedState {
         sessions: Vec::new(),
         layout: None,
         focused: 0,
         next_id: saved.next_id,
         projects: vec![project],
-        active_project: 1,
+        active_project: id,
         detached: Vec::new(),
         composer_draft: saved.composer_draft,
         extra_windows: Vec::new(),
+        next_project_id: id + 1,
     }
 }
 
@@ -264,6 +268,7 @@ mod tests {
             detached: vec![3],
             composer_draft: "draft".into(),
             extra_windows: vec![state::SavedWindow { id: 1, project: 2, ..Default::default() }],
+            next_project_id: 0,
         };
         assert!(worth_keeping(&saved));
         let f = forget(saved, Lang::En);
@@ -272,10 +277,14 @@ mod tests {
         assert!(f.detached.is_empty() && f.extra_windows.is_empty());
         assert_eq!(f.next_id, 9, "Ids werden nie wiederverwendet");
         assert_eq!(f.composer_draft, "draft");
-        assert_eq!(f.active_project, 1);
+        // Neue Projekt-Kennung über allen bisherigen (#386): nichts Altes hängt am frischen Standardprojekt.
+        let fresh = f.projects[0].id;
+        assert!(fresh > 2, "{fresh}");
+        assert_eq!(f.active_project, fresh);
+        assert_eq!(f.next_project_id, fresh + 1);
         assert_eq!(f.projects.len(), 1);
         let p = &f.projects[0];
-        assert_eq!((p.id, p.name.as_str(), p.folder.as_str()), (1, "Default", ""));
+        assert_eq!((p.name.as_str(), p.folder.as_str()), ("Default", ""));
         assert!(p.folders.is_empty() && p.layout.is_none());
         assert!(p.tree_view, "Baumansicht des aktiven Projekts bleibt (Darstellung)");
         // Deutsch und ohne Projekte (alter Stand)

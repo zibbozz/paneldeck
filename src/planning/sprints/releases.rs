@@ -289,9 +289,19 @@ impl ReleaseProgress {
 
 /// Fortschritt nach Status-Kategorie und als Anteil (`basis`: Punkte aus `story_points`, Anzahl oder Punkte mit „ohne = 1“).
 pub fn release_progress(conn: &Connection, kind: ReleaseKind, id: i64, basis: Basis) -> SRes<ReleaseProgress> {
+    release_progress_ex(conn, kind, id, basis, false)
+}
+
+/// [`release_progress`]; `hide_private` lässt private Tickets weg (Sicht eines Agenten, #386).
+pub fn release_progress_ex(conn: &Connection, kind: ReleaseKind, id: i64, basis: Basis, hide_private: bool) -> SRes<ReleaseProgress> {
     let cur = get_release(conn, kind, id)?;
     release_project(conn, cur.project_id)?;
-    let sql = format!("SELECT s.category, {} FROM tickets t LEFT JOIN statuses s ON s.id = t.status_id WHERE t.project_id = ?1 AND t.archived = 0 AND t.id IN ({})", points_sql(), referencing_sql());
+    let sql = format!(
+        "SELECT s.category, {} FROM tickets t LEFT JOIN statuses s ON s.id = t.status_id WHERE t.project_id = ?1 AND t.archived = 0 AND t.id IN ({}){}",
+        points_sql(),
+        referencing_sql(),
+        if hide_private { " AND t.private = 0" } else { "" }
+    );
     let mut st = conn.prepare(&sql)?;
     let rows = st
         .query_map(params![cur.project_id, kind.field_kind(), id], |r| Ok((r.get::<_, Option<String>>(0)?, r.get::<_, Option<f64>>(1)?)))?

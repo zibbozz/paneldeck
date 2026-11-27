@@ -356,10 +356,10 @@ impl App {
         if let Some(id) = self.tut.p.project.filter(|id| self.projects.iter().any(|p| p.id == *id)) {
             return id;
         }
-        let id = self.projects.iter().map(|p| p.id).max().unwrap_or(0) + 1;
+        let id = self.alloc_project_id();
         // Standardprofil wie das aktive Projekt: Tutorial-Terminals starten wie die gewohnten.
         let profile = self.projects.iter().find(|p| p.id == self.active_project).map(|p| p.profile).unwrap_or(0);
-        self.projects.push(Project { id, name: "Tutorial".to_string(), color: hub_color(id), profile, ..Project::default() });
+        self.projects.push(Project { id, name: "Tutorial".to_string(), color: hub_color(id), profile, agent_access: crate::access::AgentAccess::LOCKED, ..Project::default() });
         self.tut.p.project = Some(id);
         id
     }

@@ -86,7 +86,7 @@ impl App {
                         Err((code, msg)) => format!("{code}: {}", mcp::short(msg, 80)),
                         Ok(_) => info,
                     };
-                    let entry = LogEntry { ts: usage::today_secs(), tool: name, session: None, caller: Some(chat), ok: r.is_ok(), info, how: log_how, model };
+                    let entry = LogEntry { ts: usage::today_secs(), tool: name, session: None, caller: Some(chat), ok: r.is_ok(), info, how: log_how, model, project: None };
                     mcp::append_log(&dir, &entry);
                     let _ = tx.try_send(r);
                     ctx2.request_repaint();

@@ -2516,6 +2516,136 @@ c.close()
   $log = if (Test-Path "$data\mcp-log.jsonl") { [IO.File]::ReadAllText("$data\mcp-log.jsonl") } else { '' }
   Check 'Kalender: mcp-log.jsonl nennt die Werkzeuge, aber keine Notiz' ($log -match 'create_calendar_event' -and $log -notmatch 'geheime Notiz') ''
 
+  Write-Host "== Zugriff je Projekt (#386): gesperrtes Projekt, Fuer alle, private Karte, Papierkorb" -ForegroundColor Cyan
+  # Die Bruecke dieses Skripts ist ein externer Agent (keine Sitzung): Sie erreicht nur Bereiche mit "Fuer alle".
+  # Projekt 1 "Standard" = wie global + fuer alle (Stand nach dem Update), 2 "Gesperrt" = aus, 3 "Freigegeben" = nur lesen + fuer alle.
+  if (-not $py) {
+    Skip 'Zugriff je Projekt (#386)' 'kein python fuer die Praeparierung der Datenbank'
+  } else {
+    $u8a = New-Object Text.UTF8Encoding $false
+    function Set-SmokeSetting([string]$name, $value) {
+      $f = "$data\settings.json"
+      $j = [IO.File]::ReadAllText($f).TrimStart([char]0xFEFF) | ConvertFrom-Json
+      $j | Add-Member -Force -NotePropertyName $name -NotePropertyValue $value
+      [IO.File]::WriteAllText($f, ($j | ConvertTo-Json -Depth 10), $u8a)
+    }
+    $seedA = @'
+import sqlite3, sys
+c = sqlite3.connect(sys.argv[1])
+mode = sys.argv[2]
+if mode == 'simple':
+    now = '2026-01-01T00:00:00'
+    pos = (c.execute('SELECT COALESCE(MAX(position), 0) FROM todo_items').fetchone()[0] or 0) + 1
+    c.execute("INSERT INTO todo_items (title, body, position, created_at, updated_at, private) VALUES ('Smoke-Oeffentlich-386', '', ?, ?, ?, 0)", (pos, now, now))
+    c.execute("INSERT INTO todo_items (title, body, position, created_at, updated_at, private) VALUES ('Smoke-Privat-386', '', ?, ?, ?, 1)", (pos + 1, now, now))
+    print(c.execute('SELECT last_insert_rowid()').fetchone()[0])
+c.execute("INSERT INTO meta (key,value) VALUES ('expert_mode', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", ('0' if mode == 'simple' else '1',))
+c.commit()
+c.close()
+'@
+    $seedAFile = "$work\seed-access.py"; [IO.File]::WriteAllText($seedAFile, $seedA, $u8a)
+    Stop-Hub
+    $st = [ordered]@{
+      sessions = @(
+        [ordered]@{ id = 970; name = 'Smoke-Offen'; custom_name = $true; shell_id = 'powershell'; cwd = "$proj"; project = 1 },
+        [ordered]@{ id = 971; name = 'Smoke-Gesperrt'; custom_name = $true; shell_id = 'powershell'; cwd = "$proj"; project = 2 },
+        [ordered]@{ id = 972; name = 'Smoke-Lesen'; custom_name = $true; shell_id = 'powershell'; cwd = "$proj"; project = 3 })
+      next_id = 973
+      projects = @(
+        [ordered]@{ id = 1; name = 'Standard'; agent_access = [ordered]@{ level = 'global'; for_all = $true } },
+        [ordered]@{ id = 2; name = 'Gesperrt'; agent_access = [ordered]@{ level = 'off'; for_all = $false } },
+        [ordered]@{ id = 3; name = 'Freigegeben'; agent_access = [ordered]@{ level = 'read'; for_all = $true } })
+      active_project = 1
+    }
+    [IO.File]::WriteAllText("$data\state.json", ($st | ConvertTo-Json -Depth 8), $u8a)
+    Set-SmokeSetting 'agent_delete' $false
+    Set-SmokeSetting 'agent_create_projects' $false
+    # (a)-(c) im einfachen Modus: eine oeffentliche und eine private Karte (ohne Projekt = "Allgemein").
+    $script:privId = $null
+    $script:prestart = { $env:PYTHONUTF8 = '1'; $script:privId = (& python -I $seedAFile "$data\paneldeck.db" simple | Select-Object -Last 1); if ($LASTEXITCODE -ne 0) { throw 'seed-access.py fehlgeschlagen' } }
+    Set-Level 'Control' -Tray
+    $script:prestart = $null
+    [void](Rpc 'initialize' @{ protocolVersion = '2025-06-18'; capabilities = @{}; clientInfo = @{ name = 'smoke'; version = '1' } })
+    Start-Sleep 4
+    $wa = Tool 'whoami'
+    $acc = $wa.data.access
+    $accIds = @($acc.projects | ForEach-Object { $_.id })
+    Check 'whoami (#386): Feld access nennt nur erreichbare Projekte (Standard, Freigegeben), nicht das gesperrte' (-not $wa.err -and $accIds -contains 1 -and $accIds -contains 3 -and $accIds -notcontains 2) ($acc | ConvertTo-Json -Compress -Depth 5)
+    Check 'whoami (#386): Stufe je Projekt (Freigegeben = read) und general = control' ((@($acc.projects | Where-Object { $_.id -eq 3 })[0].level -eq 'read') -and $acc.general -eq 'control' -and -not (@($acc.projects | Where-Object { $_.home }).Count)) ($acc | ConvertTo-Json -Compress -Depth 5)
+    $lsIds = @((Tool 'list_sessions').data.sessions | ForEach-Object { $_.id })
+    Check 'list_sessions (#386): Sitzung des gesperrten Projekts fehlt, Fuer-alle-Projekte sind da' ($lsIds -contains 970 -and $lsIds -contains 972 -and $lsIds -notcontains 971) ($lsIds -join ',')
+    $lk = Tool 'read_terminal' @{ session = 971; lines = 5 }
+    Check 'read_terminal auf Sitzung des gesperrten Projekts -> project_locked (Projekt nicht genannt)' ((Code $lk) -eq 'project_locked' -and $lk.text -notmatch 'Gesperrt') $lk.text
+    Check 'read_terminal im Fuer-alle-Projekt mit Stufe Nur lesen geht' (-not (Tool 'read_terminal' @{ session = 972; lines = 5 }).err)
+    Check 'rename_session im Projekt mit Stufe Nur lesen -> forbidden' ((Code (Tool 'rename_session' @{ session = 972; name = 'x' })) -eq 'forbidden')
+    Check 'create_session mit project = gesperrtes Projekt -> project_locked' ((Code (Tool 'create_session' @{ shell = 'powershell'; cwd = "$proj"; project = 'Gesperrt' })) -eq 'project_locked')
+    Check 'create_session mit project = Nur-lesen-Projekt -> forbidden' ((Code (Tool 'create_session' @{ shell = 'powershell'; cwd = "$proj"; project = 3 })) -eq 'forbidden')
+    $cp = Tool 'create_session' @{ shell = 'powershell'; cwd = "$proj"; name = 'Smoke-Projekt-1'; project = 'Standard' }
+    Check 'create_session mit project = Standard (Steuern) legt die Sitzung an' (-not $cp.err -and $cp.data.id -gt 0) $cp.text
+    if (-not $cp.err) { [void](Tool 'close_session' @{ session = $cp.data.id }) }
+    Check 'screenshot ohne session bei gesperrtem Bereich -> project_locked' ((Code (Tool 'screenshot' @{})) -eq 'project_locked')
+    $tdl = Tool 'list_todos' @{ state = 'all'; limit = 200 }
+    $tdTitles = @($tdl.data.todos | ForEach-Object { $_.title })
+    Check 'list_todos (#386): oeffentliche Karte da, private Karte fehlt' (-not $tdl.err -and $tdTitles -contains 'Smoke-Oeffentlich-386' -and $tdTitles -notcontains 'Smoke-Privat-386') ($tdTitles -join ',')
+    Check 'list_todos (#386): Karten haben origin' (@($tdl.data.todos | Where-Object { $_.title -eq 'Smoke-Oeffentlich-386' -and $_.origin -eq 'user' }).Count -eq 1) ($tdl.data.todos | ConvertTo-Json -Compress -Depth 4)
+    if ($script:privId -match '^\d+$') {
+      Check 'set_todo_done auf private Karte -> not_found' ((Code (Tool 'set_todo_done' @{ id = [int]$script:privId })) -eq 'not_found')
+    } else {
+      Check 'seed-access.py: Kennung der privaten Karte' $false "'$($script:privId)'"
+    }
+    $logA = if (Test-Path "$data\mcp-log.jsonl") { [IO.File]::ReadAllText("$data\mcp-log.jsonl") } else { '' }
+    Check 'mcp-log.jsonl (#386): Feld project bei Aufrufen auf eine Sitzung' ($logA -match '"project":"(Freigegeben|Standard)"') ''
+
+    # (d) Expertenmodus: Papierkorb nur mit dem Schalter "Agenten duerfen Tickets/Kommentare loeschen".
+    $script:prestart = { $env:PYTHONUTF8 = '1'; & python -I $seedAFile "$data\paneldeck.db" expert | Out-Null; if ($LASTEXITCODE -ne 0) { throw 'seed-access.py fehlgeschlagen' } }
+    Set-Level 'Control' -Tray
+    $script:prestart = $null
+    [void](Rpc 'initialize' @{ protocolVersion = '2025-06-18'; capabilities = @{}; clientInfo = @{ name = 'smoke'; version = '1' } })
+    Start-Sleep 3
+    $names = @((Rpc 'tools/list').result.tools | ForEach-Object name)
+    Check 'Expertenmodus (#386): create_project, delete_ticket, update_comment, delete_comment in tools/list' (@('create_project', 'delete_ticket', 'update_comment', 'delete_comment' | Where-Object { $names -contains $_ }).Count -eq 4) ($names -join ',')
+    $pan = @((Tool 'list_projects').data.projects | Where-Object { $_.key -eq 'PAN' })
+    if (-not $pan.Count) {
+      Skip 'Papierkorb (#386)' 'Projekt PAN fehlt (Ticket-Teil nicht gelaufen)'
+    } else {
+      Check 'list_projects (#386): agent_level und created_by_agent' ($pan[0].agent_level -eq 'control' -and $pan[0].created_by_agent -eq $false) ($pan[0] | ConvertTo-Json -Compress -Depth 4)
+      $td = Tool 'create_ticket' @{ project = 'PAN'; type = 'Note'; title = 'Smoke-Papierkorb-386'; fields = @{} }
+      $tc = Tool 'create_ticket' @{ project = 'PAN'; type = 'Note'; title = 'Smoke-Kommentar-386'; fields = @{} }
+      $tdk = $td.data.ticket.key; $tck = $tc.data.ticket.key
+      Check 'create_ticket (#386): Herkunft agent' (-not $td.err -and -not $tc.err -and $td.data.ticket.origin -eq 'agent') $td.text
+      [void](Tool 'add_comment' @{ ticket = $tck; body = 'Smoke-Agenten-Kommentar' })
+      $gc = Tool 'get_ticket' @{ ticket = $tck }
+      $cm = @($gc.data.comments | Where-Object { $_.origin -eq 'agent' })
+      Check 'get_ticket (#386): Kommentar mit origin agent' ($cm.Count -eq 1) $gc.text
+      if ($cm.Count) {
+        $uc = Tool 'update_comment' @{ comment = $cm[0].id; body = 'Smoke-Agenten-Kommentar (korrigiert)' }
+        Check 'update_comment: Agenten-Kommentar geaendert (ohne Schalter)' (-not $uc.err -and $uc.data.changed -eq $true) $uc.text
+        Check 'delete_comment ohne Schalter -> forbidden' ((Code (Tool 'delete_comment' @{ comment = $cm[0].id })) -eq 'forbidden')
+      }
+      Check 'delete_ticket ohne Schalter -> forbidden' ((Code (Tool 'delete_ticket' @{ ticket = $tdk })) -eq 'forbidden')
+      Check 'create_project ohne Schalter -> forbidden' ((Code (Tool 'create_project' @{ key = 'SMK'; name = 'Smoke' })) -eq 'forbidden')
+      Check 'delete_ticket ohne Schalter: Ticket bleibt' (-not (Tool 'get_ticket' @{ ticket = $tdk }).err)
+      Set-SmokeSetting 'agent_delete' $true
+      Set-SmokeSetting 'agent_create_projects' $true
+      Set-Level 'Control' -Tray
+      [void](Rpc 'initialize' @{ protocolVersion = '2025-06-18'; capabilities = @{}; clientInfo = @{ name = 'smoke'; version = '1' } })
+      Start-Sleep 3
+      $dt = Tool 'delete_ticket' @{ ticket = $tdk }
+      Check 'delete_ticket mit Schalter: in den Papierkorb' (-not $dt.err -and $dt.data.trashed -eq $true) $dt.text
+      Check 'Ticket im Papierkorb: get_ticket -> not_found' ((Code (Tool 'get_ticket' @{ ticket = $tdk })) -eq 'not_found')
+      Check 'Ticket im Papierkorb: search_tickets findet es nicht' ((Tool 'search_tickets' @{ project = 'PAN'; text = 'Smoke-Papierkorb-386' }).data.total -eq 0)
+      if ($cm.Count) {
+        $dc = Tool 'delete_comment' @{ comment = $cm[0].id }
+        Check 'delete_comment mit Schalter: Agenten-Kommentar in den Papierkorb' (-not $dc.err -and $dc.data.trashed -eq $true -and (Tool 'get_ticket' @{ ticket = $tck }).data.comments_total -eq 0) $dc.text
+      }
+      Check 'create_project von aussen (ohne Heimatprojekt) auch mit Schalter -> forbidden' ((Code (Tool 'create_project' @{ key = 'SMK'; name = 'Smoke' })) -eq 'forbidden')
+    }
+    # Zurueck auf die Standards (Schalter aus); state.json mit dem gesperrten Projekt entfernt der naechste Abschnitt (-Empty).
+    Stop-Hub
+    Set-SmokeSetting 'agent_delete' $false
+    Set-SmokeSetting 'agent_create_projects' $false
+  }
+
   Write-Host "== Shell-Integration: Hilfsdateien beim Beenden geloescht (#57)" -ForegroundColor Cyan
   # Eigener Hub ohne Sitzungen (keine Rueckfrage beim Schliessen); Fenster normal schliessen statt Prozess beenden.
   Set-Level 'Control' -Empty

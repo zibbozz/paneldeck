@@ -91,6 +91,21 @@ impl Source {
         self.kind == SourceKind::Ui && self.detail.as_deref() == Some(MAINTENANCE)
     }
 
+    /// Gespeicherte Form für den Papierkorb (#386): `ui`, `agent:<Sitzung>` …; zurück mit [`Source::from_label_text`].
+    pub fn as_label_text(&self) -> String {
+        match &self.detail {
+            Some(d) => format!("{}:{d}", self.kind.as_str()),
+            None => self.kind.as_str().to_string(),
+        }
+    }
+
+    pub fn from_label_text(s: &str) -> Source {
+        match s.split_once(':') {
+            Some((k, d)) => Source { kind: SourceKind::parse(k), detail: Some(d.to_string()) },
+            None => Source { kind: SourceKind::parse(s), detail: None },
+        }
+    }
+
     /// Anzeigetext: „User interface“, „Quick menu“, „Agent (Sitzung)“, „Import“.
     pub fn label(&self, lang: Lang) -> String {
         match self.kind {
@@ -364,6 +379,14 @@ pub fn describe(conn: &Connection, e: &HistoryEntry, lang: Lang) -> String {
         HistoryField::Other(s) if s == "archived" => {
             if e.new.as_deref() == Some("1") { lang.t("Archiviert", "Archived") } else { lang.t("Aus dem Archiv geholt", "Restored from the archive") }.to_string()
         }
+        HistoryField::Other(s) if s == "private" => {
+            if e.new.as_deref() == Some("1") { lang.t("Als privat markiert", "Marked as private") } else { lang.t("Nicht mehr privat", "No longer private") }.to_string()
+        }
+        HistoryField::Other(s) if s == "trashed" => {
+            if e.new.as_deref() == Some("1") { lang.t("In den Papierkorb gelegt", "Moved to the trash") } else { lang.t("Aus dem Papierkorb geholt", "Restored from the trash") }.to_string()
+        }
+        HistoryField::Other(s) if s == "comment_trashed" => lang.t("Kommentar in den Papierkorb gelegt", "Comment moved to the trash").to_string(),
+        HistoryField::Other(s) if s == "comment_restored" => lang.t("Kommentar aus dem Papierkorb geholt", "Comment restored from the trash").to_string(),
         HistoryField::Other(s) if s == "broken_link" => lang.t("Verknüpfung zu einem gelöschten Ticket entfernt", "Link to a deleted ticket removed").to_string(),
         HistoryField::Other(s) => s.clone(),
     }

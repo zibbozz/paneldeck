@@ -62,6 +62,11 @@ pub struct ToolPolicy {
     /// Editor-Schalter der Agenten (#54, Bits wie `editor_svc::settings::AGENT_SWITCHES`, beim Anlegen gelesen):
     /// schreibende Editor-Werkzeuge bekommt das Modell nur, wenn ihr Schalter an ist.
     pub editor_switches: u8,
+    /// Obergrenze für die Paneldeck-Werkzeuge (#386): die Stufe des Projekts, in dem der Chat liegt („wie global“ = wie das
+    /// Modell). Die eigenen Agenten-Werkzeuge des Chats (Dateien, Befehle) gelten unabhängig davon weiter.
+    pub project_cap: McpLevel,
+    /// Schalter „Projekte anlegen“/„Löschen“ (#386, `access::AGENT_SWITCHES`), beim Anlegen gelesen.
+    pub access_switches: u8,
 }
 
 impl ToolPolicy {
@@ -72,7 +77,7 @@ impl ToolPolicy {
             cfg.level = McpLevel::Off;
         }
         let editor_switches = crate::editor_svc::settings::AGENT_SWITCHES.load(std::sync::atomic::Ordering::Relaxed);
-        ToolPolicy { cfg, tools_supported, expert, origin_sessions: Vec::new(), agent: AgentEnv::default(), editor_switches }
+        ToolPolicy { cfg, tools_supported, expert, origin_sessions: Vec::new(), agent: AgentEnv::default(), editor_switches, project_cap: McpLevel::Control, access_switches: crate::access::AGENT_SWITCHES.load(std::sync::atomic::Ordering::Relaxed) }
     }
 
     /// Dieselbe Momentaufnahme mit anderen Editor-Schaltern (Tests, ohne die globalen Schalter anzufassen).
@@ -80,6 +85,24 @@ impl ToolPolicy {
     pub fn with_editor_switches(mut self, bits: u8) -> Self {
         self.editor_switches = bits;
         self
+    }
+
+    /// Dieselbe Momentaufnahme mit anderen Schaltern „Projekte anlegen“/„Löschen“ (#386; Tests).
+    #[cfg(test)]
+    pub fn with_access_switches(mut self, bits: u8) -> Self {
+        self.access_switches = bits;
+        self
+    }
+
+    /// Dieselbe Momentaufnahme mit der Stufe des Projekts des Chats (#386): es gilt die niedrigere von Modell und Projekt.
+    pub fn with_project_cap(mut self, cap: McpLevel) -> Self {
+        self.project_cap = cap;
+        self
+    }
+
+    /// Stufe für die Paneldeck-Werkzeuge: die niedrigere von Modell und Projekt (#386).
+    pub fn paneldeck_level(&self) -> McpLevel {
+        self.cfg.level.min(self.project_cap)
     }
 
     /// Dieselbe Momentaufnahme mit den Sitzungen der auslösenden Agenten-Kette.
@@ -116,11 +139,15 @@ impl ToolPolicy {
     }
 
     fn allowed(&self, def: &mcp::ToolDef) -> bool {
-        def.level <= self.cfg.level
+        def.level <= self.paneldeck_level()
             && def.group.available(self.expert)
             && !self.cfg.disabled_tools.iter().any(|t| t == def.name)
             // Editor (#54): schreibende Werkzeuge nur, wenn ihr Schalter an ist (geprüft wird beim Ausführen ohnehin).
             && crate::editor_svc::tools::offered_to_chats(def.name, self.editor_switches)
+            // #386: Projekte anlegen, Papierkorb, Kommentare ändern nur mit ihrem Schalter der Einstellungen.
+            && crate::access::offered_to_chats(def.name, self.access_switches)
+            // … und vorerst gar nicht: kein Platz mehr im Chat-Prompt (bis zum Nachladen von Werkzeugen, #393).
+            && !crate::access::CHAT_EXCLUDED.contains(&def.name)
             // Reiter „Zeit“ (#164): nur für externe Agenten – die Kurzfassung des Chat-Prompts hätte sonst bei Steuern im
             // Expertenmodus keinen Platz mehr in 8192 Tokens.
             && !crate::time::agent::TOOLS.contains(&def.name)
@@ -138,7 +165,7 @@ impl ToolPolicy {
         let mut v: Vec<ToolSpec> = mcp::tools()
             .into_iter()
             .filter(|d| self.allowed(d) && !agent::is_agent_tool(d.name))
-            .map(|d| ToolSpec { name: d.name.to_string(), description: compact_description(&d), parameters: compact_schema(d.schema) })
+            .map(|d| ToolSpec { name: d.name.to_string(), description: compact_description(&d), parameters: compact_schema(chat_schema(d.name, d.schema)) })
             .collect();
         v.extend(agent::defs().into_iter().filter(|d| self.agent_allowed(d) && agent::offered(d, &self.agent).is_ok()).map(|d| ToolSpec { name: d.name.to_string(), description: d.description.to_string(), parameters: d.schema }));
         v
@@ -156,7 +183,24 @@ impl ToolPolicy {
         };
         // Stufe nach den Argumenten (`format_file` liest nur mit `op` = `validate`, #381).
         let level = mcp::call_level(def.name, &call.arguments).unwrap_or(def.level);
-        if !self.enabled() || level > self.cfg.level || self.cfg.disabled_tools.iter().any(|t| t == def.name) || crate::time::agent::TOOLS.contains(&def.name) {
+        // #386: Projekte anlegen, Papierkorb, Kommentare ändern – vorerst nur für externe Agenten (kein Platz im
+        // Chat-Prompt; das Nachladen von Werkzeugen, #393, hebt das auf), auch wenn das Modell den Namen errät.
+        if crate::access::CHAT_EXCLUDED.contains(&def.name) {
+            return Err((ToolStatus::Denied, error_json("forbidden", "This tool is not available in chats yet (only for agents outside chats).")));
+        }
+        if !crate::access::allowed_for_chats(def.name, self.access_switches) {
+            return Err((ToolStatus::Denied, error_json("forbidden", "The user has not allowed this (Settings -> Agents: \"Agents may create projects\" / \"Agents may delete tickets/comments\").")));
+        }
+        // Das Projekt des Chats begrenzt die Paneldeck-Werkzeuge (#386): gesperrt = `project_locked`, sonst `forbidden`.
+        if self.enabled() && level <= self.cfg.level && level > self.project_cap && !self.cfg.disabled_tools.iter().any(|t| t == def.name) {
+            let (code, msg) = if self.project_cap == McpLevel::Off {
+                (crate::access::LOCKED_CODE, "The project of this chat is locked for agents: no Paneldeck tools (only the user can release it in Settings -> Agents).")
+            } else {
+                ("forbidden", "The project of this chat only allows reading for agents (Settings -> Agents).")
+            };
+            return Err((ToolStatus::Denied, error_json(code, msg)));
+        }
+        if !self.enabled() || level > self.paneldeck_level() || self.cfg.disabled_tools.iter().any(|t| t == def.name) || crate::time::agent::TOOLS.contains(&def.name) {
             return Err((ToolStatus::Denied, error_json("forbidden", "This tool is not allowed for this model (Settings → Models).")));
         }
         if !def.group.available(self.expert) {
@@ -168,8 +212,8 @@ impl ToolPolicy {
             return Err((ToolStatus::Denied, error_json("wrong_mode", msg)));
         }
         // Argumente (schon normalisiert, `repair::normalize`): Objekt, Pflichtfelder, Typen – vor jeder Freigabe-Frage,
-        // mit einer Meldung, die Feld, erwarteten Typ und ein richtiges Beispiel nennt (#340).
-        if let Err(msg) = super::repair::validate(def.name, &def.schema, &call.arguments) {
+        // mit einer Meldung, die Feld, erwarteten Typ und ein richtiges Beispiel nennt (#340). Gegen die Fassung der Chats.
+        if let Err(msg) = super::repair::validate(def.name, &chat_schema(def.name, def.schema.clone()), &call.arguments) {
             return Err((ToolStatus::Error, error_json("bad_args", &msg)));
         }
         // Kein Umweg in die Sitzung des Agenten, der diese Runde ausgelöst hat – geprüft vor jeder Freigabe-Frage.
@@ -329,6 +373,26 @@ pub fn compact_description(def: &mcp::ToolDef) -> String {
         s.push_str(" Only sessions you created.");
     }
     s
+}
+
+/// Kurzfassung der Beschreibung von `create_session` → `env` (#384) für Chats; die Regeln prüft der Hub (`bad_args`
+/// nennt die Variable).
+pub const CHAT_ENV_DESCRIPTION: &str = "Terminals only, needs the user's switch (else forbidden): env vars {\"NAME\": \"value\"}, max 20, literal, never secret; refused names return bad_args";
+
+/// Schema eines MCP-Werkzeugs in der Fassung der Chats: `create_session` ohne `project` (#386) – ein Chat legt Sitzungen
+/// in seinem eigenen Projekt an (wie ohne den Parameter bei externen Agenten) – und mit kürzerer Beschreibung von `env`.
+/// Spart Platz im Chat-Prompt, der bei Steuern keinen mehr hat (die volle Fassung muss bei 32768 passen). Alle anderen
+/// unverändert; externe Agenten sehen das Schema aus `mcp::tools`.
+pub fn chat_schema(name: &str, mut schema: Value) -> Value {
+    if name == "create_session"
+        && let Some(p) = schema.get_mut("properties").and_then(Value::as_object_mut)
+    {
+        p.remove("project");
+        if let Some(e) = p.get_mut("env").and_then(Value::as_object_mut) {
+            e.insert("description".into(), Value::String(CHAT_ENV_DESCRIPTION.into()));
+        }
+    }
+    schema
 }
 
 /// Längste Parameter-Beschreibung in der kompakten Fassung (Zeichen).
@@ -594,6 +658,21 @@ mod tests {
     }
 
     #[test]
+    fn the_lower_of_model_and_project_level_applies() {
+        let model = LlmModel { level: McpLevel::Control, level_chosen: true, ..LlmModel::named("m") };
+        let p = ToolPolicy::new(model.clone(), None, false).with_project_cap(McpLevel::Read);
+        assert_eq!(p.paneldeck_level(), McpLevel::Read);
+        assert!(names(&p).contains(&"list_sessions".to_string()) && !names(&p).contains(&"send_text".to_string()));
+        assert!(p.check(&call("send_text", json!({"session": 1, "text": "x"}))).unwrap_err().1.contains("forbidden"));
+        let locked = ToolPolicy::new(model.clone(), None, false).with_project_cap(McpLevel::Off);
+        assert!(locked.enabled(), "die eigenen Werkzeuge des Chats bleiben");
+        assert!(!names(&locked).iter().any(|n| crate::mcp::tool_level(n).is_some() && !super::agent::is_agent_tool(n)), "keine Paneldeck-Werkzeuge: {:?}", names(&locked));
+        assert!(locked.check(&call("list_sessions", json!({}))).unwrap_err().1.contains(crate::access::LOCKED_CODE));
+        let low = ToolPolicy::new(LlmModel { level: McpLevel::Read, level_chosen: true, ..LlmModel::named("m") }, None, false).with_project_cap(McpLevel::Control);
+        assert_eq!(low.paneldeck_level(), McpLevel::Read, "das Modell begrenzt auch");
+    }
+
+    #[test]
     fn an_unchosen_level_counts_as_off() {
         let p = ToolPolicy::new(LlmModel { level: McpLevel::Control, level_chosen: false, ..LlmModel::named("m") }, None, false);
         assert_eq!((p.cfg.level, p.enabled(), p.specs().len()), (McpLevel::Off, false, 0));
@@ -664,6 +743,22 @@ mod tests {
         }
     }
 
+    /// #386: Projekte anlegen, Papierkorb und Kommentare ändern bekommen Chats vorerst nie (kein Platz im Chat-Prompt, bis
+    /// #393), auch nicht mit beiden Schaltern; `create_session` hat im Chat kein `project` (eigenes Projekt).
+    #[test]
+    fn project_access_extension_stays_out_of_chats() {
+        let p = policy(McpLevel::Control, &[], true).with_access_switches(crate::access::SW_CREATE | crate::access::SW_DELETE);
+        let all = names(&p);
+        for t in crate::access::CHAT_EXCLUDED {
+            assert!(!all.contains(&t.to_string()), "{t}");
+            let r = p.check(&call(t, json!({"comment": 1, "body": "x", "ticket": "A-1", "key": "AB", "name": "n"})));
+            assert!(matches!(r, Err((ToolStatus::Denied, _))), "{t}: {r:?}");
+        }
+        let cs = p.specs().into_iter().find(|s| s.name == "create_session").unwrap();
+        assert!(cs.parameters["properties"].get("project").is_none());
+        assert!(mcp::tools().iter().find(|d| d.name == "create_session").unwrap().schema["properties"].get("project").is_some(), "externe Agenten behalten ihn");
+    }
+
     #[test]
     fn compact_specs_keep_names_parameters_and_safety_notes() {
         let p = policy(McpLevel::Control, &[], true);
@@ -676,7 +771,7 @@ mod tests {
             // gleiche Parameter, gleiche Pflichtfelder
             assert_eq!(s.parameters["required"], d.schema["required"], "{}", s.name);
             let keys = |v: &Value| v["properties"].as_object().unwrap().keys().cloned().collect::<Vec<_>>();
-            assert_eq!(keys(&s.parameters), keys(&d.schema), "{}", s.name);
+            assert_eq!(keys(&s.parameters), keys(&chat_schema(d.name, d.schema.clone())), "{}", s.name);
         }
         let get = |n: &str| specs.iter().find(|s| s.name == n).unwrap().description.clone();
         assert!(get("send_text").contains("Never your own session"));

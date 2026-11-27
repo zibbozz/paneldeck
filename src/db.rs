@@ -60,6 +60,8 @@ const MIGRATIONS: &[&str] = &[
     crate::time::store::MIGRATION,
     // 12: Kalender (Issue #164): eigene Termine (`cal_events`) und Einstellungen (`cal_settings`), SQL in `calendar/store.rs`
     crate::calendar::store::MIGRATION,
+    // 13: Zugriff der Agenten je Projekt, private Einträge, Herkunft, Papierkorb (Issue #386), SQL in `planning/access.rs`
+    crate::planning::access::MIGRATION,
 ];
 
 /// Schema-Version dieser Programmversion (auch für die Rettung einer beschädigten Datenbank in eine neue Datei).
@@ -346,7 +348,6 @@ mod tests {
     #[test]
     fn a_3_0_database_gets_the_time_tables_and_backups_include_them() {
         use crate::planning::projects::{create_project, NewProject};
-        use crate::planning::tickets::{create_ticket, NewTicket};
         use crate::time::{store, Alarm, Birthday};
         let d = tmp("db-v10-time");
         let bdir = d.join("backups");
@@ -359,8 +360,9 @@ mod tests {
             np.with_defaults = true;
             let pid = create_project(&db.conn, &np).unwrap();
             let ty = crate::planning::types::list_types(&db.conn, pid).unwrap()[0].id;
-            let (t, _) = create_ticket(&db.conn, &NewTicket::new(pid, ty, "Alt"), &crate::planning::history::Source::ui()).unwrap();
-            (pid, t.id)
+            // Direkt in SQL: die Ticket-Funktionen dieser Version lesen schon die Spalten späterer Migrationen (#386).
+            db.conn.execute("INSERT INTO tickets (project_id, number, type_id, title, created_at, updated_at) VALUES (?1, 1, ?2, 'Alt', 'x', 'x')", rusqlite::params![pid, ty]).unwrap();
+            (pid, db.conn.last_insert_rowid())
         };
         let db = open(&d, &bdir).unwrap();
         assert_eq!(user_version(&db.conn), latest_version());

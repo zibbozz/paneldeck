@@ -201,6 +201,16 @@ pub struct Settings {
     pub mcp_session_env: bool,
     /// Erlaubte Namensmuster für Variablen von Agenten (#384, z. B. `APP_*`); leer = alle außer der festen Sperrliste.
     pub mcp_env_allow: Vec<String>,
+    /// Zugriff der Agenten auf den Bereich „Allgemein“ (alles ohne Projekt, #386). Fehlt = wie global, für alle.
+    pub agent_general: crate::access::AgentAccess,
+    /// Agenten dürfen Ticket-Projekte anlegen (#386, Standard aus; nur mit Steuern im Heimatprojekt).
+    pub agent_create_projects: bool,
+    /// Agenten dürfen Tickets und eigene Kommentare in den Papierkorb legen (#386, Standard aus; nur mit Steuern).
+    pub agent_delete: bool,
+    /// Neue Todo-Karten sind privat (#386, Standard aus).
+    pub todo_new_private: bool,
+    /// Systemnotizen (von Agenten oder Paneldeck angelegte Karten/Tickets) in den Listen zeigen (#386, Standard an).
+    pub show_system_notes: bool,
     /// Sprache des Systemprompts für Agenten (`initialize`), unabhängig von der Sprache der Oberfläche. Standard: Englisch;
     /// ein ungültiger Wert ergibt Englisch (die Datei bleibt lesbar).
     #[serde(deserialize_with = "crate::mcp::sysprompt::de_lang")]
@@ -416,6 +426,11 @@ impl Default for Settings {
             mcp_close_any: false,
             mcp_session_env: false,
             mcp_env_allow: Vec::new(),
+            agent_general: crate::access::AgentAccess::AS_BEFORE,
+            agent_create_projects: false,
+            agent_delete: false,
+            todo_new_private: false,
+            show_system_notes: true,
             mcp_prompt_lang: Lang::En,
             backup_interval_hours: 24,
             backup_keep: 2,
@@ -721,11 +736,13 @@ pub struct Project {
     pub tree_view: bool,
     /// Ordner dieses Projekts (Pfade mit `/`, auch leere).
     pub folders: Vec<Folder>,
+    /// Zugriff der Agenten (#386). Fehlt (ältere `state.json`) = wie global, für alle; neue Projekte beginnen gesperrt.
+    pub agent_access: crate::access::AgentAccess,
 }
 
 impl Default for Project {
     fn default() -> Self {
-        Self { id: 0, name: String::new(), color: [0x61, 0xaf, 0xef], folder: String::new(), profile: 0, layout: None, focused: 0, tree_view: false, folders: Vec::new() }
+        Self { id: 0, name: String::new(), color: [0x61, 0xaf, 0xef], folder: String::new(), profile: 0, layout: None, focused: 0, tree_view: false, folders: Vec::new(), agent_access: crate::access::AgentAccess::AS_BEFORE }
     }
 }
 
@@ -918,6 +935,17 @@ pub struct SavedState {
     /// Weitere Fenster (Strg+Klick auf einen Reiter); fehlt, solange es keine gibt.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub extra_windows: Vec<SavedWindow>,
+    /// Nächste Kennung eines Seitenleisten-Projekts (#386): Kennungen werden nie wiederverwendet, sonst erbten neue
+    /// Projekte Karten und Verknüpfungen gelöschter. Fehlt (ältere Dateien) = größte Kennung + 1.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub next_project_id: u64,
+}
+
+impl SavedState {
+    /// Nächste freie Projekt-Kennung: nie unter einer schon vergebenen.
+    pub fn project_id_floor(&self) -> u64 {
+        self.next_project_id.max(self.projects.iter().map(|p| p.id).max().unwrap_or(0) + 1)
+    }
 }
 
 /// Ein weiteres Fenster (#110): Reiter, Projekt und Layout des Terminal Hubs, Lage auf dem Bildschirm.

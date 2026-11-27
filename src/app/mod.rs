@@ -33,6 +33,7 @@ use std::time::{Duration, Instant};
 
 /// Kalender (#164): Ansichten, Dialoge; Einstieg `calendar_ui::show` (für den Zeit-Reiter).
 pub(crate) mod calendar_ui;
+mod access_ui;
 mod chat_plan_ui;
 mod chat_images;
 mod chat_images_ui;
@@ -857,6 +858,8 @@ pub struct App {
     layout: Option<Node>,
     focused: u64,
     next_id: u64,
+    /// Nächste Kennung eines Seitenleisten-Projekts (#386, nie wiederverwendet).
+    next_project_id: u64,
     want_focus: Option<u64>,
     /// Zurück in den Terminal Hub (#238): Zahl der Bilder seit dem Umschalten; nach zwei vollen Terminal-Bildern bekommt
     /// das zuvor fokussierte Terminal (sonst die Pane oben links) den Fokus – nur, wenn kein Dialog/Popup offen ist.
@@ -1235,6 +1238,8 @@ impl App {
         let restored_once = restored_once && !saved.sessions.is_empty();
         // Vorgemerkte Wiederherstellung einspielen, dann die Datenbank öffnen (Migrationen inklusive).
         let restore_result = crate::backup::apply_pending_restore(&dir, crate::db::FILE);
+        // Sicherung von vor 3.2.0 (Schema < 13, #386): Zugriff der Ticket-Projekte steht danach auf den Standards.
+        let restore_resets_access = matches!(restore_result, Some(Ok(_))) && mcp::access_gate::restore_resets_access(mcp::access_gate::file_schema_version(&dir.join(crate::db::FILE)));
         let backup_dir = crate::cli::get().backup_dir.clone().unwrap_or_else(|| crate::backup::dir(&dir, &settings.backup_dir));
         let (db, db_error) = match crate::db::open(&dir, &backup_dir) {
             Ok(d) => (Some(d), None),
@@ -1260,6 +1265,7 @@ impl App {
             layout: None,
             focused: 0,
             next_id: saved.next_id.max(1),
+            next_project_id: saved.project_id_floor(),
             want_focus: None,
             focus_return: None,
             rename: None,
@@ -1501,7 +1507,7 @@ impl App {
         // Start aus dem Explorer-Kontextmenü: Sitzung im übergebenen Ordner öffnen.
         let cli = crate::cli::get();
         if let Some(p) = &cli.open {
-            let _ = app.open_folder(&cc.egui_ctx, p, cli.claude, false);
+            let _ = app.open_folder(&cc.egui_ctx, p, cli.claude, None);
         }
         app.want_focus = Some(app.focused);
         if let Some(n) = startup_note {
@@ -1523,6 +1529,12 @@ impl App {
                 Err(e) => format!("{}: {e}", lang.t("Wiederherstellung fehlgeschlagen", "Restore failed")),
             });
         }
+        if restore_resets_access {
+            app.notify_text(lang.t(
+                "Die Sicherung stammt von vor 3.2.0: Der Zugriff der Agenten auf Ticket-Projekte steht auf den Standards (wie global, für alle) – prüfe Einstellungen → Agenten.",
+                "The backup is from before 3.2.0: agent access to ticket projects was reset to the defaults (as global, for all) – check Settings → Agents.",
+            ).to_string());
+        }
         if let Some(e) = app.db_error.clone() {
             app.notify_text(e);
         }
@@ -1536,7 +1548,11 @@ impl App {
     /// `from_hub` = angestoßen aus einem Hub-Terminal (`paneldeck --open` dort, möglicherweise von einem Agenten): dann
     /// Optionen wie bei Sitzungen über MCP (#182): ohne die Rechte erweiternden Wertoptionen der Standards und mit
     /// ausdrücklichem Permission-Mode (`ClaudeOpts::for_agent`).
-    fn open_folder(&mut self, ctx: &egui::Context, path: &str, claude: bool, from_hub: bool) -> u64 {
+    fn open_folder(&mut self, ctx: &egui::Context, path: &str, claude: bool, origin: Option<u64>) -> u64 {
+        let from_hub = origin.is_some();
+        // Aus einer Sitzung heraus (#386): Fenster und Projekt dieser Sitzung (wie Kinder über `create_session`), nicht das
+        // gerade angezeigte Projekt – sonst landete ein Agent über `paneldeck --open` in einem für ihn gesperrten Projekt.
+        let (window, project) = mcp::access_gate::open_home(origin.and_then(|o| self.entries.get(&o)).map(|e| (e.meta.window, e.meta.project)), self.active_project);
         let p = std::path::Path::new(path);
         // Ein WSL-Pfad gilt ungeprüft als Ordner (schon das Prüfen kann die WSL-VM starten und die Oberfläche blockieren).
         let dir = if !crate::wsl::is_wsl_unc(path) && p.is_file() { p.parent().map(|d| d.to_string_lossy().to_string()).unwrap_or_default() } else { path.to_string() };
@@ -1545,7 +1561,7 @@ impl App {
         // Das Standardprofil des Projekts kann ein eigenes Programm haben: nur wenn die Sitzung wirklich in dieser
         // Distribution startet, den Linux-Pfad nehmen – sonst bleibt es der (für Windows gültige) UNC-Pfad.
         let wsl = crate::wsl::unc_to_linux(&dir).and_then(|(d, linux)| self.wsl_shell_for(&d).map(|sid| (d, sid, linux))).filter(|(d, sid, _)| {
-            let eff = self.effective_shell_id(Some(sid), self.active_project);
+            let eff = self.effective_shell_id(Some(sid), project);
             matches!(folder_picker::Target::for_shell(self.shell_by_id(&eff).as_ref(), false), folder_picker::Target::Wsl { distro: Some(x), .. } if x.eq_ignore_ascii_case(d))
         }).map(|(_, sid, linux)| (sid, linux));
         let (shell_id, cwd) = match wsl {
@@ -1553,7 +1569,8 @@ impl App {
             None => (None, dir),
         };
         let claude_opts = from_hub.then(|| ClaudeOpts::default().for_agent(&self.settings.claude_defaults));
-        self.new_session(ctx, NewOpts { shell_id, cwd: Some(cwd), claude: claude && self.settings.claude_mode, claude_opts, ..NewOpts::default() })
+        let home = from_hub.then_some((Some(window), Some(project)));
+        self.new_session(ctx, NewOpts { shell_id, cwd: Some(cwd), claude: claude && self.settings.claude_mode, claude_opts, window: home.and_then(|h| h.0), project: home.and_then(|h| h.1), ..NewOpts::default() })
     }
 
     fn handle_ipc(&mut self, ctx: &egui::Context) {
@@ -1575,7 +1592,7 @@ impl App {
                     self.notify_text(taint::orphan_error().1);
                     continue;
                 }
-                let id = self.open_folder(ctx, &path, claude, origin.is_some());
+                let id = self.open_folder(ctx, &path, claude, origin);
                 if origin.is_some() && taint::on_create(&mut self.entries, origin, id) {
                     self.save_state();
                 }
@@ -2746,6 +2763,7 @@ impl App {
             layout: self.layout.clone(),
             focused: self.focused,
             next_id: self.next_id,
+            next_project_id: self.next_project_id.max(self.projects.iter().map(|p| p.id).max().unwrap_or(0) + 1),
             projects: {
                 let mut p = self.projects.clone();
                 if let Some(a) = p.iter_mut().find(|p| p.id == self.active_project) {
@@ -3185,16 +3203,18 @@ impl App {
 
     fn project_bar(&mut self, ui: &mut Ui, actions: &mut Vec<Action>) {
         let lang = self.settings.language;
-        let projects: Vec<(u64, String, [u8; 3], usize)> = self
+        let projects: Vec<(u64, String, [u8; 3], usize, bool)> = self
             .projects
             .iter()
-            .map(|p| (p.id, p.name.clone(), p.color, self.entries.values().filter(|e| e.meta.project == p.id && self.in_win(e)).count()))
+            .map(|p| (p.id, p.name.clone(), p.color, self.entries.values().filter(|e| e.meta.project == p.id && self.in_win(e)).count(), p.agent_access.level == crate::access::AreaLevel::Off))
             .collect();
         let bar = ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing = Vec2::new(4.0, 4.0);
-            for (id, name, c, n) in projects {
+            for (id, name, c, n, locked) in projects {
                 let col = Color32::from_rgb(c[0], c[1], c[2]);
-                let r = style::pill(ui, &name, Some(n), col, id == self.active_project);
+                // Schloss: für Agenten gesperrt (#386).
+                let r = style::pill_ex(ui, &name, Some(n), col, id == self.active_project, locked);
+                let r = if locked { r.on_hover_text(lang.t("Für Agenten gesperrt (Rechtsklick → Zugriff für Agenten …)", "Locked for agents (right-click → Agent access …)")) } else { r };
                 if r.clicked() {
                     actions.push(Action::SwitchProject(id));
                 }
@@ -3205,6 +3225,10 @@ impl App {
                     }
                     if ui.button(lang.t("Standardordner …", "Default folder …")).clicked() {
                         actions.push(Action::ProjectPrompt(id, PromptKind::ProjectFolder));
+                        ui.close();
+                    }
+                    if ui.button(lang.t("Zugriff für Agenten …", "Agent access …")).clicked() {
+                        self.mcp.access_dlg = Some(crate::access::Area::Project(id));
                         ui.close();
                     }
                     if !self.settings.profiles.is_empty() {
@@ -3482,6 +3506,21 @@ impl App {
         }
         .with_origins(origins)
         .with_agent(self.agent_env(id))
+        .with_project_cap(self.chat_project_cap(id))
+    }
+
+    /// Neue Kennung für ein Seitenleisten-Projekt (#386): steigt immer, auch über gelöschte Projekte hinweg.
+    pub(super) fn alloc_project_id(&mut self) -> u64 {
+        let id = self.next_project_id.max(self.projects.iter().map(|p| p.id).max().unwrap_or(0) + 1);
+        self.next_project_id = id + 1;
+        id
+    }
+
+    /// Stufe des Projekts eines Chats für seine Paneldeck-Werkzeuge (#386): „wie global“ = wie das Modell; gesperrt = keine.
+    fn chat_project_cap(&self, id: u64) -> crate::mcp::McpLevel {
+        let Some(project) = self.entries.get(&id).map(|e| e.meta.project) else { return crate::mcp::McpLevel::Off };
+        // Obergrenze hier „Steuern“: die Stufe des Modells begrenzt `ToolPolicy` selbst (es gilt das Minimum).
+        self.access_map(crate::mcp::McpLevel::Control).sidebar(crate::access::Caller::Home(project), project)
     }
 
     /// Muss der Chat vor dem Senden einmal nach der Stufe seines Modells fragen? Ja, wenn das Modell Werkzeuge nutzen
@@ -4146,10 +4185,31 @@ impl App {
             Action::DeleteProject(id) => {
                 let other = self.projects.iter().find(|p| p.id != id).map(|p| p.id);
                 if let (true, Some(other)) = (self.projects.len() > 1, other) {
+                    // Hinweis, wenn Agenten durch das Verschieben mehr Zugriff bekommen (#386) – vor dem Entfernen prüfen,
+                    // auch wenn das Ziel nur für sein eigenes Projekt (ohne „Für alle“) freigegeben ist.
+                    let gains = self.access_map(self.settings.mcp_level).move_gains(id, other);
                     for e in self.entries.values_mut() {
                         if e.meta.project == id {
                             e.meta.project = other;
                         }
+                    }
+                    // Karten, verknüpfte Ticket-Projekte und Prozesse ziehen mit; es gilt sofort der Zugriff des Ziels (#386).
+                    if let Some(db) = self.db.as_ref() {
+                        let _ = crate::planning::access::sidebar_project_moved(&db.conn, id, other);
+                        self.tasks.invalidate();
+                    }
+                    if crate::procs::move_project(&mut self.procs.defs, id, other) {
+                        self.procs_save();
+                    }
+                    if gains {
+                        let name = self.projects.iter().find(|p| p.id == other).map(|p| p.name.clone()).unwrap_or_default();
+                        let lang = self.settings.language;
+                        let text = if lang == Lang::De {
+                            format!("Hinweis: In „{name}“ haben Agenten der verschobenen Sitzungen mehr Zugriff als vorher – das gilt sofort.")
+                        } else {
+                            format!("Note: agents of the moved sessions have more access in “{name}” than before – this applies immediately.")
+                        };
+                        self.push_toast(text, toasts::ToastKind::Info, None);
                     }
                     if self.active_project == id {
                         self.projects.retain(|p| p.id != id);
@@ -4690,6 +4750,7 @@ impl eframe::App for App {
         if self.main_overlay() {
             self.notice_ui(ctx);
             self.toasts_ui(ctx);
+            self.access_dialog_ui(ctx);
             self.time_overlay(ctx);
         }
         self.detached_windows(ctx, &mut actions);

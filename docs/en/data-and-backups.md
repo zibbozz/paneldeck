@@ -21,7 +21,7 @@ With `--profile <name>` the subfolder `profiles\<name>` of that folder is used.
 |---|---|
 | `settings.json` | settings (hand-editable); `settings.json.bak-<time>` = copy made by `--reset-settings` |
 | `state.json` | sessions, projects, layout, further windows (`state.defekt.json` = backup if the file was corrupted; `state.json.bak-<date>` = backup made when *Remember sessions* was switched off) |
-| `paneldeck.db` | the local database (SQLite, schema version 10 since 2.6.0) with the to-do list, projects and tickets (`paneldeck.db-wal` / `-shm` exist while the app runs) |
+| `paneldeck.db` | the local database (SQLite, schema version 13 since 3.2.0) with the to-do list, projects and tickets (`paneldeck.db-wal` / `-shm` exist while the app runs) |
 | `backups/` | automatic and manual copies of the database (the folder can be changed) |
 | `scrollback/` | saved terminal history |
 | `chats/` | histories of the [chats](chat.md), one `<id>.json` per chat (see [Chat histories](#chat-histories)); since 3.1.0 `chats/<id>/images/` with the chat's [images](chat.md#images-and-screenshots) |
@@ -254,7 +254,7 @@ All fields are optional; older versions ignore them (see [Images and screenshots
 - `plans/`: approved plans as Markdown files, `<chat id>-<time>.md`, with a comment line on top (chat, level, revision, time). They are documents for you to keep: closing the chat or deleting its history does not delete them (delete them yourself if they contain anything private), and the format is not a stable interface.
 
 ## New fields in 3.2.0
-All fields are optional; older versions ignore them, and missing fields mean the defaults below.
+All fields are optional; older versions ignore them, and missing fields mean the defaults below (everything stays as before the update). See [Access per project](agent-interface.md#access-per-project) and [Private items and system notes](todo-and-tickets.md#private-items-and-system-notes).
 - `settings.json` → `editor` ([Menu bar](editor.md#menu-bar), [Formatting JSON and XML](editor.md#formatting-json-and-xml)):
 
   | Field | Default | Meaning |
@@ -283,6 +283,12 @@ See [Environment variables](terminals.md#environment-variables).
 - `settings.json` → `mcp_session_env` (default `false`): *Agents may set environment variables*; `mcp_env_allow` (default `[]`): allowed name patterns such as `"APP_*"`.
 - `themes/*.json` → optional object `background`: the theme's own [background](themes.md#background) (image, gradient, colour or pattern, filters, overlay, areas; format in [Themes](themes.md#file-format)). Images are stored as bare file names in a folder next to the theme file, `themes/<file>/` (copies of at most 3840 px). An invalid value falls back to its default; the theme stays valid.
 - `settings.json` → `reduce_transparency` (*Settings → Appearance → Reduce transparency*, default `false`): all surfaces opaque, no theme background.
+- `settings.json` → `agent_general`: access of agents to **General** (everything without a project), `{"level": "global" | "off" | "read" | "control", "for_all": true}`. Missing = `{"level": "global", "for_all": true}`; a missing field inside counts the same way, an unknown `level` counts as `"off"` (the safe case).
+- `settings.json` → `agent_create_projects` (default `false`): *Agents may create projects*; `agent_delete` (default `false`): *Agents may delete tickets and their own comments* (to the trash).
+- `settings.json` → `todo_new_private` (default `false`): new to-do cards start private; `show_system_notes` (default `true`): lists show system notes (cards and tickets created by agents or by Paneldeck).
+- `state.json` → per project `agent_access`, same form as `agent_general`. Missing (projects from before 3.2.0) = *As global* + *For all*; projects created later are written with `{"level": "off", "for_all": false}`.
+- `mcp-log.jsonl` → optional field `project` per entry: the sidebar project name of the target session or the ticket project key (missing when a call concerns no project).
+- `paneldeck.db` → **schema version 13**: ticket projects get `agent_level` (`global`/`off`/`read`/`control`), `agent_for_all`, `sidebar_project` (link to a sidebar project), `origin` and `origin_detail`; tickets get `private`, `origin`, `origin_detail` and the trash columns `trashed_at`, `trashed_by`, `trashed_was_archived`; comments get `origin`, `origin_detail`, `trashed_at`, `trashed_by`; to-do cards get `project` (sidebar project id), `private`, `origin`, `origin_detail`; tags get `private`. Existing data becomes *As global* + *For all*, origin `user`, not private. As with every migration, Paneldeck backs up the database first; older versions refuse a database with schema version 13 (go back via the backup, as described under 2.3.0).
 
 ## Backups
 *Settings → Data & backup* controls the automatic backups of `paneldeck.db`: by default one copy every 24 hours, keeping two (plus the database itself). If the computer was off when a backup was due, it is made at the next start; several missed ones result in just one. You can choose another backup folder, open it, press **Back up now** (manual copies are never deleted automatically) and **Restore** any copy from the list – the current state is backed up first, Paneldeck then quits and applies the restore at the next start. Before every database update (migration) Paneldeck makes a copy as well, and it never touches a database created by a newer version.

@@ -41,7 +41,11 @@ pub(super) fn run(ctx: &Ctx, project: Option<&Project>, query: &str, limit: i64,
         Some(p) => Scope::Project(p.id),
         None => Scope::All,
     };
-    let sctx = search::Ctx::new(&ctx.now.format("%Y-%m-%d").to_string(), ctx.lang).with_timeout(QUERY_TIMEOUT).with_archived(include_archived);
+    let mut sctx = search::Ctx::new(&ctx.now.format("%Y-%m-%d").to_string(), ctx.lang).with_timeout(QUERY_TIMEOUT).with_archived(include_archived);
+    // Sicht des Agenten (#386): nur erreichbare Projekte, nie private Tickets.
+    if let Some(view) = ctx.view {
+        sctx = sctx.for_agent(view.project_ids());
+    }
     let page = search::run_query(ctx.conn, &sctx, scope, query, Page::new(limit, offset)).map_err(|e| search_err(ctx.lang, e))?;
     let mut tickets = Vec::with_capacity(page.rows.len());
     for r in &page.rows {
@@ -65,7 +69,7 @@ mod tests {
     use chrono::NaiveDate;
 
     fn ctx(f: &Fx, lang: Lang) -> Ctx<'_> {
-        Ctx { conn: &f.c, lang, source: Source::agent("Builder"), now: NaiveDate::from_ymd_opt(2026, 11, 14).unwrap().and_hms_opt(12, 0, 0).unwrap() }
+        Ctx { conn: &f.c, lang, source: Source::agent("Builder"), now: NaiveDate::from_ymd_opt(2026, 11, 14).unwrap().and_hms_opt(12, 0, 0).unwrap(), view: None, need: Default::default() }
     }
 
     fn keys(d: &Done) -> Vec<String> {

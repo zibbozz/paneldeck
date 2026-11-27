@@ -67,6 +67,7 @@ spots! {
     ClaudeDefaults = "settings.claude.defaults",
     ClaudeBudget = "settings.claude.budget",
     McpLevel = "settings.agents.level",
+    AgentAccess = "settings.agents.access",
     McpRegister = "settings.agents.register",
     McpSysprompt = "settings.agents.system_prompt",
     // Umgebungsvariablen der Sitzungen (#384, 3.2.0)

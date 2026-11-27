@@ -319,9 +319,10 @@ impl App {
                 match p.kind {
                     PromptKind::NewProject => {
                         if !text.is_empty() {
-                            let id = self.projects.iter().map(|p| p.id).max().unwrap_or(0) + 1;
+                            let id = self.alloc_project_id();
                             let color = hub_color(id);
-                            self.projects.push(Project { id, name: text, color, ..Project::default() });
+                            // Neue Projekte beginnen für Agenten gesperrt (#386).
+                            self.projects.push(Project { id, name: text, color, agent_access: crate::access::AgentAccess::LOCKED, ..Project::default() });
                             actions.push(Action::SwitchProject(id));
                         }
                     }

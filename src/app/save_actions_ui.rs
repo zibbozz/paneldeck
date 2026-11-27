@@ -15,8 +15,8 @@ use serde_json::{json, Value};
 use std::collections::{HashMap, VecDeque};
 use std::sync::mpsc::Receiver;
 
-/// Kennung der Toast-Knöpfe *Ausgabe zeigen* (Bit 62, Rest = Lauf).
-pub(super) const SA_TOKEN: u64 = 1 << 62;
+/// Kennung der Toast-Knöpfe *Ausgabe zeigen* (Bit 59, Rest = Lauf). Bit 63 = „Alle beenden“, Bits 60–62 = „Freigeben …“ (#386).
+pub(super) const SA_TOKEN: u64 = 1 << 59;
 
 /// Zustand eines Laufs im Verlauf.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

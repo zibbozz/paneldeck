@@ -988,7 +988,8 @@ fn handle_mcp(s: &mut TcpStream, v: &Value, ipc_token: &str, mcp_tx: &std::sync:
     let level = mcp::current_level();
     let expert = mcp::expert_mode();
     if tool == "_level" {
-        return reply(json!({"ok": true, "result": {"level": level.as_u8(), "expert": expert}}));
+        // Ohne Aufrufer: die höchste erreichbare Stufe (#386); geprüft wird je Aufruf in der UI-Schleife.
+        return reply(json!({"ok": true, "result": {"level": mcp::reach_level().as_u8(), "expert": expert}}));
     }
     // Stufe und Modus (einfache Todo-Liste / Tickets) prüft der Hub selbst; die UI-Schleife prüft nach dem Warten noch einmal.
     if let Err((code, message)) = mcp::check_access(tool, level, expert) {

@@ -293,6 +293,14 @@ pub struct DocTicket {
     /// Archiviert (Wartung). Ab Version 4.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub archived: bool,
+    /// Privat (#386, ab 3.2.0, optional – ältere Fassungen überlesen es).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub private: bool,
+    /// Herkunft `agent`/`paneldeck` (#386; fehlt = Nutzer) und Zusatz (Sitzungs-/Modellname).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_detail: Option<String>,
     pub created_at: String,
     pub updated_at: String,
     /// Gesetzte Feldwerte nach Feld-Nummer; Ticket-Felder enthalten die Ticketnummer des Ziels.
@@ -320,6 +328,11 @@ pub struct DocComment {
     pub body: String,
     pub created_at: String,
     pub updated_at: String,
+    /// Herkunft `agent`/`paneldeck` (#386; fehlt = Nutzer) und Zusatz.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_detail: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

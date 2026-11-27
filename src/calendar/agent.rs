@@ -124,6 +124,39 @@ pub struct Ctx<'a> {
     /// Lokale Zeit „jetzt“.
     pub now: NaiveDateTime,
     pub zone: &'a dyn Zone,
+    /// Sicht eines Agenten (#386): Termine und Quellen nur aus erreichbaren Bereichen, nie private Karten/Tickets.
+    pub view: Option<&'a crate::access::AgentView>,
+}
+
+/// Gehört der Eintrag zu einem Bereich, den der Agent sieht (#386)? Termine mit Projekt folgen dem Ticket-Projekt, ohne
+/// Projekt „Allgemein“; Fälligkeiten und Zeiteinträge nur für sichtbare (nicht private, nicht gelöschte) Tickets bzw. Karten.
+fn item_visible(ctx: &Ctx, it: &sources::Item) -> bool {
+    use crate::mcp::McpLevel::Off;
+    let Some(v) = ctx.view else { return true };
+    let ticket_ok = |t: Option<crate::planning::tickets::Ticket>| t.is_some_and(|t| !t.private && !t.trashed && v.ticket_level(t.project_id) > Off);
+    match it.kind {
+        Kind::Event => match it.project {
+            Some(p) => v.ticket_level(p) > Off,
+            None => v.general > Off,
+        },
+        Kind::Due => ticket_ok(crate::planning::tickets::get_ticket(ctx.conn, it.id).ok()),
+        Kind::Time => ticket_ok(crate::planning::tickets::ticket_by_key(ctx.conn, &it.key).ok()),
+        Kind::Todo => {
+            let tags = crate::tasks::list_tags(ctx.conn).unwrap_or_default();
+            crate::tasks::get_item(ctx.conn, it.id).is_ok_and(|c| !crate::tasks::is_private(&c, &tags) && v.card_level(c.project) > Off)
+        }
+        Kind::Sprint | Kind::Version | Kind::Milestone => it.project.is_none_or(|p| v.ticket_level(p) > Off),
+    }
+}
+
+/// Schreiben in den Bereich eines Termins (Projekt oder „Allgemein“) braucht Steuern (#386).
+fn check_write(ctx: &Ctx, project: Option<i64>) -> Result<(), ToolError> {
+    let Some(v) = ctx.view else { return Ok(()) };
+    let have = match project {
+        Some(p) => v.ticket_level(p),
+        None => v.general,
+    };
+    crate::access::gate(have, crate::mcp::McpLevel::Control).map_err(|(code, message)| ToolError { code: if code == crate::access::LOCKED_CODE { crate::access::LOCKED_CODE } else { "forbidden" }, message, details: None })
 }
 
 type R = Result<Done, ToolError>;
@@ -168,7 +201,14 @@ fn project_id(ctx: &Ctx, key: &str) -> Result<i64, ToolError> {
         .into_iter()
         .find(|(_, k, _)| k.eq_ignore_ascii_case(key.trim()))
         .map(|(id, _, _)| id)
-        .ok_or_else(|| ToolError { code: "not_found", message: if ctx.lang == Lang::De { format!("Kein Projekt „{key}“") } else { format!("No project “{key}”") }, details: None })
+        .map_or_else(
+            || Err(ToolError { code: "not_found", message: if ctx.lang == Lang::De { format!("Kein Projekt „{key}“") } else { format!("No project “{key}”") }, details: None }),
+            |id| match ctx.view {
+                // Gesperrtes Projekt (#386): wie bei den Ticket-Werkzeugen `project_locked`.
+                Some(v) if v.ticket_level(id) == crate::mcp::McpLevel::Off => Err(ToolError { code: crate::access::LOCKED_CODE, message: crate::access::locked_error().1, details: None }),
+                _ => Ok(id),
+            },
+        )
 }
 
 fn rec_json(r: &Recurrence, lang: Lang) -> Value {
@@ -235,6 +275,13 @@ fn list(ctx: &Ctx, v: &Value) -> R {
         }
     };
     let (events, items) = (&data.0, &data.1);
+    let filtered: Vec<sources::Item>;
+    let items: &Vec<sources::Item> = if ctx.view.is_some() {
+        filtered = items.iter().filter(|it| item_visible(ctx, it)).cloned().collect();
+        &filtered
+    } else {
+        items
+    };
     let keys = project_keys(ctx.conn);
     let by_id: std::collections::HashMap<i64, &Event> = events.iter().map(|e| (e.id, e)).collect();
     let total = items.len();
@@ -431,6 +478,7 @@ fn create(ctx: &Ctx, v: &Value) -> R {
     }
     let mut i = EventInput::new("", ctx.now, 60);
     apply(ctx, v, &mut i, true)?;
+    check_write(ctx, i.project_id)?;
     let e = store::create_event(ctx.conn, i, None, "agent").map_err(|e| store_err(ctx, e))?;
     let text = match ctx.lang {
         Lang::De => format!("Kalender: Termin „{}“ angelegt", e.title),
@@ -442,8 +490,10 @@ fn create(ctx: &Ctx, v: &Value) -> R {
 fn update(ctx: &Ctx, v: &Value) -> R {
     let id = v.get("event").and_then(Value::as_i64).ok_or_else(|| bad(ctx, "event fehlt (event_id aus list_calendar_events)", "event is missing (event_id from list_calendar_events)"))?;
     let old = store::get_event(ctx.conn, id).map_err(|e| store_err(ctx, e))?;
+    check_write(ctx, old.project_id)?;
     let mut i = EventInput::from_event(&old);
     apply(ctx, v, &mut i, false)?;
+    check_write(ctx, i.project_id)?;
     let e = store::update_event(ctx.conn, id, i).map_err(|e| store_err(ctx, e))?;
     let text = match ctx.lang {
         Lang::De => format!("Kalender: Termin „{}“ geändert", e.title),

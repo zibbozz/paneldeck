@@ -163,6 +163,8 @@ pub fn create_project(conn: &Connection, p: &NewProject) -> Res<i64> {
             params![key, name, p.description.trim(), color, p.work_dir.trim(), bool_i(p.use_sprints), bool_i(p.use_versions), p.tag_color_mode.as_str(), pos, common::now()],
         )?;
         let id = conn.last_insert_rowid();
+        // Neue Ticket-Projekte beginnen für Agenten gesperrt (#386).
+        super::access::lock_new_project(conn, id)?;
         if p.with_defaults {
             defaults::apply(conn, id, p.use_versions)?;
             // Projekte mit den mitgelieferten Typen bekommen die Standard-Schwellen der Fälligkeit
@@ -324,6 +326,7 @@ mod tests {
             let c = Connection::open(d.join(crate::db::FILE)).unwrap();
             c.execute_batch("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL) WITHOUT ROWID; PRAGMA user_version = 2;").unwrap();
             c.execute_batch("CREATE TABLE todo_items (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL DEFAULT '', body TEXT NOT NULL DEFAULT '', done INTEGER NOT NULL DEFAULT 0, position INTEGER NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, done_at TEXT); INSERT INTO todo_items (title, position, created_at, updated_at) VALUES ('alt', 0, 'x', 'x');").unwrap();
+            c.execute_batch("CREATE TABLE todo_tags (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, name_key TEXT NOT NULL UNIQUE, color TEXT NOT NULL);").unwrap();
         }
         let db = crate::db::open(&d, &d.join("backups")).unwrap();
         let v: u32 = db.conn.pragma_query_value(None, "user_version", |r| r.get(0)).unwrap();

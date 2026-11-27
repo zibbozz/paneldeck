@@ -56,7 +56,17 @@ pub(super) fn maintenance_report_tool(ctx: &Ctx, v: &Value) -> R {
     };
     let report = maint::run_report(ctx.conn, project.id, &opts).map_err(|e| ctx.err("db_error", e.message(Lang::De), e.message(Lang::En)))?;
     let ignored: std::collections::HashSet<String> = if include_ignored { maint::ignored(ctx.conn, project.id).unwrap_or_default().into_iter().map(|(id, _)| id).collect() } else { Default::default() };
-    let matching: Vec<&maint::Finding> = report.findings.iter().filter(|f| category.is_none_or(|c| f.category() == c) && severity.is_none_or(|s| f.severity == s)).collect();
+    // Sicht (#386): Befunde, die ein unsichtbares (privates, gelöschtes) Ticket nennen, fallen vor dem Zählen heraus.
+    let visible = |id: i64| ctx.view.is_none() || get_ticket(ctx.conn, id).is_ok_and(|t| ctx.ticket_visible(&t));
+    let shown = |f: &maint::Finding| {
+        f.ticket.as_ref().is_none_or(|t| visible(t.id))
+            && f.other.as_ref().is_none_or(|t| visible(t.id))
+            && match &f.target {
+                maint::Target::Tickets(ids) => ids.iter().all(|i| visible(*i)),
+                _ => true,
+            }
+    };
+    let matching: Vec<&maint::Finding> = report.findings.iter().filter(|f| shown(f)).filter(|f| category.is_none_or(|c| f.category() == c) && severity.is_none_or(|s| f.severity == s)).collect();
     let total = matching.len();
     let mut counts = Map::new();
     for c in Category::ALL {

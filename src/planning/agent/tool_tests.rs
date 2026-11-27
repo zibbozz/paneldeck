@@ -31,7 +31,7 @@ const CODES: [&str; 20] = [
 ];
 
 fn ctx(f: &Fx, lang: Lang) -> Ctx<'_> {
-    Ctx { conn: &f.c, lang, source: Source::agent("Builder"), now: NaiveDate::from_ymd_opt(2026, 11, 14).unwrap().and_hms_opt(12, 0, 0).unwrap() }
+    Ctx { conn: &f.c, lang, source: Source::agent("Builder"), now: NaiveDate::from_ymd_opt(2026, 11, 14).unwrap().and_hms_opt(12, 0, 0).unwrap(), view: None, need: Default::default() }
 }
 
 /// Werkzeuge dieser Datei (ohne `link_terminal`, das die Anwendung selbst ausführt) mit Stufe und Parameternamen aus dem Schema.

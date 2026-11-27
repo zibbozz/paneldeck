@@ -187,7 +187,7 @@ impl App {
 
     /// Projekt anlegen (nur in der Seitenleiste der Aufnahme).
     fn shot_project(&mut self, name: &str, folder: &Path) -> u64 {
-        let id = self.projects.iter().map(|p| p.id).max().unwrap_or(0) + 1;
+        let id = self.alloc_project_id();
         self.projects.push(Project { id, name: name.to_string(), color: hub_color(id + 2), folder: folder.to_string_lossy().to_string(), ..Project::default() });
         id
     }

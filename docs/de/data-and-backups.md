@@ -21,7 +21,7 @@ Mit `--profile <name>` wird der Unterordner `profiles\<name>` dieses Ordners gen
 |---|---|
 | `settings.json` | Einstellungen (von Hand editierbar); `settings.json.bak-<Zeit>` = Kopie von `--reset-settings` |
 | `state.json` | Sitzungen, Projekte, Layout, weitere Fenster (`state.defekt.json` = Sicherung, falls die Datei beschädigt war; `state.json.bak-<Datum>` = Sicherung beim Ausschalten von *Sitzungen merken*) |
-| `paneldeck.db` | die lokale Datenbank (SQLite, seit 2.6.0 Schema-Version 10) mit Todo-Liste, Projekten und Tickets (`paneldeck.db-wal` / `-shm` gibt es nur, solange die App läuft) |
+| `paneldeck.db` | die lokale Datenbank (SQLite, seit 3.2.0 Schema-Version 13) mit Todo-Liste, Projekten und Tickets (`paneldeck.db-wal` / `-shm` gibt es nur, solange die App läuft) |
 | `backups/` | automatische und manuelle Kopien der Datenbank (der Ordner ist änderbar) |
 | `scrollback/` | gespeicherter Terminalverlauf |
 | `chats/` | Verläufe der [Chats](chat.md), je Chat eine `<id>.json` (siehe [Chatverläufe](#chatverläufe)); seit 3.1.0 `chats/<id>/images/` mit den [Bildern](chat.md#bilder-und-bildschirmfotos) des Chats |
@@ -254,7 +254,7 @@ Alle Felder sind optional; ältere Versionen ignorieren sie (siehe [Bilder und B
 - `plans/`: freigegebene Pläne als Markdown-Dateien, `<Chat-Kennung>-<Zeit>.md`, mit einer Kommentarzeile oben (Chat, Stufe, Fassung, Zeit). Sie sind Dokumente zum Aufheben: Schließen des Chats oder Löschen seines Verlaufs löscht sie nicht (lösche sie selbst, wenn darin etwas Privates steht), und ihr Format ist keine feste Schnittstelle.
 
 ## Neue Felder in 3.2.0
-Alle Felder sind optional; ältere Versionen ignorieren sie, fehlende Felder bedeuten die Standards unten.
+Alle Felder sind optional; ältere Versionen ignorieren sie, fehlende Felder bedeuten die Standardwerte unten (es bleibt alles wie vor dem Update). Siehe [Zugriff je Projekt](agent-interface.md#zugriff-je-projekt) und [Private Einträge und Systemnotizen](todo-and-tickets.md#private-einträge-und-systemnotizen).
 - `settings.json` → `editor` ([Menüleiste](editor.md#menüleiste), [JSON und XML formatieren](editor.md#json-und-xml-formatieren)):
 
   | Feld | Standard | Bedeutung |
@@ -283,6 +283,12 @@ Siehe [Umgebungsvariablen](terminals.md#umgebungsvariablen).
 - `settings.json` → `mcp_session_env` (Standard `false`): *Agenten dürfen Umgebungsvariablen setzen*; `mcp_env_allow` (Standard `[]`): erlaubte Namensmuster wie `"APP_*"`.
 - `themes/*.json` → optionales Objekt `background`: der [eigene Hintergrund](themes.md#hintergrund) des Themes (Bild, Farbverlauf, Farbe oder Muster, Filter, Überlagerung, Bereiche; Format unter [Themes](themes.md#dateiformat)). Bilder stehen als bloße Dateinamen in einem Ordner neben der Theme-Datei, `themes/<datei>/` (Kopien mit höchstens 3840 px). Ein ungültiger Wert fällt auf seinen Standard zurück; das Theme bleibt gültig.
 - `settings.json` → `reduce_transparency` (*Einstellungen → Darstellung → Transparenz reduzieren*, Standard `false`): alle Flächen deckend, kein Hintergrund des Themes.
+- `settings.json` → `agent_general`: Zugriff der Agenten auf **Allgemein** (alles ohne Projekt), `{"level": "global" | "off" | "read" | "control", "for_all": true}`. Fehlt = `{"level": "global", "for_all": true}`; ein fehlendes Feld darin zählt ebenso, ein unbekannter `level` zählt als `"off"` (der sichere Fall).
+- `settings.json` → `agent_create_projects` (Standard `false`): *Agenten dürfen Projekte anlegen*; `agent_delete` (Standard `false`): *Agenten dürfen Tickets und eigene Kommentare löschen* (in den Papierkorb).
+- `settings.json` → `todo_new_private` (Standard `false`): neue Todo-Karten sind privat; `show_system_notes` (Standard `true`): Listen zeigen Systemnotizen (Karten und Tickets, die Agenten oder Paneldeck angelegt haben).
+- `state.json` → je Projekt `agent_access`, gleiche Form wie `agent_general`. Fehlt (Projekte von vor 3.2.0) = *Wie global* + *Für alle*; später angelegte Projekte werden mit `{"level": "off", "for_all": false}` geschrieben.
+- `mcp-log.jsonl` → optionales Feld `project` je Eintrag: Name des Seitenleisten-Projekts der Zielsitzung bzw. Schlüssel des Ticket-Projekts (fehlt, wenn ein Aufruf kein Projekt betrifft).
+- `paneldeck.db` → **Schema-Version 13**: Ticket-Projekte bekommen `agent_level` (`global`/`off`/`read`/`control`), `agent_for_all`, `sidebar_project` (Verknüpfung mit einem Seitenleisten-Projekt), `origin` und `origin_detail`; Tickets `private`, `origin`, `origin_detail` und die Papierkorb-Spalten `trashed_at`, `trashed_by`, `trashed_was_archived`; Kommentare `origin`, `origin_detail`, `trashed_at`, `trashed_by`; Todo-Karten `project` (Kennung des Seitenleisten-Projekts), `private`, `origin`, `origin_detail`; Tags `private`. Vorhandene Daten werden *Wie global* + *Für alle*, Herkunft `user`, nicht privat. Wie vor jeder Migration sichert Paneldeck die Datenbank zuerst; ältere Versionen lehnen eine Datenbank mit Schema-Version 13 ab (zurück über die Sicherung, wie unter 2.3.0 beschrieben).
 
 ## Sicherungen
 *Einstellungen → Daten & Sicherung* steuert die automatischen Sicherungen von `paneldeck.db`: Standard ist eine Kopie alle 24 Stunden, behalten werden zwei (zusätzlich zur Datenbank selbst). War der Rechner zur fälligen Zeit aus, wird die Sicherung beim nächsten Start nachgeholt; mehrere verpasste ergeben nur eine. Du kannst einen anderen Sicherungsordner wählen, ihn öffnen, mit **Jetzt sichern** eine Kopie anlegen (manuelle Kopien werden nie automatisch gelöscht) und jede Kopie aus der Liste **wiederherstellen** – dabei wird zuerst der aktuelle Stand gesichert, danach beendet sich Paneldeck und spielt die Wiederherstellung beim nächsten Start ein. Vor jedem Datenbank-Update (Migration) legt Paneldeck ebenfalls eine Kopie an und fasst eine Datenbank einer neueren Version nie an.

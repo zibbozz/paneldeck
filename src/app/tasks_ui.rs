@@ -50,6 +50,10 @@ struct CardForm {
     /// Gewählte Tag-Namen (neue entstehen erst beim Bestätigen).
     tags: Vec<String>,
     tag_input: String,
+    /// Projekt der Karte (#386; `None` = „Allgemein“) und Privat-Schalter. `meta_set` = schon vorbelegt.
+    project: Option<u64>,
+    private: bool,
+    meta_set: bool,
 }
 
 impl CardForm {
@@ -167,6 +171,10 @@ pub(super) struct TasksUi {
     pub(super) notice: Option<String>,
     /// Filter und Sortierung nach Fälligkeit.
     due_filter: tasks::DueFilter,
+    /// Projekte und Vorgaben aus der Anwendung (#386), je Bild gesetzt.
+    pub(super) card_env: CardEnv,
+    /// Systemnotizen zeigen (Einstellung `show_system_notes`, #386).
+    pub(super) show_system: bool,
     sort: tasks::ItemSort,
     /// Schwellen der Fälligkeits-Markierung der Todo-Liste (beim Laden gelesen).
     thresholds: Vec<crate::due::DueThreshold>,
@@ -210,6 +218,8 @@ impl Default for TasksUi {
             thresholds: crate::due::default_thresholds(),
             due_mgr: None,
             due_counts: (0, 0),
+            card_env: CardEnv::default(),
+            show_system: true,
             rescue_request: false,
         }
     }
@@ -222,6 +232,15 @@ pub(super) struct Env<'a> {
     pub lang: Lang,
     pub bg: Color32,
     pub undo_steps: usize,
+}
+
+/// Was die Todo-Liste von der Anwendung braucht (#386): Projekte für die Auswahl, aktives Projekt, Vorgaben.
+#[derive(Default, Clone)]
+pub(super) struct CardEnv {
+    pub projects: Vec<(u64, String)>,
+    pub active: u64,
+    /// Einstellung „Neue Karten privat“.
+    pub new_private: bool,
 }
 
 struct Colors {
@@ -389,6 +408,24 @@ struct Hover {
     chip: Option<usize>,
 }
 
+/// Kennzeichen unten rechts (#386): Systemnotiz (Agent/Paneldeck) und privat.
+fn paint_badges(ui: &Ui, rect: Rect, it: &Item, tags: &[Tag], lang: Lang, col: &Colors) {
+    let mut parts: Vec<String> = Vec::new();
+    if it.origin.is_system() {
+        parts.push(match &it.origin_detail {
+            Some(d) => format!("{} · {}", it.origin.label(lang), crate::mcp::short(d, 24)),
+            None => it.origin.label(lang).to_string(),
+        });
+    }
+    if tasks::is_private(it, tags) {
+        parts.push(lang.t("Privat", "Private").to_string());
+    }
+    if parts.is_empty() {
+        return;
+    }
+    ui.painter().text(rect.right_bottom() + Vec2::new(-10.0, -6.0), egui::Align2::RIGHT_BOTTOM, parts.join(" · "), FontId::proportional(10.5), col.dim);
+}
+
 fn paint_card(p: &Painter, rect: Rect, lay: &CardLayout, it: &Item, col: &Colors, hv: Hover, ghost: bool, st: Option<&crate::due::DueState>) {
     let fade = if it.done { 0.5 } else { 1.0 };
     let o = rect.min.to_vec2();
@@ -443,8 +480,14 @@ fn paint_card(p: &Painter, rect: Rect, lay: &CardLayout, it: &Item, col: &Colors
 
 /// Felder Titel, Text und Tags. Gibt `true` zurück, wenn mit Strg+Enter bestätigt wurde. `counted`: alle Tags mit Zahl der
 /// Karten (Vorschläge).
-fn card_form_ui(ui: &mut Ui, form: &mut CardForm, all: &[Tag], counted: &[Counted], lang: Lang, salt: &str, focus_title: bool) -> bool {
+fn card_form_ui(ui: &mut Ui, form: &mut CardForm, all: &[Tag], counted: &[Counted], lang: Lang, salt: &str, focus_title: bool, cenv: &CardEnv) -> bool {
     let dim = style::dim(ui);
+    if !form.meta_set {
+        // Neue Karte: aktives Projekt, Privat nach der Einstellung „Neue Karten privat“ (#386).
+        form.project = Some(cenv.active).filter(|a| cenv.projects.iter().any(|(i, _)| i == a));
+        form.private = cenv.new_private;
+        form.meta_set = true;
+    }
     let tid = if salt == "new" { title_id() } else { Id::new((salt, "title")) };
     ui.label(RichText::new(lang.t("Titel (optional)", "Title (optional)")).small().color(dim));
     let r_title = ui.add(egui::TextEdit::singleline(&mut form.title).id(tid).desired_width(f32::INFINITY).margin(Margin::symmetric(8, 6)).hint_text(lang.t("Kurzer Titel …", "Short title …")));
@@ -462,6 +505,21 @@ fn card_form_ui(ui: &mut Ui, form: &mut CardForm, all: &[Tag], counted: &[Counte
     ui.add_space(S1);
     ui.label(RichText::new("Tags").small().color(dim));
     let tag_focus = tag_editor(ui, form, all, counted, lang, Id::new((salt, "tag")));
+    ui.add_space(S1);
+    // Projekt und Privat (#386): Agenten sehen die Karte nur mit Zugriff auf das Projekt, private Karten nie.
+    ui.horizontal(|ui| {
+        ui.label(RichText::new(lang.t("Projekt", "Project")).small().color(dim));
+        let shown = form.project.and_then(|p| cenv.projects.iter().find(|(i, _)| *i == p)).map(|(_, n)| n.clone()).unwrap_or_else(|| lang.t("Allgemein (ohne Projekt)", "General (no project)").to_string());
+        egui::ComboBox::from_id_salt((salt, "project")).selected_text(shown).width(160.0).show_ui(ui, |ui| {
+            ui.selectable_value(&mut form.project, None, lang.t("Allgemein (ohne Projekt)", "General (no project)"));
+            for (id, name) in &cenv.projects {
+                ui.selectable_value(&mut form.project, Some(*id), name);
+            }
+        });
+        ui.add_space(S2);
+        style::toggle(ui, &mut form.private).on_hover_text(lang.t("Private Karten sieht nie ein Agent", "Agents never see private cards"));
+        ui.label(RichText::new(lang.t("Privat", "Private")).small());
+    });
     let any_focus = r_title.has_focus() || r_body.has_focus() || tag_focus || due_focus;
     any_focus && ui.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::Enter))
 }
@@ -560,6 +618,10 @@ impl TasksUi {
             self.due_counts = tasks::due_counts(conn, now)?;
             let mut items = tasks::list_items(conn, &self.filter())?;
             items.retain(|i| self.due_filter.matches(i, &self.thresholds, now));
+            // Systemnotizen (von Agenten oder Paneldeck) ausblenden, wenn gewünscht (#386).
+            if !self.show_system {
+                items.retain(|i| !i.origin.is_system());
+            }
             if self.sort == tasks::ItemSort::Due {
                 tasks::sort_by_due(&mut items);
             }
@@ -731,7 +793,8 @@ impl TasksUi {
                 let add = ui.add_sized([btn_w, 32.0], egui::Button::new(lang.t("Hinzufügen", "Add")).fill(style::accent().gamma_multiply(0.35))).clicked();
                 if enter || add {
                     let text = std::mem::take(&mut self.quick);
-                    match tasks::create_item(conn, "", &text, None, &[]) {
+                    let meta = tasks::ItemMeta { project: Some(self.card_env.active).filter(|a| self.card_env.projects.iter().any(|(i, _)| i == a)), private: self.card_env.new_private, ..Default::default() };
+                    match tasks::create_item_ext(conn, "", &text, None, &[], &meta) {
                         Ok((_, op)) => {
                             self.commit(Some(op));
                             self.create_err = None;
@@ -762,7 +825,7 @@ impl TasksUi {
                 ui.set_width(ui.available_width());
                 let all = self.tags.clone();
                 let counted = self.tag_counted.clone();
-                let submit = card_form_ui(ui, &mut self.form, &all, &counted, lang, "new", focus == Some(Focus::Title));
+                let submit = card_form_ui(ui, &mut self.form, &all, &counted, lang, "new", focus == Some(Focus::Title), &self.card_env.clone());
                 ui.add_space(S2);
                 let mut create = submit;
                 ui.horizontal(|ui| {
@@ -780,7 +843,8 @@ impl TasksUi {
                 if create {
                     self.form.flush_tag(&all);
                     let names = self.form.tags.clone();
-                    match tasks::create_item(conn, &self.form.title, &self.form.body, Some(&self.form.due), &names) {
+                    let meta = tasks::ItemMeta { project: self.form.project, private: self.form.private, ..Default::default() };
+                    match tasks::create_item_ext(conn, &self.form.title, &self.form.body, Some(&self.form.due), &names, &meta) {
                         Ok((_, op)) => {
                             self.commit(Some(op));
                             self.form.clear();
@@ -846,6 +910,12 @@ impl TasksUi {
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if ui.small_button(lang.t("Tags …", "Tags …")).on_hover_text(lang.t("Tags verwalten", "Manage tags")).clicked() {
                     self.tag_mgr = Some(TagMgr::default());
+                }
+                // Systemnotizen zeigen/ausblenden (#386).
+                let label = if self.show_system { lang.t("Systemnotizen: an", "System notes: shown") } else { lang.t("Systemnotizen: aus", "System notes: hidden") };
+                if ui.small_button(label).on_hover_text(lang.t("Karten, die ein Agent oder Paneldeck angelegt hat, zeigen oder ausblenden", "Show or hide cards created by an agent or by Paneldeck")).clicked() {
+                    self.show_system = !self.show_system;
+                    self.dirty = true;
                 }
                 if ui.small_button(lang.t("Fälligkeit …", "Due dates …")).on_hover_text(lang.t("Markierungen fälliger Karten einstellen", "Set up the markers of due cards")).clicked() {
                     self.due_mgr = Some(DueManager(due_ui::Manager::new(0, self.thresholds.clone())));
@@ -974,6 +1044,7 @@ impl TasksUi {
                     ghost = Some((lay.clone(), it.clone()));
                 } else {
                     paint_card(ui.painter(), rect, &lay, it, &col, hv, false, st.as_ref());
+                    paint_badges(ui, rect, it, &self.tags, lang, &col);
                     if let (Some((Some(mr), _, _)), Some(s)) = (&lay.due, &st) {
                         ui.interact(mr.translate(o).expand(2.0), base.with("due"), Sense::hover()).on_hover_text(due_ui::tooltip_text(s, lang));
                     }
@@ -1049,7 +1120,7 @@ impl TasksUi {
                         let tags = it.tags.iter().filter_map(|t| self.tags.iter().find(|x| x.id == *t)).map(|t| t.name.clone()).collect::<Vec<_>>();
                         let mut tags = tags;
                         tags.sort_by_key(|a| a.to_lowercase());
-                        self.edit = Some(EditDialog { id, key: it.key(), form: CardForm { title: it.title.clone(), body: it.body.clone(), due: it.due.as_deref().map(crate::due::edit_text).unwrap_or_default(), tags, ..CardForm::default() }, err: None, focus_title: true });
+                        self.edit = Some(EditDialog { id, key: it.key(), form: CardForm { title: it.title.clone(), body: it.body.clone(), due: it.due.as_deref().map(crate::due::edit_text).unwrap_or_default(), tags, project: it.project, private: it.private, meta_set: true, ..CardForm::default() }, err: None, focus_title: true });
                     }
                 }
                 CardAct::FilterTag(id) => {
@@ -1128,7 +1199,7 @@ impl TasksUi {
             });
             ui.add_space(S2);
             let focus = std::mem::take(&mut ed.focus_title);
-            if card_form_ui(ui, &mut ed.form, &all, &counted, lang, "edit", focus) {
+            if card_form_ui(ui, &mut ed.form, &all, &counted, lang, "edit", focus, &self.card_env.clone()) {
                 save = true;
             }
             ui.add_space(S2);
@@ -1153,6 +1224,11 @@ impl TasksUi {
             match tasks::edit_item(conn, ed.id, &ed.form.title, &ed.form.body, Some(&ed.form.due), &ed.form.tags) {
                 Ok(op) => {
                     self.commit(op);
+                    // Projekt und Privat (#386): eigener Rückgängig-Schritt.
+                    match tasks::set_item_meta(conn, ed.id, ed.form.project, ed.form.private) {
+                        Ok(op) => self.commit(op),
+                        Err(e) => self.fail(lang, &e),
+                    }
                     close = true;
                 }
                 Err(e @ (TaskError::Empty | TaskError::DueInvalid)) => ed.err = Some(e),
@@ -1326,6 +1402,7 @@ impl TasksUi {
         let tag_use = self.tag_use.clone();
         let mut renames: Vec<(i64, String)> = Vec::new();
         let mut recolor: Vec<(i64, String)> = Vec::new();
+        let mut private_set: Vec<(i64, bool)> = Vec::new();
         let mut merge_into: Vec<(i64, i64)> = Vec::new();
         let mut delete: Vec<i64> = Vec::new();
         let m = crate::style::modal(Id::new("todo_tags_modal")).show(ctx, |ui| {
@@ -1358,6 +1435,11 @@ impl TasksUi {
                                 renames.push((t.id, new));
                             }
                             mgr.names.remove(&t.id);
+                        }
+                        // Privater Tag (#386): alle Karten mit ihm sind privat.
+                        let mut private = t.private;
+                        if style::toggle(ui, &mut private).on_hover_text(lang.t("Privat: Karten mit diesem Tag sieht nie ein Agent", "Private: agents never see cards with this tag")).changed() {
+                            private_set.push((t.id, private));
                         }
                         let n = tag_use.get(&t.id).copied().unwrap_or(0);
                         ui.label(RichText::new(format!("{n} {}", if n == 1 { lang.t("Karte", "card") } else { lang.t("Karten", "cards") })).small().color(style::dim(ui)));
@@ -1417,6 +1499,12 @@ impl TasksUi {
             let r = tasks::set_tag_color(conn, id, &c);
             self.finish(lang, r);
         }
+        for (id, on) in private_set {
+            if let Err(e) = tasks::set_tag_private(conn, id, on) {
+                self.fail(lang, &e);
+            }
+            self.dirty = true;
+        }
         for (from, into) in merge_into {
             let f = tags.iter().find(|t| t.id == from);
             let i = tags.iter().find(|t| t.id == into);
@@ -1443,6 +1531,7 @@ impl App {
         let env = Env { db: self.db.as_ref(), db_error: self.db_error.as_deref(), lang: self.settings.language, bg: self.theme_for(crate::theme::background::Area::Todo).bg, undo_steps: self.settings.undo_steps as usize };
         if let Some(db) = env.db {
             self.plan.set_maint_dirs(self.backup_dir_path(), self.dir.clone());
+            self.plan.sidebar_projects = self.projects.iter().map(|p| (p.id, p.name.clone())).collect();
             self.plan.ensure_loaded(Some(db));
             self.plan.header(ctx, &env, db);
             #[cfg(feature = "readme-shots")]
@@ -1463,10 +1552,23 @@ impl App {
                 for t in self.plan.take_toasts() {
                     self.toast(t);
                 }
+                for (from, to) in std::mem::take(&mut self.plan.moved) {
+                    self.access_gain_hint(crate::access::Area::Tickets(from), crate::access::Area::Tickets(to));
+                }
                 return;
             }
         }
+        // Projekte und Vorgaben für Karten (#386).
+        self.tasks.card_env = tasks_ui_card_env(&self.projects, self.active_project, self.settings.todo_new_private);
+        if self.tasks.show_system != self.settings.show_system_notes {
+            self.tasks.show_system = self.settings.show_system_notes;
+            self.tasks.invalidate();
+        }
         self.tasks.show(ctx, &env);
+        if self.tasks.show_system != self.settings.show_system_notes {
+            self.settings.show_system_notes = self.tasks.show_system;
+            state::save_json(&self.dir.join("settings.json"), &self.settings);
+        }
         if std::mem::take(&mut self.tasks.rescue_request) {
             self.rescue_unavailable_db();
         }
@@ -1534,7 +1636,12 @@ impl App {
             self.end_retired(token & !super::closing::RETIRED_TOKEN);
             return;
         }
-        // „Ausgabe zeigen“ der Aktionen beim Speichern (#383)
+        // „Freigeben …“ (#386): Dialog „Zugriff für Agenten“ des Bereichs (Bit 62).
+        if let Some(area) = super::mcp::access_gate::token_area(token) {
+            self.open_access_dialog(area);
+            return;
+        }
+        // „Ausgabe zeigen“ der Aktionen beim Speichern (#383, Bit 59)
         if token & super::save_actions_ui::SA_TOKEN != 0 {
             self.sa_toast_clicked(token);
             return;
@@ -1593,7 +1700,7 @@ mod tag_suggest_tests {
     use super::*;
 
     fn tag(id: i64, name: &str) -> Tag {
-        Tag { id, name: name.into(), color: "#336699".into() }
+        Tag { id, name: name.into(), color: "#336699".into(), private: false }
     }
 
     #[test]
@@ -1675,4 +1782,9 @@ mod due_tests {
         tasks::set_due_thresholds(&conn, &Vec::<DueThreshold>::new()).unwrap();
         assert_eq!(tasks::due_counts(&conn, now).unwrap(), (1, 0));
     }
+}
+
+/// Projekte der Seitenleiste für die Auswahl in der Karte (#386).
+pub(super) fn tasks_ui_card_env(projects: &[state::Project], active: u64, new_private: bool) -> CardEnv {
+    CardEnv { projects: projects.iter().map(|p| (p.id, p.name.clone())).collect(), active, new_private }
 }

@@ -358,6 +358,16 @@ pub fn find<'a>(list: &'a [ProcDef], key: &Value) -> Option<&'a ProcDef> {
 }
 
 /// Alle Gruppennamen (sortiert, ohne leere).
+/// Ein Projekt wurde gelöscht (#386): seine Prozesse ziehen mit den Sitzungen nach `to`. Gibt zurück, ob sich etwas änderte.
+pub fn move_project(list: &mut [ProcDef], from: u64, to: u64) -> bool {
+    let mut changed = false;
+    for d in list.iter_mut().filter(|d| d.project == from && from != 0) {
+        d.project = to;
+        changed = true;
+    }
+    changed
+}
+
 pub fn groups(list: &[ProcDef]) -> Vec<String> {
     let mut g: Vec<String> = list.iter().map(|d| d.group.trim().to_string()).filter(|g| !g.is_empty()).collect();
     g.sort_by_key(|s| s.to_lowercase());
@@ -984,6 +994,15 @@ mod tests {
 
     fn backups(dir: &Path) -> usize {
         std::fs::read_dir(dir).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().starts_with("processes.defekt-")).count()
+    }
+
+    #[test]
+    fn processes_move_with_a_deleted_project() {
+        let mut v = vec![ProcDef { project: 2, ..ProcDef::new(1, "a", "x") }, ProcDef { project: 3, ..ProcDef::new(2, "b", "x") }, ProcDef::new(3, "c", "x")];
+        assert!(move_project(&mut v, 2, 5));
+        assert_eq!(v.iter().map(|d| d.project).collect::<Vec<_>>(), vec![5, 3, 0]);
+        assert!(!move_project(&mut v, 2, 5), "nichts mehr zu verschieben");
+        assert!(!move_project(&mut v, 0, 5), "„Allgemein“ zieht nie um");
     }
 
     #[test]

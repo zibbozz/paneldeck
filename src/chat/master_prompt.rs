@@ -38,7 +38,7 @@ pub struct ToolDoc {
 pub const DOCS: &[ToolDoc] = &[
     ToolDoc {
         name: "whoami",
-        purpose: "Shows your own session – in this chat that is the chat itself (its session id, name, project, folder) –, the sessions you created (`children`) and `agent_chain` (sessions you must not write into).",
+        purpose: "Shows your own session – in this chat that is the chat itself (its session id, name, project, folder) –, the sessions you created (`children`), `agent_chain` (sessions you must not write into) and `access`.",
         usage: &[
             "You do not need to call it before other tools. Use it when you need your own session id or the list of sessions you created.",
             "You may control and close the sessions in `children`.",
@@ -285,7 +285,7 @@ pub const DOCS: &[ToolDoc] = &[
     },
     ToolDoc {
         name: "list_projects",
-        purpose: "Lists the ticket projects with key, name, description, work folder, whether sprints and versions are on, ticket count and due-date markers.",
+        purpose: "Lists the ticket projects you can reach with key, name, description, work folder, whether sprints and versions are on, ticket count and due-date markers.",
         usage: &["Use the project key (e.g. PAN) with the other ticket tools. The system project TODO is the simple to-do list and read-only."],
         examples: &[("{}", "all projects")],
     },
@@ -375,7 +375,7 @@ pub const DOCS: &[ToolDoc] = &[
     ToolDoc {
         name: "add_comment",
         purpose: "Adds a comment (Markdown, at most 20000 characters) to a ticket.",
-        usage: &["You cannot edit or delete comments afterwards."],
+        usage: &["You cannot edit or delete comments afterwards (unless the user allows it)."],
         examples: &[(r#"{"ticket": "PAN-12", "body": "Fixed in branch fix/login."}"#, "comment on PAN-12")],
     },
     ToolDoc {
@@ -398,6 +398,34 @@ pub const DOCS: &[ToolDoc] = &[
         purpose: "Links a ticket to a terminal session so the user sees which session works on it. It only records the link and never types into the terminal.",
         usage: &["Without `session` your own session (this chat) is linked; otherwise only a session you created yourself."],
         examples: &[(r#"{"ticket": "PAN-12", "session": 9}"#, "link PAN-12 to session 9")],
+    },
+    // ---- #386 (3.2.0): Projekte anlegen, Papierkorb, Kommentare von Agenten
+    ToolDoc {
+        name: "create_project",
+        purpose: "Creates a ticket project (key of 2-10 letters/digits, name, optional description and colour) linked to the sidebar project of this chat; it follows that project's access level.",
+        usage: &[
+            "Only works when the user turned on \"Agents may create projects\" (Settings → Agents) and you have Control in this chat's project; otherwise `forbidden`. Sidebar projects are created only by the user.",
+            "Agents never delete projects.",
+        ],
+        examples: &[(r#"{"key": "API", "name": "Public API", "description": "Tickets for the REST API"}"#, "create the project API")],
+    },
+    ToolDoc {
+        name: "delete_ticket",
+        purpose: "Moves a ticket to the trash: it disappears from all lists. Only the user can restore it or delete it permanently.",
+        usage: &["Only works when the user turned on \"Agents may delete tickets/comments\" (Settings → Agents) and you have Control in the ticket's project; otherwise `forbidden`. Make sure the user asked for it."],
+        examples: &[(r#"{"ticket": "PAN-12"}"#, "move PAN-12 to the trash")],
+    },
+    ToolDoc {
+        name: "update_comment",
+        purpose: "Replaces the text (Markdown) of a comment written by an agent (origin agent in get_ticket); the change is recorded in the ticket history.",
+        usage: &["Take the comment id from get_ticket. Comments of the user cannot be changed (`forbidden`)."],
+        examples: &[(r#"{"comment": 41, "body": "Fixed in branch fix/login (corrected)."}"#, "correct comment 41")],
+    },
+    ToolDoc {
+        name: "delete_comment",
+        purpose: "Moves a comment written by an agent (origin agent) to the trash. Only the user can restore it or delete it permanently.",
+        usage: &["Only works when the user turned on \"Agents may delete tickets/comments\" (Settings → Agents); comments of the user cannot be deleted (`forbidden`). Take the comment id from get_ticket."],
+        examples: &[(r#"{"comment": 41}"#, "move comment 41 to the trash")],
     },
     // ---- Reiter „Zeit“ (#164): Einträge für Vollständigkeit; Chats bekommen diese Werkzeuge nicht (8192-Token-Budget,
     // `chat::tools::ToolPolicy::allowed`).
@@ -582,7 +610,11 @@ pub fn offered_defs(policy: &ToolPolicy) -> Vec<ToolDef> {
         let d = if agent::is_agent_tool(&s.name) {
             agent_defs.iter_mut().find(|d| d.as_ref().is_some_and(|d| d.name == s.name)).and_then(Option::take).map(agent::as_tool_def)
         } else {
-            mcp_defs.iter_mut().find(|d| d.as_ref().is_some_and(|d| d.name == s.name)).and_then(Option::take)
+            // In der Fassung der Chats (`create_session` ohne `project`, #386).
+            mcp_defs.iter_mut().find(|d| d.as_ref().is_some_and(|d| d.name == s.name)).and_then(Option::take).map(|mut d| {
+                d.schema = super::tools::chat_schema(d.name, d.schema);
+                d
+            })
         };
         out.extend(d);
     }
@@ -1055,7 +1087,10 @@ const ABOUT: &str = concat!(
     "- **Expert mode** (expert mode on): a small Jira. **Projects** have a key (e.g. PAN; tickets are PAN-1, PAN-2 …), a work folder and their own configuration: **ticket types** with fields, **statuses** and a **workflow** per type (allowed transitions, required fields, conditions), link types and kinds of work. **Tickets** have the built-in fields title, description (Markdown), due date and labels plus the fields of their type, a parent and children, comments, links (to tickets, terminals, URLs, git branches), time entries and a history that records agents as the source. Kanban boards, a JQL-like query language, dashboards and a maintenance page belong to it. The simple to-do list stays visible as the read-only system project TODO.\n",
     "- **Sprints** (optional per project): planned, active or completed, with goal, dates, tickets and a report.\n",
     "- **Versions and milestones** (optional per project): with due date, released / reached flag and progress of the tickets pointing to them.\n",
-    "- Agents (and you) can never delete tickets or to-do cards and never change ticket types, workflows or projects.\n",
+    "- You never delete tickets, to-do cards or projects and never change ticket types or workflows.\n",
+    "\n",
+    "### Access per project\n",
+    "- Your level: the lower of the model's level and the level of this chat's project; others only if \"For all\". Locked: `project_locked`.\n",
     "\n",
     "### Process list\n",
     "The *Processes* section in the Terminal Hub sidebar runs long-running programs such as dev servers and watchers (`npm run dev`, `cargo watch`) apart from the terminals, with their output in their own pane. Entries can form groups that start and stop together. Only the user can add, change or delete entries; agents can read them and start, stop or restart them.\n",
@@ -1065,7 +1100,6 @@ const ABOUT: &str = concat!(
     "- **Off**: no tools – chat only.\n",
     "- **Read**: read sessions, terminal content, chats, the Claude history and costs, the to-do list or tickets, the process list and themes. Nothing is changed.\n",
     "- **Control**: additionally type text, send keys, run commands, send messages to other chats, create, rename, show and close sessions, change the to-do list or tickets, and start, stop and restart process-list entries. By default every write action waits for the user's approval in the chat.\n",
-    "This level is independent of the MCP level under *Settings → Agents*, which applies only to external agents (programs that connect to Paneldeck through its MCP interface).\n",
     "\n",
     "### Simple and expert mode for tools\n",
     "The to-do tools follow the Expert mode switch: in simple mode you get list_todos, add_todo and set_todo_done; in expert mode you get the project and ticket tools, and list_todos is read-only. A tool of the other mode returns `wrong_mode`.\n",
@@ -1083,8 +1117,9 @@ const ABOUT: &str = concat!(
 pub const ERRORS: &[(&str, &str)] = &[
     ("bad_args", "The arguments are wrong: a required field is missing, a field has the wrong type, an unknown field, a value out of range, broken JSON or a forbidden combination. The message names the field and the expected type, lists the tool's fields and shows a correct example. Fix exactly that and call again with the corrected arguments."),
     ("unknown_tool", "There is no tool with that name. Use only the tool names listed under \"Tools\"."),
-    ("forbidden", "Not allowed: the tool is not enabled for this model, or a safety rule applies (your own session, a session of your agent chain, a session you did not create, a session with a git worktree). Do not retry; tell the user what you could not do."),
-    ("wrong_mode", "The tool belongs to the other to-do mode (simple or expert). Use the tools of the current mode; only the user can switch the Expert mode."),
+    ("forbidden", "Not allowed: the tool is not enabled for this model or project, or a safety rule applies (your own session, a session of your agent chain, a session you did not create, a session with a git worktree). Do not retry; tell the user what you could not do."),
+    ("project_locked", "Project locked for agents; tell the user."),
+    ("wrong_mode","The tool belongs to the other to-do mode (simple or expert). Use the tools of the current mode; only the user can switch the Expert mode."),
     ("not_found", "Unknown session, ticket, project, sprint, process, theme or tool. Look the id or name up with the matching list tool instead of guessing."),
     ("denied", "The user denied this call in the approval prompt. Do not retry it; ask the user what to do instead."),
     ("cancelled", "The user stopped the answer before the call ran."),
@@ -1426,7 +1461,7 @@ fn short_purpose(name: &str) -> &'static str {
 const ERROR_GROUPS: &[(&str, &[&str])] = &[
     ("Fix the arguments and call again (the message names the field and shows a correct example)", &["bad_args", "unknown_tool", "invalid_value", "required_missing", "transition_needs_fields", "invalid_query", "too_large"]),
     ("Look the id or name up with a list tool", &["not_found"]),
-    ("Not possible – do not retry, tell the user", &["forbidden", "denied", "wrong_mode", "admin_profile", "transition_not_allowed", "conditions_not_met", "hierarchy_violation", "link_not_allowed", "already_exists", "feature_disabled", "no_workflow", "status_not_in_workflow", "no_model", "claude_mode_off", "status_unavailable"]),
+    ("Not possible – do not retry, tell the user", &["forbidden", "project_locked", "denied", "wrong_mode", "admin_profile", "transition_not_allowed", "conditions_not_met", "hierarchy_violation", "link_not_allowed", "already_exists", "feature_disabled", "no_workflow", "status_not_in_workflow", "no_model", "claude_mode_off", "status_unavailable"]),
     ("Wait or try later; never answer an approval yourself", &["permission_pending", "busy", "timeout", "interrupted", "conflict", "skipped", "no_result", "cancelled"]),
     ("Wrong kind of session or session not running", &["not_a_terminal", "not_a_chat", "not_claude", "claude_session", "no_shell_integration", "fullscreen_program", "session_not_running", "session_exited", "session_closed", "spawn_failed"]),
     ("No screenshot possible", &["window_hidden", "not_visible", "screenshot_timeout", "empty_image"]),
@@ -1539,7 +1574,9 @@ pub fn render_compact_with(policy: &ToolPolicy, spec: &Spec) -> String {
                 t => defs.iter().any(|d| d.name == t),
             };
             for (what, codes) in ERROR_GROUPS {
-                let shown: Vec<String> = codes.iter().filter(|c| error_scope(c).is_empty() || error_scope(c).iter().any(|s| has(s))).map(|c| format!("`{c}`")).collect();
+                // `project_locked` (#386) erklärt sich selbst (die Meldung sagt, dass nur der Nutzer freigeben kann): in der
+                // Kurzfassung weggelassen, sie hat bei Steuern im Expertenmodus keinen Platz mehr.
+                let shown: Vec<String> = codes.iter().filter(|c| **c != "project_locked").filter(|c| error_scope(c).is_empty() || error_scope(c).iter().any(|s| has(s))).map(|c| format!("`{c}`")).collect();
                 if !shown.is_empty() {
                     out.push_str(&format!("- {what}: {}.\n", shown.join(", ")));
                 }
@@ -1602,6 +1639,30 @@ mod tests {
             assert!(agent::is_agent_tool(d.name), "agent::TOOL_DOCS nennt ein unbekanntes Werkzeug: {}", d.name);
         }
         assert!(chat_doc("run_command").unwrap().purpose.contains("chat's own terminal"), "im Chat gilt die Fassung der Agenten-Werkzeuge");
+    }
+
+    /// #386: Die neuen Werkzeuge (Projekte anlegen, Papierkorb, Kommentare von Agenten) ändern etwas – im Plan-Modus
+    /// gesperrt, im Chat freigabepflichtig – und der Prompt erklärt Zugriff je Projekt, private Einträge und Papierkorb.
+    /// Chats bekommen die vier vorerst nicht (kein Platz im Chat-Prompt, bis #393), auch nicht mit beiden Schaltern.
+    #[test]
+    fn project_access_tools_are_writes_and_the_rules_are_explained() {
+        let pol = policy(McpLevel::Control, true).with_access_switches(crate::access::SW_CREATE | crate::access::SW_DELETE);
+        for n in ["create_project", "delete_ticket", "update_comment", "delete_comment"] {
+            assert_eq!(mcp::tool_level(n), Some(McpLevel::Control), "{n}");
+            assert!(!super::super::plan::is_read_only(n), "{n}: im Plan-Modus gesperrt");
+            assert!(!approval_free(n, &serde_json::json!({})), "{n}: braucht die Freigabe");
+            assert!(!pol.specs().iter().any(|s| s.name == n), "{n}: vorerst nicht im Chat");
+            let call = super::super::store::ToolCall { id: "c".into(), name: n.into(), arguments: serde_json::json!({}) };
+            assert!(matches!(pol.check(&call), Err((super::super::store::ToolStatus::Denied, _))), "{n}: auch beim Erraten des Namens gesperrt");
+        }
+        let p = render(&pol, "m");
+        for needle in ["### Access per project", "`project_locked`", "lower of the model's level and the level of this chat's project", "\"For all\"", "You never delete tickets"] {
+            assert!(p.contains(needle), "fehlt: {needle}");
+        }
+        // Den Papierkorb nennt der Chat-Prompt nicht: Chats haben die Werkzeuge vorerst nicht (#393).
+        assert!(!p.contains("**trash**") && !p.contains("### delete_ticket"));
+        // Die Kurzfassung lässt `project_locked` aus (Platz bei 8192, die Meldung erklärt sich selbst).
+        assert!(!render_compact(&pol, "m").contains("`project_locked`"));
     }
 
     #[test]
@@ -2038,6 +2099,31 @@ mod tests {
     }
 
     #[test]
+    fn the_project_and_trash_tools_stay_out_of_chats_and_the_prompt_still_fits() {
+        // #386: Chats bekommen die vier Werkzeuge vorerst nie (kein Platz in der Kurzfassung bei 8192, bis #393) – auch
+        // nicht mit beiden Schaltern; die Schalter ändern den Chat-Prompt also nicht.
+        let off = policy(McpLevel::Control, true).with_access_switches(0);
+        let on = policy(McpLevel::Control, true).with_access_switches(crate::access::SW_CREATE | crate::access::SW_DELETE);
+        let four = crate::access::CHAT_EXCLUDED;
+        assert!(off.tool_names().iter().all(|n| !four.contains(&n.as_str())));
+        assert!(on.tool_names().iter().all(|n| !four.contains(&n.as_str())));
+        assert_eq!(off.tool_names(), on.tool_names());
+        for model in ["qwen3:8b", "llama3.1:8b", "m"] {
+            // volle Fassung: passt in den automatischen Kontext (höchstens 65536, wie Steuern im Expertenmodus ohnehin)
+            let full = request_tokens(&on, model, Variant::Full);
+            let auto = crate::llm::config::auto_context(full, None);
+            eprintln!("FULL+SWITCHES {model}: {full} tokens, auto context {auto}");
+            assert!(auto <= 65536, "{model}: {auto}");
+            assert_eq!(choose(auto, full), Variant::Full, "{model}");
+            let budget = 8192 * 3 / 4;
+            let n = request_tokens(&on, model, Variant::Compact);
+            eprintln!("COMPACT+SWITCHES {model}: {n} tokens of {budget}");
+            assert!(n <= budget, "{model}: {n} von {budget}");
+            assert_eq!(n, request_tokens(&off, model, Variant::Compact), "{model}: Schalter ändern den Chat-Prompt nicht");
+        }
+    }
+
+    #[test]
     fn the_compact_prompt_keeps_rules_safety_tools_and_family_note() {
         let pol = policy(McpLevel::Control, true);
         let c = render_compact(&pol, "mistral-nemo");
@@ -2055,7 +2141,8 @@ mod tests {
                 continue;
             }
             assert_eq!(ERROR_GROUPS.iter().filter(|(_, cs)| cs.contains(code)).count(), 1, "{code}: genau eine Gruppe");
-            assert!(c.contains(&format!("`{code}`")), "{code}");
+            // `project_locked` (#386) fehlt in der Kurzfassung bewusst (Platz; die Meldung erklärt sich selbst).
+            assert!(*code == "project_locked" || c.contains(&format!("`{code}`")), "{code}");
         }
         assert!(c.contains("- File, git and web tools: the message says what is wrong"));
         assert!(AGENT_ERRORS.iter().all(|a| ERRORS.iter().any(|(c, _)| c == a)), "jeder Agenten-Code ist dokumentiert");

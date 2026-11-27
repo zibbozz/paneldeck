@@ -582,7 +582,7 @@ pub fn sprint_content(conn: &Connection, sprint_id: i64) -> SRes<SprintContent> 
     );
     let mut st = conn.prepare(&sql)?;
     let items = st
-        .query_map([sprint_id], |r| Ok(SprintItem { ticket: tickets::from_row(r)?, points: r.get(14)?, done: r.get::<_, i64>(15)? != 0, added_at: r.get(16)? }))?
+        .query_map([sprint_id], |r| Ok(SprintItem { ticket: tickets::from_row(r)?, points: r.get(tickets::COLS_N)?, done: r.get::<_, i64>(tickets::COLS_N + 1)? != 0, added_at: r.get(tickets::COLS_N + 2)? }))?
         .collect::<Result<Vec<_>, _>>()?;
     let mut totals = SprintTotals::default();
     for i in &items {

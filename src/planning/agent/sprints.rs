@@ -9,7 +9,7 @@
 use super::*;
 use crate::calc::progress::Basis;
 use crate::planning::projects::get_project;
-use crate::planning::sprints::releases::{list_milestones, list_versions, release_progress, Release, ReleaseKind};
+use crate::planning::sprints::releases::{list_milestones, list_versions, release_progress_ex, Release, ReleaseKind};
 use crate::planning::sprints::sprint::{get_sprint, list_sprints, sprint_content, sprint_totals, Sprint, SprintState};
 use crate::planning::sprints::{sprint_report, Figure, SprintError};
 
@@ -54,10 +54,32 @@ fn sprint_json(ctx: &Ctx, s: &Sprint) -> Value {
     })
 }
 
-/// Die Summen eines Sprints (alle und erledigte Tickets) als JSON.
+/// Die Summen eines Sprints (alle und erledigte Tickets) als JSON – für Agenten nur über die Tickets, die sie sehen (#386).
 fn totals_json(ctx: &Ctx, id: i64) -> Result<Value, ToolError> {
-    let t = sp(ctx, sprint_totals(ctx.conn, id))?;
+    let t = if ctx.view.is_some() {
+        visible_totals(ctx, &sp(ctx, sprint_content(ctx.conn, id))?.items)
+    } else {
+        sp(ctx, sprint_totals(ctx.conn, id))?
+    };
     Ok(json!({"total": fig(&t.total), "done": fig(&t.done)}))
+}
+
+/// Summen nur über die sichtbaren Tickets (#386: private Tickets zählen für Agenten nicht).
+fn visible_totals(ctx: &Ctx, items: &[crate::planning::sprints::sprint::SprintItem]) -> crate::planning::sprints::sprint::SprintTotals {
+    let mut t = crate::planning::sprints::sprint::SprintTotals::default();
+    for i in items.iter().filter(|i| ctx.ticket_visible(&i.ticket)) {
+        t.total.add(i.points);
+        if i.done {
+            t.done.add(i.points);
+        }
+    }
+    t
+}
+
+/// Enthält der Sprint (auch früher) ein Ticket, das der Agent nicht sieht? Dann gibt es keinen Bericht (#386).
+fn has_hidden(ctx: &Ctx, sprint: i64) -> bool {
+    ctx.view.is_some()
+        && ctx.conn.query_row("SELECT EXISTS (SELECT 1 FROM sprint_tickets st JOIN tickets t ON t.id = st.ticket_id WHERE st.sprint_id = ?1 AND (t.private = 1 OR t.trashed_at IS NOT NULL))", [sprint], |r| r.get::<_, bool>(0)).unwrap_or(true)
 }
 
 pub(super) fn list_sprints_tool(ctx: &Ctx, v: &Value) -> R {
@@ -121,8 +143,15 @@ fn sprint_arg(ctx: &Ctx, a: &Args) -> Result<Sprint, ToolError> {
 pub(super) fn get_sprint_tool(ctx: &Ctx, v: &Value) -> R {
     let a = args(ctx, v, &["sprint", "project"])?;
     let s = sprint_arg(ctx, &a)?;
-    let content = sp(ctx, sprint_content(ctx.conn, s.id))?;
+    // Auch über die Kennung allein: Zugriff auf das Projekt des Sprints (#386).
+    ctx.check_project(s.project_id, crate::mcp::McpLevel::Read)?;
+    let mut content = sp(ctx, sprint_content(ctx.conn, s.id))?;
     let report = sp(ctx, sprint_report(ctx.conn, s.id))?;
+    let hidden = has_hidden(ctx, s.id);
+    if ctx.view.is_some() {
+        content.totals = visible_totals(ctx, &content.items);
+        content.items.retain(|i| ctx.ticket_visible(&i.ticket));
+    }
     let items: Vec<Value> = content
         .items
         .iter()
@@ -141,7 +170,8 @@ pub(super) fn get_sprint_tool(ctx: &Ctx, v: &Value) -> R {
         "sprint": sprint,
         "items": items,
         "items_total": content.items.len(),
-        "report": {
+        // Enthält der Sprint Tickets, die der Agent nicht sieht, verriete der Bericht sie über die Zahlen (#386).
+        "report": if hidden { Value::Null } else { json!({
             "planned": fig(&report.planned),
             "completed": fig(&report.completed),
             "added": fig(&report.added),
@@ -151,13 +181,14 @@ pub(super) fn get_sprint_tool(ctx: &Ctx, v: &Value) -> R {
                 "geplant = Startumfang, erledigt = im Sprint erledigt, hinzugefügt/entfernt = Umfangsänderung nach dem Start, offen = noch nicht erledigt",
                 "planned = committed at start, completed = finished in the sprint, added/removed = scope change after the start, open = not finished yet",
             ),
-        },
+        }) },
         "note": untrusted(ctx.lang),
     }))
 }
 
 fn release_json(ctx: &Ctx, r: &Release) -> Result<Value, ToolError> {
-    let prog = sp(ctx, release_progress(ctx.conn, r.kind, r.id, Basis::TicketCount))?;
+    // Für Agenten ohne private Tickets (#386; Tickets im Papierkorb sind archiviert und zählen ohnehin nicht).
+    let prog = sp(ctx, release_progress_ex(ctx.conn, r.kind, r.id, Basis::TicketCount, ctx.view.is_some()))?;
     let done_key = match r.kind {
         ReleaseKind::Version => "released",
         ReleaseKind::Milestone => "reached",
@@ -220,7 +251,7 @@ mod tests {
     use chrono::NaiveDate;
 
     fn ctx(f: &Fx, lang: Lang) -> Ctx<'_> {
-        Ctx { conn: &f.c, lang, source: Source::agent("Builder"), now: NaiveDate::from_ymd_opt(2026, 11, 14).unwrap().and_hms_opt(12, 0, 0).unwrap() }
+        Ctx { conn: &f.c, lang, source: Source::agent("Builder"), now: NaiveDate::from_ymd_opt(2026, 11, 14).unwrap().and_hms_opt(12, 0, 0).unwrap(), view: None, need: Default::default() }
     }
 
     fn ok(f: &Fx, tool: &str, v: Value) -> Done {

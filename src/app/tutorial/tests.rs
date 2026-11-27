@@ -178,7 +178,7 @@ fn home(s: Spot) -> Home {
         ClaudeMode | ClaudeDefaults | ClaudeBudget => Home::Settings(2),
         TabShortcuts => Home::Settings(5),
         TabProfiles => Home::Settings(6),
-        McpLevel | McpRegister | McpSysprompt | McpSessionEnv | McpLog => Home::Settings(7),
+        McpLevel | McpRegister | McpSysprompt | McpSessionEnv | McpLog | AgentAccess => Home::Settings(7),
         DataBackups | DataCleanup => Home::Settings(8),
         AboutInfo | AboutUpdates | AboutTutorial => Home::Settings(9),
         TabModels | ModelsServers | ModelsCommands => Home::Settings(super::super::models_ui::SETTINGS_TAB),

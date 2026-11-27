@@ -43,12 +43,24 @@ The user chooses the level in Paneldeck (Settings → Agents):
 - **Read only**: read sessions, terminal content, screenshots, costs, the Claude conversation history and the to-do list or tickets. Nothing is changed.
 - **Control**: additionally type text, send keys, run commands, create, rename, focus and close sessions, and change the to-do list or tickets. You then type into the user's real terminals.
 
-A tool above the current level returns `forbidden`.
+A tool above the current level returns `forbidden`. This level is the upper bound: the user can lower it per project (see "Access per project").
 
 ## First steps
 
-1. Call `whoami` first. It tells you the session you run in (`session` = null means you do not run inside a Paneldeck terminal) and the sessions you created yourself (your children).
+1. Call `whoami` first. It tells you the session you run in (`session` = null means you do not run inside a Paneldeck terminal), the sessions you created yourself (your children) and what you may reach (`access`).
 2. Use `list_sessions` to find the sessions you were asked to work with.
+
+## Access per project
+
+The user can set a level per area (Settings → Agents → access per project, or "Agent access …" in a project's context menu): As global, Off, Read only or Control. "As global" means the level above; no area gets more than that.
+- Areas: every sidebar project (its sessions, processes and to-do cards and the ticket projects linked to it), every ticket project, and **General** – everything without a project (to-do cards without project, the Time tab, calendar events without project, processes without project, the editor, themes, models, the history search).
+- If you run in a Paneldeck session, the sidebar project of that session is your **home project** and you get its level. Other sidebar projects you reach only if the user released them "For all". An agent outside Paneldeck (no session) reaches only areas released "For all". General and ticket projects that are not linked to a sidebar project apply to agents in every Paneldeck session; "For all" adds agents outside Paneldeck.
+- The answer of `whoami` has `access`: the sidebar projects you can reach (`projects` with `id`, `name`, `level`, `home`) and your level in General (`general`). `list_sessions`, `list_projects`, `search_tickets`, `list_todos`, `list_processes` and the calendar only show what you can reach; `list_projects` also returns `agent_level` (`read` or `control`) and `created_by_agent`.
+- Projects the user creates start Off. A call into an area that is Off for you returns `project_locked` (the project is never named); the user then sees a notice and can release it. Do not try to get around a lock – ask the user. A level that is too low (Read only) returns `forbidden`.
+- `create_session` takes `project` (name or id from `whoami.access.projects`) and needs Control there. Without it the session is created in your home project (outside Paneldeck: the project shown in the main window, also only with Control).
+- Ticket changes need Control in the ticket's project; `link_ticket` needs Control in the source and at least Read in the target. `add_todo` puts the card into your home project (outside Paneldeck: General) and needs Control there. `screenshot` without `session` works only if no area is locked for you; otherwise pass `session`.
+- The user can mark to-do cards, tags and tickets as **private**. You never see private items: they are missing from every list, search and calendar, and a direct call returns `not_found` – exactly as for an item that does not exist. Only the user sets or removes "private".
+- Tickets, comments and to-do cards carry `origin` (`user`, `agent` or `paneldeck`); everything you create gets `agent`. `list_todos` also returns `project` (sidebar project id, null = General).
 
 ## Rules
 
@@ -81,7 +93,9 @@ The task tools depend on the mode the user sets with the "Expert mode" switch in
 Every ticket and every to-do card has a title, an optional description and an optional due date (`due`: `YYYY-MM-DD` means the end of that day, or `YYYY-MM-DDTHH:MM`); tickets also have built-in `labels`. Custom fields are searchable by name or key. Answers carry `due_state` (overdue, time left, marker by the project's or to-do list's thresholds). Search with e.g. `due < currentDate() ORDER BY due`.
 
 A tool of the other mode returns `wrong_mode`. Reload the tool list (tools/list) after the user switches the mode.
-You can never delete tickets or to-do cards, and never change ticket types, workflows or projects.
+You never delete tickets, comments, to-do cards, projects or anything else – with one exception: only if the user turned on "Agents may delete tickets/comments" (Settings → Agents) can you move a ticket (`delete_ticket`) or a comment written by an agent (`delete_comment`) to the **trash**; without the switch both return `forbidden`. Only the user restores items from the trash or deletes them permanently.
+`create_project` creates a ticket project only if the user turned on "Agents may create projects" (Settings → Agents) and you run in a Paneldeck session with Control in its project; the new project is linked to that project and follows its level (otherwise `forbidden`). Sidebar projects are created only by the user.
+`update_comment` changes only comments with `origin` = `agent` (from any agent); comments of the user return `forbidden`. You never change ticket types, workflows or projects.
 Ticket types have an optional `icon` (in get_project): a built-in name such as `bug`, or `lucide:<name>` from the Lucide icon set (https://lucide.dev/icons).
 
 ## Time tab: alarms, timers, stopwatches, clocks, birthdays
@@ -96,8 +110,9 @@ At Read you can read the alarms (`list_alarms`), timers and their presets (`list
 A failed call returns `isError` with a code at the start of the text (`code: message`) and may carry details (for example `details.missing_fields` lists the fields to fill in). Codes:
 - `mcp_disabled` – the agent interface is switched off; the user has to enable it in Paneldeck (Settings → Agents).
 - `hub_not_running` – Paneldeck is not running (or uses a different data folder).
-- `forbidden` – not allowed at this level or by the safety rules (your own session, a session you did not create or link, closing a session that has a git worktree).
-- `not_found` – unknown session, ticket, project, sprint or tool.
+- `forbidden` – not allowed at this level, at the level of the project or by the safety rules (your own session, a session you did not create or link, closing a session that has a git worktree, deleting or creating projects without the user's switch, changing a comment of the user).
+- `project_locked` – the project (or General) is locked for you; only the user can release it. The project is not named.
+- `not_found` – unknown session, ticket, card, comment, project, sprint or tool, or a private item (or one in the trash).
 - `wrong_mode` – the tool belongs to the other to-do mode.
 - `permission_pending` – the session waits for the user's approval decision.
 - `bad_args`, `too_large`, `timeout`, `busy`, `internal` – fix the arguments, make the request smaller or try again later.
@@ -122,12 +137,24 @@ Der Nutzer wählt die Stufe in Paneldeck (Einstellungen → Agenten):
 - **Nur lesen**: Sitzungen, Terminalinhalt, Screenshots, Kosten, den Claude-Verlauf und die Todo-Liste bzw. Tickets lesen. Nichts wird verändert.
 - **Steuern**: zusätzlich Text eingeben, Tasten senden, Befehle ausführen, Sitzungen anlegen, umbenennen, anzeigen und schließen sowie die Todo-Liste bzw. Tickets ändern. Du tippst dann in die echten Terminals des Nutzers.
 
-Ein Werkzeug oberhalb der aktuellen Stufe liefert `forbidden`.
+Ein Werkzeug oberhalb der aktuellen Stufe liefert `forbidden`. Diese Stufe ist die Obergrenze: Der Nutzer kann sie je Projekt senken (siehe „Zugriff je Projekt“).
 
 ## Erste Schritte
 
-1. Rufe zuerst `whoami` auf. Es nennt die Sitzung, in der du läufst (`session` = null heißt: du läufst nicht in einem Paneldeck-Terminal), und die Sitzungen, die du selbst angelegt hast (deine Kinder).
+1. Rufe zuerst `whoami` auf. Es nennt die Sitzung, in der du läufst (`session` = null heißt: du läufst nicht in einem Paneldeck-Terminal), die Sitzungen, die du selbst angelegt hast (deine Kinder), und was du erreichen darfst (`access`).
 2. Mit `list_sessions` findest du die Sitzungen, mit denen du arbeiten sollst.
+
+## Zugriff je Projekt
+
+Der Nutzer kann je Bereich eine Stufe setzen (Einstellungen → Agenten → Zugriff je Projekt oder „Agenten-Zugriff …“ im Kontextmenü eines Projekts): Wie global, Aus, Nur lesen oder Steuern. „Wie global“ heißt: die Stufe oben; mehr als sie bekommt kein Bereich.
+- Bereiche: jedes Seitenleisten-Projekt (seine Sitzungen, Prozesse und Todo-Karten und die damit verknüpften Ticket-Projekte), jedes Ticket-Projekt und **Allgemein** – alles ohne Projekt (Todo-Karten ohne Projekt, der Reiter „Zeit“, Termine ohne Projekt, Prozesse ohne Projekt, der Editor, Themes, Modelle, die Verlaufssuche).
+- Läufst du in einer Paneldeck-Sitzung, ist das Seitenleisten-Projekt dieser Sitzung dein **Heimatprojekt**, und du bekommst seine Stufe. Andere Seitenleisten-Projekte erreichst du nur, wenn der Nutzer sie „Für alle“ freigegeben hat. Ein Agent außerhalb von Paneldeck (ohne Sitzung) erreicht nur Bereiche mit „Für alle“. Allgemein und Ticket-Projekte ohne Verknüpfung mit einem Seitenleisten-Projekt gelten für Agenten in jeder Paneldeck-Sitzung; „Für alle“ nimmt Agenten außerhalb von Paneldeck dazu.
+- Die Antwort von `whoami` enthält `access`: die Seitenleisten-Projekte, die du erreichst (`projects` mit `id`, `name`, `level`, `home`), und deine Stufe in Allgemein (`general`). `list_sessions`, `list_projects`, `search_tickets`, `list_todos`, `list_processes` und der Kalender zeigen nur, was du erreichst; `list_projects` liefert außerdem `agent_level` (`read` oder `control`) und `created_by_agent`.
+- Projekte, die der Nutzer anlegt, beginnen mit Aus. Ein Aufruf in einen Bereich, der für dich auf Aus steht, liefert `project_locked` (das Projekt wird nie genannt); der Nutzer sieht dann einen Hinweis und kann es freigeben. Versuche nie, eine Sperre zu umgehen – frag den Nutzer. Eine zu niedrige Stufe (Nur lesen) liefert `forbidden`.
+- `create_session` nimmt `project` (Name oder Kennung aus `whoami.access.projects`) und braucht dort Steuern. Ohne landet die Sitzung in deinem Heimatprojekt (außerhalb von Paneldeck: im Projekt, das das Hauptfenster zeigt, ebenfalls nur mit Steuern).
+- Ticket-Änderungen brauchen Steuern im Projekt des Tickets; `link_ticket` braucht Steuern in der Quelle und mindestens Nur lesen im Ziel. `add_todo` legt die Karte in deinem Heimatprojekt an (außerhalb von Paneldeck: Allgemein) und braucht dort Steuern. `screenshot` ohne `session` geht nur, wenn für dich kein Bereich gesperrt ist; sonst gib `session` an.
+- Der Nutzer kann Todo-Karten, Tags und Tickets **privat** stellen. Private Einträge siehst du nie: Sie fehlen in allen Listen, Suchen und im Kalender, und ein direkter Aufruf liefert `not_found` – genau wie bei einem Eintrag, den es nicht gibt. „Privat“ setzt und entfernt nur der Nutzer.
+- Tickets, Kommentare und Todo-Karten tragen `origin` (`user`, `agent` oder `paneldeck`); alles, was du anlegst, bekommt `agent`. `list_todos` liefert außerdem `project` (Kennung des Seitenleisten-Projekts, null = Allgemein).
 
 ## Regeln
 
@@ -160,7 +187,9 @@ Die Aufgaben-Werkzeuge hängen vom Modus ab, den der Nutzer mit dem Schalter „
 Jedes Ticket und jede Todo-Karte hat einen Titel, eine optionale Beschreibung und eine optionale Fälligkeit (`due`: `JJJJ-MM-TT` meint das Ende dieses Tages, oder `JJJJ-MM-TTTHH:MM`); Tickets haben außerdem eingebaute `labels`. Eigene Felder lassen sich über Namen oder Schlüssel suchen. Antworten enthalten `due_state` (überfällig, verbleibende Zeit, Markierung nach den Schwellen des Projekts bzw. der Todo-Liste). Suche z. B. mit `due < currentDate() ORDER BY due`.
 
 Ein Werkzeug des anderen Modus liefert `wrong_mode`. Lade die Werkzeugliste (tools/list) neu, nachdem der Nutzer den Modus umgestellt hat.
-Du kannst nie Tickets oder Todo-Karten löschen und nie Tickettypen, Workflows oder Projekte ändern.
+Du löschst nie Tickets, Kommentare, Todo-Karten, Projekte oder sonst etwas – mit einer Ausnahme: Nur wenn der Nutzer „Agenten dürfen Tickets/Kommentare löschen“ (Einstellungen → Agenten) eingeschaltet hat, kannst du ein Ticket (`delete_ticket`) oder einen von einem Agenten geschriebenen Kommentar (`delete_comment`) in den **Papierkorb** verschieben; ohne den Schalter liefern beide `forbidden`. Nur der Nutzer stellt aus dem Papierkorb wieder her oder löscht endgültig.
+`create_project` legt ein Ticket-Projekt nur an, wenn der Nutzer „Agenten dürfen Projekte anlegen“ (Einstellungen → Agenten) eingeschaltet hat und du in einer Paneldeck-Sitzung mit Steuern in deren Projekt läufst; das neue Projekt wird mit diesem Projekt verknüpft und folgt seiner Stufe (sonst `forbidden`). Seitenleisten-Projekte legt nur der Nutzer an.
+`update_comment` ändert nur Kommentare mit `origin` = `agent` (von jedem Agenten); Kommentare des Nutzers liefern `forbidden`. Tickettypen, Workflows und Projekte änderst du nie.
 Tickettypen haben ein optionales `icon` (in get_project): einen eingebauten Namen wie `bug` oder `lucide:<name>` aus dem Lucide-Icon-Satz (https://lucide.dev/icons).
 
 ## Reiter „Zeit“: Wecker, Timer, Stoppuhren, Weltuhren, Geburtstage
@@ -175,8 +204,9 @@ Ab *Nur lesen* liest du Wecker (`list_alarms`), Timer samt Vorlagen (`list_timer
 Ein fehlgeschlagener Aufruf liefert `isError` mit einem Code am Anfang des Textes (`code: Meldung`) und kann Einzelheiten tragen (z. B. listet `details.missing_fields` die auszufüllenden Felder). Codes:
 - `mcp_disabled` – die Agenten-Schnittstelle ist ausgeschaltet; der Nutzer muss sie in Paneldeck einschalten (Einstellungen → Agenten).
 - `hub_not_running` – Paneldeck läuft nicht (oder nutzt einen anderen Datenordner).
-- `forbidden` – auf dieser Stufe oder nach den Sicherheitsregeln nicht erlaubt (eigene Sitzung, eine nicht selbst angelegte oder verknüpfte Sitzung, Schließen einer Sitzung mit Git-Worktree).
-- `not_found` – unbekannte Sitzung, Ticket, Projekt, Sprint oder Werkzeug.
+- `forbidden` – auf dieser Stufe, auf der Stufe des Projekts oder nach den Sicherheitsregeln nicht erlaubt (eigene Sitzung, eine nicht selbst angelegte oder verknüpfte Sitzung, Schließen einer Sitzung mit Git-Worktree, Löschen oder Projekte anlegen ohne den Schalter des Nutzers, Ändern eines Kommentars des Nutzers).
+- `project_locked` – das Projekt (oder Allgemein) ist für dich gesperrt; nur der Nutzer kann es freigeben. Das Projekt wird nicht genannt.
+- `not_found` – unbekannte Sitzung, Ticket, Karte, Kommentar, Projekt, Sprint oder Werkzeug oder ein privater Eintrag (oder einer im Papierkorb).
 - `wrong_mode` – das Werkzeug gehört zum anderen Todo-Modus.
 - `permission_pending` – die Sitzung wartet auf die Freigabe-Entscheidung des Nutzers.
 - `bad_args`, `too_large`, `timeout`, `busy`, `internal` – Argumente korrigieren, die Anfrage verkleinern oder später erneut versuchen.
@@ -240,6 +270,11 @@ pub fn short_desc(name: &str) -> Option<(&'static str, &'static str)> {
         "log_time" => ("Arbeitszeit auf einem Ticket erfassen.", "Log work time on a ticket."),
         "link_ticket" => ("Ticket mit Ticket, URL oder Git-Branch verknüpfen.", "Link a ticket to a ticket, URL or git branch."),
         "link_terminal" => ("Ticket mit einer Terminal-Sitzung verknüpfen.", "Link a ticket to a terminal session."),
+        // #386 (3.2.0): nur mit den Schaltern in Einstellungen → Agenten (außer update_comment)
+        "create_project" => ("Ticket-Projekt anlegen, verknüpft mit deinem Projekt (nur mit dem Schalter „Agenten dürfen Projekte anlegen“).", "Create a ticket project linked to your project (needs the user's switch)."),
+        "delete_ticket" => ("Ticket in den Papierkorb verschieben (nur mit dem Schalter „Agenten dürfen Tickets/Kommentare löschen“).", "Move a ticket to the trash (needs the user's switch)."),
+        "update_comment" => ("Text eines von einem Agenten geschriebenen Kommentars ändern.", "Change the text of a comment written by an agent."),
+        "delete_comment" => ("Von einem Agenten geschriebenen Kommentar in den Papierkorb verschieben (nur mit dem Schalter zum Löschen).", "Move a comment written by an agent to the trash (needs the user's switch)."),
         // Reiter „Zeit“ (#164: Wecker … Geburtstage, Kalender) und Editor-Reiter (#54): Texte bei den Werkzeugen selbst.
         n if crate::time::agent::TOOLS.contains(&n) => return crate::time::agent::short_desc(n),
         n => return crate::editor_svc::tools::short_desc(n).or_else(|| crate::calendar::agent::short_desc(n)),
@@ -715,6 +750,25 @@ mod tests {
     }
 
     #[test]
+    fn builtin_templates_explain_project_access_and_trash() {
+        // #386: Zugriff je Projekt, private Einträge, Papierkorb und die neuen Werkzeuge stehen in beiden Sprachen.
+        for lang in [Lang::En, Lang::De] {
+            let b = builtin(lang);
+            for w in [
+                "`project_locked`", "`forbidden`", "`not_found`", "`access`", "`project`", "`origin`", "`agent_level`", "`created_by_agent`",
+                "`create_project`", "`delete_ticket`", "`update_comment`", "`delete_comment`", "`whoami.access.projects`",
+            ] {
+                assert!(b.contains(w), "{w} fehlt ({lang:?})");
+            }
+            assert!(b.contains(lang.t("## Zugriff je Projekt", "## Access per project")), "{lang:?}");
+            assert!(b.contains(lang.t("Für alle", "For all")) && b.contains(lang.t("Heimatprojekt", "home project")), "{lang:?}");
+            assert!(b.contains(lang.t("Papierkorb", "trash")) && b.contains(lang.t("privat", "private")), "{lang:?}");
+            assert!(b.contains(lang.t("„Agenten dürfen Tickets/Kommentare löschen“", "\"Agents may delete tickets/comments\"")), "{lang:?}");
+            assert!(b.contains(lang.t("„Agenten dürfen Projekte anlegen“", "\"Agents may create projects\"")), "{lang:?}");
+        }
+    }
+
+    #[test]
     fn error_codes_in_templates_exist_in_the_code() {
         let sources = [
             include_str!("mcp.rs"),
@@ -723,6 +777,7 @@ mod tests {
             include_str!("planning/agent.rs"),
             include_str!("planning/agent/query.rs"),
             include_str!("planning/agent/sprints.rs"),
+            include_str!("access.rs"),
         ];
         for lang in [Lang::En, Lang::De] {
             let b = builtin(lang);
