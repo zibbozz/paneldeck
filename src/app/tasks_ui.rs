@@ -1440,7 +1440,7 @@ impl TasksUi {
 impl App {
     /// Reiter „Todo-Liste“ zeichnen: Kopf mit dem Schalter „Expertenmodus“, darunter die einfache Liste oder die Projektansicht.
     pub(super) fn tasks_view(&mut self, ctx: &egui::Context) {
-        let env = Env { db: self.db.as_ref(), db_error: self.db_error.as_deref(), lang: self.settings.language, bg: self.theme().bg, undo_steps: self.settings.undo_steps as usize };
+        let env = Env { db: self.db.as_ref(), db_error: self.db_error.as_deref(), lang: self.settings.language, bg: self.theme_for(crate::theme::background::Area::Todo).bg, undo_steps: self.settings.undo_steps as usize };
         if let Some(db) = env.db {
             self.plan.set_maint_dirs(self.backup_dir_path(), self.dir.clone());
             self.plan.ensure_loaded(Some(db));

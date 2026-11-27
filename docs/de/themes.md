@@ -42,8 +42,8 @@ Eine Theme-Datei, die sich nicht laden lässt, steht mit dem Grund unter der The
 4. *Auf abgeleitet zurücksetzen* entfernt den Verweis wieder.
 
 ## So gibst du ein Theme weiter
-- **Exportieren:** Theme wählen, dann **⋯ → Exportieren …** und den Speicherort der JSON-Datei wählen.
-- **Importieren:** **⋯ → Importieren …** und eine JSON-Datei wählen. Eine ungültige Datei wird mit dem Grund abgelehnt; ein vergebener Name bekommt eine Nummer.
+- **Exportieren:** Theme wählen, dann **⋯ → Exportieren …** und den Speicherort der JSON-Datei wählen. Ein Theme mit Hintergrundbildern wird als **ZIP-Datei** gespeichert (`theme.json` und die Bilder).
+- **Importieren:** **⋯ → Importieren …** und eine JSON- oder ZIP-Datei wählen. Eine ungültige Datei wird mit dem Grund abgelehnt; ein vergebener Name bekommt eine Nummer. Ein ZIP darf nur `theme.json` und die Bilder enthalten, auf die das Theme verweist (bloße Namen, keine Ordner – alles andere wird abgelehnt), innerhalb der Größengrenzen, und jedes Bild muss lesbar sein.
 
 ## So reparierst du eine Theme-Datei, die nicht lädt
 1. Lies den Grund unter der Theme-Wahl, z. B. `⚠ themes/mein.json: Ungültige Farbe in „fg“: „white“`.
@@ -82,6 +82,23 @@ Die Design-Prüfung unter der Vorschau zeigt **Hinweise, die das Speichern nie b
 | Statusfarben und Farbsehschwächen | Erfolg/Warnung/Fehler/Info und die Diff-Farben mindestens ΔE 12 auseinander, in den Simulationen von Rot-, Grün- und Blau-Gelb-Schwäche (Machado 2009) mindestens ΔE 6 |
 | Terminal-Palette | Schrift auf Hintergrund 4,5:1, Schrift in der Auswahl 4,5:1, Cursor 3:1, jede ANSI-Farbe 3:1 auf dem Hintergrund (außer Schwarz im dunklen und Weiß im hellen Theme), helle Varianten heller als normale, Auswahl sichtbar |
 | Harmonie und Stimmigkeit | Akzent hebt sich vom Text ab (ΔE 15), nicht drei oder mehr stark gesättigte Flächen, gleichmäßige Stufen Hintergrund → Fläche → Rahmen |
+| Hintergrund | nur mit eigenem [Hintergrund](#hintergrund): je Bereich, der ihn durchscheinen lässt, der Text (Terminals und Editor: die Terminalschrift) gegen die Fläche über dem Bild mindestens 4,5:1 gegen das Mittel und 3:1 gegen die hellsten 10 % (dunkler Text: die dunkelsten 10 %). Der Vorschlag setzt die Helligkeit (bzw. mit Überlagerung deren Deckkraft) |
+
+## Hintergrund
+
+Seit 3.2.0 kann ein Theme einen **eigenen Hintergrund** hinter dem ganzen Fenster haben: ein **Bild** (PNG, JPEG, WebP oder BMP; bei animierten Dateien nur das erste Bild), einen **Farbverlauf**, eine **Farbe** oder ein **Muster**. Eingestellt wird er im Theme-Editor: die linke Spalte von *Farben* auf **Hintergrund** umschalten und *Eigener Hintergrund* anhaken. Eine kleine Vorschau zeigt den Hintergrund mit einem Beispiel je Bereich; wie alles im Editor ändert sich die App erst mit *Speichern*.
+
+- **Bild:** *Bild wählen …* kopiert die Datei in einen Ordner neben der Theme-Datei (`themes/<datei>/`), verkleinert auf höchstens 3840 px an der längeren Seite (PNG bei Transparenz, sonst JPEG mit Qualität 90) – das Original bleibt unverändert. Grenzen wie bei Bildern in Chats: 64 MB, 12 000 px je Seite, 50 Megapixel. **Skalierung:** *Füllen* (Standard; Seitenverhältnis bleibt, Überstand wird abgeschnitten), *Einpassen* (Seitenverhältnis bleibt, der Rest zeigt die Grundfarbe), *Strecken*, *Original* (1:1). **Anker:** einer von 9 Punkten (Ecken, Kantenmitten, Mitte), wie `backgroundImageAlignment` in Windows Terminal.
+- **Farbverlauf:** linear (Winkel 0–359°, 0 = von oben nach unten) oder radial (Mitte x/y in %, Radius), 2–4 Stopps mit freier Lage auf einer Leiste, auf der du die Stopps ziehst. Farben sind Hex-Werte oder Verweise wie `@bg` oder `@accent/40`. Ein leichtes Dithering verhindert Streifen.
+- **Farbe:** eine Farbe (Hex oder Verweis) über der Grundfarbe.
+- **Muster:** eingebaute Muster in den Theme-Farben – Punkte, Linien, Raster, Karo, schräge Linien, Rauschen – mit einer Farbe (Standard `@text/12`) oder ein eigenes Kachelbild (*Eigene Kachel …*); Größe 25–400 % und ein Versatz. Es werden keine Bilddateien mitgeliefert und nichts heruntergeladen.
+- **Für jede Art:** ein **Abstand** je Seite (oben, rechts, unten, links, in Punkten; außerhalb die Grundfarbe), die **Deckkraft** des ganzen Hintergrunds (unter 100 % scheint der Desktop durch; sonst deckt der Hintergrund ihn ab), **Helligkeit** −100 … +100 % (mischt zu Schwarz bzw. Weiß), **Unschärfe** 0–40 pt und eine **Überlagerung** (Farbe und Deckkraft über dem Bild, unter allen Flächen).
+- **Bereiche:** *Terminals*, *Editor*, *To-do und Planung*, *Chat* und *Seitenleiste* (Titelleiste und Reiter folgen der Seitenleiste) haben je einen Schalter und eine Deckkraft: an = die Fläche lässt den Hintergrund mit dieser Deckkraft durchscheinen (multipliziert mit *Deckkraft* unter *Einstellungen → Darstellung*), aus = die Fläche bleibt deckend. Dialoge, Menüs, Tooltips und Eingabefelder bleiben immer deckend. In Terminals ist nur der Standardhintergrund durchscheinend – von Programmen gesetzte Farben, Auswahl und Cursor bleiben deckend, und der Mindestkontrast der Schrift wird gegen die Fläche über dem Bild gerechnet.
+- **Hintergrund übernehmen von …** kopiert den Hintergrund eines anderen Themes (seine Bilder werden beim *Speichern* kopiert). Das Theme eines Profils färbt nur dessen Terminals; der Hintergrund kommt immer vom gewählten Theme.
+
+Der Hintergrund ist ein durchgehendes Bild über das ganze Fenster – jeder Bereich zeigt seinen Ausschnitt, beim Teilen springt nichts. Jedes Fenster berechnet ihn für seine eigene Größe. Er wird einmal im Hintergrund berechnet (in physischen Pixeln) und zwischengespeichert; nach dem Ändern der Fenstergröße wartet Paneldeck eine Viertelsekunde und streckt so lange das alte Bild. Es gibt kein zusätzliches Neuzeichnen. **Transparenz reduzieren** unter *Einstellungen → Darstellung* (Standard aus) macht alle Flächen deckend und blendet den Hintergrund aus.
+
+Fehlt die Bilddatei oder ist sie ungültig (z. B. ein Pfad statt eines bloßen Dateinamens), erscheint die Grundfarbe, und das Theme bleibt gültig. Umbenennen behält den Ordner; *Duplizieren* kopiert ihn, *Löschen* entfernt ihn.
 
 ## Dateiformat
 
@@ -109,6 +126,30 @@ Themes sind JSON-Dateien in `themes/` im [Datenordner](data-and-backups.md) (hö
 
 - Pflicht sind `name`, `fg`, `bg` und `ansi` (16 Farben); fehlt `dark`, wird es aus dem Hintergrund geschätzt; `cursor` (Standard: `fg`) und `selection` (Standard: Hintergrund mit 20 % Schrift gemischt) sind optional (auch ein ungültiger Wert dort fällt auf den Standard zurück). Terminalfarben sind `#RRGGBB` (oder `#RRGGBBAA`; die Transparenz wird ignoriert – die Deckkraft des Fensters kommt aus den Einstellungen).
 - `ui` (optional, seit 2.6.0): Oberflächenfarben nach Name. Ein Wert ist eine Farbe `#RRGGBB` / `#RRGGBBAA` oder ein Verweis `@name` bzw. `@name/NN` (NN = Deckkraft 0–100 %). Ein Verweis kann auf jede Oberflächenfarbe und auf `fg`, `bg`, `cursor`, `selection`, `ansi0` … `ansi15` zeigen. Ein fehlender Name wird abgeleitet.
+- `background` (optional, seit 3.2.0): der [eigene Hintergrund](#hintergrund) des Themes. Beispiel:
+
+  ```json
+  "background": {
+    "kind": "image",
+    "image": "wald.jpg",
+    "mode": "fill",
+    "anchor": "center",
+    "margin": [0, 0, 0, 0],
+    "opacity": 100,
+    "brightness": -20,
+    "blur": 0,
+    "overlay": { "color": "@bg", "opacity": 30 },
+    "areas": {
+      "terminals": { "on": true, "opacity": 80 },
+      "editor": { "on": true, "opacity": 85 },
+      "todo": { "on": true, "opacity": 85 },
+      "chat": { "on": true, "opacity": 85 },
+      "sidebar": { "on": true, "opacity": 75 }
+    }
+  }
+  ```
+
+  `kind`: `image`, `gradient`, `color` oder `pattern`. `image`: ein **bloßer Dateiname** in `themes/<datei>/` (keine Ordner, kein `..`, kein Laufwerks- oder UNC-Pfad; Endung `png`, `jpg`, `jpeg`, `webp`, `bmp`; Symlinks werden nie verfolgt). `mode`: `fill`, `fit`, `stretch`, `original`. `anchor`: `top_left`, `top`, `top_right`, `left`, `center`, `right`, `bottom_left`, `bottom`, `bottom_right`. `margin`: oben, rechts, unten, links in Punkten. `opacity` 0–100, `brightness` −100–100, `blur` 0–40. `color` (Art `color`): eine Farbe oder ein Verweis. `gradient`: `{"type": "linear" | "radial", "angle": 0–359, "center": [x, y] in %, "radius": 1–200, "stops": [{"pos": 0–100, "color": "…"}, …]}` mit 2–4 Stopps. `pattern`: `{"name": "dots" | "lines" | "grid" | "checks" | "diagonal" | "noise", "image": "kachel.png", "color": "@text/12", "scale": 25–400, "offset": [x, y]}`. `overlay`: `{"color": "…", "opacity": 0–100}`. `areas`: je Bereich `on` und `opacity` (0–100). Jeder Wert ist optional; ein **ungültiger Wert fällt auf seinen Standard zurück** (beim Bild: die Grundfarbe), das Theme bleibt gültig. Ungültige und unbekannte Werte bleiben erhalten und werden unverändert wieder geschrieben.
 - **Verträglichkeit:** Unbekannte Felder und unbekannte Namen in `ui` werden ignoriert, ebenso ein Verweis auf eine Farbe, die diese Version nicht kennt (der Wert gilt dann als abgeleitet). Solche Inhalte bleiben erhalten: Speichern, Umbenennen, Duplizieren und Importieren schreiben sie unverändert zurück. Ältere Versionen lesen also neuere Theme-Dateien (sie übergehen nur die neuen Farben), und neuere Versionen lesen ältere.
 - **Ungültige Dateien** (kein JSON, Pflichtfeld fehlt oder ist fehlerhaft, weniger als 16 ANSI-Farben, ein `ui`-Wert, der weder Farbe noch Verweis ist, Deckkraft über 100, Verweise im Kreis, größer als 1 MB, ein schon genau so vergebener Name – Namen, die sich nur in Groß-/Kleinschreibung unterscheiden, bleiben wählbar) stehen mit dem Grund in der Liste und sind nicht wählbar. Der Import lehnt sie mit derselben Meldung ab.
 

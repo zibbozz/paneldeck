@@ -197,6 +197,19 @@ impl App {
                         row(ui, lang.t("Deckkraft", "Opacity"), lang.t("Terminal und Seitenleiste", "Terminal and sidebar"), |ui| {
                             ui.add(egui::Slider::new(&mut self.settings.opacity, 0.3..=1.0).custom_formatter(|v, _| format!("{:.0} %", v * 100.0)));
                         });
+                        let top_rt = ui.cursor().min.y;
+                        row(
+                            ui,
+                            lang.t("Transparenz reduzieren", "Reduce transparency"),
+                            lang.t(
+                                "Alle Flächen deckend, auch ohne eigenen Hintergrund des Themes (Bild, Verlauf, Muster – im Theme-Editor unter „Hintergrund“)",
+                                "All surfaces opaque, also without the theme's own background (image, gradient, pattern – in the theme editor under “Background”)",
+                            ),
+                            |ui| {
+                                style::toggle(ui, &mut self.settings.reduce_transparency);
+                            },
+                        );
+                        tutorial::spot_since(ui, Spot::ReduceTransparency, top_rt);
                         row(ui, lang.t("Animationen", "Animations"), lang.t("Weiche Übergänge bei Hover, Fokus und Panels", "Smooth transitions for hover, focus and panels"), |ui| {
                             style::toggle(ui, &mut self.settings.animations);
                         });

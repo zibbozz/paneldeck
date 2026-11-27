@@ -80,6 +80,7 @@ spots! {
     AboutUpdates = "settings.about.updates",
     AboutTutorial = "settings.about.tutorial",
     ThemeManage = "settings.appearance.theme",
+    ReduceTransparency = "settings.appearance.reduce_transparency",
     TodoInput = "todo.input",
     TodoList = "todo.list",
     ExpertToggle = "todo.expert",

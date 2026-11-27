@@ -4,6 +4,9 @@ use eframe::egui::Color32;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+pub mod background;
+pub mod bake;
+pub mod bg_files;
 pub mod checks;
 pub mod color;
 pub mod file;
@@ -30,6 +33,8 @@ pub struct Theme {
     pub source: Option<PathBuf>,
     /// Inhalte der Datei, die diese Version nicht kennt (neuere Versionen); werden beim Schreiben wieder eingefügt.
     pub extra: file::Extra,
+    /// Eigener Hintergrund (#387, Feld `background` der Datei); `None` = wie bisher nur die Hintergrundfarbe.
+    pub background: Option<background::Background>,
 }
 
 const fn c(r: u8, g: u8, b: u8) -> Color32 {
@@ -99,6 +104,7 @@ fn builtin_list() -> Vec<Theme> {
             builtin: true,
             source: None,
             extra: Default::default(),
+            background: None,
         },
         Theme {
             name: "Dracula".into(),
@@ -117,6 +123,7 @@ fn builtin_list() -> Vec<Theme> {
             builtin: true,
             source: None,
             extra: Default::default(),
+            background: None,
         },
         Theme {
             name: "Solarized Dark".into(),
@@ -135,6 +142,7 @@ fn builtin_list() -> Vec<Theme> {
             builtin: true,
             source: None,
             extra: Default::default(),
+            background: None,
         },
         Theme {
             name: "Hell / Light".into(),
@@ -153,6 +161,7 @@ fn builtin_list() -> Vec<Theme> {
             builtin: true,
             source: None,
             extra: Default::default(),
+            background: None,
         },
         // Rosé hell: Puderrosa, Pflaume als Schrift, Beerenrosa als Cursor. „Weiß“ ist ein Malvengrau,
         // damit auch weißer Text auf dem hellen Grund lesbar bleibt.
@@ -173,6 +182,7 @@ fn builtin_list() -> Vec<Theme> {
             builtin: true,
             source: None,
             extra: Default::default(),
+            background: None,
         },
         // Rosé dunkel: Aubergine als Grund, zartes Rosa als Schrift, Rosa als Cursor. „Schwarz“ ist ein
         // gedämpftes Pflaumengrau, damit es auf dem dunklen Grund sichtbar bleibt.
@@ -193,6 +203,7 @@ fn builtin_list() -> Vec<Theme> {
             builtin: true,
             source: None,
             extra: Default::default(),
+            background: None,
         },
     ]
 }

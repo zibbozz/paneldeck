@@ -73,6 +73,9 @@ $data = "$dir\paneldeck-data"
 New-Item -ItemType Directory -Force "$data\themes" | Out-Null
 $ansi = '"ansi":["#000000","#cc3333","#33aa33","#ccaa33","#3366cc","#aa33aa","#33aaaa","#cccccc","#555555","#ff5555","#55ff55","#ffff55","#5599ff","#ff55ff","#55ffff","#ffffff"]'
 [IO.File]::WriteAllText("$data\themes\smoke.json", '{"name":"Smoke Theme","dark":true,"fg":"#e0e0e0","bg":"#202020",' + $ansi + ',"ui":{"accent":"#0080ff","border":"@text/20","future_token":"#123456"},"future_field":1}', (New-Object Text.UTF8Encoding $false))
+# Hintergrund (#387): ein Theme mit Verlauf und eines mit ungueltigem Bildpfad (faellt auf die Grundfarbe zurueck).
+[IO.File]::WriteAllText("$data\themes\smoke-bg.json", '{"name":"Smoke Background","dark":true,"fg":"#e0e0e0","bg":"#202020",' + $ansi + ',"background":{"kind":"gradient","gradient":{"type":"linear","angle":90,"stops":[{"pos":0,"color":"#000000"},{"pos":100,"color":"@accent/40"}]},"brightness":-20,"areas":{"terminals":{"on":true,"opacity":70}},"future_bg":1}}', (New-Object Text.UTF8Encoding $false))
+[IO.File]::WriteAllText("$data\themes\smoke-bad-bg.json", '{"name":"Smoke Bad Background","fg":"#e0e0e0","bg":"#202020",' + $ansi + ',"background":{"kind":"image","image":"..\\..\\secret.png","mode":"zoom"}}', (New-Object Text.UTF8Encoding $false))
 [IO.File]::WriteAllText("$data\themes\broken.json", '{"name":"Broken","fg":"white","bg":"#000000",' + $ansi + '}', (New-Object Text.UTF8Encoding $false))
 # Alle PANELDECK_*-Variablen eines umgebenden Paneldeck-Terminals entfernen: PANELDECK_SESSION/PORT/TOKEN (vom Hub in
 # jedes Terminal gesetzt) liessen die Bruecke sonst als "Sitzung 1" der Test-Instanz gelten, und die Pruefungen
@@ -1830,6 +1833,20 @@ c.close()
   $ta = Tool 'theme_get'
   Check 'theme_get ohne Namen: aktives Theme' ($ta.data.name -eq $tl.data.active -and $ta.data.active -eq $true) $ta.text
   Check 'theme_get: unbekannter Name -> not_found' ((Code (Tool 'theme_get' @{ name = 'Gibts nicht' })) -eq 'not_found')
+  # Hintergrund (#387): nur lesbares Feld background, ohne Bilddaten und ohne Pfade.
+  Check 'theme_get: ohne Hintergrund ist background null' ($null -eq $tg.data.background -and ($tg.text -match '"background"\s*:\s*null'))
+  $tb = Tool 'theme_get' @{ name = 'Smoke Background' }
+  Check 'theme_get: background mit Art, Verlauf, Filtern und Bereichen' ($tb.data.background.kind -eq 'gradient' -and $tb.data.background.gradient.type -eq 'linear' -and @($tb.data.background.gradient.stops).Count -eq 2 -and $tb.data.background.brightness -eq -20 -and $tb.data.background.areas.terminals.opacity -eq 70 -and $tb.data.background.areas.editor.on -eq $true -and $tb.data.background.future_bg -eq 1) $tb.text
+  Check 'theme_get: background ohne Bilddaten' ($tb.text -notmatch 'base64' -and $tb.text.Length -lt 20000) $tb.text
+  $mbOk = $false
+  for ($i = 0; $i -lt 20 -and -not $mbOk; $i++) {
+    $tb = Tool 'theme_get' @{ name = 'Smoke Background' }
+    $mbOk = $null -ne $tb.data.background.mean_brightness -and [double]$tb.data.background.mean_brightness -ge 0 -and [double]$tb.data.background.mean_brightness -le 1
+    if (-not $mbOk) { Start-Sleep -Milliseconds 500 }
+  }
+  Check 'theme_get: background.mean_brightness berechnet (0-1)' $mbOk $tb.text
+  $tbad = Tool 'theme_get' @{ name = 'Smoke Bad Background' }
+  Check 'theme_get: ungueltiger Bildpfad laedt, wird nicht zurueckgegeben, nur markiert' ($tbad.data.background.kind -eq 'image' -and $null -eq $tbad.data.background.image -and $tbad.data.background.image_invalid -eq $true -and $tbad.text -notmatch 'secret' -and $tbad.data.background.mode -eq 'zoom' -and $tbad.text -notmatch [regex]::Escape($dir)) $tbad.text
   $script:prestart = $null
 
   Write-Host "== Minimierte Bereiche (#142, #162): Wiederherstellung, kaputtes Layout, focus_session mit placement" -ForegroundColor Cyan

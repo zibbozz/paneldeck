@@ -171,6 +171,10 @@ pub struct Settings {
     pub opacity: f32,
     /// Weiche Animationen (aus = sofortige Zustandswechsel).
     pub animations: bool,
+    /// „Transparenz reduzieren“ (#387, ab 3.2.0): alle Flächen deckend, kein eigener Hintergrund des Themes. Standard aus;
+    /// ein falscher Typ gilt als aus.
+    #[serde(deserialize_with = "lenient_false")]
+    pub reduce_transparency: bool,
     /// Terminalschrift: "Cascadia Mono" (eingebettet), "Hack", "Consolas", "Lucida Console", "Courier New".
     pub terminal_font: String,
     /// Abweichende Tastenkürzel (Kennung → "Ctrl+Shift+T").
@@ -398,6 +402,7 @@ impl Default for Settings {
             minimize_to_tray: false,
             opacity: 1.0,
             animations: true,
+            reduce_transparency: false,
             terminal_font: "Cascadia Mono".into(),
             keys: Default::default(),
             prices: Default::default(),
@@ -1524,6 +1529,14 @@ mod tests {
         assert_eq!(s.theme_checks_off, ["contrast", "harmony"]);
         let s: Settings = serde_json::from_str(r#"{"theme_checks_off":"x"}"#).unwrap();
         assert!(s.theme_checks_off.is_empty());
+        // Transparenz reduzieren (#387): fehlt in alten Dateien = aus; falscher Typ = aus; wird geschrieben und gelesen.
+        assert!(!Settings::default().reduce_transparency && !s.reduce_transparency);
+        let s: Settings = serde_json::from_str(r#"{"reduce_transparency":"ja"}"#).unwrap();
+        assert!(!s.reduce_transparency);
+        let s: Settings = serde_json::from_str(r#"{"reduce_transparency":true}"#).unwrap();
+        assert!(s.reduce_transparency);
+        let back: Settings = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
+        assert!(back.reduce_transparency);
         // Prompt-Teile der Chats (#341): fehlt = alles an und wird nicht geschrieben; falscher Typ = alles an.
         use crate::llm::prompt_parts::PromptPart;
         assert!(s.chat_prompt_parts.is_default());

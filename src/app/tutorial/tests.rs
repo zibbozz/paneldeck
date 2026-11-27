@@ -174,7 +174,7 @@ fn home(s: Spot) -> Home {
         TimeSubTabs | TimeNewAlarm | TimeOptions => Home::Time(super::super::time_ui::Sub::Alarms),
         TimePresets => Home::Time(super::super::time_ui::Sub::Timers),
         CalendarViews => Home::Time(super::super::time_ui::Sub::Calendar),
-        ThemeManage => Home::Settings(1),
+        ThemeManage | ReduceTransparency => Home::Settings(1),
         ClaudeMode | ClaudeDefaults | ClaudeBudget => Home::Settings(2),
         TabShortcuts => Home::Settings(5),
         TabProfiles => Home::Settings(6),

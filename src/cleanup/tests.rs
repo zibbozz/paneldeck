@@ -374,6 +374,24 @@ fn custom_themes_leave_the_example() {
 }
 
 #[test]
+fn custom_themes_include_background_images() {
+    let d = tmp("themes-bg");
+    put(&d.join("themes").join("mine.json"), 6);
+    put(&d.join("themes").join("mine").join("wald.jpg"), 100);
+    put(&d.join("themes").join("mine").join("notes.txt"), 7);
+    put(&d.join("themes").join("old").join("tile.png"), 50);
+    let c = ctx(&d);
+    let s = scan(&c);
+    let f = s.items.iter().find(|x| x.0 == Item::Themes).map(|x| x.1.files.len());
+    assert_eq!(f, Some(3), "JSON und zwei Bilder gezählt");
+    let r = execute(&c, &s, &sel(&[Item::Themes]), &Opts { backup_db: false, ..Opts::default() }, Phase::Live);
+    assert_eq!(r[0].files, 3);
+    assert!(!d.join("themes").join("mine").join("wald.jpg").exists() && !d.join("themes").join("old").exists(), "Bilder und leere Ordner weg");
+    assert!(d.join("themes").join("mine").join("notes.txt").exists(), "fremde Dateien bleiben");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+#[test]
 fn other_profiles_only_when_not_running() {
     let d = tmp("profiles");
     put(&d.join("profiles").join("work").join("settings.json"), 2);

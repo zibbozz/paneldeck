@@ -21,6 +21,18 @@ pub const D_BASE: f32 = 0.20;
 
 static ANIMATIONS: AtomicBool = AtomicBool::new(true);
 
+/// Zeigt das gerade gezeichnete Fenster den eigenen Hintergrund des Themes (#387)? Dann füllen Flächen nur einmal in der
+/// Deckkraft ihres Bereichs (keine doppelten Schichten).
+static BACKDROP: AtomicBool = AtomicBool::new(false);
+
+pub fn set_backdrop(on: bool) {
+    BACKDROP.store(on, Ordering::Relaxed);
+}
+
+pub fn backdrop_on() -> bool {
+    BACKDROP.load(Ordering::Relaxed)
+}
+
 /// Zusatz für Animations-Ids: das gerade gezeichnete Paneldeck-Fenster (0 = Hauptfenster, #110). egui führt Animationen
 /// für alle Fenster gemeinsam nach Id; ohne Zusatz kämpften gleiche Knöpfe zweier Fenster um denselben Wert.
 static ID_SALT: AtomicU64 = AtomicU64::new(0);
@@ -258,7 +270,9 @@ pub fn build_style(style: &mut egui::Style, theme: &Theme, opacity: f32, accent:
         base
     };
     let dark = theme.dark;
-    let a = opacity.clamp(0.3, 1.0);
+    // Mit eigenem Hintergrund des Themes (#387) darf die Seitenleiste durchscheinender sein als der Regler (30 %); Titelleiste
+    // und Design-Prüfung nutzen denselben Wert.
+    let a = opacity.clamp(0.0, 1.0);
     let fade = |c: Color32| c.gamma_multiply(a);
 
     let mut v = if dark { egui::Visuals::dark() } else { egui::Visuals::light() };

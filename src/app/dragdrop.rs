@@ -304,6 +304,9 @@ impl App {
                 .with_transparent(true);
             let mut close = false;
             ctx.show_viewport_immediate(vid, builder, |ctx, _class| {
+                // Abgedockte Fenster zeigen keinen eigenen Hintergrund des Themes (#387).
+                crate::style::set_backdrop(false);
+                crate::termview::set_backdrop(None);
                 if ctx.input(|i| i.viewport().close_requested()) {
                     close = true;
                 }
@@ -345,6 +348,7 @@ impl App {
                         tl: &self.tlinks,
                         alt_wheel: self.settings.alt_screen_wheel,
                         hide_key: "",
+                        chat_bg: theme.bg,
                     };
                     show_pane(ui, id, rect, &mut cx);
                 });

@@ -17,12 +17,39 @@ use crate::theme::{self, Theme};
 use eframe::egui::{self, Align, Color32, CornerRadius, FontId, Id, Layout, Pos2, Rect, RichText, Sense, Stroke, StrokeKind, Ui, Vec2};
 use std::sync::Arc;
 
+#[path = "theme_bg_ui.rs"]
+mod bg_ui;
+
 /// Zustand der Theme-Verwaltung in der App.
 #[derive(Default)]
 pub(super) struct ThemeUi {
     pub(super) editor: Option<Editor>,
     rename: Option<Rename>,
     delete_ask: Option<String>,
+    /// Laufende Datei-Arbeit (Import, Duplizieren, Export mit Bildern, #387) im Hintergrund; währenddessen sind diese
+    /// Aktionen gesperrt.
+    job: Option<JobSlot>,
+}
+
+/// Ergebnis einer Datei-Arbeit im Hintergrund.
+enum JobDone {
+    /// Gelesenes Theme (Import), noch nicht gespeichert.
+    Imported(Result<crate::theme::bg_files::Imported, file::Msg>),
+    /// Fertig (Duplizieren, Export): Text des Toasts oder Fehler; `reload` = Themes neu laden.
+    Done { result: Result<String, String>, reload: bool },
+}
+
+type JobSlot = Arc<std::sync::Mutex<Option<JobDone>>>;
+
+/// Arbeit im Hintergrund-Faden starten (Bilder lesen, dekodieren und kopieren blockiert nie die Oberfläche).
+fn spawn_job(f: impl FnOnce() -> JobDone + Send + 'static) -> JobSlot {
+    let slot: JobSlot = Arc::new(std::sync::Mutex::new(None));
+    let s2 = slot.clone();
+    std::thread::spawn(move || {
+        let r = f();
+        *s2.lock().unwrap_or_else(|e| e.into_inner()) = Some(r);
+    });
+    slot
 }
 
 struct Rename {
@@ -54,10 +81,18 @@ pub(super) struct Editor {
     sample: Sample,
     marks: Marks,
     hints: Vec<Hint>,
-    hints_for: Option<(Theme, Vec<String>)>,
+    hints_for: Option<(Theme, Vec<String>, Option<crate::theme::bake::Stats>)>,
     /// Zeitpunkt der letzten Design-Prüfung (Entprellen beim Ziehen).
     hints_at: f64,
     style_for: Option<(Theme, Arc<egui::Style>)>,
+    /// Reiter „Hintergrund“ statt der Farbliste (#387).
+    bg_tab: bool,
+    bg: bg_ui::BgState,
+    /// Globale Deckkraft der Einstellungen (für die Regel „Hintergrund“ und die Vorschau).
+    global: f32,
+    /// Andere Themes mit Hintergrund („Hintergrund übernehmen von …“) und der Stand der Themes, aus dem sie stammen.
+    others: Vec<Theme>,
+    others_gen: Option<u64>,
 }
 
 /// Was der Editor nach dem Zeichnen von der App braucht.
@@ -100,6 +135,11 @@ impl Editor {
             hints_for: None,
             hints_at: f64::NEG_INFINITY,
             style_for: None,
+            bg_tab: false,
+            bg: bg_ui::BgState::default(),
+            global: 1.0,
+            others: Vec::new(),
+            others_gen: None,
         }
     }
 
@@ -190,14 +230,16 @@ impl Editor {
     /// Design-Prüfung nach einer Änderung neu rechnen, höchstens alle [`HINTS_EVERY_S`]. `true`, wenn eine Prüfung
     /// noch aussteht (der Aufrufer zeichnet dann nach der Wartezeit erneut).
     fn refresh_hints(&mut self, off: &[String], now: f64) -> bool {
-        if matches!(&self.hints_for, Some((t, o)) if *t == self.theme && o.as_slice() == off) {
+        let stats = self.bg.stats.filter(|_| self.theme.background.is_some());
+        if matches!(&self.hints_for, Some((t, o, s)) if *t == self.theme && o.as_slice() == off && *s == stats) {
             return false;
         }
         if self.hints_for.is_some() && now - self.hints_at < HINTS_EVERY_S {
             return true;
         }
-        self.hints = checks::run(&self.theme, |r| !off.iter().any(|o| o == r.key()));
-        self.hints_for = Some((self.theme.clone(), off.to_vec()));
+        let input = stats.map(|stats| checks::BgInput { stats, global: self.global });
+        self.hints = checks::run_with(&self.theme, input.as_ref(), |r| !off.iter().any(|o| o == r.key()));
+        self.hints_for = Some((self.theme.clone(), off.to_vec(), stats));
         self.hints_at = now;
         false
     }
@@ -328,7 +370,20 @@ impl App {
             Some(p) => p.clone(),
             None => file::file_for(&self.themes_dir(), &ed.theme.name),
         };
+        // Hintergrund (#387): gewählte Bilder zuerst in den Ordner des Themes, danach die Datei; nicht mehr verwendete
+        // Bilder des vorigen Stands werden entfernt.
+        if ed.theme.source.is_none() {
+            // Neue Datei: ein übrig gebliebener Bilderordner gleichen Namens gehört zu keinem Theme mehr.
+            crate::theme::bg_files::clear_stale(&path);
+        }
+        crate::theme::bg_files::write_files(&path, &ed.bg.files_for(&ed.theme)).map_err(|e| format!("{} {e}", lang.t("Speichern fehlgeschlagen:", "Saving failed:")))?;
         file::write(&path, &ed.theme).map_err(|e| format!("{} {e}", lang.t("Speichern fehlgeschlagen:", "Saving failed:")))?;
+        if ed.saved.source.as_deref() == Some(path.as_path()) {
+            let old: Vec<String> = ed.saved.background.as_ref().map(|b| b.files().iter().map(|s| s.to_string()).collect()).unwrap_or_default();
+            let keep: Vec<&str> = ed.theme.background.as_ref().map(|b| b.files()).unwrap_or_default();
+            crate::theme::bg_files::remove_unused(&path, &old, &keep);
+        }
+        ed.bg.pending.clear();
         let old = ed.saved.source.as_ref().map(|_| ed.saved.name.clone());
         ed.mark_saved(path);
         self.reload_themes();
@@ -346,14 +401,55 @@ impl App {
         let Some(mut t) = self.themes.iter().find(|t| t.name == name).cloned() else { return };
         t.name = file::unique_name(name, &self.theme_names());
         t.builtin = false;
+        if self.theme_ui.job.is_some() {
+            return;
+        }
         let path = file::file_for(&self.themes_dir(), &t.name);
-        match file::write(&path, &t) {
-            Ok(()) => {
-                let msg = format!("{} {}", lang.t("Theme angelegt:", "Theme created:"), lang.q(&t.name));
-                self.reload_themes();
-                self.push_toast(msg, ToastKind::Info, None);
+        let (ok, fail) = (format!("{} {}", lang.t("Theme angelegt:", "Theme created:"), lang.q(&t.name)), lang.t("Duplizieren fehlgeschlagen:", "Duplicating failed:"));
+        // Im Hintergrund: die Bilder des Hintergrunds (#387) kommen mit.
+        self.theme_ui.job = Some(spawn_job(move || {
+            crate::theme::bg_files::clear_stale(&path);
+            let r = match &t.source {
+                Some(from) => crate::theme::bg_files::copy_folder(from, &path),
+                None => Ok(()),
             }
-            Err(e) => self.push_toast(format!("{} {e}", lang.t("Duplizieren fehlgeschlagen:", "Duplicating failed:")), ToastKind::Error, None),
+            .and_then(|_| file::write(&path, &t).map_err(|e| e.to_string()));
+            JobDone::Done { result: r.map(|_| ok).map_err(|e| format!("{fail} {e}")), reload: true }
+        }));
+    }
+
+    /// Ergebnis einer Datei-Arbeit abholen (Import speichern, Toast, Themes neu laden).
+    fn theme_job_tick(&mut self) {
+        let Some(slot) = &self.theme_ui.job else { return };
+        let Some(done) = slot.lock().unwrap_or_else(|e| e.into_inner()).take() else { return };
+        self.theme_ui.job = None;
+        let lang = self.settings.language;
+        match done {
+            JobDone::Done { result, reload } => {
+                if reload {
+                    self.reload_themes();
+                }
+                match result {
+                    Ok(m) => self.push_toast(m, ToastKind::Info, None),
+                    Err(e) => self.push_toast(e, ToastKind::Error, None),
+                }
+            }
+            JobDone::Imported(Ok(imp)) => {
+                let mut t = imp.theme;
+                t.name = file::unique_name(&t.name, &self.theme_names());
+                t.source = None;
+                let path = file::file_for(&self.themes_dir(), &t.name);
+                crate::theme::bg_files::clear_stale(&path);
+                let res = crate::theme::bg_files::write_files(&path, &imp.files).map_err(std::io::Error::other).and_then(|_| file::write(&path, &t));
+                match res {
+                    Ok(()) => {
+                        self.reload_themes();
+                        self.push_toast(format!("{} {}", lang.t("Theme importiert:", "Theme imported:"), lang.q(&t.name)), ToastKind::Info, None);
+                    }
+                    Err(e) => self.push_toast(format!("{} {e}", lang.t("Import fehlgeschlagen:", "Import failed:")), ToastKind::Error, None),
+                }
+            }
+            JobDone::Imported(Err(msg)) => self.push_toast(format!("{} {}", lang.t("Import abgelehnt:", "Import refused:"), msg.get(lang)), ToastKind::Error, None),
         }
     }
 
@@ -365,6 +461,8 @@ impl App {
         let Some(path) = self.themes.iter().find(|t| t.name == name && !t.builtin).and_then(|t| t.source.clone()) else { return };
         match std::fs::remove_file(&path) {
             Ok(()) => {
+                // Ordner mit den Bildern des Hintergrunds (#387).
+                crate::theme::bg_files::remove_folder(&path);
                 self.reload_themes();
                 if self.settings.theme == name {
                     self.settings.theme = self.themes[0].name.clone();
@@ -401,28 +499,31 @@ impl App {
     /// Theme-Datei importieren (höchstens 1 MB, geprüft); bei Namensgleichheit „… (2)“. Nichts wird überschrieben.
     fn theme_import(&mut self) {
         let lang = self.settings.language;
-        let Some(src) = crate::platform::notify::open_json() else { return };
-        match file::read_file(&src) {
-            Ok(mut t) => {
-                t.name = file::unique_name(&t.name, &self.theme_names());
-                t.source = None;
-                let path = file::file_for(&self.themes_dir(), &t.name);
-                match file::write(&path, &t) {
-                    Ok(()) => {
-                        self.reload_themes();
-                        self.push_toast(format!("{} {}", lang.t("Theme importiert:", "Theme imported:"), lang.q(&t.name)), ToastKind::Info, None);
-                    }
-                    Err(e) => self.push_toast(format!("{} {e}", lang.t("Import fehlgeschlagen:", "Import failed:")), ToastKind::Error, None),
-                }
-            }
-            Err(msg) => self.push_toast(format!("{} {}", lang.t("Import abgelehnt:", "Import refused:"), msg.get(lang)), ToastKind::Error, None),
+        let _ = lang;
+        if self.theme_ui.job.is_some() {
+            return;
         }
+        let Some(src) = crate::platform::notify::open_theme() else { return };
+        // `.json` wie bisher, `.zip` mit Hintergrundbild (#387): Lesen und Prüfen der Bilder im Hintergrund.
+        self.theme_ui.job = Some(spawn_job(move || JobDone::Imported(crate::theme::bg_files::read_import(&src))));
     }
 
     fn theme_export(&mut self, name: &str) {
         let lang = self.settings.language;
         let Some(t) = self.themes.iter().find(|t| t.name == name).cloned() else { return };
         let default = file::file_for(std::path::Path::new(""), &t.name).to_string_lossy().to_string();
+        // Mit Bildern im Hintergrund (#387) als ZIP (`theme.json` + Bilder), sonst wie bisher als JSON.
+        if crate::theme::bg_files::has_files(&t) {
+            if self.theme_ui.job.is_some() {
+                return;
+            }
+            let name = default.trim_end_matches(".json").to_string() + ".zip";
+            let Some(dest) = crate::platform::notify::save_zip(&name) else { return };
+            let (ok, fail) = (format!("{} {}", lang.t("Theme exportiert:", "Theme exported:"), dest.display()), lang.t("Export fehlgeschlagen:", "Export failed:"));
+            // Bilder lesen und packen im Hintergrund.
+            self.theme_ui.job = Some(spawn_job(move || JobDone::Done { result: crate::theme::bg_files::export_zip(&t, &dest).map(|_| ok).map_err(|e| format!("{fail} {e}")), reload: false }));
+            return;
+        }
         let Some(dest) = crate::platform::notify::save_json(&default) else { return };
         match std::fs::write(&dest, file::to_json(&t)) {
             Ok(()) => self.push_toast(format!("{} {}", lang.t("Theme exportiert:", "Theme exported:"), dest.display()), ToastKind::Info, None),
@@ -457,7 +558,8 @@ impl App {
                     self.theme_ui.rename = Some(Rename { old: cur.name.clone(), buf: cur.name.clone(), err: None });
                     ui.close();
                 }
-                if ui.button(lang.t("Duplizieren", "Duplicate")).clicked() {
+                let working = self.theme_ui.job.is_some();
+                if ui.add_enabled(!working, egui::Button::new(lang.t("Duplizieren", "Duplicate"))).clicked() {
                     self.theme_duplicate(&cur.name);
                     ui.close();
                 }
@@ -473,11 +575,11 @@ impl App {
                         }
                     }
                     ui.separator();
-                    if ui.add_enabled(!editing, egui::Button::new(lang.t("Importieren …", "Import …"))).on_disabled_hover_text(busy).clicked() {
+                    if ui.add_enabled(!editing && !working, egui::Button::new(lang.t("Importieren …", "Import …"))).on_disabled_hover_text(busy).clicked() {
                         ui.close();
                         self.theme_import();
                     }
-                    if ui.button(lang.t("Exportieren …", "Export …")).clicked() {
+                    if ui.add_enabled(!working, egui::Button::new(lang.t("Exportieren …", "Export …"))).clicked() {
                         ui.close();
                         self.theme_export(&cur.name);
                     }
@@ -501,12 +603,19 @@ impl App {
         if self.wins.cur != 0 {
             return;
         }
+        self.theme_job_tick();
         self.theme_rename_ui(ctx);
         self.theme_delete_ui(ctx);
         let Some(mut ed) = self.theme_ui.editor.take() else { return };
         let lang = self.settings.language;
         let now = ctx.input(|i| i.time);
         let off = self.settings.theme_checks_off.clone();
+        ed.global = self.settings.opacity.clamp(0.3, 1.0);
+        if ed.others_gen != Some(self.backdrops.generation()) {
+            ed.others = self.themes.iter().filter(|t| t.background.is_some()).cloned().collect();
+            ed.others_gen = Some(self.backdrops.generation());
+        }
+        bg_ui::tick_preview(&mut ed, ctx);
         if ed.refresh_hints(&off, now) {
             ctx.request_repaint_after(std::time::Duration::from_secs_f64(HINTS_EVERY_S));
         }
@@ -726,7 +835,16 @@ fn body(ed: &mut Editor, ui: &mut Ui, lang: Lang, now: f64, off: &[String], base
     ui.horizontal_top(|ui| {
         ui.allocate_ui_with_layout(Vec2::new(list_w, avail.y), Layout::top_down(Align::Min), |ui| {
             ui.set_min_size(Vec2::new(list_w, avail.y));
-            list(ed, ui, lang, now);
+            // Farben oder Hintergrund (#387).
+            ui.horizontal(|ui| {
+                ui.selectable_value(&mut ed.bg_tab, false, lang.t("Farben", "Colours"));
+                ui.selectable_value(&mut ed.bg_tab, true, lang.t("Hintergrund", "Background"));
+            });
+            if ed.bg_tab {
+                bg_ui::panel(ed, ui, lang, now);
+            } else {
+                list(ed, ui, lang, now);
+            }
         });
         ui.separator();
         let right_w = ui.available_width();
@@ -945,7 +1063,18 @@ fn preview(ed: &mut Editor, ui: &mut Ui, lang: Lang, base_style: &egui::Style, h
     let u = ed.theme.ui_colors();
     let st = ed.preview_style(base_style);
     let clip = Rect::from_min_size(ui.cursor().min, Vec2::new(ui.available_width(), h));
-    ui.painter().rect_filled(clip, CornerRadius::same(6), u.window_bg);
+    // Mit eigenem Hintergrund (#387): das Vorschaubild darunter, die Fläche in der Deckkraft der Seitenleiste darüber.
+    match (bg_ui::preview_texture(ed), ed.theme.background.as_ref()) {
+        (Some(tex), Some(b)) => {
+            ui.painter().with_clip_rect(clip).image(tex, clip, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
+            let a = b.surface_alpha(crate::theme::background::Area::Sidebar, ed.global);
+            let [r, g, bl, _] = u.window_bg.to_srgba_unmultiplied();
+            ui.painter().rect_filled(clip, CornerRadius::same(6), Color32::from_rgba_unmultiplied(r, g, bl, (a * 255.0).round() as u8));
+        }
+        _ => {
+            ui.painter().rect_filled(clip, CornerRadius::same(6), u.window_bg);
+        }
+    }
     ed.marks.clear();
     let Editor { theme, sample, marks, .. } = ed;
     // Beide Richtungen: Eine nur senkrecht rollende Fläche wüchse mit zu breitem Inhalt mit – samt Fenster.
@@ -988,6 +1117,7 @@ fn checks_panel(ed: &mut Editor, ui: &mut Ui, lang: Lang, now: f64) {
         ui.label(RichText::new(lang.t("Hinweise blockieren nie das Speichern.", "Hints never block saving.")).small().color(style::dim(ui)));
     });
     let mut apply = None;
+    let mut apply_bg: Option<checks::BgFix> = None;
     let mut pick = None;
     // Beide Richtungen: Sollte doch etwas zu breit sein, erscheint ein Rollbalken, statt dass das Fenster wächst.
     let out = egui::ScrollArea::both().id_salt("pd_theme_checks").auto_shrink([false, false]).show(ui, |ui| {
@@ -1007,6 +1137,11 @@ fn checks_panel(ed: &mut Editor, ui: &mut Ui, lang: Lang, now: f64) {
                     .response
                 },
                 |ui| {
+                    if let Some(f) = &h.bg_fix {
+                        if ui.button(lang.t("Übernehmen", "Apply")).on_hover_text(format!("{} ({})", checks::bg_fix_text(f, lang), lang.t("rückgängig mit Strg+Z", "undo with Ctrl+Z"))).clicked() {
+                            apply_bg = Some(f.clone());
+                        }
+                    }
                     if let Some(f) = &h.fix {
                         if ui.button(lang.t("Übernehmen", "Apply")).on_hover_text(format!("{} ({})", checks::fix_text(f), lang.t("rückgängig mit Strg+Z", "undo with Ctrl+Z"))).clicked() {
                             apply = Some(i);
@@ -1029,6 +1164,19 @@ fn checks_panel(ed: &mut Editor, ui: &mut Ui, lang: Lang, now: f64) {
             ed.scroll_to = Some(first);
         }
         ed.highlight = toks;
+    }
+    if let Some(f) = apply_bg {
+        ed.edit(now, false, |t| {
+            if let Some(b) = t.background.as_mut() {
+                b.clear_invalid();
+                if let Some(v) = f.brightness {
+                    b.brightness = v;
+                }
+                if let (Some(v), Some(o)) = (f.overlay_opacity, b.overlay.as_mut()) {
+                    o.opacity = v;
+                }
+            }
+        });
     }
     if let Some(i) = apply {
         if let Some(f) = ed.hints[i].fix.clone() {
@@ -1101,6 +1249,8 @@ fn generator_ui(ed: &mut Editor, ctx: &egui::Context, lang: Lang, now: f64) {
             g.source = t.source.clone();
             // Unbekannte Inhalte der Datei (neuere Versionen) bleiben erhalten.
             g.extra = std::mem::take(&mut t.extra);
+            // Der Hintergrund (#387) gehört nicht zu den Farben: er bleibt.
+            g.background = t.background.take();
             *t = g;
         });
         ed.generator = None;

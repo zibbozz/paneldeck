@@ -997,8 +997,10 @@ fn paint(ui: &Ui, rect: Rect, doc: &Document, view: &View, g: &Geo, rows: &[Row]
     let primary_line = sels.map(|s| doc.char_to_line(s.primary().head));
     let sel_lines: Vec<usize> = sels.map(|s| s.iter().map(|x| doc.char_to_line(x.head)).collect()).unwrap_or_default();
     let scroll = if g.wrap_cols.is_some() { 0.0 } else { view.scroll_x };
-    // Gutter
-    painter.rect_filled(g.gutter, 0.0, cx.theme.bg);
+    // Gutter (mit eigenem Hintergrund des Themes deckt die Mitte schon in der Deckkraft des Editors, #387)
+    if !style::backdrop_on() {
+        painter.rect_filled(g.gutter, 0.0, cx.theme.bg);
+    }
     // Aktuelle Zeile(n)
     let only_cursors = sels.is_some_and(|s| s.iter().all(|x| x.is_empty()));
     for r in rows {
@@ -1186,7 +1188,9 @@ fn paint_row(p: &egui::Painter, doc: &Document, g: &Geo, r: &Row, scroll: f32, f
 fn minimap_ui(ui: &mut Ui, m: Rect, doc: &Document, view: &mut View, g: &Geo, cx: &TextCx) {
     let u = style::ui();
     let painter = ui.painter_at(m);
-    painter.rect_filled(m, 0.0, cx.theme.bg);
+    if !style::backdrop_on() {
+        painter.rect_filled(m, 0.0, cx.theme.bg);
+    }
     painter.line_segment([m.left_top(), m.left_bottom()], Stroke::new(1.0_f32, u.border.gamma_multiply(0.5)));
     let n = doc.len_lines();
     let fit = (m.height() / MINIMAP_ROW).floor() as usize;

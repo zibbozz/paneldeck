@@ -81,6 +81,7 @@ mod sysprompt_ui;
 mod taint;
 mod tasks_ui;
 mod terminal_links;
+mod backdrop;
 mod theme_editor;
 mod theme_preview;
 // Reiter „Zeit“ (#164): Wecker, Timer, Kalender-Platz, Stoppuhren, Weltuhren, Geburtstage.
@@ -841,6 +842,8 @@ pub struct App {
     theme_issues: Vec<theme::Issue>,
     /// Theme-Editor und Verwaltung eigener Themes (#309).
     theme_ui: theme_editor::ThemeUi,
+    /// Eigener Hintergrund des Themes je Fenster (#387).
+    backdrops: backdrop::Backdrops,
     entries: BTreeMap<u64, Entry>,
     layout: Option<Node>,
     focused: u64,
@@ -1240,6 +1243,7 @@ impl App {
             themes: Vec::new(),
             theme_issues: Vec::new(),
             theme_ui: theme_editor::ThemeUi::default(),
+            backdrops: Default::default(),
             entries: BTreeMap::new(),
             layout: None,
             focused: 0,
@@ -1673,6 +1677,7 @@ impl App {
         self.theme_issues = issues;
         self.style_cache.clear();
         self.applied_theme.clear();
+        self.backdrops.themes_changed();
     }
 
     fn binding(&self, id: &str) -> Option<(Modifiers, Key)> {
@@ -2761,7 +2766,9 @@ impl App {
     /// Fertige Stile liegen im Zwischenspeicher, damit der Wechsel zwischen Fenstern `style::apply` nicht jedes Bild neu rechnet.
     fn ensure_style(&mut self, ctx: &egui::Context) {
         let theme = self.theme();
-        let key = format!("{}|{}|{}|{:?}", theme.name, theme.bg.a(), self.settings.animations, style::accent());
+        // Deckkraft der Seitenleiste (mit eigenem Hintergrund des Themes die des Bereichs, #387).
+        let side = self.surface_alpha(crate::theme::background::Area::Sidebar);
+        let key = format!("{}|{}|{}|{:?}|{side}", theme.name, theme.bg.a(), self.settings.animations, style::accent());
         if self.applied_theme == key {
             return;
         }
@@ -2771,7 +2778,7 @@ impl App {
         match self.style_cache.iter().find(|(k, _)| *k == key) {
             Some((_, s)) => ctx.set_style(s.clone()),
             None => {
-                style::apply(ctx, &theme, self.settings.opacity);
+                style::apply(ctx, &theme, side);
                 if self.style_cache.len() >= 16 {
                     self.style_cache.remove(0);
                 }
@@ -2831,7 +2838,9 @@ impl App {
             .find(|t| t.name == self.settings.theme)
             .unwrap_or(&self.themes[0])
             .clone();
-        let a = (self.settings.opacity.clamp(0.3, 1.0) * 255.0).round() as u8;
+        // „Transparenz reduzieren“ (#387): alles deckend.
+        let o = if self.settings.reduce_transparency { 1.0 } else { self.settings.opacity.clamp(0.3, 1.0) };
+        let a = (o * 255.0).round() as u8;
         t.bg = Color32::from_rgba_unmultiplied(t.bg.r(), t.bg.g(), t.bg.b(), a);
         t
     }
@@ -2999,7 +3008,10 @@ impl App {
         if self.new_dialog.is_some() || self.folder_prompt.as_ref().is_some_and(|p| p.kind == 2) || self.templates_open || self.wt_close.is_some() || self.tpl.form.is_some() || self.tpl.confirm.is_some() || pick_here {
             self.release_terminal_focus(ctx);
         }
-        let theme = self.theme();
+        // Terminals mit der Deckkraft ihres Bereichs; mit eigenem Hintergrund (#387) lässt die Mitte das Bild durch.
+        let theme = self.theme_for(crate::theme::background::Area::Terminals);
+        let chat_bg = self.theme_for(crate::theme::background::Area::Chat).bg;
+        let center_fill = if self.backdrop_active() { Color32::TRANSPARENT } else { theme.bg };
         let font = FontId::monospace(self.settings.font_size);
         let lang = self.settings.language;
 
@@ -3035,7 +3047,7 @@ impl App {
         self.pane_rects.clear();
         let hide_key = self.binding_text("hide");
         egui::CentralPanel::default()
-            .frame(egui::Frame::NONE.fill(theme.bg))
+            .frame(egui::Frame::NONE.fill(center_fill))
             .show(ctx, |ui| {
                 let rect = ui.available_rect_before_wrap();
                 // Ausgabe eines Prozesses der Prozessliste (#243) statt der Sitzungen.
@@ -3068,6 +3080,7 @@ impl App {
                     tl: &self.tlinks,
                     alt_wheel: self.settings.alt_screen_wheel,
                     hide_key: &hide_key,
+                    chat_bg,
                 };
                 show_node(ui, &mut layout, rect, &mut cx);
                 self.layout = Some(layout);
@@ -4553,6 +4566,9 @@ impl eframe::App for App {
         self.sync_accent();
         self.ensure_style(ctx);
         self.apply_font(ctx);
+        // Eigener Hintergrund des Themes (#387): zuerst, damit er unter allen Flächen liegt.
+        self.backdrop_frame(ctx);
+        self.backdrop_tick(self.theme_ui.editor.is_some());
         ctx.options_mut(|o| o.zoom_with_keyboard = false);
         if (ctx.zoom_factor() - self.settings.ui_scale).abs() > 0.001 {
             ctx.set_zoom_factor(self.settings.ui_scale);
@@ -4725,6 +4741,8 @@ struct PaneCx<'a> {
     alt_wheel: state::AltScreenWheel,
     /// Kürzel „Bereich minimieren“ für den Tooltip (eigene Belegung, Sprache).
     hide_key: &'a str,
+    /// Hintergrund eines Chats (Deckkraft des Bereichs „Chat“, #387).
+    chat_bg: Color32,
 }
 
 
@@ -5127,7 +5145,7 @@ fn show_pane(ui: &mut Ui, id: u64, rect: Rect, cx: &mut PaneCx) {
 
     // Chat (keine PTY): Nachrichten und Eingabe; Senden usw. führt die App aus.
     if let Some(chat) = entry.chat.as_mut() {
-        ui.painter().rect_filled(body, 0.0, cx.theme.bg);
+        ui.painter().rect_filled(body, 0.0, cx.chat_bg);
         let grab = *cx.want_focus == Some(id);
         if grab {
             *cx.want_focus = None;
@@ -5677,6 +5695,7 @@ mod pane_tests {
                         tl: &tl,
                         alt_wheel: Default::default(),
                         hide_key: "Ctrl+Shift+W",
+                        chat_bg: theme.bg,
                     };
                     if detached {
                         show_pane(ui, layout.leaf_ids()[0], rect, &mut cx);
