@@ -37,11 +37,14 @@ impl App {
     pub(in crate::app) fn time_view(&mut self, ctx: &egui::Context) {
         let env = Env { conn: self.db.as_ref().map(|d| &d.conn), lang: self.settings.language, now_ms: crate::time::now_ms() };
         let mut s = self.settings.time.clone();
+        // Wie die Todo-Ansicht: eigene Füllung mit der Deckkraft des Bereichs, sonst scheint das transparente Hub-Fenster durch.
+        let bg = self.theme_for(crate::theme::background::Area::Todo).bg;
+        self.time.bg = Some(bg);
         self.time.show(ctx, &env, &mut s);
         self.settings.time = s;
         // Unterreiter „Kalender“: der Kalender (#164) mit eigener Ansicht und eigenem Detailbereich.
         if self.time.sub == super::Sub::Calendar {
-            egui::CentralPanel::default().show(ctx, |ui| crate::app::calendar_ui::show(self, ui));
+            egui::CentralPanel::default().frame(egui::Frame::central_panel(&ctx.style()).fill(bg)).show(ctx, |ui| crate::app::calendar_ui::show(self, ui));
         }
         self.time_outs();
     }

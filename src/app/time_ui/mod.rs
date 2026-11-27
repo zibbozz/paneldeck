@@ -123,6 +123,9 @@ pub(crate) struct BdayEdit {
 /// Zustand des Reiters.
 #[derive(Default)]
 pub(crate) struct TimeUi {
+    /// Hintergrund der Flächen (Leiste, Liste, Details), von `App::time_view` je Bild gesetzt; `None` = Stil-Standard.
+    /// Ohne eigene Füllung schienen die Flächen im transparenten Hub-Fenster durch.
+    pub bg: Option<Color32>,
     pub data: TimeData,
     pub loaded: bool,
     /// Fehler beim Laden/Speichern (wird oben angezeigt).
@@ -213,7 +216,8 @@ impl TimeUi {
     pub fn show(&mut self, ctx: &egui::Context, env: &Env, settings: &mut TimeSettings) {
         self.ensure_loaded(env.conn);
         let lang = env.lang;
-        egui::TopBottomPanel::top(style::salted(Id::new("time_tabs"))).frame(egui::Frame::new().inner_margin(egui::Margin::symmetric(12, 8))).show(ctx, |ui| {
+        let bg = self.bg.unwrap_or_else(|| ctx.style().visuals.panel_fill);
+        egui::TopBottomPanel::top(style::salted(Id::new("time_tabs"))).frame(egui::Frame::new().fill(bg).inner_margin(egui::Margin::symmetric(12, 8))).show(ctx, |ui| {
             ui.horizontal(|ui| {
                 let left = ui.cursor().min;
                 for s in Sub::ALL {
@@ -268,6 +272,7 @@ impl TimeUi {
                 .resizable(true)
                 .default_width(400.0)
                 .width_range(300.0..=700.0)
+                .frame(egui::Frame::side_top_panel(&ctx.style()).fill(bg))
                 .show(ctx, |ui| {
                     egui::ScrollArea::vertical().id_salt("time_detail_scroll").show(ui, |ui| {
                         ui.add_space(8.0);
@@ -281,7 +286,7 @@ impl TimeUi {
                         }
                     });
                 });
-            egui::CentralPanel::default().show(ctx, |ui| match self.sub {
+            egui::CentralPanel::default().frame(egui::Frame::central_panel(&ctx.style()).fill(bg)).show(ctx, |ui| match self.sub {
                 Sub::Alarms => self.alarm_list(ui, env),
                 Sub::Timers => self.timer_list(ui, env),
                 Sub::Stopwatches => self.stopwatch_list(ui, env),
