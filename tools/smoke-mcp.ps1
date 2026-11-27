@@ -474,7 +474,11 @@ try {
     $inj = Tool 'create_session' @{ shell = $wslSh; cwd = '/tmp/x" echo INJECTED-$((6*7)); #'; name = 'smoke-wsl-inj' }
     Check "WSL: cwd mit Anfuehrungszeichen abgelehnt ($wslSh)" ((Code $inj) -eq 'bad_args') $inj.text
     Check 'WSL: cwd mit Backslash abgelehnt' ((Code (Tool 'create_session' @{ shell = $wslSh; cwd = '/tmp/a\b' })) -eq 'bad_args')
-    Check 'WSL: ~/x abgelehnt (nur ~ allein)' ((Code (Tool 'create_session' @{ shell = $wslSh; cwd = '~/x' })) -eq 'bad_args')
+    # #392: ~/x geht (geprueft wird der mit dem Linux-Home aufgeloeste Ordner); ein fehlender -> bad_args
+    $tx = Tool 'create_session' @{ shell = $wslSh; cwd = '~/paneldeck-smoke-gibt-es-nicht'; name = 'smoke-wsl-tilde' } 60000
+    Check 'WSL: ~/fehlt -> bad_args (oder WSL antwortete nicht)' ((Code $tx) -eq 'bad_args' -or $tx.data.cwd_checked -eq $false) $tx.text
+    if (-not $tx.err) { [void](Tool 'close_session' @{ session = $tx.data.id }) }
+    Check 'WSL: ~/x mit Anfuehrungszeichen abgelehnt' ((Code (Tool 'create_session' @{ shell = $wslSh; cwd = '~/x" echo pwned' })) -eq 'bad_args')
     Check 'Linux-cwd fuer Windows-Shell abgelehnt' ((Code (Tool 'create_session' @{ shell = 'powershell'; cwd = '/tmp' })) -eq 'bad_args')
     # Fehlender Ordner: Pruefung in WSL im Hintergrund -> bad_args (antwortet WSL nicht, wird angelegt mit cwd_checked=false)
     $miss = Tool 'create_session' @{ shell = $wslSh; cwd = '/paneldeck-smoke-gibt-es-nicht'; name = 'smoke-wsl-miss' } 60000

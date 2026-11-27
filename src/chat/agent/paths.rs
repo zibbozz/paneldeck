@@ -72,6 +72,10 @@ pub const DEFAULT_SENSITIVE: &[&str] = &[
 /// Ordnernamen, die überall gesperrt sind (auch mitten im Projekt).
 const BLOCKED_NAMES: &[&str] = &[".ssh", ".gnupg"];
 
+/// Dateinamen, die überall gesperrt sind (Zugangsdaten von Claude Code und git, auch außerhalb des Benutzerordners,
+/// z. B. in WSL oder einem kopierten Profil; #392).
+const BLOCKED_FILES: &[&str] = &[".credentials.json", ".claude.json", ".git-credentials"];
+
 /// Unter dem Benutzerordner gesperrt (relativ zu ihm).
 const BLOCKED_HOME: &[&str] = &[
     ".ssh",
@@ -119,6 +123,11 @@ pub fn root(env: &AgentEnv) -> Result<Root, ToolErr> {
     }
     if canon.parent().is_none() {
         return Err(err("unsafe_project_folder", format!("The chat's project folder {} is a drive root; file tools only work inside a project folder.", r.display())));
+    }
+    // WSL (#392): Ein Ordner, der einen Laufwerks-Einhängepunkt enthält (`/`, `/mnt`, `/mnt/c` …), öffnete über
+    // `/mnt/c/…` die ganze Windows-Platte – wie ein Laufwerks-Stammordner ablehnen.
+    if wsl_root_contains_mount(&canon) {
+        return Err(err("unsafe_project_folder", format!("The chat's project folder {} contains the Windows drives of WSL (/mnt …); file tools only work inside a project folder.", r.display())));
     }
     if let Some(why) = blocked(&canon, &[], Access::Read, env) {
         return Err(err("blocked", format!("The chat's project folder is off-limits: {why}.")));
@@ -191,6 +200,11 @@ pub fn resolve(root: &Root, env: &AgentEnv, input: &str, access: Access) -> Resu
             Component::Normal(n) => cand.push(n),
         }
     }
+    // WSL (#392): Linux-Verknüpfungen löst Windows über 9P nicht verlässlich auf (absolute Ziele zeigen in Linux) –
+    // in WSL-Projektordnern wird keiner gefolgt.
+    if let Some(link) = wsl_symlink_below(&root.canon, &cand) {
+        return Err(err("blocked", format!("“{}” goes through the symbolic link {}; links are not followed in WSL project folders.", crate::mcp::short(trimmed, 200), display(&link))));
+    }
     let (real, exists) = real_path(&cand).map_err(|e| err("bad_path", format!("Cannot resolve “{}”: {e}.", crate::mcp::short(trimmed, 200))))?;
     let Ok(rel_path) = real.strip_prefix(&root.canon) else { return Err(outside(trimmed, root)) };
     let comps: Vec<String> = rel_path.components().filter_map(|c| if let Component::Normal(n) = c { Some(n.to_string_lossy().into_owned()) } else { None }).collect();
@@ -239,36 +253,132 @@ fn real_path(p: &Path) -> std::io::Result<(PathBuf, bool)> {
 
 /// Warum dieser (kanonische) Pfad gesperrt ist; `comps` = Abschnitte relativ zum Projektordner.
 pub fn blocked(real: &Path, comps: &[String], access: Access, env: &AgentEnv) -> Option<String> {
+    if let Some(why) = windows_blocked(real, env) {
+        return Some(why);
+    }
+    // Projektordner in WSL (#392): dieselben Geheimnis-Ordner im Linux-Home (`/home/<u>/.ssh`, `/root/.aws` …) und –
+    // über die Laufwerks-Einhängepunkte (`/mnt/c/…`, `/c/…`) – dieselben Windows-Ordner wie direkt.
+    if let Some(why) = wsl_blocked(real) {
+        return Some(why);
+    }
+    for w in wsl_drive_paths(real) {
+        if let Some(why) = windows_blocked(&w, env) {
+            return Some(format!("{why} (reached through WSL)"));
+        }
+    }
+    let all: Vec<String> = real.components().filter_map(|c| if let Component::Normal(n) = c { Some(n.to_string_lossy().to_lowercase()) } else { None }).collect();
+    if let Some(b) = all.iter().find(|c| BLOCKED_NAMES.contains(&c.as_str())) {
+        return Some(format!("{b} folders hold keys"));
+    }
+    if let Some(b) = all.last().filter(|n| BLOCKED_FILES.contains(&n.as_str())) {
+        return Some(format!("{b} holds credentials"));
+    }
+    if access == Access::Write && comps.iter().any(|c| c.eq_ignore_ascii_case(".git")) {
+        return Some("writing inside .git is not allowed (git operations go through run_command with the user's approval)".into());
+    }
+    None
+}
+
+/// Datenordner von Paneldeck und Geheimnis-Ordner im Windows-Benutzerordner (ohne Rücksicht auf Groß-/Kleinschreibung
+/// und `\\?\`-Präfix).
+fn windows_blocked(real: &Path, env: &AgentEnv) -> Option<String> {
+    let p = norm_win(real);
     if let Some(d) = env.data_dir.as_ref() {
-        let d = std::fs::canonicalize(d).unwrap_or_else(|_| d.clone());
-        if real.starts_with(&d) {
+        let canon = std::fs::canonicalize(d).unwrap_or_else(|_| d.clone());
+        if [norm_win(&canon), norm_win(d)].iter().any(|d| under_norm(&p, d)) {
             return Some("this is Paneldeck's own data folder".into());
         }
     }
     if let Some(home) = home_dir() {
-        let under = |rel: &str| {
-            let mut p = home.clone();
-            for part in rel.split('/') {
-                p.push(part);
-            }
-            starts_with_ci(real, &p)
-        };
+        let h = norm_win(&home);
+        let under = |rel: &str| under_norm(&p, &format!("{h}{SEP}{}", rel.replace('/', SEP).to_lowercase()));
         if !ALLOWED_HOME.iter().any(|a| under(a))
             && let Some(b) = BLOCKED_HOME.iter().find(|b| under(b))
         {
             return Some(format!("~/{b} holds the user's secrets or settings"));
         }
     }
-    // Projektordner in WSL (#392): dieselben Geheimnis-Ordner im Linux-Home (`/home/<u>/.ssh`, `/root/.aws` …).
-    if let Some(why) = wsl_blocked(real) {
-        return Some(why);
+    None
+}
+
+/// Trenner der normalisierten Form.
+const SEP: &str = if cfg!(windows) { "\\" } else { "/" };
+
+/// Vergleichsform eines Pfads: unter Windows klein, `/` → `\`, ohne `\\?\` bzw. `\\?\UNC\` (→ `\\`), ohne
+/// Trenner am Ende.
+fn norm_win(p: &Path) -> String {
+    let s = p.to_string_lossy().to_string();
+    if !cfg!(windows) {
+        return s.trim_end_matches('/').to_string();
     }
-    let all: Vec<String> = real.components().filter_map(|c| if let Component::Normal(n) = c { Some(n.to_string_lossy().to_lowercase()) } else { None }).collect();
-    if let Some(b) = all.iter().find(|c| BLOCKED_NAMES.contains(&c.as_str())) {
-        return Some(format!("{b} folders hold keys"));
+    let s = s.replace('/', "\\").to_lowercase();
+    let s = if let Some(r) = s.strip_prefix(r"\\?\unc\") { format!(r"\\{r}") } else { s.strip_prefix(r"\\?\").map(str::to_string).unwrap_or(s) };
+    s.trim_end_matches('\\').to_string()
+}
+
+/// Liegt `p` in `dir` (oder ist es)? Beide in [`norm_win`]-Form.
+fn under_norm(p: &str, dir: &str) -> bool {
+    !dir.is_empty() && (p == dir || p.strip_prefix(dir).is_some_and(|r| r.starts_with(SEP)))
+}
+
+/// Einhängepunkte der Windows-Laufwerke, die für eine Distribution in Frage kommen (der bekannte, dazu sicherheitshalber
+/// `/mnt/` und `/`).
+fn wsl_mounts(distro: &str) -> Vec<String> {
+    let mut v = vec![crate::wsl::DEFAULT_MOUNT.to_string(), "/".to_string()];
+    if let Some(m) = crate::wsl::cached_mount(distro).filter(|m| !v.contains(m)) {
+        v.insert(0, m);
     }
-    if access == Access::Write && comps.iter().any(|c| c.eq_ignore_ascii_case(".git")) {
-        return Some("writing inside .git is not allowed (git operations go through run_command with the user's approval)".into());
+    v
+}
+
+/// WSL-Pfad (`\\wsl.localhost\<D>\mnt\c\x`) → die Windows-Pfade, die er über einen Laufwerks-Einhängepunkt erreichen
+/// kann (`C:\x`).
+fn wsl_drive_paths(real: &Path) -> Vec<PathBuf> {
+    let Some((d, linux)) = crate::wsl::unc_to_linux(&real.to_string_lossy()) else { return Vec::new() };
+    let mut out: Vec<PathBuf> = Vec::new();
+    for m in wsl_mounts(&d) {
+        if let Some((drive, rest)) = crate::wsl::mounted_drive(&linux, &m) {
+            let p = PathBuf::from(format!("{}:\\{}", drive.to_ascii_uppercase(), rest.join("\\")));
+            if !out.contains(&p) {
+                out.push(p);
+            }
+        }
+    }
+    out
+}
+
+/// Enthält der WSL-Ordner einen Laufwerks-Einhängepunkt (ist `/`, ein Einhängepunkt, ein Ordner darüber oder ein
+/// eingehängtes Laufwerk selbst wie `/mnt/c`)?
+fn wsl_root_contains_mount(canon: &Path) -> bool {
+    let Some((d, linux)) = crate::wsl::unc_to_linux(&canon.to_string_lossy()) else { return false };
+    let l = linux.trim_end_matches('/');
+    if l.is_empty() {
+        return true;
+    }
+    wsl_mounts(&d).iter().any(|m| {
+        let m = m.trim_end_matches('/');
+        // Einhängepunkt selbst oder ein Ordner darüber
+        let contains = !m.is_empty() && (m == l || m.starts_with(&format!("{l}/")));
+        // ein eingehängtes Laufwerk selbst (`/mnt/c`, bei `/` als Einhängepunkt `/c`)
+        let drive_root = crate::wsl::mounted_drive(l, &format!("{m}/")).is_some_and(|(_, rest)| rest.is_empty());
+        contains || drive_root
+    })
+}
+
+/// Erste Verknüpfung (Symlink/Junction) zwischen WSL-Projektordner `root` und `cand` (nur vorhandene Teile).
+fn wsl_symlink_below(root: &Path, cand: &Path) -> Option<PathBuf> {
+    if !crate::wsl::is_wsl_unc(&root.to_string_lossy()) {
+        return None;
+    }
+    let rel = cand.strip_prefix(root).ok()?;
+    let mut cur = root.to_path_buf();
+    for c in rel.components() {
+        cur.push(c);
+        match std::fs::symlink_metadata(&cur) {
+            Ok(m) if m.file_type().is_symlink() => return Some(cur),
+            Ok(_) => {}
+            Err(_) => return None,
+        }
     }
     None
 }
@@ -510,6 +620,48 @@ pub(crate) mod tests {
     }
 
     #[cfg(windows)]
+    #[test]
+    fn windows_secrets_are_blocked_through_wsl_drive_mounts() {
+        let home = home_dir().expect("home");
+        let data = std::env::temp_dir().join(format!("pd-paths-data-{}", std::process::id()));
+        let env = AgentEnv { data_dir: Some(data.clone()), ..AgentEnv::default() };
+        if let Some((d, parts)) = crate::wsl::drive_parts(&home.to_string_lossy()) {
+            let rest = parts.join("/");
+            for mount in ["/mnt", ""] {
+                let unc = |sub: &str| PathBuf::from(crate::wsl::linux_to_unc("Sec-Distro", &format!("{mount}/{d}/{rest}/{sub}")));
+                assert!(blocked(&unc("AppData/Roaming/x"), &[], Access::Read, &env).is_some(), "{mount}: AppData");
+                assert!(blocked(&unc(".claude/.credentials.json"), &[], Access::Read, &env).is_some(), "{mount}: .claude");
+                assert!(blocked(&unc(".ssh/id_rsa"), &[], Access::Read, &env).is_some());
+                assert!(blocked(&unc("proj/src/main.rs"), &[], Access::Read, &env).is_none(), "{mount}: normales Projekt");
+            }
+        }
+        // Datenordner (ipc.json mit dem Token) auch über /mnt/<lw>
+        if let Some((d, parts)) = crate::wsl::drive_parts(&data.to_string_lossy()) {
+            let p = PathBuf::from(crate::wsl::linux_to_unc("Sec-Distro", &format!("/mnt/{d}/{}/ipc.json", parts.join("/"))));
+            assert!(blocked(&p, &[], Access::Read, &env).unwrap().contains("data folder"));
+        }
+        // Zugangsdaten-Dateien überall
+        assert!(blocked(Path::new("C:/proj/.claude/.credentials.json"), &[], Access::Read, &env).is_some());
+        assert!(blocked(Path::new("C:/proj/.Git-Credentials"), &[], Access::Read, &env).is_some());
+        assert!(blocked(Path::new("C:/proj/credentials.md"), &[], Access::Read, &env).is_none());
+    }
+
+    #[test]
+    fn wsl_roots_with_drive_mounts_are_refused() {
+        let r = |l: &str| wsl_root_contains_mount(&PathBuf::from(crate::wsl::linux_to_unc("Mnt-Distro", l)));
+        assert!(r("/") && r("/mnt") && r("/mnt/c") && r("/c"), "Einhängepunkte und Laufwerke");
+        assert!(!r("/mnt/c/Users/u/proj") && !r("/home/u/proj") && !r("/srv"));
+        assert!(wsl_root_contains_mount(Path::new(r"\\?\UNC\wsl.localhost\Mnt-Distro\mnt")));
+        assert!(!wsl_root_contains_mount(Path::new(r"C:\Users\u\proj")));
+        crate::wsl::set_cached("Mnt-Win-Distro", None, Some("/win/"));
+        assert!(wsl_root_contains_mount(&PathBuf::from(crate::wsl::linux_to_unc("Mnt-Win-Distro", "/win"))), "eigener Einhängepunkt");
+        assert!(wsl_root_contains_mount(&PathBuf::from(crate::wsl::linux_to_unc("Mnt-Win-Distro", "/win/d"))));
+        assert_eq!(wsl_drive_paths(&PathBuf::from(crate::wsl::linux_to_unc("Mnt-Win-Distro", "/win/d/x"))), vec![PathBuf::from(r"D:\x")]);
+        // Kein Verknüpfungs-Test für Windows-Ordner
+        assert_eq!(wsl_symlink_below(Path::new(r"C:\x"), Path::new(r"C:\x\y")), None);
+        assert!(under_norm(&norm_win(Path::new(r"\\?\C:\Users\U\AppData\x")), &norm_win(Path::new(r"c:\users\u\appdata"))) == cfg!(windows));
+    }
+
     #[test]
     fn wsl_secret_folders_are_blocked() {
         // #392: Projektordner über \\wsl.localhost – die Geheimnis-Ordner im Linux-Home bleiben gesperrt.

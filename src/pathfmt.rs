@@ -24,7 +24,21 @@ pub fn is_remote_unc(p: &str) -> bool {
     if !s.starts_with(r"\\") {
         return false;
     }
-    !(s.starts_with(r"\\wsl$\") || s.starts_with(r"\\wsl.localhost\"))
+    // `\\wsl$`/`\\wsl.localhost` sind nur mit installiertem WSL lokal (#392) – sonst wäre es ein Rechner im Netz.
+    !((s.starts_with(r"\\wsl$\") || s.starts_with(r"\\wsl.localhost\")) && wsl_installed())
+}
+
+/// Ist WSL installiert (`%SystemRoot%\System32\wsl.exe`; einmal geprüft, lokal)? Außerhalb von Windows: `true`
+/// (dort gibt es keine UNC-Freigaben).
+pub fn wsl_installed() -> bool {
+    static C: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *C.get_or_init(|| {
+        if !cfg!(windows) {
+            return true;
+        }
+        let root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
+        std::path::Path::new(&root).join("System32").join("wsl.exe").is_file()
+    })
 }
 
 /// Netzwerkpfad im weiteren Sinn: [`is_remote_unc`] oder ein Pfad auf einem verbundenen Netzlaufwerk (`Z:\…`,

@@ -39,8 +39,9 @@ const SHOW_MAX: usize = 8;
 pub enum Target {
     /// Windows-Shell: Windows-Pfad (auch `~`, `~\x` = Windows-Benutzerordner, #392).
     Windows,
-    /// Git Bash / MSYS (#392): Windows-Pfad, dazu `/c/x` und `~` (= Windows-Benutzerordner); gespeichert wie eingegeben.
-    Msys,
+    /// Git Bash / MSYS / Cygwin (#392): Windows-Pfad, dazu `/c/x` und `~` (= Windows-Benutzerordner), mit bekanntem
+    /// Installationsordner `root` auch `/usr`, `/etc`, `/tmp`; gespeichert wie eingegeben.
+    Msys { root: Option<String> },
     /// WSL-Shell. `distro` = None: Standard-Distribution. `choose_distro`: Auswahl der Distribution anzeigen
     /// (sonst ist sie durch die Shell festgelegt).
     Wsl { distro: Option<String>, choose_distro: bool },
@@ -55,7 +56,10 @@ impl Target {
                 let distro = s.id.strip_prefix("wsl:").filter(|d| !d.is_empty()).map(str::to_string).or_else(|| crate::shells::wsl_distro(&s.args));
                 Target::Wsl { distro, choose_distro }
             }
-            Some(s) if matches!(PathKind::of(s), PathKind::Msys { .. }) => Target::Msys,
+            Some(s) => match PathKind::of(s) {
+                PathKind::Msys { root } => Target::Msys { root },
+                _ => Target::Windows,
+            },
             _ => Target::Windows,
         }
     }
@@ -64,7 +68,7 @@ impl Target {
     pub fn kind(&self) -> PathKind {
         match self {
             Target::Windows => PathKind::Windows { cmd: false },
-            Target::Msys => PathKind::Msys { root: None },
+            Target::Msys { root } => PathKind::Msys { root: root.clone() },
             Target::Wsl { distro, .. } => PathKind::Wsl { distro: distro.clone() },
         }
     }
@@ -267,7 +271,7 @@ impl FolderPicker {
             return;
         }
         match &t {
-            Target::Windows | Target::Msys => {
+            Target::Windows | Target::Msys { .. } => {
                 if self.wsl_mode {
                     self.leave_wsl();
                 }
@@ -1179,29 +1183,34 @@ mod tests {
     #[test]
     fn git_bash_and_home_paths_in_windows_fields() {
         let s = |id: &str, prog: &str| ShellSpec { id: id.into(), label: id.into(), program: prog.into(), args: vec![] };
-        assert_eq!(Target::for_shell(Some(&s("gitbash", r"C:\Program Files\Git\bin\bash.exe")), false), Target::Msys);
+        let gb = Target::Msys { root: Some(r"C:\Program Files\Git".into()) };
+        assert_eq!(Target::for_shell(Some(&s("gitbash", r"C:\Program Files\Git\bin\bash.exe")), false), gb);
         if cfg!(windows) {
-            assert_eq!(Target::for_shell(Some(&s("custom:4", r"D:\Git\usr\bin\bash.exe")), false), Target::Msys, "eigenes Git-Bash-Profil");
+            assert_eq!(Target::for_shell(Some(&s("custom:4", r"D:\Git\usr\bin\bash.exe")), false), Target::Msys { root: Some(r"D:\Git".into()) }, "eigenes Git-Bash-Profil");
             assert_eq!(Target::for_shell(Some(&s("custom:5", r"C:\Windows\System32\bash.exe")), false), Target::Wsl { distro: None, choose_distro: false });
         }
-        assert_eq!(Target::Msys.kind(), PathKind::Msys { root: None });
-        // Git Bash: /c/x und ~ gehen, ein reiner Linux-Pfad nicht
-        let mut p = FolderPicker::with_backend("m", "/c/work", Target::Msys, Arc::new(Fake::default()));
+        assert_eq!(gb.kind(), PathKind::Msys { root: Some(r"C:\Program Files\Git".into()) }, "Installationsordner bleibt");
+        // Git Bash: /c/x, ~ und (mit Installationsordner) /usr, /etc gehen, ein Linux-Pfad außerhalb nicht
+        let mut p = FolderPicker::with_backend("m", "/c/work", Target::Msys { root: None }, Arc::new(Fake::default()));
         assert!(!p.is_wsl());
         assert_eq!(p.value(), "/c/work", "gespeichert wie eingegeben");
         assert!(p.blocking_error(Lang::En).is_none());
         p.set_text("~/x");
         assert!(p.blocking_error(Lang::En).is_none());
-        p.set_text("/home/u");
+        p.set_text("/opt/x");
         assert!(p.blocking_error(Lang::En).is_some_and(|e| e.contains("cannot be converted")));
+        let mut p = FolderPicker::with_backend("m2", "/etc", gb.clone(), Arc::new(Fake::default()));
+        assert!(p.blocking_error(Lang::En).is_none(), "/etc im Git-Ordner");
+        p.set_text("/tmp");
+        assert!(p.blocking_error(Lang::En).is_none());
         // Windows-Ziel: ~ geht
         let p = FolderPicker::with_backend("w", "~", Target::Windows, Arc::new(Fake::default()));
         assert!(p.blocking_error(Lang::De).is_none());
         // Wechsel Git Bash -> WSL rechnet um, zurück wieder Windows-Pfad
-        let mut p = FolderPicker::with_backend("mw", r"C:\a", Target::Msys, Arc::new(Fake::default()));
+        let mut p = FolderPicker::with_backend("mw", r"C:\a", Target::Msys { root: None }, Arc::new(Fake::default()));
         p.set_target(ubuntu());
         assert_eq!(p.value(), "/mnt/c/a");
-        p.set_target(Target::Msys);
+        p.set_target(Target::Msys { root: None });
         assert_eq!(p.value(), r"C:\a");
         assert!(p.calls_none());
     }

@@ -51,7 +51,7 @@ pub use encoding::{EolStats, LineEnding, TextEncoding, Unencodable};
 #[allow(unused_imports)]
 pub use file::{
     ConflictChoice, ConflictOutcome, ContentHasher, DiskChangeAction, DiskSnapshot, DiskState, OpenError, OpenNote,
-    OpenOptions, OpenReport, SaveError, SaveReport, atomic_write, check_disk,
+    OpenOptions, OpenReport, SaveError, SaveJob, SaveReport, WriteResult, atomic_write, check_disk,
 };
 #[allow(unused_imports)]
 pub use history::{EditKind, EditOrigin, HistoryLimits};

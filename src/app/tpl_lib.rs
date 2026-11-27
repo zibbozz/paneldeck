@@ -171,6 +171,9 @@ pub(super) struct TplForm {
     pub(super) legacy_rest: String,
     pub(super) error: Option<String>,
     focus: bool,
+    /// Das Ordnerfeld lässt den Wert nicht übernehmen (#392: ungültiger/fehlender Linux-Ordner, andere Distribution,
+    /// Linux-Pfad für eine Windows-Shell) – Speichern gesperrt.
+    pub(super) folder_block: Option<String>,
 }
 
 impl TplForm {
@@ -194,6 +197,7 @@ impl TplForm {
             item,
             error: None,
             focus: true,
+            folder_block: None,
         }
     }
 
@@ -406,11 +410,13 @@ pub(super) fn tpl_form_ui(ctx: &egui::Context, f: &mut TplForm, shells: &[ShellS
         }
         ui.add_space(6.0);
         ui.horizontal(|ui| {
-            let b = ui.add_enabled(opts_ok, egui::Button::new(lang.t("Speichern", "Save")));
+            let blocked = f.terminal && f.folder_block.is_some();
+            let b = ui.add_enabled(opts_ok && !blocked, egui::Button::new(lang.t("Speichern", "Save")));
             mark(ui, "save", &b);
             if b.clicked() {
                 out = FormOut::Save;
             }
+            let invalid = if blocked { f.folder_block.clone() } else { invalid.clone() };
             tabs::show_invalid(ui, &invalid, &b);
             let c = ui.button(lang.t("Abbrechen", "Cancel"));
             mark(ui, "cancel", &c);
@@ -478,7 +484,7 @@ fn tpl_general(ui: &mut Ui, f: &mut TplForm, shells: &[ShellSpec], profiles: &[P
         ui.end_row();
         ui.label(lang.t("Startordner", "Start folder"));
         // Ordnerfeld nach der Shell der Vorlage (#392): WSL-Pfade, Git Bash `/c/x`, `~`.
-        session_settings::folder_field(ui, "tpl_cwd", &mut f.item.cwd, target, false, lang, &Default::default());
+        f.folder_block = session_settings::folder_field(ui, "tpl_cwd", &mut f.item.cwd, target, false, lang, &Default::default()).blocking;
         ui.end_row();
         if eff_shell.starts_with("wsl") {
             #[cfg(test)]

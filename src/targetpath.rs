@@ -29,7 +29,9 @@ pub enum PathKind {
     Windows { cmd: bool },
     /// WSL; `distro` = None: die Standard-Distribution (`wsl.exe` ohne `-d`, bzw. der WSL-Starter `bash.exe`).
     Wsl { distro: Option<String> },
-    /// Git Bash / MSYS2 / Cygwin: `/c/x` = `C:\x`. `root` = Windows-Ordner der Installation (für `/usr/…`), wenn bekannt.
+    /// Git Bash / MSYS2: `/c/x` = `C:\x`; Cygwin (Installationsordner `cygwin…`): `/cygdrive/c/x`. `root` =
+    /// Windows-Ordner der Installation (für `/usr/…`, `/etc/…`), wenn bekannt. Git Bash/MSYS: `/tmp` = `%TEMP%`,
+    /// `/home/<u>` = Windows-Benutzerordner.
     Msys { root: Option<String> },
     /// Linux/macOS: Pfade bleiben, wie sie sind.
     Native,
@@ -72,6 +74,15 @@ pub trait Lookup {
     fn default_distro(&self) -> Option<String>;
     /// Windows-Benutzerordner (`USERPROFILE`).
     fn win_home(&self) -> String;
+    /// Windows-Temp-Ordner (`TEMP`; Git Bash `/tmp`).
+    fn win_temp(&self) -> String {
+        std::env::var("TEMP").or_else(|_| std::env::var("TMP")).unwrap_or_default()
+    }
+}
+
+/// Cygwin-Installation (Ordnername `cygwin…`)? Dann heißen Laufwerke `/cygdrive/c/…`.
+fn is_cygwin(root: &Option<String>) -> bool {
+    root.as_ref().and_then(|r| r.trim_end_matches('\\').rsplit('\\').next().map(|n| n.to_ascii_lowercase().starts_with("cygwin"))).unwrap_or(false)
 }
 
 /// Angaben aus den Zwischenspeichern von [`crate::wsl`]; fehlt etwas, wird es im Hintergrund geholt (nie in Tests).
@@ -151,12 +162,13 @@ impl PathKind {
             return PathKind::Wsl { distro: (!d.is_empty()).then_some(d) };
         }
         if shell.id == "gitbash" {
-            return PathKind::Msys { root: msys_root(&shell.program.replace('/', "\\")) };
+            return PathKind::Msys { root: msys_root(&crate::shells::resolve_program(&shell.program).replace('/', "\\")) };
         }
         if !cfg!(windows) {
             return PathKind::Native;
         }
-        let prog = shell.program.replace('/', "\\");
+        // Ein bloßes `bash.exe` (eigenes Profil) über PATH auflösen: der WSL-Starter aus System32 ist oben schon WSL.
+        let prog = crate::shells::resolve_program(&shell.program).replace('/', "\\");
         let file = prog.rsplit('\\').next().unwrap_or("").to_ascii_lowercase();
         let stem = file.strip_suffix(".exe").unwrap_or(&file);
         match stem {
@@ -235,9 +247,10 @@ impl PathKind {
                 // Relativer Pfad: wie er ist (ein `\` kann in Linux zum Namen gehören).
                 Ok(p.to_string())
             }
-            PathKind::Msys { .. } => {
+            PathKind::Msys { root } => {
                 if let Some((d, parts)) = crate::wsl::drive_parts(p) {
-                    return Ok(if parts.is_empty() { format!("/{d}") } else { format!("/{d}/{}", parts.join("/")) });
+                    let pre = if is_cygwin(root) { "/cygdrive" } else { "" };
+                    return Ok(if parts.is_empty() { format!("{pre}/{d}") } else { format!("{pre}/{d}/{}", parts.join("/")) });
                 }
                 if is_unc(p) {
                     // MSYS versteht UNC-Pfade mit Schrägstrichen (`//wsl.localhost/Ubuntu/x`, `//server/share`).
@@ -279,10 +292,11 @@ impl PathKind {
                     return Ok(win_join(&lk.win_home(), rest));
                 }
                 if p.starts_with('/') {
+                    // Nur `/mnt/<lw>/…` (WSL-Schreibweise); `/c/…` gilt nur für Git Bash/MSYS/Cygwin.
                     if let Some((d, rest)) = crate::wsl::mounted_drive(p, crate::wsl::DEFAULT_MOUNT) {
                         return Ok(format!("{}:\\{}", d.to_ascii_uppercase(), rest.join("\\")));
                     }
-                    return msys_drive(p).ok_or(PathErr::NotConvertible);
+                    return Err(PathErr::NotConvertible);
                 }
                 Ok(p.to_string())
             }
@@ -291,8 +305,19 @@ impl PathKind {
                     return Ok(win_join(&lk.win_home(), rest));
                 }
                 if p.starts_with('/') {
-                    if let Some(w) = msys_drive(p) {
+                    let cyg = is_cygwin(root);
+                    // Cygwin: Laufwerke nur unter `/cygdrive`; `/c/…` ist dort ein Ordner der Installation.
+                    if let Some(w) = msys_drive(p).filter(|_| !cyg || p.starts_with("/cygdrive/")) {
                         return Ok(w);
+                    }
+                    if !cyg {
+                        // Git for Windows/MSYS2: `/tmp` = `%TEMP%`, `/home/<u>` = Windows-Benutzerordner.
+                        let parts: Vec<&str> = p.split('/').filter(|c| !c.is_empty()).collect();
+                        match parts.as_slice() {
+                            ["tmp", rest @ ..] if !lk.win_temp().is_empty() => return Ok(win_join(&lk.win_temp(), &rest.join("/"))),
+                            ["home", _, rest @ ..] => return Ok(win_join(&lk.win_home(), &rest.join("/"))),
+                            _ => {}
+                        }
                     }
                     return match root {
                         Some(r) => Ok(win_join(r, p)),
@@ -353,6 +378,10 @@ pub fn for_insert(shell: &ShellSpec, p: &str) -> Result<String, PathErr> {
 /// Wie [`for_insert`] mit eigenen Angaben (Tests).
 pub fn for_insert_with(shell: &ShellSpec, p: &str, lk: &dyn Lookup) -> Result<String, PathErr> {
     let t = PathKind::of(shell).to_target_with(p, lk)?;
+    // 9P-Zeichen (U+F001…) werden zu Steuerzeichen zurückgebildet: so einen Pfad nie ins Terminal tippen (#392).
+    if t.chars().any(char::is_control) {
+        return Err(PathErr::NotConvertible);
+    }
     Ok(crate::quote::quote_if_needed(crate::shells::quote_kind(shell), &t))
 }
 
@@ -400,6 +429,9 @@ mod tests {
         fn win_home(&self) -> String {
             r"C:\Users\u".into()
         }
+        fn win_temp(&self) -> String {
+            r"C:\Users\u\AppData\Local\Temp".into()
+        }
     }
 
     const LK: Fake = Fake { default: Some("Ubuntu") };
@@ -440,7 +472,10 @@ mod tests {
         assert_eq!(PathKind::of(&sp("gitbash", r"C:\Program Files\Git\bin\bash.exe", &["--login", "-i"])), msys());
         assert_eq!(PathKind::of(&sp("custom:6", r"D:\Tools\Git\usr\bin\bash.exe", &[])), PathKind::Msys { root: Some(r"D:\Tools\Git".into()) }, "eigenes Git-Bash-Profil");
         assert_eq!(PathKind::of(&sp("custom:7", r"C:\msys64\usr\bin\zsh.exe", &[])), PathKind::Msys { root: Some(r"C:\msys64".into()) });
-        assert_eq!(PathKind::of(&sp("custom:8", "bash.exe", &[])), PathKind::Msys { root: None });
+        // Bloßes bash.exe: über PATH aufgelöst – WSL-Starter (System32) oder Git Bash, nie eine Windows-Shell
+        assert!(matches!(PathKind::of(&sp("custom:8", "bash.exe", &[])), PathKind::Msys { .. } | PathKind::Wsl { .. }));
+        assert_eq!(crate::shells::resolve_program("pd-gibt-es-nicht-bash"), "pd-gibt-es-nicht-bash");
+        assert_eq!(PathKind::of(&sp("custom:8", "pd-gibt-es-nicht-bash.exe", &[])), win());
         assert_eq!(PathKind::of(&sp("cmd", "cmd.exe", &[])), PathKind::Windows { cmd: true });
         assert_eq!(PathKind::of(&sp("pwsh", r"C:\Program Files\PowerShell\7\pwsh.exe", &[])), win());
         assert_eq!(PathKind::of(&sp("custom:9", "ssh.exe", &[])), win());
@@ -487,7 +522,11 @@ mod tests {
         assert_eq!(t(&ub, r"~\x\y"), Ok("~/x/y".into()));
         // Windows-Ziel: Linux nur über /mnt/<lw> und /<lw>, ~ = Windows-Home
         assert_eq!(t(&win(), "/mnt/c/Users/u"), Ok(r"C:\Users\u".into()));
-        assert_eq!(t(&win(), "/d/x"), Ok(r"D:\x".into()));
+        assert_eq!(t(&win(), "/d/x"), Err(PathErr::NotConvertible), "/<lw>/ nur für Git Bash/MSYS/Cygwin");
+        // Cygwin: /cygdrive/<lw>
+        let cyg = PathKind::Msys { root: Some(r"C:\cygwin64".into()) };
+        assert_eq!(t(&cyg, r"C:\Users\u\x"), Ok("/cygdrive/c/Users/u/x".into()));
+        assert_eq!(t(&cyg, "E:"), Ok("/cygdrive/e".into()));
         assert_eq!(t(&win(), "~"), Ok(r"C:\Users\u".into()));
         assert_eq!(t(&win(), "~/projects/a"), Ok(r"C:\Users\u\projects\a".into()));
         assert_eq!(t(&win(), "/home/u"), Err(PathErr::NotConvertible));
@@ -533,7 +572,18 @@ mod tests {
         assert_eq!(w(&win(), "~"), Ok(r"C:\Users\u".into()));
         assert_eq!(w(&win(), r"~\a"), Ok(r"C:\Users\u\a".into()));
         assert_eq!(w(&win(), "/mnt/c/x"), Ok(r"C:\x".into()));
-        assert_eq!(w(&win(), "/c/x"), Ok(r"C:\x".into()));
+        assert_eq!(w(&win(), "/c/x"), Err(PathErr::NotConvertible), "/<lw>/ nur für Git Bash/MSYS/Cygwin");
+        // Git Bash: /tmp = %TEMP%, /home/<u> = Windows-Home, /etc über den Installationsordner
+        assert_eq!(w(&msys(), "/tmp/a.log"), Ok(r"C:\Users\u\AppData\Local\Temp\a.log".into()));
+        assert_eq!(w(&msys(), "/tmp"), Ok(r"C:\Users\u\AppData\Local\Temp".into()));
+        assert_eq!(w(&msys(), "/home/u/repo"), Ok(r"C:\Users\u\repo".into()));
+        assert_eq!(w(&msys(), "/etc/profile"), Ok(r"C:\Program Files\Git\etc\profile".into()));
+        // Cygwin: Laufwerke nur unter /cygdrive, /tmp und /home liegen in der Installation
+        let cyg = PathKind::Msys { root: Some(r"C:\cygwin64".into()) };
+        assert_eq!(w(&cyg, "/cygdrive/c/x"), Ok(r"C:\x".into()));
+        assert_eq!(w(&cyg, "/c/x"), Ok(r"C:\cygwin64\c\x".into()));
+        assert_eq!(w(&cyg, "/tmp/a"), Ok(r"C:\cygwin64\tmp\a".into()));
+        assert_eq!(w(&cyg, "/home/u"), Ok(r"C:\cygwin64\home\u".into()));
         assert_eq!(w(&win(), "/home/u"), Err(PathErr::NotConvertible));
         // Hin und zurück
         for p in ["/home/u/a b", "/srv/ä-ö", "/x/a:b|c"] {
@@ -583,6 +633,10 @@ mod tests {
         assert!(q.contains("x\"; touch pwned; #\\"), "{q}");
         let q = i(&gb, r"C:\x\';touch pwned;#").unwrap();
         assert_eq!(q, r"'/c/x/'\'';touch pwned;#'");
+        // 9P-Zeichen für Steuerzeichen (U+F00A → Zeilenumbruch, U+F01B → Escape): nie eintippen
+        assert_eq!(i(&ub, "\\\\wsl.localhost\\pf-ins-u\\tmp\\a\u{F00A}rm -rf ~"), Err(PathErr::NotConvertible));
+        assert_eq!(i(&ub, "\\\\wsl.localhost\\pf-ins-u\\tmp\\a\u{F01B}[2J"), Err(PathErr::NotConvertible));
+        assert_eq!(i(&ub, "/tmp/a\nb"), Err(PathErr::NotConvertible));
     }
 
     #[test]

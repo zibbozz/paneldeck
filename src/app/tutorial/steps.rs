@@ -1296,6 +1296,19 @@ const TOOLS: &[Step] = &[
         need: None,
     },
     Step {
+        id: "tools.paths",
+        since: "3.2.0",
+        spot: Some(Spot::SidebarFiles),
+        title: tx("Pfade für jede Shell", "Paths for every shell"),
+        body: tx(
+            "Pfade folgen der Shell: Ziehst du eine Datei in eine WSL-Sitzung oder fügst sie aus dem Dateibaum ein, wird `C:\\x` zu `/mnt/c/x` und `\\\\wsl.localhost\\<Distro>\\x` zu `/x`; in Git Bash zu `/c/x`. Ordnerfelder (Vorlagen, Profile, Prozesse) nehmen Linux-Pfade, `/c/x` und `~`. Strg+Klick auf `/home/…/datei:12` öffnet die Datei im Editor an der Zeile.",
+            "Paths follow the shell: drag a file into a WSL session or insert it from the file tree and `C:\\x` becomes `/mnt/c/x` and `\\\\wsl.localhost\\<distro>\\x` becomes `/x`; in Git Bash `/c/x`. Folder fields (templates, profiles, processes) take Linux paths, `/c/x` and `~`. Ctrl+click on `/home/…/file:12` opens the file in the editor at that line.",
+        ),
+        prep: HUB,
+        done: None,
+        need: None,
+    },
+    Step {
         id: "tools.diff",
         since: "1.0.0",
         spot: Some(Spot::SidebarDiff),

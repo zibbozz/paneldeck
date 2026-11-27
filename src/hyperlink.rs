@@ -152,7 +152,8 @@ fn wsl_file(p: &str) -> Option<String> {
         return None;
     }
     let q = q.strip_prefix('/').unwrap_or(&q).replace('/', "\\");
-    if q.is_empty() || q.contains("\\\\") {
+    // Keine leeren, `.`- oder `..`-Abschnitte (kein Hinausführen, keine leere Distribution).
+    if q.is_empty() || q.split('\\').any(|s| s.is_empty() || s == "." || s == "..") {
         return None;
     }
     let unc = format!(r"\\wsl.localhost\{q}");
@@ -293,6 +294,10 @@ mod tests {
         assert_eq!(classify("file://wsl.localhost/U/a.txt:evil"), LinkKind::Denied(DenyReason::NotLocal));
         assert_eq!(classify("file://wsl.localhost//evil/s"), LinkKind::Denied(DenyReason::NotLocal));
         assert_eq!(classify("file://wsl.localhost/"), LinkKind::Denied(DenyReason::NotLocal));
+        for bad in ["file://wsl.localhost/U/../x", "file://wsl.localhost/U/./x", "file://wsl.localhost/../U/x", "file://wsl.localhost//U/x", "file://wsl.localhost/U/a%2F..%2Fb"] {
+            assert_eq!(classify(bad), LinkKind::Denied(DenyReason::NotLocal), "{bad}");
+        }
+        assert!(matches!(classify("file://wsl.localhost/U/a.txt"), LinkKind::Ask { file: Some(_) }));
     }
 
     #[test]

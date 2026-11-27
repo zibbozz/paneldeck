@@ -918,14 +918,34 @@ pub fn write_session_settings(dir: &Path, exe: &Path) -> Option<PathBuf> {
     Some(path)
 }
 
-/// Wie `write_session_settings`, aber mit WSL-Pfad zur .exe (Aufruf über WSL-Interop).
+/// Wie `write_session_settings`, aber mit WSL-Pfad zur .exe (Aufruf über WSL-Interop). Eine Datei je Distribution
+/// (#392: der Einhängepunkt der Laufwerke kann sich unterscheiden), der Pfad in POSIX-Quoting (`'…'`). Die frühere
+/// gemeinsame Datei `claude-hooks-wsl.json` wird weiter aktuell gehalten, solange es sie gibt (noch laufende
+/// Claude-Sitzungen eines älteren Starts lesen sie).
 pub fn write_session_settings_wsl(dir: &Path, exe: &Path, shell_id: &str) -> Option<PathBuf> {
-    let path = dir.join("claude-hooks-wsl.json");
-    let wsl_exe = crate::pathfmt::convert(shell_id, &exe.to_string_lossy());
-    let cmd = format!("\"{wsl_exe}\" --hook");
-    let v = json!({ "hooks": hooks_value(&cmd) });
+    let path = dir.join(wsl_hooks_file(shell_id));
+    let v = json!({ "hooks": hooks_value(&wsl_hook_command(&crate::pathfmt::convert(shell_id, &exe.to_string_lossy()))) });
     std::fs::write(&path, serde_json::to_string_pretty(&v).ok()?).ok()?;
+    let legacy = dir.join("claude-hooks-wsl.json");
+    if legacy.is_file() {
+        let old = json!({ "hooks": hooks_value(&wsl_hook_command(&crate::pathfmt::convert("wsl", &exe.to_string_lossy()))) });
+        let _ = std::fs::write(&legacy, serde_json::to_string_pretty(&old).unwrap_or_default());
+    }
     Some(path)
+}
+
+/// Hook-Befehl für WSL: der Linux-Pfad der .exe in POSIX-Quoting.
+fn wsl_hook_command(wsl_exe: &str) -> String {
+    format!("{} --hook", crate::quote::quote(crate::quote::Kind::Posix, wsl_exe))
+}
+
+/// Name der Hook-Datei einer WSL-Shell (`claude-hooks-wsl-<distro>.json`, Zeichen außerhalb von `[A-Za-z0-9._-]` als
+/// `_`; ohne Distribution `default`).
+pub fn wsl_hooks_file(shell_id: &str) -> String {
+    let d = shell_id.strip_prefix("wsl:").unwrap_or("").trim();
+    let safe: String = d.chars().map(|c| if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') { c } else { '_' }).collect();
+    let safe = safe.trim_matches('.');
+    format!("claude-hooks-wsl-{}.json", if safe.is_empty() { "default" } else { safe })
 }
 
 /// Benutzer-Einstellungen von Claude Code: `$CLAUDE_CONFIG_DIR/settings.json`, sonst `~/.claude/settings.json`. Mit
@@ -1118,6 +1138,30 @@ pub fn uninstall_global(path: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #392: eine Hook-Datei je Distribution, der Pfad der .exe in POSIX-Quoting; die alte gemeinsame Datei bleibt aktuell.
+    #[test]
+    fn wsl_hook_files_per_distro_with_quoted_exe() {
+        assert_eq!(wsl_hooks_file("wsl:Ubuntu-24.04"), "claude-hooks-wsl-Ubuntu-24.04.json");
+        assert_eq!(wsl_hooks_file("wsl:"), "claude-hooks-wsl-default.json");
+        assert_eq!(wsl_hooks_file("wsl:a/b\\c..x"), "claude-hooks-wsl-a_b_c..x.json");
+        assert_eq!(wsl_hooks_file("wsl:.."), "claude-hooks-wsl-default.json");
+        assert_eq!(wsl_hook_command("/mnt/c/Program Files/Paneldeck/paneldeck.exe"), "'/mnt/c/Program Files/Paneldeck/paneldeck.exe' --hook");
+        assert_eq!(wsl_hook_command("/mnt/c/a'b/p.exe"), "'/mnt/c/a'\\''b/p.exe' --hook");
+        let dir = std::env::temp_dir().join(format!("pd-wsl-hooks-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let legacy = dir.join("claude-hooks-wsl.json");
+        std::fs::write(&legacy, "{}").unwrap();
+        let exe = if cfg!(windows) { std::path::PathBuf::from(r"C:\Program Files\Paneldeck\paneldeck.exe") } else { std::path::PathBuf::from("/opt/p/paneldeck") };
+        let p = write_session_settings_wsl(&dir, &exe, "wsl:Hook-Distro").unwrap();
+        assert_eq!(p.file_name().unwrap().to_string_lossy(), "claude-hooks-wsl-Hook-Distro.json");
+        let text = std::fs::read_to_string(&p).unwrap();
+        if cfg!(windows) {
+            assert!(text.contains("'/mnt/c/Program Files/Paneldeck/paneldeck.exe' --hook"), "{text}");
+        }
+        assert!(std::fs::read_to_string(&legacy).unwrap().contains("--hook"), "alte Datei aktuell gehalten");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn server_roundtrip_and_status() {

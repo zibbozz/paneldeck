@@ -258,7 +258,7 @@ pub(super) fn list_editor(
 pub(super) fn pick_entry(kind: ListKind, target: &Target, lang: Lang, linux_ok: bool) -> Result<Option<(String, Option<String>)>, String> {
     let start = match target {
         Target::Wsl { distro, .. } => format!(r"\\wsl.localhost\{}", distro.as_deref().map(|d| format!("{d}\\")).unwrap_or_default()),
-        Target::Windows | Target::Msys => String::new(),
+        Target::Windows | Target::Msys { .. } => String::new(),
     };
     let picked = match (kind, target) {
         (ListKind::Folders, Target::Wsl { .. }) => crate::platform::notify::pick_folder_unchecked(&start),
@@ -297,8 +297,8 @@ pub(super) fn picked_to_entry(p: &str, target: &Target, lang: Lang, linux_ok: bo
                 format!("Applies only if {} is your default WSL distribution.", lang.q(&d))
             }),
         )),
-        Target::Windows | Target::Msys if linux_ok => Ok((linux, Some(lang.t("Linux-Pfad: gilt nur in WSL-Sitzungen.", "Linux path: applies only to WSL sessions.").to_string()))),
-        Target::Windows | Target::Msys => Err(lang.t("Ordner in WSL gibt es nur für WSL-Sitzungen.", "WSL folders are only available for WSL sessions.").to_string()),
+        Target::Windows | Target::Msys { .. } if linux_ok => Ok((linux, Some(lang.t("Linux-Pfad: gilt nur in WSL-Sitzungen.", "Linux path: applies only to WSL sessions.").to_string()))),
+        Target::Windows | Target::Msys { .. } => Err(lang.t("Ordner in WSL gibt es nur für WSL-Sitzungen.", "WSL folders are only available for WSL sessions.").to_string()),
     }
 }
 

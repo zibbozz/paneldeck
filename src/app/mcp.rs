@@ -1432,8 +1432,7 @@ impl App {
                 let ctx2 = ctx.clone();
                 let (d2, p2) = (distro.clone(), path.clone());
                 std::thread::spawn(move || {
-                    use crate::wsl::Backend;
-                    let _ = tx.send(crate::wsl::WslExe.is_dir(&d2, &p2));
+                    let _ = tx.send(wsl_dir_check(&crate::wsl::WslExe, &d2, &p2));
                     ctx2.request_repaint();
                 });
                 // wsl.exe hat selbst ein Zeitlimit (FAST_TIMEOUT); etwas Luft für den Start des Threads.
@@ -1620,6 +1619,12 @@ impl App {
             (Some(_), Some(_)) => return Err(er("bad_args", tr("Shell oder Ordner haben sich während der Prüfung geändert – bitte erneut versuchen.", "The shell or folder changed during the check – please try again."))),
             (None, _) => None,
         };
+        // `~/x` (#392): mit dem (bei der Prüfung geholten) Home als absoluter Linux-Pfad speichern – `wsl.exe --cd`
+        // kennt nur `~` allein.
+        let cwd = match (cwd, linux_check.as_ref()) {
+            (Some(c), Some((d, _))) if c.starts_with("~/") => Some(crate::wsl::expand_home(&c, crate::wsl::cached_home(d).as_deref()).filter(|f| crate::wsl::validate_linux_path(f).is_ok()).unwrap_or(c)),
+            (c, _) => c,
+        };
         // Administrator-Profile würden eine UAC-Abfrage auslösen: nie über MCP.
         if self.profile(default_profile).is_some_and(|p| p.admin) {
             return Err(er(
@@ -1711,11 +1716,14 @@ impl App {
         if !crate::wsl::looks_linux(c) {
             return c.to_string();
         }
-        let from = caller.and_then(|id| self.entries.get(&id)).and_then(|e| e.live.as_ref().map(|s| crate::targetpath::PathKind::of(&s.spec)));
-        match from {
-            Some(k) if matches!(k, crate::targetpath::PathKind::Wsl { .. } | crate::targetpath::PathKind::Msys { .. }) => k.to_windows(c).unwrap_or_else(|_| c.to_string()),
-            _ => self.chat_root(c, caller.and_then(|id| self.entries.get(&id)).map(|e| e.meta.project).unwrap_or(self.active_project)),
+        let spec = caller.and_then(|id| self.entries.get(&id)).and_then(|e| e.live.as_ref().map(|s| s.spec.clone()));
+        let home_form = c == "~" || c.starts_with("~/") || c.starts_with("~\\");
+        // Aufruf aus einem Terminal: dessen Pfadart (`~` aus einer Windows-Shell = Windows-Home); `~` ohne Terminal =
+        // Windows-Home; ein absoluter Linux-Pfad ohne Terminal wie beim Projekt.
+        if spec.is_some() || home_form {
+            return super::cli_path_kind(spec.as_ref(), c).to_windows(c).unwrap_or_else(|_| c.to_string());
         }
+        self.chat_root(c, caller.and_then(|id| self.entries.get(&id)).map(|e| e.meta.project).unwrap_or(self.active_project))
     }
 
     /// `create_session` mit `kind = chat`: Chat mit einem eingerichteten Modell, im Fenster/Projekt des Aufrufers.
@@ -2463,7 +2471,20 @@ enum CreateStep {
 /// (`~` gibt es immer; ohne Distribution – `wsl.exe` ohne `-d` – lässt sich nicht gezielt prüfen).
 fn cwd_check_target(cwd: &str, distro: Option<&str>) -> Option<(String, String)> {
     let d = distro?;
-    (cwd.starts_with('/') && crate::wsl::validate_linux_path(cwd).is_ok()).then(|| (d.to_string(), cwd.to_string()))
+    // `~/x` (#392): geprüft wird der mit dem Home der Distribution aufgelöste Pfad (im Hintergrund).
+    let probe = cwd.strip_prefix("~/").map(|r| format!("/{r}"));
+    ((cwd.starts_with('/') || probe.is_some()) && crate::wsl::validate_linux_path(probe.as_deref().unwrap_or(cwd)).is_ok()).then(|| (d.to_string(), cwd.to_string()))
+}
+
+/// Ordnerprüfung im Hintergrund: `~/x` erst mit dem Home der Distribution auflösen (danach im Zwischenspeicher).
+fn wsl_dir_check(b: &dyn crate::wsl::Backend, distro: &str, path: &str) -> crate::wsl::DirCheck {
+    match path.strip_prefix("~/") {
+        Some(_) => match b.home(distro).and_then(|h| crate::wsl::expand_home(path, Some(&h))) {
+            Some(full) if crate::wsl::validate_linux_path(&full).is_ok() => b.is_dir(distro, &full),
+            _ => crate::wsl::DirCheck::Unknown,
+        },
+        None => b.is_dir(distro, path),
+    }
 }
 
 /// Ergebnis der Ordnerprüfung: fehlt der Ordner, `bad_args`; sonst ob er wirklich geprüft wurde
@@ -2490,7 +2511,7 @@ fn windows_side_cwd(c: &str, kind: &crate::targetpath::PathKind, lk: &dyn crate:
 }
 
 /// Startordner für `create_session` prüfen (rein, testbar). `wsl` = `Some(Distribution)`, wenn die Sitzung in WSL
-/// startet: dann ist auch ein Linux-Pfad erlaubt (absolut oder `~`, ohne Steuerzeichen, höchstens 4096 Bytes; ob er
+/// startet: dann ist auch ein Linux-Pfad erlaubt (absolut, `~` oder `~/x`, ohne Steuerzeichen, höchstens 4096 Bytes; ob er
 /// existiert, zeigt erst der Start – eine Prüfung über wsl.exe würde die Oberfläche blockieren), und ein
 /// `\\wsl.localhost\<Distro>\…`-Pfad wird zum Linux-Pfad. Windows-Pfade müssen existieren; Netzwerkfreigaben werden
 /// gar nicht erst geprüft (schon das Prüfen baute eine SMB-Verbindung auf).
@@ -2509,7 +2530,9 @@ fn check_create_cwd(c: &str, wsl: Option<Option<&str>>, de: bool, is_dir: impl F
         };
         let c = linux.as_deref().unwrap_or(c);
         if crate::wsl::looks_linux(c) {
-            return match crate::wsl::validate_linux_path(c) {
+            // `~/x` (#392): geprüft wie der aufgelöste Pfad (`/x` als Platzhalter für das Home).
+            let probe = c.strip_prefix("~/").map(|r| format!("/{r}"));
+            return match crate::wsl::validate_linux_path(probe.as_deref().unwrap_or(c)) {
                 Ok(()) => Ok(crate::wsl::normalize(c, None)),
                 Err(e) => bad(format!("Ungültiger Linux-Pfad: {}", e.message(true)), format!("Invalid Linux path: {}", e.message(false))),
             };
@@ -2661,8 +2684,12 @@ mod tests {
         // Windows-Pfade wie bisher (müssen existieren)
         assert_eq!(ok(r"C:\Work", ubuntu).unwrap(), r"C:\Work");
         assert!(ok(r"C:\Missing", ubuntu).is_err());
+        // `~/x` (#392): angenommen (geprüft wird der aufgelöste Pfad in WSL)
+        assert_eq!(ok("~/x/", ubuntu).unwrap(), "~/x");
+        assert!(ok("~/x\"y", ubuntu).is_err(), "Einschleusung auch hinter ~/");
         // Ungültige Linux-Pfade
-        for c in ["~/x", "/a\nb", "/a\u{0}b", &format!("/{}", "x".repeat(5000))] {
+        assert_eq!(ok("~x", ubuntu).unwrap_err().0, "bad_args", "kein Linux-Pfad");
+        for c in ["/a\nb", "/a\u{0}b", &format!("/{}", "x".repeat(5000))] {
             let e = ok(c, ubuntu).unwrap_err();
             assert_eq!(e.0, "bad_args", "{c:?}");
             assert!(e.1.starts_with("Invalid Linux path"), "{c:?}: {}", e.1);
@@ -2712,6 +2739,31 @@ mod tests {
         // Nur absolute Linux-Pfade bei bekannter Distribution werden in WSL geprüft.
         assert_eq!(cwd_check_target("/home/u/p", Some("Ubuntu")), Some(("Ubuntu".into(), "/home/u/p".into())));
         assert_eq!(cwd_check_target("~", Some("Ubuntu")), None);
+        assert_eq!(cwd_check_target("~/p", Some("Ubuntu")), Some(("Ubuntu".into(), "~/p".into())), "#392: ~/x wird geprüft");
+        assert_eq!(cwd_check_target("~/p\"", Some("Ubuntu")), None);
+        // Prüfung im Hintergrund löst ~/x mit dem Home auf
+        struct B;
+        impl crate::wsl::Backend for B {
+            fn distros(&self) -> Vec<String> {
+                vec![]
+            }
+            fn default_distro(&self) -> Option<String> {
+                None
+            }
+            fn home(&self, d: &str) -> Option<String> {
+                (d == "Ubuntu").then(|| "/home/u".into())
+            }
+            fn list(&self, _d: &str, _p: &str) -> Option<Vec<u8>> {
+                None
+            }
+            fn is_dir(&self, _d: &str, p: &str) -> crate::wsl::DirCheck {
+                if p == "/home/u/p" { crate::wsl::DirCheck::Exists } else { crate::wsl::DirCheck::Missing }
+            }
+        }
+        assert_eq!(wsl_dir_check(&B, "Ubuntu", "~/p"), crate::wsl::DirCheck::Exists);
+        assert_eq!(wsl_dir_check(&B, "Ubuntu", "~/q"), crate::wsl::DirCheck::Missing);
+        assert_eq!(wsl_dir_check(&B, "Other", "~/p"), crate::wsl::DirCheck::Unknown, "Home unbekannt");
+        assert_eq!(wsl_dir_check(&B, "Ubuntu", "/home/u/p"), crate::wsl::DirCheck::Exists);
         assert_eq!(cwd_check_target("/home/u", None), None, "wsl.exe ohne -d: Distribution unbekannt");
         assert_eq!(cwd_check_target(r"C:\Work", Some("Ubuntu")), None);
         assert_eq!(cwd_check_target("/x\"y", Some("Ubuntu")), None);

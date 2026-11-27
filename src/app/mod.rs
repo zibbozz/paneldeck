@@ -3214,7 +3214,7 @@ impl App {
             return cwd.to_string();
         }
         let shell = self.shell_by_id(&self.effective_shell_id(None, project));
-        cli_path_kind(shell.as_ref()).to_windows(c).unwrap_or_else(|_| cwd.to_string())
+        cli_path_kind(shell.as_ref(), c).to_windows(c).unwrap_or_else(|_| cwd.to_string())
     }
 
     /// Pfad aus `--open`/`--edit` (#392): Ein Linux-Pfad (`/…`, `~`) gilt in der Sitzung `origin`, aus der der Aufruf kam
@@ -3224,7 +3224,7 @@ impl App {
         if !crate::wsl::looks_linux(path.trim()) {
             return Ok(path.to_string());
         }
-        cli_path_kind(origin.and_then(|id| self.entries.get(&id)).and_then(|e| e.live.as_ref().map(|s| &s.spec))).to_windows(path)
+        cli_path_kind(origin.and_then(|id| self.entries.get(&id)).and_then(|e| e.live.as_ref().map(|s| &s.spec)), path).to_windows(path)
     }
 
     /// Hinweis: Pfad nicht eingefügt (#392: Ordner einer anderen WSL-Distribution, nicht umrechenbar).
@@ -5432,13 +5432,17 @@ fn wslenv_with(wslenv: &str, name: &str, flag: &str) -> String {
     parts.join(":")
 }
 
-/// Pfadart für einen Linux-Pfad aus `--open`/`--edit`: die der Ursprungssitzung, wenn sie POSIX-Pfade kennt (WSL, Git
-/// Bash), sonst WSL mit der Standard-Distribution.
-fn cli_path_kind(origin: Option<&ShellSpec>) -> crate::targetpath::PathKind {
+/// Pfadart für einen Linux-Pfad `path` aus `--open`/`--edit` bzw. einen Chat-Ordner: die der Ursprungssitzung, wenn sie
+/// POSIX-Pfade kennt (WSL, Git Bash); sonst ist `~`/`~/x` der Windows-Benutzerordner (#392, Entscheidung 9) und ein
+/// absoluter Linux-Pfad gilt in der WSL-Standard-Distribution.
+fn cli_path_kind(origin: Option<&ShellSpec>, path: &str) -> crate::targetpath::PathKind {
     use crate::targetpath::PathKind;
+    let p = path.trim();
+    let home_form = p == "~" || p.starts_with("~/") || p.starts_with("~\\");
     match origin.map(PathKind::of) {
         Some(k @ (PathKind::Wsl { .. } | PathKind::Msys { .. })) => k,
         Some(PathKind::Native) => PathKind::Native,
+        _ if home_form => PathKind::Windows { cmd: false },
         _ => PathKind::Wsl { distro: None },
     }
 }
@@ -5452,14 +5456,21 @@ mod cli_path_tests {
     #[test]
     fn linux_paths_follow_the_origin_session() {
         let s = |id: &str, prog: &str, args: &[&str]| ShellSpec { id: id.into(), label: id.into(), program: prog.into(), args: args.iter().map(|a| a.to_string()).collect() };
-        assert_eq!(cli_path_kind(Some(&s("wsl:Debian", "wsl.exe", &["-d", "Debian"]))), PathKind::Wsl { distro: Some("Debian".into()) });
-        assert_eq!(cli_path_kind(Some(&s("gitbash", r"C:\Program Files\Git\bin\bash.exe", &[]))), PathKind::Msys { root: Some(r"C:\Program Files\Git".into()) });
-        assert_eq!(cli_path_kind(None), PathKind::Wsl { distro: None });
+        let deb = s("wsl:Debian", "wsl.exe", &["-d", "Debian"]);
+        assert_eq!(cli_path_kind(Some(&deb), "/srv"), PathKind::Wsl { distro: Some("Debian".into()) });
+        assert_eq!(cli_path_kind(Some(&deb), "~/x"), PathKind::Wsl { distro: Some("Debian".into()) }, "~ aus WSL = Linux-Home");
+        assert_eq!(cli_path_kind(Some(&s("gitbash", r"C:\Program Files\Git\bin\bash.exe", &[])), "/c/x"), PathKind::Msys { root: Some(r"C:\Program Files\Git".into()) });
+        assert_eq!(cli_path_kind(None, "/etc/hostname"), PathKind::Wsl { distro: None });
+        assert_eq!(cli_path_kind(None, "~"), PathKind::Windows { cmd: false }, "~ ohne Ursprung = Windows-Home");
         if cfg!(windows) {
-            assert_eq!(cli_path_kind(Some(&s("powershell", "powershell.exe", &[]))), PathKind::Wsl { distro: None }, "Windows-Shell: Standard-Distribution");
+            let ps = s("powershell", "powershell.exe", &[]);
+            assert_eq!(cli_path_kind(Some(&ps), "/srv"), PathKind::Wsl { distro: None }, "Windows-Shell: Standard-Distribution");
+            assert_eq!(cli_path_kind(Some(&ps), "~/x"), PathKind::Windows { cmd: false }, "Windows-Shell: ~ = Windows-Home");
+            let home = std::env::var("USERPROFILE").unwrap_or_default();
+            assert_eq!(cli_path_kind(Some(&ps), "~/x").to_windows("~/x"), Ok(format!("{home}\\x")));
             // Ergebnis für die Sitzung: UNC der Distribution bzw. Laufwerk
-            assert_eq!(cli_path_kind(Some(&s("wsl:Debian", "wsl.exe", &["-d", "Debian"]))).to_windows("/srv/a.txt").as_deref(), Ok(r"\\wsl.localhost\Debian\srv\a.txt"));
-            assert_eq!(cli_path_kind(Some(&s("wsl:Debian", "wsl.exe", &[]))).to_windows("/mnt/c/x").as_deref(), Ok(r"C:\x"));
+            assert_eq!(cli_path_kind(Some(&deb), "/srv/a.txt").to_windows("/srv/a.txt").as_deref(), Ok(r"\\wsl.localhost\Debian\srv\a.txt"));
+            assert_eq!(cli_path_kind(Some(&s("wsl:Debian", "wsl.exe", &[])), "/mnt/c/x").to_windows("/mnt/c/x").as_deref(), Ok(r"C:\x"));
         }
     }
 }

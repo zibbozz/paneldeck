@@ -113,7 +113,10 @@ pub fn take_editor_requests() -> Vec<(String, Option<usize>)> {
 /// Strg+Klick auf einen Link (#392): Ein in Linux-Schreibweise genannter Pfad öffnet als Textdatei im Editor von
 /// Paneldeck an der Zeile (Ausführbares nie, Ordner im Explorer); sonst wie bisher mit dem Standardprogramm.
 pub fn activate(link: &Link) {
-    if link.linux && !link.target.starts_with("http") && !is_executable_like(&link.target) && !Path::new(&link.target).is_dir() {
+    // WSL-/Netzwerkpfade nie im UI-Thread prüfen (#392): Ordner oder Datei aus der Prüfung, die den Link gefunden hat.
+    let slow = crate::wsl::is_wsl_unc(&link.target) || crate::pathfmt::is_remote(&link.target);
+    let is_dir = if slow { dir_cached(&link.target) } else { Some(Path::new(&link.target).is_dir()) };
+    if link.linux && !link.target.starts_with("http") && !is_executable_like(&link.target) && is_dir == Some(false) {
         EDITOR_REQUESTS.lock().unwrap_or_else(|e| e.into_inner()).push((link.target.clone(), link.line));
         return;
     }
@@ -123,6 +126,8 @@ pub fn activate(link: &Link) {
 /// Prüfungen langsamer Pfade (Netzlaufwerk, `\\wsl$`), die gerade laufen oder kürzlich liefen (#251).
 struct SlowCheck {
     result: Option<bool>,
+    /// Ist es ein Ordner (mit dem Ergebnis gemessen)?
+    dir: bool,
     at: std::time::Instant,
 }
 
@@ -152,13 +157,15 @@ fn exists_cached(path: &str) -> Option<bool> {
     if map.len() >= SLOW_MAX {
         map.retain(|_, c| c.result.is_none());
     }
-    map.insert(path.to_string(), SlowCheck { result: None, at: now });
+    map.insert(path.to_string(), SlowCheck { result: None, dir: false, at: now });
     let p = path.to_string();
     let spawned = std::thread::Builder::new().name("link-check".into()).spawn(move || {
-        let r = Path::new(&p).exists();
+        let m = std::fs::metadata(&p);
+        let (r, dir) = (m.is_ok(), m.is_ok_and(|m| m.is_dir()));
         let mut g = SLOW_CHECKS.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(c) = g.get_or_insert_with(Default::default).get_mut(&p) {
             c.result = Some(r);
+            c.dir = dir;
             c.at = std::time::Instant::now();
         }
     });
@@ -166,6 +173,12 @@ fn exists_cached(path: &str) -> Option<bool> {
         map.remove(path);
     }
     None
+}
+
+/// Ordner laut der letzten Prüfung im Hilfsthread (`None`: nicht geprüft oder läuft noch). Fragt nie selbst.
+fn dir_cached(path: &str) -> Option<bool> {
+    let g = SLOW_CHECKS.lock().unwrap_or_else(|e| e.into_inner());
+    g.as_ref().and_then(|m| m.get(path)).and_then(|c| c.result.map(|_| c.dir))
 }
 
 /// Läuft gerade eine Pfadprüfung im Hilfsthread? Dann zeichnet das Terminal bald noch einmal, damit der Link erscheint.

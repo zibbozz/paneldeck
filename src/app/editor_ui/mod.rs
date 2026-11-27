@@ -16,6 +16,7 @@
 //! offen ist; jeder Reiter hat seine eigene Ansicht (Cursor, Bildlauf).
 
 mod doc;
+pub(crate) use doc::DiskJobDone;
 mod find;
 pub(crate) mod format;
 mod menu;
@@ -331,6 +332,20 @@ impl EditorUi {
         self.docs.insert(id, DocEntry::untitled(n, text));
         self.show_doc(id, false);
         id
+    }
+
+    /// Fertige Hintergrund-Läufe (Speichern/Neu laden von WSL-Dateien, #392) übernehmen: (Titel, Ergebnis). `busy`: es
+    /// läuft noch einer.
+    pub(super) fn poll_disk_jobs(&mut self, lang: crate::state::Lang) -> (Vec<(String, doc::DiskJobDone)>, bool) {
+        let mut out = Vec::new();
+        let mut busy = false;
+        for d in self.docs.values_mut() {
+            if let Some(r) = d.poll_disk_job(lang) {
+                out.push((d.title(lang), r));
+            }
+            busy |= d.disk_busy();
+        }
+        (out, busy)
     }
 
     /// Wartenden Sprung zur Zeile ausführen, sobald das Dokument geladen ist und sein Reiter vorn steht.

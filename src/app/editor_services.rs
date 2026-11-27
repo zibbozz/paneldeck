@@ -135,6 +135,21 @@ impl App {
         if self.ed.pending_goto.is_some() {
             ctx.request_repaint_after(Duration::from_millis(50));
         }
+        // Speichern/Neu laden von WSL-Dateien im Hintergrund (#392).
+        let lang = self.settings.language;
+        let (done, busy) = self.ed.poll_disk_jobs(lang);
+        for (title, r) in done {
+            use super::editor_ui::DiskJobDone;
+            match r {
+                DiskJobDone::Saved => self.ed.set_hint(format!("{title}: {}", lang.t("gespeichert", "saved"))),
+                DiskJobDone::Reloaded(s) => self.ed.set_hint(format!("{title}: {}{}", lang.t("von der Platte neu geladen", "reloaded from disk"), if s.is_empty() { String::new() } else { format!(" ({s})") })),
+                DiskJobDone::Failed(e) => self.notify_text(format!("{title}: {e}")),
+                DiskJobDone::Conflict | DiskJobDone::Deleted | DiskJobDone::Unchanged => {}
+            }
+        }
+        if busy {
+            ctx.request_repaint_after(Duration::from_millis(100));
+        }
         let open = self.editor_bridge_paths();
         let c = ctx.clone();
         let events = self.editor_svc.watch.tick(Instant::now(), &open, move || c.request_repaint());

@@ -933,6 +933,8 @@ impl App {
         // Ordnerfeld nach der Shell des Prozesses (#392): Linux-Pfade für WSL, Git Bash `/c/x`, `~`.
         let cwd_target = super::folder_picker::Target::for_shell(procs::resolve_shell(&ed.shell, &self.shells), false);
         let wsl_recent = self.settings.wsl_recent.clone();
+        // Ordnerfeld lässt den Wert nicht übernehmen (#392) → Speichern gesperrt.
+        let mut cwd_block: Option<String> = None;
         let esc = ctx.input(|i| i.key_pressed(Key::Escape));
         style::movable(ctx, Id::new("proc_editor"), egui::Window::new(title)).collapsible(false).resizable(false).show(ctx, |ui| {
             ui.set_max_width(560.0);
@@ -944,7 +946,7 @@ impl App {
                 ui.add(egui::TextEdit::singleline(&mut ed.command).hint_text("npm run dev").font(egui::TextStyle::Monospace).desired_width(380.0));
                 ui.end_row();
                 ui.label(lang.t("Ordner", "Folder"));
-                super::folder_picker::field(ui, ("proc_cwd", ed.id), &mut ed.cwd, cwd_target.clone(), false, lang, &wsl_recent);
+                cwd_block = super::folder_picker::field(ui, ("proc_cwd", ed.id), &mut ed.cwd, cwd_target.clone(), false, lang, &wsl_recent).blocking;
                 ui.end_row();
                 ui.label(lang.t("Shell", "Shell"));
                 let current = if ed.shell.is_empty() { lang.t("PowerShell (Standard)", "PowerShell (default)").to_string() } else { shells.iter().find(|(id, _)| *id == ed.shell).map(|(_, l)| l.clone()).unwrap_or_else(|| ed.shell.clone()) };
@@ -1029,7 +1031,11 @@ impl App {
             }
             ui.add_space(S2);
             ui.horizontal(|ui| {
-                save = ui.button(RichText::new(lang.t("Speichern", "Save")).strong()).clicked();
+                let sb = ui.add_enabled(cwd_block.is_none(), egui::Button::new(RichText::new(lang.t("Speichern", "Save")).strong()));
+                save = sb.clicked();
+                if let Some(why) = &cwd_block {
+                    sb.on_disabled_hover_text(why.as_str());
+                }
                 cancel = ui.button(lang.t("Abbrechen", "Cancel")).clicked();
                 if ed.id.is_some() {
                     ui.add_space(S3);
@@ -1330,8 +1336,20 @@ fn proc_cwd_with(shell: &ShellSpec, spec: &mut ShellSpec, cwd: &str, lang: Lang,
             let distro = kind.distro_with(lk);
             let home = distro.as_deref().and_then(|d| lk.wsl_home(d));
             let c = if cwd.starts_with("~/") { crate::wsl::normalize(cwd, home.as_deref()) } else { cwd.to_string() };
-            if c.starts_with("~/") {
-                return Err(format!("{} {}", crate::targetpath::PathErr::HomeUnknown.message(lang), lang.q(cwd)));
+            if let Some(rest) = c.strip_prefix("~/") {
+                // Home noch nicht bekannt (erster Start, es wird im Hintergrund geholt): im Home starten und den
+                // Unterordner in der Shell wechseln – `~/'…'` (Tilde ungequotet, der Rest in '…'); Namen mit `'` oder
+                // ungültigen Zeichen nicht (#392).
+                if rest.contains('\'') || crate::wsl::validate_linux_path(&format!("/{rest}")).is_err() {
+                    return Err(format!("{} {}", crate::targetpath::PathErr::HomeUnknown.message(lang), lang.q(cwd)));
+                }
+                if crate::wsl::apply_cd(&mut spec.args, "~", distro.as_deref()) != crate::wsl::Cd::Linux {
+                    return Err(format!("{} {}", crate::targetpath::PathErr::HomeUnknown.message(lang), lang.q(cwd)));
+                }
+                if let Some(cmd) = spec.args.last_mut() {
+                    *cmd = format!("cd -- ~/'{rest}' || exit 1; {cmd}");
+                }
+                return Ok((String::new(), true));
             }
             match crate::wsl::apply_cd(&mut spec.args, &c, distro.as_deref()) {
                 crate::wsl::Cd::Linux => Ok((String::new(), true)),
@@ -1376,6 +1394,29 @@ mod tests {
         let (mut spec, _) = procs::launch_spec(&wsl, "npm start");
         assert_eq!(proc_cwd_with(&wsl, &mut spec, "~/app", Lang::En, &Lk), Ok((String::new(), true)));
         assert_eq!(&spec.args[..2], ["--cd", "/home/u/app"]);
+        // Home noch unbekannt (erster Start): im Home starten, Unterordner in der Shell wechseln
+        struct NoHome;
+        impl crate::targetpath::Lookup for NoHome {
+            fn wsl_home(&self, _d: &str) -> Option<String> {
+                None
+            }
+            fn wsl_mount(&self, _d: &str) -> Option<String> {
+                None
+            }
+            fn default_distro(&self) -> Option<String> {
+                None
+            }
+            fn win_home(&self) -> String {
+                String::new()
+            }
+        }
+        let (mut spec, _) = procs::launch_spec(&wsl, "npm start");
+        assert_eq!(proc_cwd_with(&wsl, &mut spec, "~/my app", Lang::En, &NoHome), Ok((String::new(), true)));
+        assert_eq!(&spec.args[..2], ["--cd", "~"]);
+        assert_eq!(spec.args.last().map(String::as_str), Some("cd -- ~/'my app' || exit 1; npm start"));
+        let (mut spec, _) = procs::launch_spec(&wsl, "x");
+        assert!(proc_cwd_with(&wsl, &mut spec, "~/a'b", Lang::En, &NoHome).is_err(), "kein ' im Namen");
+        assert!(proc_cwd_with(&wsl, &mut spec, "~/a\"b", Lang::En, &NoHome).is_err());
         let (mut spec, _) = procs::launch_spec(&wsl, "x");
         assert_eq!(proc_cwd_with(&wsl, &mut spec, r"\\wsl.localhost\Ubuntu\srv", Lang::En, &Lk), Ok((String::new(), true)));
         assert_eq!(&spec.args[..2], ["--cd", "/srv"]);

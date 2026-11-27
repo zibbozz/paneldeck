@@ -150,6 +150,78 @@ pub(crate) struct DocEntry {
     pub(super) scratch: Selections,
     /// Syntax-Modus (#312).
     pub syntax: SyntaxDoc,
+    /// Speichern bzw. Neu laden einer WSL-Datei im Hilfsthread (#392; langsames Dateisystem, nie im UI-Thread).
+    disk_job: Option<DiskJob>,
+}
+
+/// Lesen bzw. Schreiben einer WSL-Datei im Hilfsthread (#392).
+enum DiskJob {
+    Save { rx: std::sync::mpsc::Receiver<Result<core::WriteResult, core::SaveError>>, path: PathBuf, state: u64 },
+    /// `force`: „Von der Platte laden“ (immer übernehmen); sonst Meldung der Überwachung (wie [`DocEntry::disk_changed`]).
+    Reload { rx: std::sync::mpsc::Receiver<std::io::Result<(Vec<u8>, std::fs::Metadata)>>, force: bool },
+}
+
+/// Ergebnis eines fertigen [`DiskJob`] für die Oberfläche.
+#[derive(Debug, PartialEq)]
+pub(crate) enum DiskJobDone {
+    Saved,
+    Reloaded(String),
+    Conflict,
+    Deleted,
+    Unchanged,
+    Failed(String),
+}
+
+/// Liegt die Datei in WSL (`\\wsl.localhost\…`)? Dann nie im UI-Thread lesen, schreiben oder prüfen.
+pub(super) fn is_wsl_path(p: &std::path::Path) -> bool {
+    crate::wsl::is_wsl_unc(&p.to_string_lossy())
+}
+
+/// Datei öffnen, wenn es sie gibt; nur „nicht gefunden“ ergibt ein neues, leeres Dokument – jeder andere Fehler (kein
+/// Zugriff, Netzwerk, WSL antwortet nicht) ist ein Ladefehler, damit Speichern die Datei nie mit einem leeren Puffer
+/// überschreibt.
+fn open_or_new(p: &std::path::Path, opts: &core::OpenOptions) -> Result<Document, String> {
+    match std::fs::metadata(p) {
+        Ok(m) if m.is_file() => Document::open(p, opts).map(|(d, _)| d).map_err(|e| e.to_string()),
+        Ok(_) => Err(crate::state::t("Kein reguläre Datei (Ordner?).", "Not a regular file (a folder?).").to_string()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Document::new_file(Some(p), opts)),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+/// Meldung zu einem Fehler beim Speichern.
+fn save_error_text(e: core::SaveError, lang: Lang) -> String {
+    match e {
+        core::SaveError::Unencodable(u) => format!("{} U+{:04X}", lang.t("Zeichen passt nicht in die Kodierung:", "Character does not fit the encoding:"), u.ch as u32),
+        core::SaveError::ReadOnly => lang.t("Die Datei ist schreibgeschützt.", "The file is read-only.").to_string(),
+        core::SaveError::NoPath => lang.t("Die Datei hat noch keinen Namen.", "The file has no name yet.").to_string(),
+        e => format!("{}: {e}", lang.t("Fehler beim Speichern", "Error while saving")),
+    }
+}
+
+#[cfg(test)]
+mod wsl_io_tests {
+    use super::*;
+
+    /// #392: Nur „nicht gefunden“ ergibt ein neues Dokument; jeder andere Fehler ist ein Ladefehler (sonst überschriebe
+    /// Speichern eine nicht lesbare Datei mit einem leeren Puffer).
+    #[test]
+    fn only_missing_files_become_new_documents() {
+        let dir = std::env::temp_dir().join(format!("pd-open-or-new-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let opts = core::OpenOptions::default();
+        assert!(open_or_new(&dir.join("neu.txt"), &opts).is_ok_and(|d| d.text().is_empty()));
+        std::fs::write(dir.join("a.txt"), "inhalt").unwrap();
+        assert_eq!(open_or_new(&dir.join("a.txt"), &opts).map(|d| d.text()), Ok("inhalt".to_string()));
+        assert!(open_or_new(&dir, &opts).is_err(), "Ordner");
+        // Eine Datei als Ordner im Pfad: kein NotFound unter Windows/Linux → Ladefehler, kein leeres Dokument
+        let r = open_or_new(&dir.join("a.txt").join("x.txt"), &opts);
+        if let Err(e) = &r {
+            assert!(!e.is_empty());
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(is_wsl_path(std::path::Path::new(r"\\wsl.localhost\U\x")) && !is_wsl_path(std::path::Path::new(r"C:\x")));
+    }
 }
 
 /// Ab dieser Dateigröße wird im Hilfsthread gelesen (die Oberfläche bleibt bedienbar).
@@ -157,7 +229,7 @@ pub(super) const BACKGROUND_BYTES: u64 = 4 * 1024 * 1024;
 
 impl DocEntry {
     fn blank(path: Option<PathBuf>, untitled: u32) -> Self {
-        DocEntry { path, untitled, doc: None, load_error: None, pending_hot: None, initial_text: None, hot: Default::default(), opened_by_agent: false, agent_edited: false, agent_note_dismissed: false, large_dismissed: false, disk_conflict: false, disk_deleted: false, edited_at: None, touched: false, loading: None, scratch: Selections::default(), syntax: SyntaxDoc::default() }
+        DocEntry { path, untitled, doc: None, load_error: None, pending_hot: None, initial_text: None, hot: Default::default(), opened_by_agent: false, agent_edited: false, agent_note_dismissed: false, large_dismissed: false, disk_conflict: false, disk_deleted: false, edited_at: None, touched: false, loading: None, scratch: Selections::default(), syntax: SyntaxDoc::default(), disk_job: None }
     }
 
     /// Noch nicht gelesenes Dokument (Datei und/oder Hot-Exit-Inhalt).
@@ -235,8 +307,7 @@ impl DocEntry {
         if let Some(p) = self.path.clone().filter(|p| crate::wsl::is_wsl_unc(&p.to_string_lossy())) {
             let (tx, rx) = std::sync::mpsc::channel();
             std::thread::spawn(move || {
-                let r = if p.is_file() { Document::open(&p, &opts).map(|(d, _)| d).map_err(|e| e.to_string()) } else { Ok(Document::new_file(Some(&p), &opts)) };
-                let _ = tx.send(r);
+                let _ = tx.send(open_or_new(&p, &opts));
             });
             self.loading = Some(rx);
             return self.load(prefs, wait);
@@ -250,14 +321,13 @@ impl DocEntry {
             return self.load(prefs, wait);
         }
         let doc = match &self.path {
-            Some(p) if p.is_file() => match Document::open(p, &opts) {
-                Ok((d, _report)) => d,
+            Some(p) => match open_or_new(p, &opts) {
+                Ok(d) => d,
                 Err(e) => {
-                    self.load_error = Some(e.to_string());
+                    self.load_error = Some(e);
                     return;
                 }
             },
-            Some(p) => Document::new_file(Some(p), &opts),
             None => match self.initial_text.take() {
                 Some(t) => Document::from_text(&t),
                 None => Document::new_file(None, &opts),
@@ -411,8 +481,18 @@ impl DocEntry {
         self.edited_at = Some(std::time::Instant::now());
     }
 
-    /// Speichern (unter `path`, sonst unter dem eigenen Pfad).
+    /// Läuft gerade Speichern/Neu laden einer WSL-Datei im Hintergrund?
+    pub fn disk_busy(&self) -> bool {
+        self.disk_job.is_some()
+    }
+
+    /// Speichern (unter `path`, sonst unter dem eigenen Pfad). WSL-Dateien (#392) im Hilfsthread: `Ok` heißt dann
+    /// „gestartet“, das Ergebnis liefert [`DocEntry::poll_disk_job`].
     pub fn save(&mut self, path: Option<PathBuf>, lang: Lang) -> Result<(), String> {
+        let target = path.clone().or_else(|| self.path.clone());
+        if target.as_deref().is_some_and(is_wsl_path) {
+            return self.save_in_background(target.unwrap_or_default(), lang);
+        }
         let Some(d) = self.doc.as_mut() else { return Ok(()) };
         let r = match &path {
             Some(p) => d.save_as(&mut self.scratch, p),
@@ -428,11 +508,99 @@ impl DocEntry {
                 self.agent_edited = false;
                 Ok(())
             }
-            Err(core::SaveError::Unencodable(u)) => Err(format!("{} U+{:04X}", lang.t("Zeichen passt nicht in die Kodierung:", "Character does not fit the encoding:"), u.ch as u32)),
-            Err(core::SaveError::ReadOnly) => Err(lang.t("Die Datei ist schreibgeschützt.", "The file is read-only.").to_string()),
-            Err(core::SaveError::NoPath) => Err(lang.t("Die Datei hat noch keinen Namen.", "The file has no name yet.").to_string()),
-            Err(e) => Err(format!("{}: {e}", lang.t("Fehler beim Speichern", "Error while saving"))),
+            Err(e) => Err(save_error_text(e, lang)),
         }
+    }
+
+    fn save_in_background(&mut self, path: PathBuf, lang: Lang) -> Result<(), String> {
+        if self.disk_job.is_some() {
+            return Err(lang.t("Die Datei wird gerade noch gespeichert oder gelesen – bitte gleich noch einmal.", "The file is still being saved or read – please try again in a moment.").to_string());
+        }
+        let Some(d) = self.doc.as_mut() else { return Ok(()) };
+        let job = d.begin_save(&mut self.scratch, Some(&path)).map_err(|e| save_error_text(e, lang))?;
+        let (tx, rx) = std::sync::mpsc::channel();
+        let state = job.state;
+        std::thread::spawn(move || {
+            let _ = tx.send(job.write());
+        });
+        self.disk_job = Some(DiskJob::Save { rx, path, state });
+        Ok(())
+    }
+
+    /// Fertigen Hintergrund-Lauf übernehmen (je Bild). `None`: keiner oder läuft noch.
+    pub fn poll_disk_job(&mut self, lang: Lang) -> Option<DiskJobDone> {
+        use std::sync::mpsc::TryRecvError;
+        let job = self.disk_job.take()?;
+        match job {
+            DiskJob::Save { rx, path, state } => match rx.try_recv() {
+                Err(TryRecvError::Empty) => {
+                    self.disk_job = Some(DiskJob::Save { rx, path, state });
+                    None
+                }
+                Err(TryRecvError::Disconnected) => Some(DiskJobDone::Failed(lang.t("Speichern abgebrochen.", "Saving was interrupted.").to_string())),
+                Ok(Err(e)) => Some(DiskJobDone::Failed(save_error_text(e, lang))),
+                Ok(Ok(w)) => {
+                    if let Some(d) = self.doc.as_mut() {
+                        d.finish_save(&path, state, w);
+                    }
+                    self.path = Some(path);
+                    self.disk_conflict = false;
+                    self.disk_deleted = false;
+                    self.touched = true;
+                    self.edited_at = None;
+                    self.agent_edited = false;
+                    Some(DiskJobDone::Saved)
+                }
+            },
+            DiskJob::Reload { rx, force } => match rx.try_recv() {
+                Err(TryRecvError::Empty) => {
+                    self.disk_job = Some(DiskJob::Reload { rx, force });
+                    None
+                }
+                Err(TryRecvError::Disconnected) => Some(DiskJobDone::Unchanged),
+                Ok(Err(e)) if e.kind() == std::io::ErrorKind::NotFound && !force => {
+                    if let Some(d) = self.doc.as_mut() {
+                        d.mark_deleted_on_disk();
+                    }
+                    self.disk_deleted = true;
+                    Some(DiskJobDone::Deleted)
+                }
+                Ok(Err(e)) => Some(if force { DiskJobDone::Failed(e.to_string()) } else { DiskJobDone::Unchanged }),
+                Ok(Ok((bytes, meta))) => {
+                    let Some(d) = self.doc.as_mut() else { return Some(DiskJobDone::Unchanged) };
+                    if !force && !d.differs_from_disk(&bytes, &meta) {
+                        return Some(DiskJobDone::Unchanged);
+                    }
+                    if !force && d.is_dirty() {
+                        self.disk_conflict = true;
+                        return Some(DiskJobDone::Conflict);
+                    }
+                    match d.reload_with_bytes(&mut self.scratch, bytes, &meta) {
+                        Ok(s) => {
+                            self.disk_conflict = false;
+                            self.disk_deleted = false;
+                            self.touched = true;
+                            Some(DiskJobDone::Reloaded(if s.is_empty() { String::new() } else { format!("+{} −{} {}", s.inserted, s.deleted, lang.t("Zeilen", "lines")) }))
+                        }
+                        Err(e) => Some(DiskJobDone::Failed(e.to_string())),
+                    }
+                }
+            },
+        }
+    }
+
+    /// WSL-Datei im Hilfsthread lesen (#392); das Ergebnis übernimmt [`DocEntry::poll_disk_job`].
+    fn reload_in_background(&mut self, force: bool) {
+        let Some(p) = self.path.clone() else { return };
+        if self.disk_job.is_some() {
+            return;
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let r = std::fs::read(&p).and_then(|b| std::fs::metadata(&p).map(|m| (b, m)));
+            let _ = tx.send(r);
+        });
+        self.disk_job = Some(DiskJob::Reload { rx, force });
     }
 
     /// Kodierung für das nächste Speichern setzen.
@@ -456,6 +624,11 @@ impl DocEntry {
 
     /// Datei neu lesen (Hinweisleiste „Von der Platte laden“).
     pub fn reload_from_disk(&mut self, _prefs: &super::EditorPrefs) -> Option<core::DiffSummary> {
+        if self.path.as_deref().is_some_and(is_wsl_path) {
+            // WSL (#392): im Hilfsthread; das Ergebnis kommt über `poll_disk_job`.
+            self.reload_in_background(true);
+            return None;
+        }
         let d = self.doc.as_mut()?;
         let r = d.reload_from_disk(&mut self.scratch).ok();
         self.disk_conflict = false;
@@ -493,6 +666,13 @@ impl DocEntry {
 
     /// Meldung der Überwachung verarbeiten.
     pub fn disk_changed(&mut self, prefs: &super::EditorPrefs, lang: Lang) -> DiskReaction {
+        if self.path.as_deref().is_some_and(is_wsl_path) {
+            // WSL (#392): Prüfen und still neu laden im Hilfsthread (`poll_disk_job`).
+            if self.doc.is_some() {
+                self.reload_in_background(false);
+            }
+            return DiskReaction::Nothing;
+        }
         let Some(d) = self.doc.as_mut() else { return DiskReaction::Nothing };
         let Ok(state) = d.check_disk() else { return DiskReaction::Nothing };
         match d.disk_change_action(&state) {
