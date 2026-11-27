@@ -348,7 +348,6 @@ mod tests {
     #[test]
     fn a_3_0_database_gets_the_time_tables_and_backups_include_them() {
         use crate::planning::projects::{create_project, NewProject};
-        use crate::planning::tickets::{create_ticket, NewTicket};
         use crate::time::{store, Alarm, Birthday};
         let d = tmp("db-v10-time");
         let bdir = d.join("backups");

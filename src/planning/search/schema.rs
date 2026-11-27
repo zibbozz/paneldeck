@@ -458,7 +458,7 @@ pub fn search_schema_only(conn: &Connection, scope: Scope, lang: Lang, only: Opt
     reg.add(&nm("project", "Projekt"), FieldType::Option(project_set.flat_names()), false, Store::Project(project_set));
     if projects.iter().any(|p| p.use_sprints) {
         // Auswahlwerte: die Namen der Sprints (siehe `pending.rs`)
-        reg.add(&["sprint".to_string()], FieldType::Option(pending::sprint_names(conn, scope)?), false, Store::Sprint);
+        reg.add(&["sprint".to_string()], FieldType::Option(pending::sprint_names(conn, scope, only)?), false, Store::Sprint);
     }
     reg.add(&nm("changedBy", "GeändertVon"), FieldType::Option(CHANGED_BY.iter().map(|s| s.to_string()).collect()), false, Store::ChangedBy);
     let terminal_idx = reg
@@ -522,7 +522,7 @@ pub fn search_schema_only(conn: &Connection, scope: Scope, lang: Lang, only: Opt
             conflicts.push(Conflict { name: groups[win].names[0].clone(), kept: groups[win].fields.first().map(|f| f.0.kind), dropped });
         }
     }
-    let versions_on = pending::versions_enabled(conn, scope)?;
+    let versions_on = pending::versions_enabled(conn, scope, only)?;
     for wi in winners {
         let g = &groups[wi];
         // ohne Versionen im Bereich (Schalter `use_versions` überall aus) gibt es diese Felder in der Abfrage nicht
@@ -567,7 +567,7 @@ pub fn search_schema_only(conn: &Connection, scope: Scope, lang: Lang, only: Opt
             Class::Labels => (FieldType::Labels, true),
             Class::Ticket => (FieldType::TicketRef, false),
             Class::Terminal => (FieldType::Terminal, false),
-            Class::Version | Class::Milestone => (FieldType::Option(pending::version_names(conn, scope, g.class == Class::Milestone)?), false),
+            Class::Version | Class::Milestone => (FieldType::Option(pending::version_names(conn, scope, g.class == Class::Milestone, only)?), false),
         };
         let store = |opts: OptionSet| Store::Values(Vals { class: g.class, fields: g.fields.iter().map(|f| f.0).collect(), opts, links: false });
         if reg.add(&g.names, ty.clone(), multi, store(opts.clone())).is_some() {
@@ -616,7 +616,7 @@ pub fn search_schema_only(conn: &Connection, scope: Scope, lang: Lang, only: Opt
     schema.fields = reg.defs;
     schema.predicates = keyword_names(conn, true, &broken)?;
     schema.sort_keywords = keyword_names(conn, false, &broken)?;
-    let active_sprints = if projects.iter().any(|p| p.use_sprints) { pending::active_sprints(conn, scope)? } else { Vec::new() };
+    let active_sprints = if projects.iter().any(|p| p.use_sprints) { pending::active_sprints(conn, scope, only)? } else { Vec::new() };
     Ok(SearchSchema { schema, scope, conflicts, bindings: reg.bindings, by_name: reg.by_name, preds, sorts, kw_fields, active_sprints })
 }
 

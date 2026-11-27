@@ -188,7 +188,7 @@ pub fn convert_todo_with_values(conn: &Connection, todo_id: i64, project_id: i64
                 values.retain(|(i, _)| i != fid);
                 values.push((*fid, v.clone()));
             }
-            let (ticket, op) = create_ticket(conn, &NewTicket { project_id, type_id, title, parent_id: None, values }, source)?;
+            let (ticket, mut op) = create_ticket(conn, &NewTicket { project_id, type_id, title, parent_id: None, values }, source)?;
             // Zuordnung und Abhaken über dieselbe Operation wie beim Wiederholen (Strg+Y), damit beides gleich aussieht
             let link = TicketOp::TodoConversion { todo: todo_id, ticket: ticket.id, was_done: item.done, present: true };
             run_conversion(conn, todo_id, ticket.id, item.done, true)?;
@@ -196,6 +196,10 @@ pub fn convert_todo_with_values(conn: &Connection, todo_id: i64, project_id: i64
             let all_tags = tasks::list_tags(conn).map_err(task_err)?;
             if tasks::is_private(&item, &all_tags) {
                 conn.execute("UPDATE tickets SET private = 1 WHERE id = ?1", [ticket.id])?;
+                // Auch das Abbild für Rückgängig/Wiederholen: ein wiederhergestelltes Ticket bleibt privat.
+                if let TicketOp::Created { snapshot, .. } = &mut op {
+                    snapshot.ticket.private = true;
+                }
             }
             let ticket = get_ticket(conn, ticket.id)?;
             Ok(Conversion { ticket, op: TicketOp::Batch(vec![op, link]), dropped_tags, body_dropped })
@@ -303,6 +307,13 @@ mod tests {
         let (it, _) = tasks::create_item_ext(&f.c, "Geheim", "", None, &[], &tasks::ItemMeta { private: true, ..Default::default() }).unwrap();
         let c = convert_todo_to_ticket(&f.c, it.id, f.project, f.task, &Source::ui()).unwrap();
         assert!(c.ticket.private);
+        // Rückgängig und Wiederholen der Umwandlung: das Ticket bleibt privat
+        {
+            use crate::undo::Op;
+            c.op.inverse().apply(&f.c).unwrap();
+            c.op.apply(&f.c).unwrap();
+            assert!(crate::planning::tickets::get_ticket(&f.c, c.ticket.id).unwrap().private, "nach Wiederholen noch privat");
+        }
         let (it2, _) = tasks::create_item(&f.c, "Offen", "", None, &[]).unwrap();
         assert!(!convert_todo_to_ticket(&f.c, it2.id, f.project, f.task, &Source::ui()).unwrap().ticket.private);
     }

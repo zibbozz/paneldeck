@@ -112,6 +112,15 @@ pub fn list_tickets(conn: &Connection, project_id: Option<i64>, f: &TicketFilter
     }
     match f.parent {
         ParentFilter::Any => {}
+        // Sicht eines Agenten (#386): ein unsichtbares Eltern-Ticket zählt wie keins.
+        ParentFilter::Root if f.hide_private => {
+            let only = match &f.only_projects {
+                Some(o) if !o.is_empty() => format!(" AND tp.project_id IN ({})", o.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(",")),
+                Some(_) => " AND 0".to_string(),
+                None => String::new(),
+            };
+            push(format!("(t.parent_id IS NULL OR NOT EXISTS (SELECT 1 FROM tickets tp WHERE tp.id = t.parent_id AND tp.private = 0 AND tp.trashed_at IS NULL{only}))"), vec![], &mut wh)
+        }
         ParentFilter::Root => push("t.parent_id IS NULL".into(), vec![], &mut wh),
         ParentFilter::Of(id) => push("t.parent_id = ?".into(), vec![Sql::Integer(id)], &mut wh),
     }

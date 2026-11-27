@@ -168,7 +168,8 @@ impl AccessMap {
     pub fn ticket_project(&self, who: Caller, id: i64) -> McpLevel {
         match self.tickets.get(&id) {
             None => McpLevel::Off,
-            Some(t) => match t.link.filter(|p| self.projects.contains_key(p)) {
+            // Verknüpft mit einem unbekannten (gelöschten) Seitenleisten-Projekt: gesperrt, nie die eigene Stufe.
+            Some(t) => match t.link {
                 Some(p) => self.sidebar(who, p),
                 None => self.reach(t.own, matches!(who, Caller::Home(_))),
             },
@@ -183,9 +184,9 @@ impl AccessMap {
         }
     }
 
-    /// Stufe für eine Todo-Karte im Projekt `project` (`None` oder unbekannt = „Allgemein“).
+    /// Stufe für eine Todo-Karte im Projekt `project` (`None` = „Allgemein“; ein unbekanntes Projekt ist gesperrt).
     pub fn card(&self, who: Caller, project: Option<u64>) -> McpLevel {
-        let area = match project.filter(|p| self.projects.contains_key(p)) {
+        let area = match project {
             Some(p) => self.sidebar(who, p),
             None => self.general(who),
         };
@@ -198,6 +199,12 @@ impl AccessMap {
             Area::Tickets(t) => self.ticket_project(who, t),
             Area::General => self.general(who),
         }
+    }
+
+    /// Bekommen Agenten mehr Zugriff, wenn Sitzungen (und Karten, Prozesse) von `from` nach `to` ziehen? Für die Agenten der
+    /// verschobenen Sitzungen (Heimatprojekt vorher/nachher) und für alle übrigen („Für alle“).
+    pub fn move_gains(&self, from: u64, to: u64) -> bool {
+        self.sidebar(Caller::Home(to), to) > self.sidebar(Caller::Home(from), from) || self.sidebar(Caller::External, to) > self.sidebar(Caller::External, from)
     }
 
     /// Höchste Stufe, die irgendein Agent irgendwo hat (für `tools/list`, das der Hub ohne Aufrufer beantwortet).
@@ -272,9 +279,9 @@ impl AgentView {
     }
 
     pub fn card_level(&self, project: Option<u64>) -> McpLevel {
-        // Unbekanntes (z. B. gelöschtes) Projekt: wie „Allgemein“ (so auch `AccessMap::card`).
-        match project.and_then(|p| self.cards.get(&p)) {
-            Some(l) => *l,
+        // Unbekanntes (z. B. gelöschtes) Projekt: gesperrt (so auch `AccessMap::card`).
+        match project {
+            Some(p) => self.cards.get(&p).copied().unwrap_or(McpLevel::Off),
             None => self.card_general,
         }
     }
@@ -333,8 +340,15 @@ pub fn switch_bits(create_projects: bool, delete: bool) -> u8 {
     (if create_projects { SW_CREATE } else { 0 }) | if delete { SW_DELETE } else { 0 }
 }
 
+/// Darf ein Chat dieses Werkzeug aufrufen? Wie bei externen Agenten: `create_project` und die Papierkorb-Werkzeuge nur mit
+/// ihrem Schalter, `update_comment` mit Steuern allein.
+pub fn allowed_for_chats(name: &str, bits: u8) -> bool {
+    name == "update_comment" || offered_to_chats(name, bits)
+}
+
 /// Bekommt ein Chat dieses Werkzeug angeboten? Die Werkzeuge der Erweiterung nur mit ihrem Schalter (spart sonst Platz im
-/// Chat-Prompt); `update_comment` gehört zum Schalter „Löschen“ (Kommentare verwalten).
+/// Chat-Prompt, der bei 8192 Tokens keinen mehr hat); `update_comment` wird mit dem Schalter „Löschen“ angeboten, ist aber
+/// auch ohne ihn erlaubt ([`allowed_for_chats`]; mit dem Nachladen von Werkzeugen, #393, immer angeboten).
 pub fn offered_to_chats(name: &str, bits: u8) -> bool {
     match name {
         "create_project" => bits & SW_CREATE != 0,
@@ -457,8 +471,9 @@ mod tests {
         assert_eq!(m.ticket_project(Caller::Home(3), 11), Read, "eigene Stufe (Aus) zählt nicht");
         assert_eq!(m.ticket_project(Caller::Home(1), 11), Off);
         assert_eq!(m.ticket_project(Caller::External, 11), Off);
-        // Verknüpfung auf ein gelöschtes Projekt: eigene Stufe
-        assert_eq!(m.ticket_project(Caller::External, 13), Read);
+        // Verknüpfung auf ein gelöschtes Projekt: gesperrt (nie die eigene Stufe)
+        assert_eq!(m.ticket_project(Caller::External, 13), Off);
+        assert_eq!(m.ticket_project(Caller::Home(99), 13), Off);
     }
 
     #[test]
@@ -467,7 +482,7 @@ mod tests {
         assert_eq!(m.card(Caller::Home(1), None), Control);
         assert_eq!(m.card(Caller::Home(1), Some(2)), Off);
         assert_eq!(m.card(Caller::Home(3), Some(3)), Read);
-        assert_eq!(m.card(Caller::Home(3), Some(42)), Control, "unbekanntes Projekt = Allgemein");
+        assert_eq!(m.card(Caller::Home(3), Some(42)), Off, "unbekanntes Projekt: gesperrt, nicht Allgemein");
         m.tickets.get_mut(&10).unwrap().own = acc(AreaLevel::Read, true);
         assert_eq!(m.card(Caller::Home(1), None), Read, "TODO begrenzt jede Karte");
         m.tickets.get_mut(&10).unwrap().own = AgentAccess::LOCKED;
@@ -486,6 +501,7 @@ mod tests {
         assert_eq!(v.card_level(Some(2)), Off);
         assert_eq!(v.card_level(Some(3)), Read);
         assert_eq!(v.card_level(None), Control);
+        assert_eq!(v.card_level(Some(4242)), Off, "unbekanntes Projekt");
         let e = m.view(Caller::External, true, true);
         assert_eq!((e.home, e.home_level), (None, Off));
         assert!(e.may_create_projects && e.may_delete);
@@ -521,6 +537,15 @@ mod tests {
     }
 
     #[test]
+    fn moving_into_a_project_with_more_access_is_noticed() {
+        let m = map(Control);
+        assert!(m.move_gains(2, 3), "gesperrt → nur lesen im eigenen Projekt (ohne „Für alle“)");
+        assert!(m.move_gains(3, 4), "nur lesen → Steuern für alle");
+        assert!(!m.move_gains(4, 3) && !m.move_gains(3, 2), "weniger Zugriff: kein Hinweis");
+        assert!(!m.move_gains(1, 1));
+    }
+
+    #[test]
     fn chats_get_the_extension_tools_only_with_their_switch() {
         for t in ["create_project", "delete_ticket", "update_comment", "delete_comment"] {
             assert!(!offered_to_chats(t, 0), "{t}");
@@ -529,6 +554,8 @@ mod tests {
         assert!(offered_to_chats("create_project", SW_CREATE) && !offered_to_chats("delete_ticket", SW_CREATE));
         assert!(offered_to_chats("delete_ticket", SW_DELETE) && !offered_to_chats("create_project", SW_DELETE));
         assert!(offered_to_chats("list_sessions", 0));
+        assert!(allowed_for_chats("update_comment", 0), "wie bei externen Agenten: Steuern genügt");
+        assert!(!allowed_for_chats("delete_comment", 0) && !allowed_for_chats("create_project", 0));
         assert_eq!(switch_bits(true, true), 3);
     }
 

@@ -1033,13 +1033,12 @@ impl PlanUi {
                 let r = set_flagged(cx.conn, tid, on, &src);
                 self.t_apply(cx, r);
             }
-            Act::Private(on) => match crate::planning::access::set_ticket_private(cx.conn, tid, on, &src) {
-                Ok(_) => {
-                    self.tickets.invalidate();
-                    self.tickets.detail_dirty = true;
-                }
-                Err(e) => self.msg_error(cx, e.message(lang)),
-            },
+            // Privat (#386): ein Rückgängig-Schritt wie Stern und Markierung.
+            Act::Private(on) => {
+                let r = crate::planning::tickets::set_private(cx.conn, tid, on, &src);
+                self.t_apply(cx, r);
+                self.tickets.invalidate();
+            }
             Act::Untrash => match crate::planning::access::restore_ticket(cx.conn, tid, &src) {
                 Ok(()) => {
                     self.tickets.invalidate();

@@ -178,7 +178,7 @@ impl ToolPolicy {
         let Some(def) = mcp::tools().into_iter().find(|d| d.name == call.name) else {
             return Err((ToolStatus::Error, error_json("unknown_tool", &self.unknown_tool_message(&call.name))));
         };
-        if !crate::access::offered_to_chats(def.name, self.access_switches) {
+        if !crate::access::allowed_for_chats(def.name, self.access_switches) {
             return Err((ToolStatus::Denied, error_json("forbidden", "The user has not allowed this (Settings -> Agents: \"Agents may create projects\" / \"Agents may delete tickets/comments\").")));
         }
         // Das Projekt des Chats begrenzt die Paneldeck-Werkzeuge (#386): gesperrt = `project_locked`, sonst `forbidden`.

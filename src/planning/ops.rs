@@ -43,6 +43,8 @@ pub enum MarkKind {
     Flag,
     /// Favoriten-Stern.
     Star,
+    /// Privat (#386): nie für Agenten sichtbar.
+    Private,
 }
 
 /// Alles, was nötig ist, um ein Ticket mit derselben Kennung wieder anzulegen.

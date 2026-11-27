@@ -49,50 +49,52 @@ fn push_unique(list: &mut Vec<String>, name: String) {
 }
 
 /// Namen der Sprints im Bereich (nur Projekte mit eingeschalteten Sprints), in der Reihenfolge Projekt, Anlegen; ohne Doppelte.
-pub(super) fn sprint_names(conn: &Connection, scope: Scope) -> SRes<Vec<String>> {
+/// `only`: Sicht eines Agenten (#386) – nur diese Projekte.
+pub(super) fn sprint_names(conn: &Connection, scope: Scope, only: Option<&[i64]>) -> SRes<Vec<String>> {
     let mut st = conn.prepare(
-        "SELECT s.name FROM sprints s JOIN projects p ON p.id = s.project_id
+        "SELECT s.name, p.id FROM sprints s JOIN projects p ON p.id = s.project_id
          WHERE p.system = 0 AND p.use_sprints = 1 AND (?1 IS NULL OR p.id = ?1) ORDER BY p.position, p.id, s.id",
     )?;
-    let rows = st.query_map(params![scope_id(scope)], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
+    let rows = st.query_map(params![scope_id(scope)], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?.collect::<Result<Vec<_>, _>>()?;
     let mut out = Vec::new();
-    for n in rows {
-        push_unique(&mut out, n);
+    for (n, pid) in rows {
+        if only.is_none_or(|o| o.contains(&pid)) {
+            push_unique(&mut out, n);
+        }
     }
     Ok(out)
 }
 
 /// Die aktiven Sprints im Bereich (Kennung, Name) – nur Projekte mit eingeschalteten Sprints.
-pub(super) fn active_sprints(conn: &Connection, scope: Scope) -> SRes<Vec<(i64, String)>> {
+pub(super) fn active_sprints(conn: &Connection, scope: Scope, only: Option<&[i64]>) -> SRes<Vec<(i64, String)>> {
     let mut st = conn.prepare(
-        "SELECT s.id, s.name FROM sprints s JOIN projects p ON p.id = s.project_id
+        "SELECT s.id, s.name, p.id FROM sprints s JOIN projects p ON p.id = s.project_id
          WHERE s.state = 'active' AND p.system = 0 AND p.use_sprints = 1 AND (?1 IS NULL OR p.id = ?1) ORDER BY s.id",
     )?;
-    let rows = st.query_map(params![scope_id(scope)], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?.collect::<Result<Vec<_>, _>>()?;
-    Ok(rows)
+    let rows = st.query_map(params![scope_id(scope)], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)?)))?.collect::<Result<Vec<_>, _>>()?;
+    Ok(rows.into_iter().filter(|(_, _, p)| only.is_none_or(|o| o.contains(p))).map(|(i, n, _)| (i, n)).collect())
 }
 
 /// Nutzt mindestens ein Projekt des Bereichs Versionen/Meilensteine?
-pub(super) fn versions_enabled(conn: &Connection, scope: Scope) -> SRes<bool> {
-    let n: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM projects p WHERE p.system = 0 AND p.use_versions = 1 AND (?1 IS NULL OR p.id = ?1)",
-        params![scope_id(scope)],
-        |r| r.get(0),
-    )?;
-    Ok(n > 0)
+pub(super) fn versions_enabled(conn: &Connection, scope: Scope, only: Option<&[i64]>) -> SRes<bool> {
+    let mut st = conn.prepare("SELECT p.id FROM projects p WHERE p.system = 0 AND p.use_versions = 1 AND (?1 IS NULL OR p.id = ?1)")?;
+    let ids = st.query_map(params![scope_id(scope)], |r| r.get::<_, i64>(0))?.collect::<Result<Vec<_>, _>>()?;
+    Ok(ids.iter().any(|p| only.is_none_or(|o| o.contains(p))))
 }
 
 /// Namen der Versionen bzw. Meilensteine im Bereich (nur Projekte mit eingeschalteten Versionen), nach Projekt und Reihenfolge; ohne Doppelte.
-pub(super) fn version_names(conn: &Connection, scope: Scope, milestones: bool) -> SRes<Vec<String>> {
+pub(super) fn version_names(conn: &Connection, scope: Scope, milestones: bool, only: Option<&[i64]>) -> SRes<Vec<String>> {
     let table = if milestones { "milestones" } else { "versions" };
     let mut st = conn.prepare(&format!(
-        "SELECT r.name FROM {table} r JOIN projects p ON p.id = r.project_id
+        "SELECT r.name, p.id FROM {table} r JOIN projects p ON p.id = r.project_id
          WHERE p.system = 0 AND p.use_versions = 1 AND (?1 IS NULL OR p.id = ?1) ORDER BY p.position, p.id, r.position, r.id"
     ))?;
-    let rows = st.query_map(params![scope_id(scope)], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
+    let rows = st.query_map(params![scope_id(scope)], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?.collect::<Result<Vec<_>, _>>()?;
     let mut out = Vec::new();
-    for n in rows {
-        push_unique(&mut out, n);
+    for (n, pid) in rows {
+        if only.is_none_or(|o| o.contains(&pid)) {
+            push_unique(&mut out, n);
+        }
     }
     Ok(out)
 }

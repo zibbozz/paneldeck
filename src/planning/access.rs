@@ -171,16 +171,7 @@ pub(crate) fn note_ticket_origin(conn: &Connection, id: i64, source: &Source) ->
 
 /// Privat-Schalter eines Tickets (nur der Nutzer). Gibt zurück, ob sich etwas geändert hat; Verlaufseintrag `private`.
 pub fn set_ticket_private(conn: &Connection, id: i64, private: bool, source: &Source) -> TRes<bool> {
-    atomic(conn, || {
-        let cur: i64 = conn.query_row("SELECT private FROM tickets WHERE id = ?1", [id], |r| r.get(0)).optional()?.ok_or_else(TicketError::not_found)?;
-        if (cur != 0) == private {
-            return Ok(false);
-        }
-        conn.execute("UPDATE tickets SET private = ?1 WHERE id = ?2", params![private as i64, id])?;
-        let batch = history::next_batch(conn)?;
-        history::log(conn, id, source, batch, &HistoryField::Other("private".into()), Some(if cur != 0 { "1" } else { "0" }), Some(if private { "1" } else { "0" }))?;
-        Ok(true)
-    })
+    Ok(super::tickets::set_private(conn, id, private, source)?.is_some())
 }
 
 /// Ticket in den Papierkorb (wiederherstellbar). `source` steht im Verlauf und als `trashed_by`.
@@ -393,6 +384,24 @@ mod tests {
         assert_eq!(comments_of(&d, id).unwrap()[0].origin, Origin::Agent);
         // Dateien ohne die neuen Felder (ältere Fassungen) laden weiter: Nutzer, nicht privat
         assert!(!text.contains("\"private\":false"), "nur gesetzte Felder werden geschrieben");
+    }
+
+    #[test]
+    fn marking_private_is_an_undo_step_and_survives_redo_of_the_creation() {
+        use crate::undo::Op;
+        let f = Fx::new();
+        let (t, create) = crate::planning::tickets::create_ticket(&f.c, &crate::planning::tickets::NewTicket::new(f.project, f.task, "Neu"), &Source::ui()).unwrap();
+        let mark = crate::planning::tickets::set_private(&f.c, t.id, true, &Source::ui()).unwrap().expect("geändert");
+        mark.inverse().apply(&f.c).unwrap();
+        assert!(!get_ticket(&f.c, t.id).unwrap().private, "Rückgängig nimmt Privat zurück");
+        mark.apply(&f.c).unwrap();
+        assert!(get_ticket(&f.c, t.id).unwrap().private, "Wiederholen setzt es wieder");
+        // ganze Kette zurück und vor: Anlegen, Privat
+        mark.inverse().apply(&f.c).unwrap();
+        create.inverse().apply(&f.c).unwrap();
+        create.apply(&f.c).unwrap();
+        mark.apply(&f.c).unwrap();
+        assert!(get_ticket(&f.c, t.id).unwrap().private);
     }
 
     #[test]

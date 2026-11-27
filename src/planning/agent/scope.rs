@@ -341,9 +341,126 @@ mod tests {
                 assert!(!all.contains("Geheimfeld"), "{q}: {all}");
             }
         }
+        // Sprints und Versionen gesperrter Projekte stehen auch nicht als Werte im Schema (#386)
+        {
+            use crate::planning::projects::{update_project, UpdateProject};
+            use crate::planning::sprints::releases::{create_release, NewRelease, ReleaseKind};
+            for p in [f.project, sec] {
+                update_project(&f.c, p, &UpdateProject { use_sprints: Some(true), use_versions: Some(true), ..Default::default() }).unwrap();
+            }
+            let cal = crate::calc::calendar::WorkCalendar::default();
+            crate::planning::sprints::sprint::create_sprint(&f.c, &crate::planning::sprints::sprint::NewSprint::new(f.project, "OpenSprint"), &cal).unwrap();
+            crate::planning::sprints::sprint::create_sprint(&f.c, &crate::planning::sprints::sprint::NewSprint::new(sec, "HiddenSprint"), &cal).unwrap();
+            create_release(&f.c, ReleaseKind::Version, &NewRelease::new(f.project, "OpenVer")).unwrap();
+            create_release(&f.c, ReleaseKind::Version, &NewRelease::new(sec, "HiddenVer")).unwrap();
+            create_release(&f.c, ReleaseKind::Milestone, &NewRelease::new(sec, "HiddenMile")).unwrap();
+            let vis = view.project_ids();
+            let agent = format!("{:?}", crate::planning::search::search_schema_only(&f.c, crate::planning::search::Scope::All, Lang::En, Some(&vis)).unwrap().schema);
+            for secret in ["HiddenSprint", "HiddenVer", "HiddenMile", "Geheimfeld", "Secret"] {
+                assert!(!agent.contains(secret), "{secret} im Schema des Agenten");
+            }
+            assert!(agent.contains("OpenSprint"), "sichtbare Sprints bleiben");
+            let all = format!("{:?}", crate::planning::search::search_schema(&f.c, crate::planning::search::Scope::All, Lang::En).unwrap().schema);
+            assert!(all.contains("HiddenSprint"), "Oberfläche kennt alles");
+            let e = call(&ctx, "search_tickets", &json!({"query": "sprint = Nope"}), true).unwrap_err();
+            assert!(!format!("{} {:?}", e.message, e.details).contains("HiddenSprint"));
+        }
         // ohne Sicht (Oberfläche) kennt die Abfrage das Feld
         let plain = Ctx { conn: &f.c, lang: Lang::En, source: Source::ui(), now: now(), view: None, need: Default::default() };
         assert!(call(&plain, "search_tickets", &json!({"query": "Geheimfeld = x"}), true).is_ok());
+    }
+
+    #[test]
+    fn sprints_counts_releases_and_maintenance_never_reveal_hidden_tickets() {
+        use crate::calc::calendar::WorkCalendar;
+        use crate::planning::projects::{update_project, UpdateProject};
+        use crate::planning::sprints::sprint::{create_sprint, move_tickets_to_sprint, NewSprint};
+        let (f, sec) = setup();
+        update_project(&f.c, f.project, &UpdateProject { use_sprints: Some(true), ..Default::default() }).unwrap();
+        update_project(&f.c, sec, &UpdateProject { use_sprints: Some(true), ..Default::default() }).unwrap();
+        let a = f.mk(f.task, "Login fails on Safari");
+        let p = f.mk(f.task, "Login fails in Safari");
+        acc::set_ticket_private(&f.c, p.id, true, &Source::ui()).unwrap();
+        let cal = WorkCalendar::default();
+        let sp = create_sprint(&f.c, &NewSprint::new(f.project, "S1"), &cal).unwrap();
+        move_tickets_to_sprint(&f.c, sp, &[a.id, p.id]).unwrap();
+        let s = mk_in(&f, sec, "Secret");
+        let sp_sec = create_sprint(&f.c, &NewSprint::new(sec, "Hidden"), &cal).unwrap();
+        move_tickets_to_sprint(&f.c, sp_sec, &[s.id]).unwrap();
+        let view = map(&f, sec, AreaLevel::Control).view(Caller::Home(1), false, false);
+        let ctx = with(&f, &view);
+        // 1. Sprint über die Kennung: Projekt geprüft; private Tickets fehlen in Liste, Summen und Bericht
+        assert_eq!(call(&ctx, "get_sprint", &json!({"sprint": sp_sec}), true).unwrap_err().code, crate::access::LOCKED_CODE);
+        let d = call(&ctx, "get_sprint", &json!({"sprint": sp}), true).unwrap();
+        let keys: Vec<&str> = d.result["items"].as_array().unwrap().iter().map(|i| i["key"].as_str().unwrap()).collect();
+        assert_eq!(keys, vec![a.key().as_str()]);
+        assert_eq!(d.result["items_total"], 1);
+        assert_eq!(d.result["sprint"]["totals"]["total"]["tickets"], 1, "{}", d.result["sprint"]["totals"]);
+        assert!(d.result["report"].is_null());
+        let d = call(&ctx, "list_sprints", &json!({"project": "PAN"}), true).unwrap();
+        assert_eq!(d.result["sprints"][0]["totals"]["total"]["tickets"], 1);
+        // 3. Zähler der Projekte
+        let d = call(&ctx, "list_projects", &json!({}), true).unwrap();
+        let pan = d.result["projects"].as_array().unwrap().iter().find(|x| x["key"] == "PAN").unwrap().clone();
+        let all: i64 = f.c.query_row("SELECT COUNT(*) FROM tickets WHERE project_id = ?1", [f.project], |r| r.get(0)).unwrap();
+        assert_eq!(pan["ticket_count"], all - 1, "ohne das private Ticket");
+        // 2. Wartung: das Duplikat-Paar nennt das private Ticket – fehlt für den Agenten
+        let d = call(&ctx, "maintenance_report", &json!({"project": "PAN"}), true).unwrap();
+        assert!(!d.result.to_string().contains(&p.key()), "{}", d.result);
+        let plain = Ctx { conn: &f.c, lang: Lang::En, source: Source::ui(), now: now(), view: None, need: Default::default() };
+        assert!(call(&plain, "maintenance_report", &json!({"project": "PAN"}), true).unwrap().result.to_string().contains(&p.key()), "Oberfläche sieht es");
+    }
+
+    #[test]
+    fn private_tags_do_not_exist_for_agents() {
+        let (f, sec) = setup();
+        tasks::create_item(&f.c, "x", "", None, &["secret".to_string()]).unwrap();
+        let tag = tasks::find_tag(&f.c, "secret").unwrap().unwrap();
+        tasks::set_tag_private(&f.c, tag.id, true).unwrap();
+        let view = map(&f, sec, AreaLevel::Control).view(Caller::Home(1), false, false);
+        let d = call(&with(&f, &view), "add_todo", &json!({"title": "New", "tags": ["Secret", "work"]}), false).unwrap();
+        assert_eq!(d.result["ignored_tags"], json!(["Secret"]));
+        assert_eq!(d.result["todo"]["tags"], json!(["work"]));
+        let it = tasks::get_item(&f.c, d.result["todo"]["id"].as_i64().unwrap()).unwrap();
+        assert!(!it.tags.contains(&tag.id), "die Karte bekommt den privaten Tag nicht (sie wäre sonst unsichtbar)");
+    }
+
+    #[test]
+    fn parent_queries_are_no_existence_oracle() {
+        let (f, sec) = setup();
+        let epic = f.mk(f.epic, "Hidden epic");
+        acc::set_ticket_private(&f.c, epic.id, true, &Source::ui()).unwrap();
+        let child = crate::planning::tickets::create_child(&f.c, epic.id, f.story, "Visible child", vec![], &Source::ui()).unwrap().0;
+        let view = map(&f, sec, AreaLevel::Control).view(Caller::Home(1), false, false);
+        let ctx = with(&f, &view);
+        // `parent = KEY` des privaten Tickets trifft nichts (wie ein unbekannter Schlüssel)
+        assert_eq!(call(&ctx, "search_tickets", &json!({"query": format!("parent = {}", epic.key())}), true).unwrap().result["total"], 0);
+        // ein Kind mit unsichtbarem Eltern-Ticket gilt als ohne Eltern
+        let d = call(&ctx, "search_tickets", &json!({"no_parent": true}), true).unwrap();
+        assert!(keys(&d).contains(&child.key()), "{:?}", keys(&d));
+        let d = call(&ctx, "search_tickets", &json!({"query": "parent IS EMPTY"}), true).unwrap();
+        assert!(keys(&d).contains(&child.key()), "{:?}", keys(&d));
+        let d = call(&ctx, "get_ticket", &json!({"ticket": child.key()}), true).unwrap();
+        assert!(d.result["parent"].is_null());
+    }
+
+    #[test]
+    fn ticket_fields_are_no_existence_oracle() {
+        let (f, sec) = setup();
+        let fid = crate::planning::fields::create_field(&f.c, &crate::planning::fields::NewField::new(f.task, "Blocks", FieldKind::Ticket)).unwrap();
+        let _ = fid;
+        let a = f.mk(f.task, "A");
+        let b = f.mk(f.task, "B");
+        let p = f.mk(f.task, "P");
+        acc::set_ticket_private(&f.c, p.id, true, &Source::ui()).unwrap();
+        let s = mk_in(&f, sec, "Secret");
+        let view = map(&f, sec, AreaLevel::Control).view(Caller::Home(1), false, false);
+        let ctx = with(&f, &view);
+        assert!(call(&ctx, "update_ticket", &json!({"ticket": a.key(), "fields": {"Blocks": b.key()}}), true).is_ok());
+        for target in [json!(s.key()), json!(p.key()), json!(s.id), json!(p.id), json!("NOPE-1"), json!(99999)] {
+            let e = call(&ctx, "update_ticket", &json!({"ticket": a.key(), "fields": {"Blocks": target}}), true).unwrap_err();
+            assert_eq!(e.code, "invalid_value", "{target}: gleiche Antwort wie für ein unbekanntes Ticket");
+        }
     }
 
     #[test]

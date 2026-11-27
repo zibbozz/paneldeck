@@ -432,10 +432,20 @@ fn value_in(ctx: &Ctx, f: &Field, v: &Value) -> Result<Value, ToolError> {
             };
             Ok(Value::Array(items.into_iter().map(|x| option_id(ctx, f, x)).collect::<Result<_, _>>()?))
         }
+        // Sicht (#386): Schlüssel über die Sicht des Agenten (gesperrt/privat wie unbekannt), Kennungen nur sichtbarer Tickets –
+        // sonst wäre das Feld ein Orakel für die Existenz fremder Tickets.
         FieldKind::Ticket => match v {
+            Value::String(s) if ctx.view.is_some() => match ticket_by_key(ctx.conn, s) {
+                Ok(t) if ctx.ticket_visible(&t) => Ok(json!(t.id)),
+                _ => Err(invalid()),
+            },
             Value::String(s) => match ticket_by_key(ctx.conn, s) {
                 Ok(t) => Ok(json!(t.id)),
                 Err(_) => Err(invalid()),
+            },
+            Value::Number(n) if ctx.view.is_some() => match n.as_i64().and_then(|id| get_ticket(ctx.conn, id).ok()) {
+                Some(t) if ctx.ticket_visible(&t) => Ok(v.clone()),
+                _ => Err(invalid()),
             },
             Value::Number(_) => Ok(v.clone()),
             _ => Err(invalid()),
@@ -661,7 +671,9 @@ fn time_entry_json(ctx: &Ctx, e: &super::time_entries::TimeEntry, kinds: &[super
 // ------------------------------------------------------------------ Projekte (lesen)
 
 fn project_json(ctx: &Ctx, p: &Project) -> Value {
-    let count: i64 = ctx.conn.query_row("SELECT COUNT(*) FROM tickets WHERE project_id = ?1 AND archived = 0", [p.id], |r| r.get(0)).unwrap_or(0);
+    // Für Agenten ohne private Tickets (#386; der Papierkorb ist archiviert).
+    let sql = if ctx.view.is_some() { "SELECT COUNT(*) FROM tickets WHERE project_id = ?1 AND archived = 0 AND private = 0" } else { "SELECT COUNT(*) FROM tickets WHERE project_id = ?1 AND archived = 0" };
+    let count: i64 = ctx.conn.query_row(sql, [p.id], |r| r.get(0)).unwrap_or(0);
     json!({
         "key": p.key,
         "id": p.id,
@@ -1194,7 +1206,20 @@ fn add_todo_tool(ctx: &Ctx, v: &Value) -> R {
     let a = args(ctx, v, &["title", "text", "tags", "due"])?;
     let title = a.opt_str("title", super::tickets::MAX_TITLE_CHARS)?.unwrap_or_default();
     let text = a.opt_str("text", MAX_TEXT_CHARS)?.unwrap_or_default();
-    let tags = a.str_list("tags", MAX_TAGS, tasks::MAX_TAG_CHARS)?;
+    let mut tags = a.str_list("tags", MAX_TAGS, tasks::MAX_TAG_CHARS)?;
+    // Private Tags (#386) gibt es für Agenten nicht: sie werden weggelassen und in `ignored_tags` genannt (eine Karte mit
+    // privatem Tag wäre privat und für den Agenten sofort unsichtbar).
+    let mut ignored: Vec<String> = Vec::new();
+    if ctx.view.is_some() {
+        let all = tasks::list_tags(ctx.conn).map_err(|e| task_err(ctx.lang, e))?;
+        tags.retain(|n| {
+            let private = all.iter().any(|t| t.private && tasks::tag_key(&t.name) == tasks::tag_key(n));
+            if private {
+                ignored.push(n.clone());
+            }
+            !private
+        });
+    }
     let due = a.opt_str("due", 32)?;
     // Die Karte gehört dem Heimatprojekt des Agenten (externe Agenten: „Allgemein“) und braucht dort Steuern (#386).
     let meta = scope::new_card_meta(ctx)?;
@@ -1202,8 +1227,12 @@ fn add_todo_tool(ctx: &Ctx, v: &Value) -> R {
     let all_tags = tasks::list_tags(ctx.conn).map_err(|e| task_err(ctx.lang, e))?;
     let th = tasks::due_thresholds(ctx.conn).map_err(|e| task_err(ctx.lang, e))?;
     let shown = super::todo_bridge::display_title(&item.title, &item.body);
+    let mut result = json!({"todo": todo_json(ctx, &item, &all_tags, &th)});
+    if !ignored.is_empty() {
+        result["ignored_tags"] = json!(ignored);
+    }
     wrote(
-        json!({"todo": todo_json(ctx, &item, &all_tags, &th)}),
+        result,
         ctx.tx(format!("Todo {} angelegt: {}", item.key(), quoted(ctx, &shown)), format!("added to-do {}: {}", item.key(), quoted(ctx, &shown))),
         Some(item.key()),
     )

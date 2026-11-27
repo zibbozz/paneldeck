@@ -326,6 +326,7 @@ pub(crate) fn raw_set_mark(conn: &Connection, id: i64, kind: MarkKind, on: bool,
     let old = match kind {
         MarkKind::Flag => t.flagged,
         MarkKind::Star => t.starred,
+        MarkKind::Private => t.private,
     };
     if old == on {
         return Ok(None);
@@ -333,6 +334,7 @@ pub(crate) fn raw_set_mark(conn: &Connection, id: i64, kind: MarkKind, on: bool,
     let (col, field) = match kind {
         MarkKind::Flag => ("flagged", HistoryField::Flagged),
         MarkKind::Star => ("starred", HistoryField::Starred),
+        MarkKind::Private => ("private", HistoryField::Other("private".into())),
     };
     conn.execute(&format!("UPDATE tickets SET {col} = ?1 WHERE id = ?2"), params![on as i64, id])?;
     history::log(conn, id, source, batch, &field, Some(if old { "1" } else { "0" }), Some(if on { "1" } else { "0" }))?;
@@ -417,6 +419,11 @@ pub fn set_parent(conn: &Connection, id: i64, parent: Option<i64>, source: &Sour
 /// Markierung („Flag“/Impediment) setzen oder entfernen.
 pub fn set_flagged(conn: &Connection, id: i64, on: bool, source: &Source) -> TRes<Option<TicketOp>> {
     set_mark(conn, id, MarkKind::Flag, on, source)
+}
+
+/// Privat setzen oder entfernen (#386, nur der Nutzer) – als Rückgängig-Schritt.
+pub fn set_private(conn: &Connection, id: i64, on: bool, source: &Source) -> TRes<Option<TicketOp>> {
+    set_mark(conn, id, MarkKind::Private, on, source)
 }
 
 /// Favoriten-Stern setzen oder entfernen.

@@ -475,7 +475,18 @@ impl<'a> Cx<'a> {
     fn ticket_ref(&mut self, key: &str) -> Option<String> {
         let (k, n) = parse_key(key)?;
         let (pk, pn) = (self.text(&k), self.int(n));
-        Some(format!("(SELECT t2.id FROM tickets t2 JOIN projects p2 ON p2.id = t2.project_id WHERE p2.key = {pk} AND t2.number = {pn})"))
+        // Sicht eines Agenten (#386): unsichtbare Tickets lassen sich auch nicht als Bezug (`parent = KEY`) ansprechen.
+        let only = self.agent_filter("t2");
+        Some(format!("(SELECT t2.id FROM tickets t2 JOIN projects p2 ON p2.id = t2.project_id WHERE p2.key = {pk} AND t2.number = {pn}{only})"))
+    }
+
+    /// SQL-Zusatz ` AND …` für die Sicht eines Agenten (#386) über den Alias `a`; leer ohne Sicht.
+    fn agent_filter(&self, a: &str) -> String {
+        match &self.ctx.agent_projects {
+            None => String::new(),
+            Some(o) if o.is_empty() => " AND 0".to_string(),
+            Some(o) => format!(" AND {a}.private = 0 AND {a}.trashed_at IS NULL AND {a}.project_id IN ({})", o.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(",")),
+        }
     }
 
     /// Positive Aussage `feld <op> werte` (`Eq`: eines der Werte; `Contains`; `Lt`/`Gt`/`Le`/`Ge`). Nie `NULL`.
@@ -706,6 +717,11 @@ impl<'a> Cx<'a> {
         Ok(match &b.store {
             Store::Key | Store::Title | Store::Created | Store::Updated | Store::Flagged | Store::Starred | Store::Archived | Store::Private | Store::SystemNote | Store::Type(_) | Store::Project(_) => "0".to_string(),
             Store::Status(_) => "t.status_id IS NULL".to_string(),
+            // Sicht eines Agenten (#386): ein unsichtbares Eltern-Ticket zählt wie keins (verrät sonst seine Existenz).
+            Store::Parent if self.ctx.agent_projects.is_some() => {
+                let only = self.agent_filter("tp");
+                format!("(t.parent_id IS NULL OR NOT EXISTS (SELECT 1 FROM tickets tp WHERE tp.id = t.parent_id{only}))")
+            }
             Store::Parent => "t.parent_id IS NULL".to_string(),
             Store::ChangedBy => "NOT EXISTS (SELECT 1 FROM history h WHERE h.ticket_id = t.id)".to_string(),
             Store::Sprint => pending::sprint_condition(self, None, &[])?,

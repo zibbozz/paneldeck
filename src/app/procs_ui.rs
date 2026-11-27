@@ -558,7 +558,7 @@ impl App {
         self.procs.cmds.push(Cmd::ProjectOpened(pid));
     }
 
-    fn procs_save(&mut self) {
+    pub(super) fn procs_save(&mut self) {
         if let Err(e) = procs::save(&self.dir, &self.procs.defs, &self.procs.meta) {
             let lang = self.settings.language;
             self.push_toast(format!("{} {e}", lang.t("Prozessliste nicht gespeichert:", "Process list not saved:")), toasts::ToastKind::Error, None);

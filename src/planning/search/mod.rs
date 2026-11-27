@@ -43,7 +43,7 @@ pub use board::{board_source_ids, board_view, board_view_with, move_card, move_c
 pub use compile::{compile, Compiled, MAX_DEPTH, MAX_NODES, MAX_SQL_LEN};
 pub use error::{Feature, Problem, SRes, SearchError};
 pub use rows::{TicketRow, PRIORITY_FIELD_KEY};
-pub use schema::{schema_for, search_schema, Conflict, SearchSchema, CHANGED_BY};
+pub use schema::{schema_for, search_schema, search_schema_only, Conflict, SearchSchema, CHANGED_BY};
 pub use seed::{seed_demo, SeedError, SeededDemo};
 
 use crate::planning::views::filters::get_filter;

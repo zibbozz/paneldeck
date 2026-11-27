@@ -917,6 +917,17 @@ pub struct SavedState {
     /// Weitere Fenster (Strg+Klick auf einen Reiter); fehlt, solange es keine gibt.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub extra_windows: Vec<SavedWindow>,
+    /// Nächste Kennung eines Seitenleisten-Projekts (#386): Kennungen werden nie wiederverwendet, sonst erbten neue
+    /// Projekte Karten und Verknüpfungen gelöschter. Fehlt (ältere Dateien) = größte Kennung + 1.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub next_project_id: u64,
+}
+
+impl SavedState {
+    /// Nächste freie Projekt-Kennung: nie unter einer schon vergebenen.
+    pub fn project_id_floor(&self) -> u64 {
+        self.next_project_id.max(self.projects.iter().map(|p| p.id).max().unwrap_or(0) + 1)
+    }
 }
 
 /// Ein weiteres Fenster (#110): Reiter, Projekt und Layout des Terminal Hubs, Lage auf dem Bildschirm.
