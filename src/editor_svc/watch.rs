@@ -69,6 +69,11 @@ impl DiskEvent {
 struct Track {
     known: Option<Stamp>,
     pending: Option<Stamp>,
+    /// Ausgangsstand fehlt, weil er nicht gemessen werden durfte (WSL nach eigenem Laden/Speichern, #392): die erste
+    /// Messung wird zum Ausgangsstand **und** gemeldet, damit der Editor den Inhalt prüft (Hash-Vergleich im
+    /// Hilfsthread). Sonst ginge eine Änderung bis zur ersten Abfrage verloren, z. B. ein Befehl beim Speichern
+    /// (`eslint --fix`), der die Datei gleich danach umschreibt.
+    recheck: bool,
 }
 
 /// Reine Vergleichslogik (getrennt vom Thread, damit sie testbar ist).
@@ -80,12 +85,13 @@ pub struct Tracker {
 impl Tracker {
     /// Eigener Stand nach Laden/Speichern: gilt sofort als bekannt, nichts wird gemeldet.
     pub fn baseline(&mut self, path: &Path, stamp: Stamp) {
-        self.files.insert(path.to_path_buf(), Track { known: Some(stamp), pending: None });
+        self.files.insert(path.to_path_buf(), Track { known: Some(stamp), pending: None, recheck: false });
     }
 
-    /// Stand vergessen: die nächste Messung gilt wieder als Ausgangsstand (ohne Meldung).
-    pub fn forget(&mut self, path: &Path) {
-        self.files.remove(path);
+    /// Stand vergessen, ohne ihn messen zu dürfen: die nächste Messung gilt als Ausgangsstand und wird gemeldet (der
+    /// Editor vergleicht dann den Inhalt und meldet nur echte Unterschiede).
+    pub fn recheck(&mut self, path: &Path) {
+        self.files.insert(path.to_path_buf(), Track { known: None, pending: None, recheck: true });
     }
 
     /// Pfade, die nicht mehr offen sind, vergessen.
@@ -97,10 +103,17 @@ impl Tracker {
     pub fn observe(&mut self, seen: &[(PathBuf, Stamp)]) -> Vec<DiskEvent> {
         let mut out = Vec::new();
         for (path, now) in seen {
-            let t = self.files.entry(path.clone()).or_insert(Track { known: None, pending: None });
+            let t = self.files.entry(path.clone()).or_insert(Track { known: None, pending: None, recheck: false });
             let Some(known) = t.known else {
-                // Erste Messung (Datei war beim Öffnen nicht als Stand übergeben): gilt als Ausgangsstand.
+                // Erste Messung (Datei war beim Öffnen nicht als Stand übergeben): gilt als Ausgangsstand – nach
+                // `recheck` zusätzlich gemeldet.
                 t.known = Some(*now);
+                if std::mem::take(&mut t.recheck) {
+                    out.push(match now {
+                        Stamp::Missing => DiskEvent::Deleted(path.clone()),
+                        Stamp::Present { .. } => DiskEvent::Changed(path.clone()),
+                    });
+                }
                 continue;
             };
             if *now == known {
@@ -154,10 +167,11 @@ impl DiskWatch {
     }
 
     /// Nach dem eigenen Laden oder Speichern aufrufen (misst sofort; die Datei ist lokal gerade geschrieben). WSL-Dateien
-    /// misst nie der UI-Thread (#392): Die nächste Abfrage im Hintergrund gilt als Ausgangsstand.
+    /// misst nie der UI-Thread (#392): Die nächste Abfrage im Hintergrund gilt als Ausgangsstand und wird gemeldet –
+    /// der Editor prüft dann im Hilfsthread per Hash, ob sich der Inhalt seit dem eigenen Schreiben geändert hat.
     pub fn baseline(&mut self, path: &Path) {
         if is_wsl(path) {
-            self.tracker.forget(path);
+            self.tracker.recheck(path);
             return;
         }
         self.tracker.baseline(path, Stamp::of(path));
@@ -250,9 +264,17 @@ mod tests {
         dw.tracker.baseline(&w, st(1));
         dw.baseline(&w);
         assert_eq!(dw.tracker.known(&w), None, "vergessen statt gemessen");
-        // Erste Messung danach gilt als Ausgangsstand, ohne Meldung
-        assert!(dw.tracker.observe(&[(w.clone(), st(5))]).is_empty());
+        // Erste Messung danach gilt als Ausgangsstand und wird gemeldet (der Editor prüft den Inhalt per Hash): ein
+        // Befehl beim Speichern, der die Datei vor der ersten Abfrage umschreibt, geht so nicht verloren.
+        assert_eq!(dw.tracker.observe(&[(w.clone(), st(5))]), [DiskEvent::Changed(w.clone())]);
         assert_eq!(dw.tracker.known(&w), Some(st(5)));
+        // Danach wie gewohnt: gleich bleibend still, nur einmal gemeldet
+        assert!(dw.tracker.observe(&[(w.clone(), st(5))]).is_empty());
+        // Nach erneutem eigenem Speichern: fehlt die Datei bei der ersten Messung, heißt das „gelöscht“
+        dw.baseline(&w);
+        assert_eq!(dw.tracker.observe(&[(w.clone(), Stamp::Missing)]), [DiskEvent::Deleted(w.clone())]);
+        dw.baseline(&w);
+        let _ = dw.tracker.observe(&[(w.clone(), st(5))]);
         // Abfragen: die lokale Datei jedes Mal, die WSL-Datei erst nach WSL_POLL_INTERVAL
         let local = std::env::temp_dir().join(format!("pd-watch-{}.txt", std::process::id()));
         let t0 = Instant::now();
