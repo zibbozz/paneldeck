@@ -47,6 +47,40 @@ pub(in crate::app) fn cwd_hidden(cwd: &str, locked: &[String]) -> bool {
     locked.iter().map(|l| norm(l)).filter(|l| !l.is_empty()).any(|l| c == l || c.starts_with(&format!("{l}/")))
 }
 
+/// [`cwd_hidden`] für einen Dateipfad (auch in der Form `\\?\C:\…`).
+pub(in crate::app) fn path_hidden(p: &std::path::Path, locked: &[String]) -> bool {
+    let s = p.to_string_lossy();
+    let s = s.strip_prefix(r"\\?\").unwrap_or(&s);
+    cwd_hidden(s, locked)
+}
+
+/// Dokument-Argumente eines Editor-Werkzeugs (`doc`, `other`: Kennung oder Pfad; `path`), die in einen gesperrten
+/// Ordner zeigen (#386, Review 3.2.0)? `docs` = alle offenen Dokumente (Kennung, Pfad). Ein solcher Aufruf bekommt
+/// `project_locked`, ohne dass das Werkzeug läuft.
+pub(in crate::app) fn editor_args_hidden(args: &Value, docs: &[(u64, Option<std::path::PathBuf>)], locked: &[String]) -> bool {
+    if locked.is_empty() {
+        return false;
+    }
+    let by_id = |id: u64| docs.iter().find(|(d, _)| *d == id).and_then(|(_, p)| p.as_deref()).is_some_and(|p| path_hidden(p, locked));
+    let refers = |v: &Value| match v {
+        Value::Number(n) => n.as_u64().is_some_and(by_id),
+        Value::String(s) => match s.trim().parse::<u64>() {
+            Ok(id) => by_id(id),
+            Err(_) => !s.trim().is_empty() && path_hidden(std::path::Path::new(s.trim()), locked),
+        },
+        _ => false,
+    };
+    ["doc", "other", "path"].iter().filter_map(|k| args.get(*k)).any(refers)
+}
+
+/// `list_save_actions` ohne die Regeln für Ordner gesperrter Projekte (#386, Review 3.2.0; ihr `path` nennte den Ordner).
+pub(in crate::app) fn hide_save_action_rules(mut v: Value, locked: &[String]) -> Value {
+    if let Some(rules) = v.get_mut("rules").and_then(Value::as_array_mut) {
+        rules.retain(|r| !r["path"].as_str().map(str::trim).is_some_and(|p| !p.is_empty() && cwd_hidden(p, locked)));
+    }
+    v
+}
+
 /// Datenbank vor der Wiederherstellung ohne Zugriffs-Spalten (#386, Schema < 13)? Dann gelten die Standards (wie global, für
 /// alle) – der Nutzer bekommt einen Hinweis.
 pub(in crate::app) fn restore_resets_access(version: Option<u32>) -> bool {
@@ -90,6 +124,93 @@ fn external_rooted(created: &HashMap<u64, super::Creator>, id: u64) -> bool {
 /// Fenster und Projekt einer Sitzung aus `paneldeck --open` (#386): aus einer Sitzung heraus deren Fenster und Projekt.
 pub(in crate::app) fn open_home(origin: Option<(u64, u64)>, active: u64) -> (u64, u64) {
     super::super::multiwin::child_home(origin, active)
+}
+
+/// Fremder Name (Sitzung eines Agenten) für einen Hinweis: Steuer- und täuschende Zeichen entschärft, eine Zeile,
+/// höchstens 40 Zeichen (Review 3.2.0).
+pub(in crate::app) fn toast_name(name: &str) -> String {
+    mcp::short(&crate::hooks::untrusted_text(name, 80).replace('\n', " "), 40)
+}
+
+/// Flächen der offenen Fenster, Dialoge, Popups, Menüs, Hinweise und Tooltips im Hauptfenster (alle egui-Ebenen außer
+/// dem Hintergrund mit Seitenleiste, Fensterleiste und Bereichen); `None` = Fläche unbekannt (gilt als ganzes Fenster).
+pub(in crate::app) fn overlay_rects(ctx: &egui::Context) -> Vec<Option<egui::Rect>> {
+    let layers = ctx.memory(|m| m.areas().visible_layer_ids());
+    let mut v: Vec<Option<egui::Rect>> = layers.into_iter().filter(|l| l.order != egui::Order::Background).map(|l| egui::AreaState::load(ctx, l.id).map(|s| s.rect())).collect();
+    if v.is_empty() && egui::Popup::is_any_open(ctx) {
+        v.push(None);
+    }
+    v
+}
+
+/// Liegt eine dieser Flächen über `r` (unbekannte Flächen immer)?
+pub(in crate::app) fn covered(overlays: &[Option<egui::Rect>], r: egui::Rect) -> bool {
+    overlays.iter().any(|o| o.is_none_or(|o| o.intersects(r)))
+}
+
+/// Ausschnitt einer Sitzung für `screenshot` mit `session` (Review 3.2.0): nur ihr Inhalt, ohne die Kopfzeile (Name,
+/// verknüpfte Tickets).
+pub(in crate::app) fn shot_body(pane: egui::Rect, header: f32) -> Option<egui::Rect> {
+    let body = egui::Rect::from_min_max(egui::pos2(pane.min.x, pane.min.y + header), pane.max);
+    (body.width() >= 1.0 && body.height() >= 1.0).then_some(body)
+}
+
+fn shot_refused() -> (String, String) {
+    (
+        "forbidden".to_string(),
+        state::t(
+            "Ein Screenshot des ganzen Fensters geht nur, wenn alle Paneldeck-Fenster den Terminal Hub zeigen, kein Dialog, Menü oder Hinweis offen ist und keine Verknüpfung ein Ticket zeigt, das du nicht sehen darfst – nimm screenshot mit session (nur der Inhalt dieser Sitzung).",
+            "A screenshot of the whole window is only possible while every Paneldeck window shows the Terminal Hub, no dialog, menu or notice is open and no link shows a ticket you may not see – use screenshot with session (only that session's content).",
+        )
+        .to_string(),
+    )
+}
+
+fn shot_covered() -> (String, String) {
+    (
+        "not_visible".to_string(),
+        state::t(
+            "Über der Sitzung liegt gerade ein Dialog, Menü oder Hinweis – später noch einmal versuchen.",
+            "A dialog, menu or notice currently covers the session – try again later.",
+        )
+        .to_string(),
+    )
+}
+
+/// Was `mcp_access_gate` prüft (rein): Bereich und nötige Stufe des Aufrufs, `None` = das Werkzeug prüft selbst. Die
+/// Stufe kommt aus den Argumenten (Review 3.2.0: `format_file` liest nur mit `op` = `validate`, alles andere braucht
+/// Steuern – auch in „Allgemein“ und für Chats; unbekannt = Steuern). `session_area` = Bereich einer Sitzung.
+pub(in crate::app) fn gate_target(m: &AccessMap, who: Caller, tool: &str, args: &Value, session_area: &dyn Fn(&Value) -> Option<Area>) -> Result<Option<(Area, McpLevel)>, (String, String)> {
+    let need = mcp::call_level(tool, args).unwrap_or(McpLevel::Control);
+    Ok(match acc::tool_scope(tool, args) {
+        ToolScope::Session => args.get("session").and_then(session_area).map(|a| (a, need)),
+        ToolScope::General => Some((Area::General, need)),
+        ToolScope::Own => match tool {
+            "screenshot" if args.get("session").is_some_and(|s| !s.is_null()) => args.get("session").and_then(session_area).map(|a| (a, McpLevel::Read)),
+            "screenshot" => {
+                if m.any_locked(who) {
+                    return Err((
+                        acc::LOCKED_CODE.to_string(),
+                        state::t(
+                            "Ein Screenshot des ganzen Fensters geht nur, wenn kein Projekt für dich gesperrt ist – nimm screenshot mit session (eine Sitzung, deren Projekt du lesen darfst).",
+                            "A screenshot of the whole window is only possible when no project is locked for you – use screenshot with session (a session whose project you may read).",
+                        )
+                        .to_string(),
+                    ));
+                }
+                // Was gerade zu sehen ist (Reiter, Dialoge, Verknüpfungen), prüft `App::shot_scope` mit dem egui-Kontext.
+                None
+            }
+            // Verknüpfen braucht Lesen in der Sitzung (das Ticket prüft die Sicht der Tickets).
+            "link_terminal" => args.get("session").and_then(session_area).map(|a| (a, McpLevel::Read)),
+            _ => None,
+        },
+    })
+}
+
+/// Stufe des Projekts `project` für einen Chat, eingeordnet als `who` (Heimat oder extern).
+pub(in crate::app) fn chat_cap(m: &AccessMap, who: Caller, project: u64) -> McpLevel {
+    m.sidebar(who, project)
 }
 
 pub(in crate::app) fn level_name(l: McpLevel) -> &'static str {
@@ -137,7 +258,77 @@ impl App {
     /// Sicht für Todo/Tickets/Kalender.
     pub(in crate::app) fn agent_view(&self, caller: Option<u64>, how: &str) -> crate::access::AgentView {
         let (m, who) = self.access_for(caller, how);
-        m.view(who, self.settings.agent_create_projects, self.settings.agent_delete)
+        let mut v = m.view(who, self.settings.agent_create_projects, self.settings.agent_delete);
+        // Terminal-Verknüpfungen nennen nur Sitzungen, die der Agent sieht (Review 3.2.0).
+        v.sessions = Some(self.visible_sessions(caller, how));
+        v
+    }
+
+    /// Obergrenze des Projekts eines Chats für seine Paneldeck-Werkzeuge (#386): wie `chat_project_cap`, aber mit der
+    /// Einordnung des Aufrufers wie bei jedem Werkzeug (`access_who`) – ein Chat, den ein externer Agent angelegt hat,
+    /// bekommt die strengere Stufe „extern“. Obergrenze „Steuern“: die Stufe des Modells begrenzt `ToolPolicy` selbst.
+    pub(in crate::app) fn chat_cap_of(&self, chat: u64) -> McpLevel {
+        let Some(project) = self.entries.get(&chat).map(|e| e.meta.project) else { return McpLevel::Off };
+        let m = self.access_map(McpLevel::Control);
+        chat_cap(&m, self.access_who(Some(chat)), project)
+    }
+
+    /// Stufe des Bereichs „Allgemein“ für einen Chat (Review 3.2.0), eingeordnet wie bei jedem Werkzeug; Obergrenze
+    /// „Steuern“ (die Stufe des Modells begrenzt `ToolPolicy` selbst).
+    pub(in crate::app) fn chat_general_cap(&self, chat: u64) -> McpLevel {
+        if !self.entries.contains_key(&chat) {
+            return McpLevel::Off;
+        }
+        self.access_map(McpLevel::Control).general(self.access_who(Some(chat)))
+    }
+
+    /// Tickets, die die Verknüpfungs-Chips (Seitenleiste, Terminalköpfe) gerade zeigen und die der Agent nicht sehen darf
+    /// (privat, im Papierkorb, gesperrtes Projekt, unbekannt)?
+    fn chips_hide_something(&self, view: &crate::access::AgentView) -> bool {
+        let ids = self.tlinks.shown_ticket_ids();
+        if ids.is_empty() {
+            return false;
+        }
+        let Some(db) = self.db.as_ref() else { return true };
+        ids.into_iter().any(|id| !crate::planning::tickets::get_ticket(&db.conn, id).is_ok_and(|t| !t.private && !t.trashed && view.ticket_level(t.project_id) > McpLevel::Off))
+    }
+
+    /// Was `screenshot` jetzt aufnehmen darf (Review 3.2.0), beim Anfordern und noch einmal beim Abschluss geprüft:
+    /// * ohne `session` das ganze Fenster – nur, wenn alle Paneldeck-Fenster den Terminal Hub zeigen, kein Fenster,
+    ///   Dialog, Popup, Menü, Hinweis oder Tooltip offen ist und kein Verknüpfungs-Chip ein für den Agenten unsichtbares
+    ///   Ticket zeigt; sonst `forbidden` mit dem Hinweis auf `session` (gesperrte Bereiche prüft `mcp_access_gate`);
+    /// * mit `session` nur der Inhalt dieser Sitzung (ohne Kopfzeile), und nur, wenn nichts darüber liegt.
+    ///
+    /// Liefert den Zuschnitt (`None` = ganzes Fenster).
+    pub(in crate::app) fn shot_scope(&self, ctx: &egui::Context, session: Option<u64>, caller: Option<u64>, how: &str) -> Result<Option<egui::Rect>, (String, String)> {
+        let overlays = overlay_rects(ctx);
+        let hub = self.mode == super::super::titlebar::Mode::Terminals;
+        match session {
+            None => {
+                if !hub || !self.wins.all_show_terminals() || !overlays.is_empty() || self.chips_hide_something(&self.agent_view(caller, how)) {
+                    return Err(shot_refused());
+                }
+                Ok(None)
+            }
+            Some(id) => {
+                let not_visible = || {
+                    (
+                        "not_visible".to_string(),
+                        state::t(
+                            "Die Sitzung ist im Fenster nicht zu sehen (anderes Projekt, anderer Reiter oder ausgeblendet) – erst focus_session aufrufen.",
+                            "The session is not visible in the window (other project, other tab or hidden) – call focus_session first.",
+                        )
+                        .to_string(),
+                    )
+                };
+                let pane = self.pane_rects.get(&id).copied().filter(|_| hub).ok_or_else(not_visible)?;
+                let body = shot_body(pane, super::super::HEADER_H).ok_or_else(not_visible)?;
+                if covered(&overlays, body) {
+                    return Err(shot_covered());
+                }
+                Ok(Some(body))
+            }
+        }
     }
 
     /// Prüfung vor der Ausführung (#386): Ziel-Sitzung, „Allgemein“, Screenshot des ganzen Fensters. Listen, Todo, Tickets,
@@ -145,32 +336,8 @@ impl App {
     /// Hinweis mit „Freigeben …“.
     pub(in crate::app) fn mcp_access_gate(&mut self, tool: &str, args: &Value, caller: Option<u64>, how: &str) -> Result<(), (String, String)> {
         let (m, who) = self.access_for(caller, how);
-        let need = mcp::tool_level(tool).unwrap_or(McpLevel::Control);
         let session_area = |s: &Value| s.as_u64().and_then(|id| self.entries.get(&id)).map(|e| Area::Project(e.meta.project));
-        let checked: Option<(Area, McpLevel)> = match acc::tool_scope(tool, args) {
-            ToolScope::Session => args.get("session").and_then(session_area).map(|a| (a, need)),
-            ToolScope::General => Some((Area::General, need)),
-            ToolScope::Own => match tool {
-                "screenshot" if args.get("session").is_some_and(|s| !s.is_null()) => args.get("session").and_then(session_area).map(|a| (a, McpLevel::Read)),
-                "screenshot" => {
-                    if m.any_locked(who) {
-                        return Err((
-                            acc::LOCKED_CODE.to_string(),
-                            state::t(
-                                "Ein Screenshot des ganzen Fensters geht nur, wenn kein Projekt für dich gesperrt ist – nimm screenshot mit session (eine Sitzung, deren Projekt du lesen darfst).",
-                                "A screenshot of the whole window is only possible when no project is locked for you – use screenshot with session (a session whose project you may read).",
-                            )
-                            .to_string(),
-                        ));
-                    }
-                    None
-                }
-                // Verknüpfen braucht Lesen in der Sitzung (das Ticket prüft die Sicht der Tickets).
-                "link_terminal" => args.get("session").and_then(session_area).map(|a| (a, McpLevel::Read)),
-                _ => None,
-            },
-        };
-        let Some((area, need)) = checked else { return Ok(()) };
+        let Some((area, need)) = gate_target(&m, who, tool, args, &session_area)? else { return Ok(()) };
         let r = acc::gate(m.area(who, area), need);
         if let Err((code, _)) = &r {
             if code == acc::LOCKED_CODE {
@@ -182,8 +349,9 @@ impl App {
 
     /// Einmal je Agent und Bereich: Hinweis „Ein Agent wollte … – Freigeben …“ (öffnet den Dialog „Zugriff für Agenten“).
     pub(in crate::app) fn access_hint(&mut self, caller: Option<u64>, how: &str, area: Area) {
+        // Der Sitzungsname stammt u. U. vom Agenten selbst (`rename_session`, OSC-Titel): entschärft und gekürzt (Review 3.2.0).
         let who = match caller.and_then(|c| self.entries.get(&c)) {
-            Some(e) => e.display_name().to_string(),
+            Some(e) => toast_name(&e.display_name()),
             None => if how == "chat" { "chat".into() } else { state::t("externer Agent", "external agent").to_string() },
         };
         if !self.mcp.access_hinted.insert((who.clone(), area)) {
@@ -435,6 +603,122 @@ mod tests {
     fn paneldeck_open_from_a_session_uses_its_window_and_project() {
         assert_eq!(open_home(Some((2, 7)), 1), (2, 7));
         assert_eq!(open_home(None, 1), (0, 1));
+    }
+
+    fn map_general(general: crate::access::AreaLevel, global: McpLevel) -> AccessMap {
+        let mut m = AccessMap { global, general: crate::access::AgentAccess { level: general, for_all: true }, ..Default::default() };
+        m.projects.insert(1, crate::access::AgentAccess { level: crate::access::AreaLevel::Control, for_all: false });
+        m
+    }
+
+    /// Review 3.2.0 (Blocker): `format_file` schreibt nur mit Steuern in „Allgemein“ – auch wenn die Stufe des Werkzeugs
+    /// (Lesen, wegen `op` = `validate`) niedriger ist. Gilt für externe Agenten und Chats (gleiche Prüfung im Hub).
+    #[test]
+    fn format_needs_control_in_general_even_when_the_tool_level_is_read() {
+        use crate::access::AreaLevel;
+        let none = |_: &Value| None;
+        for who in [Caller::External, Caller::Home(1)] {
+            let m = map_general(AreaLevel::Read, McpLevel::Control);
+            for op in ["format", "minify", "sort_keys"] {
+                let (area, need) = gate_target(&m, who, "format_file", &json!({"op": op}), &none).unwrap().unwrap();
+                assert_eq!((area, need), (Area::General, McpLevel::Control), "{op}");
+                assert_eq!(acc::gate(m.area(who, area), need).unwrap_err().0, "forbidden", "{who:?} {op}: General = Read");
+            }
+            let (area, need) = gate_target(&m, who, "format_file", &json!({"op": "validate"}), &none).unwrap().unwrap();
+            assert!(acc::gate(m.area(who, area), need).is_ok(), "validate liest nur");
+            // „Allgemein“ gesperrt: auch validate nicht
+            let off = map_general(AreaLevel::Off, McpLevel::Control);
+            let (area, need) = gate_target(&off, who, "format_file", &json!({"op": "validate"}), &none).unwrap().unwrap();
+            assert_eq!(acc::gate(off.area(who, area), need).unwrap_err().0, acc::LOCKED_CODE);
+            // Steuern in „Allgemein“: formatieren erlaubt
+            let ctl = map_general(AreaLevel::Control, McpLevel::Control);
+            let (area, need) = gate_target(&ctl, who, "format_file", &json!({"op": "format"}), &none).unwrap().unwrap();
+            assert!(acc::gate(ctl.area(who, area), need).is_ok());
+        }
+        // Ein Chat mit Modell-Stufe Lesen (Obergrenze) kommt auch mit „Allgemein“ = Steuern nicht zum Formatieren.
+        let chat = map_general(AreaLevel::Control, McpLevel::Read);
+        let (area, need) = gate_target(&chat, Caller::Home(1), "format_file", &json!({"op": "format"}), &none).unwrap().unwrap();
+        assert_eq!(acc::gate(chat.area(Caller::Home(1), area), need).unwrap_err().0, "forbidden");
+        // Unbekanntes Werkzeug: „Allgemein“ mit Steuern (nie ohne Prüfung)
+        assert_eq!(gate_target(&chat, Caller::Home(1), "no_such_tool", &json!({}), &none).unwrap(), Some((Area::General, McpLevel::Control)));
+    }
+
+    /// Review 3.2.0: Die Obergrenze eines Chats folgt derselben Einordnung wie seine Werkzeugaufrufe – ein von einem
+    /// externen Agenten angelegter Chat gilt als extern (ein Projekt ohne „Für alle“ ist dann gesperrt).
+    #[test]
+    fn chat_caps_use_the_stricter_external_view() {
+        use crate::access::{AgentAccess, AreaLevel};
+        let mut m = AccessMap { global: McpLevel::Control, ..Default::default() };
+        m.projects.insert(1, AgentAccess { level: AreaLevel::Control, for_all: false });
+        m.projects.insert(2, AgentAccess { level: AreaLevel::Read, for_all: true });
+        assert_eq!(chat_cap(&m, Caller::Home(1), 1), McpLevel::Control);
+        assert_eq!(chat_cap(&m, Caller::External, 1), McpLevel::Off, "extern: nur „Für alle“");
+        assert_eq!(chat_cap(&m, Caller::External, 2), McpLevel::Read);
+        assert_eq!(chat_cap(&m, Caller::Home(1), 99), McpLevel::Off, "unbekanntes Projekt");
+    }
+
+    #[test]
+    fn session_screenshots_show_only_the_terminal_body() {
+        let pane = egui::Rect::from_min_size(egui::pos2(10.0, 20.0), egui::vec2(400.0, 300.0));
+        let body = shot_body(pane, 30.0).unwrap();
+        assert_eq!(body, egui::Rect::from_min_max(egui::pos2(10.0, 50.0), egui::pos2(410.0, 320.0)), "ohne Kopfzeile (Name, Ticket-Chips)");
+        assert_eq!(shot_body(egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(100.0, 30.0)), 30.0), None, "nur Kopfzeile");
+        // Etwas darüber (Dialog, Menü, Hinweis) – oder eine Fläche unbekannter Lage – verhindert das Bild.
+        assert!(!covered(&[], body));
+        assert!(covered(&[Some(egui::Rect::from_min_size(egui::pos2(300.0, 300.0), egui::vec2(50.0, 50.0)))], body));
+        assert!(!covered(&[Some(egui::Rect::from_min_size(egui::pos2(500.0, 0.0), egui::vec2(50.0, 50.0)))], body));
+        assert!(covered(&[None], body));
+    }
+
+    #[test]
+    fn open_windows_popups_and_toasts_count_as_overlays() {
+        let ctx = egui::Context::default();
+        let frame = |window: bool, toast: bool| {
+            let mut out = Vec::new();
+            for _ in 0..2 {
+                let _ = ctx.run(egui::RawInput::default(), |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| ui.label("terminal"));
+                    if window {
+                        egui::Window::new("Tickets").show(ctx, |ui| ui.label("PAN-1 secret"));
+                    }
+                    if toast {
+                        egui::Area::new(egui::Id::new("toast")).order(egui::Order::Tooltip).show(ctx, |ui| ui.label("t"));
+                    }
+                    out = overlay_rects(ctx);
+                });
+            }
+            out
+        };
+        assert!(frame(false, false).is_empty(), "nur Hintergrund (Bereiche, Seitenleiste)");
+        assert!(!frame(true, false).is_empty(), "Fenster");
+        assert!(!frame(false, true).is_empty(), "Hinweis/Tooltip");
+    }
+
+    /// Review 3.2.0: Editor-Werkzeuge und `list_save_actions` nennen keine Ordner gesperrter Projekte.
+    #[test]
+    fn editor_and_save_actions_hide_locked_folders() {
+        let locked = vec![r"C:\Work\Secret".to_string()];
+        let docs = vec![(1, Some(std::path::PathBuf::from(r"C:\Work\Secret\a.rs"))), (2, Some(std::path::PathBuf::from(r"C:\Work\Open\b.rs"))), (3, None)];
+        for a in [json!({"doc": 1}), json!({"doc": "1"}), json!({"doc": r"c:/work/secret/a.rs"}), json!({"path": r"C:\Work\Secret\new.txt"}), json!({"doc": 2, "other": 1})] {
+            assert!(editor_args_hidden(&a, &docs, &locked), "{a}");
+        }
+        for a in [json!({"doc": 2}), json!({"doc": 3}), json!({"path": r"C:\Work\SecretSauce\x"}), json!({}), json!({"doc": 99})] {
+            assert!(!editor_args_hidden(&a, &docs, &locked), "{a}");
+        }
+        assert!(!editor_args_hidden(&json!({"doc": 1}), &docs, &[]), "nichts gesperrt");
+        assert!(path_hidden(std::path::Path::new(r"\\?\C:\Work\Secret\a.rs"), &locked));
+        let v = json!({"rules": [{"id": 1, "path": r"C:\Work\Secret"}, {"id": 2, "path": r"C:\Work\Open"}, {"id": 3, "path": ""}], "enabled": true});
+        let v = hide_save_action_rules(v, &locked);
+        let ids: Vec<u64> = v["rules"].as_array().unwrap().iter().map(|r| r["id"].as_u64().unwrap()).collect();
+        assert_eq!(ids, vec![2, 3]);
+        assert!(!v.to_string().contains("Secret"));
+    }
+
+    #[test]
+    fn toast_names_are_defused() {
+        let n = toast_name("evil\u{202e}gnp.exe\nsecond line\u{7}");
+        assert!(!n.contains('\u{202e}') && !n.contains('\n') && !n.contains('\u{7}'), "{n:?}");
+        assert!(toast_name(&"x".repeat(500)).chars().count() <= 41);
     }
 
     #[test]

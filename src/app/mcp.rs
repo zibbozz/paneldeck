@@ -93,6 +93,9 @@ enum Pend {
     Create { rx: std::sync::mpsc::Receiver<crate::wsl::DirCheck>, distro: String, path: String },
     /// `run_command` im Terminal eines Chats (#338): wartet, bis die Shell des (frisch gestarteten) Terminals bereit ist.
     AgentRun,
+    /// `run_command` eines Chats wartet auf die Prüfung seines Projektordners im Hintergrund (Review 3.2.0,
+    /// `App::chat_root_checked`); danach läuft `agent_run` noch einmal mit denselben Argumenten.
+    AgentRoot,
     /// `format_file` (#381): Lauf im Hilfsthread für dieses Dokument und diesen Befehl.
     Format { job: crate::editor_svc::format_job::Job, doc: u64, op: crate::editor::format::Op },
     /// Arbeit im Hilfsthread (z. B. `editor_diff`, #385): das Ergebnis kommt über den Kanal.
@@ -141,6 +144,8 @@ pub(super) struct McpState {
     pub(super) reach_at: Option<Instant>,
     /// Offener Dialog „Zugriff für Agenten“ (#386).
     pub(super) access_dlg: Option<crate::access::Area>,
+    /// Geprüfte Projektordner der Chats (Review 3.2.0: Kanonisieren und WSL-Prüfungen im Hintergrund), je Chat.
+    chat_roots: HashMap<u64, agent_tools::RootCheck>,
 }
 
 impl McpState {
@@ -157,6 +162,7 @@ impl McpState {
         self.bg_live.retain(|(s, _), _| *s != id);
         self.run_end_seq.remove(&id);
         self.chat_terms.retain(|(c, _), s| *c != id && *s != id);
+        self.chat_roots.remove(&id);
     }
 }
 
@@ -829,10 +835,16 @@ impl App {
             if let Some(pos) = self.mcp.pending.iter().position(|p| matches!(p.kind, Pend::Shot { token: t, .. } if t == token)) {
                 let p = self.mcp.pending.remove(pos);
                 let crop = if let Pend::Shot { crop, .. } = &p.kind { *crop } else { None };
-                // Zugriff beim Abschluss neu prüfen (#386): das Projekt kann inzwischen gesperrt worden sein.
+                // Zugriff beim Abschluss neu prüfen (#386): das Projekt kann inzwischen gesperrt worden sein. Ebenso, was zu
+                // sehen ist (Review 3.2.0): Reiter, Dialoge, Lage der Sitzung – sonst kein Bild.
+                let now_scope = self.shot_scope(ctx, (p.session != 0).then_some(p.session), p.caller, p.how);
                 let r = match self.mcp_access_gate(&p.tool, &p.args, p.caller, p.how) {
                     Err(e) => Err(e),
-                    Ok(()) => self.mcp_shot_result(ctx.pixels_per_point(), &image, crop, p.session),
+                    Ok(()) => match now_scope {
+                        Err(e) => Err(e),
+                        Ok(now) if now != crop => Err(er("not_visible", tr("Die Sitzung hat sich während der Aufnahme bewegt – noch einmal versuchen.", "The session moved while the screenshot was taken – try again."))),
+                        Ok(_) => self.mcp_shot_result(ctx.pixels_per_point(), &image, crop, p.session),
+                    },
                 };
                 self.mcp_finish(&p.reply, &p.tool, &p.args, p.caller, p.how, r);
             }
@@ -842,6 +854,10 @@ impl App {
         for p in pend {
             if let Pend::AgentRun = &p.kind {
                 self.agent_ready(p);
+                continue;
+            }
+            if let Pend::AgentRoot = &p.kind {
+                self.agent_root_ready(ctx, p);
                 continue;
             }
             let fmt = if let Pend::Format { job, doc, op } = &p.kind { Some((job.poll(), *doc, *op, job.revision)) } else { None };
@@ -1200,11 +1216,12 @@ impl App {
             "list_models" => Out::Now(Ok(models_json(&self.settings.llm_servers, self.settings.last_chat_model.as_ref()))),
             "cleanup_sizes" => Out::Now(Ok(self.cleanup_sizes_json())),
             "list_processes" | "read_process_output" | "start_process" | "stop_process" | "restart_process" => Out::Now(self.mcp_procs_scoped(ctx, tool, args, caller, how)),
-            "list_save_actions" => Out::Now(Ok(self.mcp_save_actions())),
+            // Regeln für Ordner gesperrter Projekte fehlen (#386, Review 3.2.0).
+            "list_save_actions" => Out::Now(Ok(access_gate::hide_save_action_rules(self.mcp_save_actions(), &self.locked_folders(caller, how)))),
             "theme_list" => Out::Now(Ok(theme_list_json(&self.themes, &self.theme_issues, &self.settings.theme))),
             "theme_get" => Out::Now(theme_get_json(&self.themes, &self.settings.theme, args, &|n| self.backdrops.stats_of(n))),
             // Vergleich (#385): git und Vergleich im Hilfsthread, die Oberfläche wartet nie darauf.
-            "editor_diff" => match self.mcp_editor_diff(ctx, args) {
+            "editor_diff" => match self.editor_unlocked(args, caller, how).and_then(|hidden| self.mcp_editor_diff(ctx, args, hidden)) {
                 Err(e) => Out::Now(Err(e)),
                 Ok(rx) => {
                     self.mcp.pending.push(PendingMcp { reply: reply.clone(), tool: tool.to_string(), args: args.clone(), caller, how, session: 0, deadline: Instant::now() + Duration::from_secs(30), kind: Pend::Job { rx } });
@@ -1214,7 +1231,7 @@ impl App {
             },
             // Editor-Reiter (#54): Schalter und Pfadregeln in `editor_svc::tools`.
             // `format_file` (#381): im Hilfsthread, die Antwort kommt in einem späteren Bild.
-            "format_file" => match self.mcp_format_start(ctx, args) {
+            "format_file" => match self.editor_unlocked(args, caller, how).and_then(|hidden| self.mcp_format_start(ctx, args, &hidden)) {
                 Ok((job, doc, op)) => {
                     self.mcp.pending.push(PendingMcp {
                         reply: reply.clone(),
@@ -1231,9 +1248,9 @@ impl App {
                 }
                 Err(e) => Out::Now(Err(e)),
             },
-            t if crate::editor_svc::tools::TOOLS.contains(&t) => Out::Now(self.mcp_editor(ctx, t, args)),
+            t if crate::editor_svc::tools::TOOLS.contains(&t) => Out::Now(self.editor_unlocked(args, caller, how).and_then(|hidden| self.mcp_editor(ctx, t, args, hidden))),
             // Reiter „Zeit“ (#164): Wecker, Timer, Stoppuhren (lesen/steuern), Weltuhren und Geburtstage (nur lesen).
-            t if crate::time::agent::TOOLS.contains(&t) => Out::Now(self.mcp_time(t, args, caller)),
+            t if crate::time::agent::TOOLS.contains(&t) => Out::Now(self.mcp_time(t, args, caller, how)),
             // Kalender (#164): `calendar::agent`, Oberfläche `calendar_ui`.
             t if crate::calendar::agent::TOOLS.contains(&t) => Out::Now(self.mcp_calendar(t, args, caller, how)),
             "send_text" => Out::Now(self.mcp_send_text(args, caller)),
@@ -1247,6 +1264,18 @@ impl App {
             t if agent::TOOLS.contains(&t) => Out::Now(self.mcp_planning(t, args, caller, how)),
             _ => Out::Now(Err(er("not_found", tr("Unbekanntes Werkzeug", "Unknown tool")))),
         }
+    }
+
+    /// Editor-Werkzeuge (#386, Review 3.2.0): Ordner der für diesen Agenten gesperrten Projekte. Zeigt ein Argument (`doc`,
+    /// `other`, `path`) dorthin, gibt es `project_locked`, ohne dass das Werkzeug läuft; sonst die Ordner für den Editor
+    /// (er lässt solche Dokumente aus Listen und Meldungen weg).
+    fn editor_unlocked(&self, args: &Value, caller: Option<u64>, how: &str) -> Result<Vec<String>, (String, String)> {
+        let hidden = self.locked_folders(caller, how);
+        let docs: Vec<(u64, Option<std::path::PathBuf>)> = self.editor_list().into_iter().map(|d| (d.id, d.path)).collect();
+        if access_gate::editor_args_hidden(args, &docs, &hidden) {
+            return Err(crate::access::locked_error());
+        }
+        Ok(hidden)
     }
 
     /// Todo-Liste und Tickets (`planning::agent`): läuft kurz in der UI-Schleife auf der Datenbank der Anwendung. Jede Änderung
@@ -1350,7 +1379,7 @@ impl App {
         if hidden {
             return Out::Now(Err(er("window_hidden", tr("Das Paneldeck-Fenster ist minimiert oder im Tray – für Screenshots muss es sichtbar sein.", "The Paneldeck window is minimized or in the tray – it must be visible for screenshots."))));
         }
-        let (session, crop) = if args.get("session").is_some() {
+        let session = if args.get("session").is_some() {
             let id = match self.mcp_target(args, None, false) {
                 Ok(id) => id,
                 Err(e) => return Out::Now(Err(e)),
@@ -1358,13 +1387,17 @@ impl App {
             if self.window_of(id).unwrap_or(0) != 0 {
                 return Out::Now(Err(er("not_visible", tr("Die Sitzung liegt in einem weiteren Paneldeck-Fenster – Screenshots einzelner Sitzungen gehen nur im Hauptfenster.", "The session is in another Paneldeck window – screenshots of single sessions only work in the main window."))));
             }
-            match self.pane_rects.get(&id).copied() {
-                Some(r) => (id, Some(r)),
-                None => return Out::Now(Err(er("not_visible", tr("Die Sitzung ist im Fenster nicht zu sehen (anderes Projekt oder ausgeblendet) – erst focus_session aufrufen.", "The session is not visible in the window (other project or hidden) – call focus_session first.")))),
-            }
+            Some(id)
         } else {
-            (0, None)
+            None
         };
+        // Was zu sehen ist (Review 3.2.0): ganzes Fenster nur im Terminal Hub ohne Dialoge und unsichtbare Tickets, eine
+        // Sitzung nur mit ihrem Inhalt (beim Abschluss noch einmal geprüft).
+        let crop = match self.shot_scope(ctx, session, caller, how) {
+            Ok(c) => c,
+            Err(e) => return Out::Now(Err(e)),
+        };
+        let session = session.unwrap_or(0);
         self.mcp.next_token += 1;
         let token = self.mcp.next_token;
         ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::new(token)));
@@ -2238,7 +2271,7 @@ impl App {
                 }
                 None
             }
-            Pend::Shot { .. } | Pend::Create { .. } | Pend::AgentRun | Pend::Format { .. } | Pend::Job { .. } => None,
+            Pend::Shot { .. } | Pend::Create { .. } | Pend::AgentRun | Pend::AgentRoot | Pend::Format { .. } | Pend::Job { .. } => None,
             Pend::Run { cmd, prompt0, cwd0, start_abs, max_lines, cmd_shell, started, mark0, nested, zsh } => {
                 let Some(s) = &e.live else { return Some(Err(er("session_not_running", tr("Die Sitzung läuft nicht mehr.", "The session is no longer running.")))) };
                 let (advanced, exit, mark) = {

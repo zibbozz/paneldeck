@@ -141,6 +141,11 @@ pub trait EditorHost {
     fn protected(&self, _path: &Path) -> bool {
         false
     }
+    /// Liegt der Pfad im Ordner eines für diesen Agenten gesperrten Projekts (#386, Review 3.2.0)? Dann öffnet der Agent
+    /// ihn nicht (`project_locked`), und [`EditorHost::docs`] lässt solche Dokumente aus.
+    fn hidden(&self, _path: &Path) -> bool {
+        false
+    }
     /// Gespeicherter Stand der Datei eines Dokuments (#385): `disk`, `head` oder `index` (lokales git), Text mit `\n`.
     /// `Ok(None)` = in diesem Stand gibt es die Datei nicht (neue Datei, nicht im Index); `Err` = nicht möglich
     /// (unbenannt, kein Repository).
@@ -614,8 +619,15 @@ pub fn open(host: &mut dyn EditorHost, s: &EditorSettings, args: &Value) -> R {
             if text.is_some() {
                 return Err(er("bad_args", t("text gibt es nur mit untitled = true.", "text only works with untitled = true.")));
             }
-            let checked = agent_path::check_file(p)?;
             let raw = Path::new(p.trim());
+            // Ordner gesperrter Projekte (Review 3.2.0): vor jedem Plattenzugriff am eingegebenen Pfad, danach am geprüften.
+            if host.hidden(raw) {
+                return Err(crate::access::locked_error());
+            }
+            let checked = agent_path::check_file(p)?;
+            if host.hidden(&checked) {
+                return Err(crate::access::locked_error());
+            }
             if host.protected(&checked) || host.protected(raw) {
                 return Err(data_folder_refused());
             }
@@ -952,6 +964,8 @@ pub(crate) mod fake {
         pub protected: Option<PathBuf>,
         /// Gespeicherte Stände für `editor_diff`: (Dokument, `disk`/`head`/`index`) → Text (`None` = gibt es nicht).
         pub bases: std::collections::HashMap<(u64, String), Option<String>>,
+        /// Ordner eines gesperrten Projekts (#386, Review 3.2.0).
+        pub hidden: Option<PathBuf>,
     }
 
     impl FakeHost {
@@ -988,6 +1002,10 @@ pub(crate) mod fake {
     impl EditorHost for FakeHost {
         fn protected(&self, path: &Path) -> bool {
             self.protected.as_deref().is_some_and(|d| path.starts_with(d))
+        }
+
+        fn hidden(&self, path: &Path) -> bool {
+            self.hidden.as_deref().is_some_and(|d| path.starts_with(d))
         }
 
         fn docs(&self) -> Vec<DocInfo> {
@@ -1178,6 +1196,10 @@ mod tests {
         assert_eq!(h.doc(v["doc"].as_u64().unwrap()).text, "a\nb");
         let big = "x".repeat(MAX_AGENT_TEXT + 1);
         assert_eq!(code(open(&mut h, &s, &json!({"untitled": true, "text": big}))), "too_large");
+        // Ordner eines gesperrten Projekts (Review 3.2.0): `project_locked`, auch wenn die Datei schon offen ist.
+        h.hidden = Some(dir.clone());
+        assert_eq!(code(open(&mut h, &s, &json!({"path": f.to_string_lossy()}))), crate::access::LOCKED_CODE);
+        assert_eq!(code(open(&mut h, &s, &json!({"path": dir.join("fehlt.txt").to_string_lossy()}))), crate::access::LOCKED_CODE, "vor jedem Plattenzugriff");
         std::fs::remove_dir_all(&dir).ok();
     }
 
