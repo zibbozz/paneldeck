@@ -52,6 +52,7 @@ mod editor_services;
 mod editor_search_ui;
 pub(crate) mod folder_picker;
 mod fresh_start;
+mod inbox_ui;
 mod closing;
 mod conv_pick;
 #[cfg(test)]
@@ -408,7 +409,8 @@ enum Action {
     OpenQueue(u64),
     ToggleDiff,
     QueueAdd(u64, String),
-    Approve(u64, bool),
+    /// Freigabe-Frage von Claude beantworten: Sitzung, Ja/Nein, laufende Nummer des gezeigten Aufrufs (#390).
+    Approve(u64, bool, u64),
     OpenGlobalSearch,
     GlobalJump(u64, i32, String),
     JumpCmd(i32),
@@ -2040,7 +2042,7 @@ impl App {
             entry.meta.queue_paused = false;
         }
         entry.track = Default::default();
-        entry.status_msg.clear();
+        entry.clear_status_msg();
         entry.perm_since = None;
         let Some(mut shell) = self.session_shell(&entry.meta.shell_id, entry.meta.profile) else {
             entry.error = Some(state::t("Keine Shell gefunden", "No shell found").into());
@@ -3907,20 +3909,30 @@ impl App {
                     }
                 }
             }
-            Action::Approve(id, yes) => {
+            Action::Approve(id, yes, seq) => {
                 if let Some(e) = self.entries.get_mut(&id) {
                     let settled = e.perm_since.is_none_or(|t| t.elapsed() >= std::time::Duration::from_millis(500));
-                    if e.status == ClaudeStatus::Permission && settled && !e.exited() {
+                    // Nur, wenn die Frage noch genau den Aufruf verlangt, den die Karte zeigte, und der Dialog ihn gerade
+                    // zeigt (#390) – sonst nichts senden; die Karte zeigt bis zur nächsten Prüfung nur *Öffnen*.
+                    let screen = e.live.as_ref().map(|s| s.screen_text()).unwrap_or_default();
+                    if !e.answerable(seq, &screen) {
+                        if let Some(r) = e.track.request.as_mut() {
+                            r.confirmed = false;
+                        }
+                    } else if e.status == ClaudeStatus::Permission && settled && !e.exited() {
+                        e.track.tools.answered();
                         if let Some(s) = &e.live {
                             s.write(if yes { b"\r" } else { b"\x1b" });
                         }
                         if yes {
                             e.assume_working();
                         } else {
-                            // Abgelehnt: Claude bricht die Runde ab und wartet (dafür gibt es keinen Stop-Hook).
+                            // Abgelehnt: Claude bricht die Runde ab und wartet (dafür gibt es keinen Stop-Hook). Der
+                            // abgelehnte Aufruf meldet kein PostToolUse mehr (#390).
+                            e.track.tools.forget(seq);
                             e.apply_fallback(ClaudeStatus::Idle);
                         }
-                        e.status_msg.clear();
+                        e.clear_status_msg();
                         e.perm_since = None;
                         e.attention = false;
                     }
