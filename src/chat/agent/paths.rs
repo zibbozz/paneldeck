@@ -866,10 +866,13 @@ pub(crate) mod tests {
         assert!(wsl_blocked(Path::new(r"C:\Users\u\proj")).is_none());
     }
 
+    /// Nur unter Windows sind das Geräte-, Netz- oder Stream-Pfade; unter Linux/macOS sind `\`, `:` und `CON` gewöhnliche
+    /// Zeichen bzw. Namen im Projektordner (dort prüfen `resolve`/`blocked` wie sonst auch). Bis 3.1 lief der Test nur
+    /// unter Windows (`#[cfg(windows)]` ging beim Einfügen neuer Tests verloren); jetzt prüft er beide Seiten.
     #[test]
     fn windows_device_unc_and_stream_paths_are_refused() {
         for bad in [r"\\server\share\x", r"\\?\C:\Windows", r"\\.\PhysicalDrive0", "//server/share", "file.txt:stream", "src/a.rs::$DATA", "C:relative.txt", r"\rooted.txt", "CON", "src/nul.txt", "COM1", "lpt9.log", "trailing.", "space ", "dir./x"] {
-            assert!(lexical_problem(bad).is_some(), "{bad}");
+            assert_eq!(lexical_problem(bad).is_some(), cfg!(windows), "{bad}: {:?}", lexical_problem(bad));
         }
         for ok in ["C:\\Users\\x", "src/main.rs", "a.b.c", "COM10.txt", "console.rs", "nullable.rs", "..", "./x"] {
             assert!(lexical_problem(ok).is_none(), "{ok}: {:?}", lexical_problem(ok));

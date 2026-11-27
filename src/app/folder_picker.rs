@@ -64,9 +64,12 @@ impl Target {
         }
     }
 
-    /// Pfadart des Ziels (für Umrechnung und Hinweise).
+    /// Pfadart des Ziels (für Umrechnung und Hinweise). `Windows` ist die Shell des Systems: unter Linux/macOS also ein
+    /// nativer Pfad (wie `PathKind::of`) – sonst wäre z. B. der Arbeitsordner `/home/<u>` im Dialog „Neue Sitzung“ dort
+    /// „nicht umrechenbar“ und „Erstellen“ gesperrt.
     pub fn kind(&self) -> PathKind {
         match self {
+            Target::Windows if !cfg!(windows) => PathKind::Native,
             Target::Windows => PathKind::Windows { cmd: false },
             Target::Msys { root } => PathKind::Msys { root: root.clone() },
             Target::Wsl { distro, .. } => PathKind::Wsl { distro: distro.clone() },
@@ -1239,7 +1242,8 @@ mod tests {
         v = "/srv/app".into();
         run(&mut v, Target::Wsl { distro: Some("FieldTest".into()), choose_distro: false });
         assert_eq!(v, "/srv/app");
-        // Linux-Pfad für eine Windows-Shell: sperrt mit Hinweis
+        // Linux-Pfad für eine Windows-Shell: sperrt mit Hinweis. Unter Linux/macOS ist die Shell des Systems nativ, dort
+        // ist /home/u ein gewöhnlicher Ordner.
         let mut w = "/home/u".to_string();
         let mut r = PickerResponse::default();
         let _ = ctx.run(RawInput::default(), |ctx| {
@@ -1247,7 +1251,8 @@ mod tests {
                 r = field(ui, "t2", &mut w, Target::Windows, false, Lang::En, &recent);
             });
         });
-        assert!(r.blocking.is_some());
+        assert_eq!(r.blocking.is_some(), cfg!(windows), "{:?}", r.blocking);
+        assert_eq!(Target::Windows.kind(), if cfg!(windows) { PathKind::Windows { cmd: false } } else { PathKind::Native });
         // Gesperrt (Worktree): nur anzeigen
         let _ = ctx.run(RawInput::default(), |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {

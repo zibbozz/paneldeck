@@ -181,8 +181,12 @@ mod tests {
         }
         assert_eq!(check_target(&rule.join("dist").to_string_lossy(), &rule), Err(CopyRefusal::InsideRuleFolder));
         assert_eq!(check_target(&rule.to_string_lossy(), &rule), Err(CopyRefusal::InsideRuleFolder));
-        assert_eq!(destination(&src, &rule, &out.to_string_lossy(), true).unwrap(), out.join("src").join("a.txt"));
-        assert_eq!(destination(&src, &rule, &out.to_string_lossy(), false).unwrap(), out.join("a.txt"));
+        // Das Ziel ist der wirkliche Ort (kanonisch: Links aufgelöst, unter Windows lange statt 8.3-Namen wie
+        // `RUNNER~1`, unter macOS `/private/var` statt `/var`) – verglichen wird deshalb mit dem kanonischen Testordner.
+        let canon = std::fs::canonicalize(&tmp).unwrap().to_string_lossy().to_string();
+        let real_out = PathBuf::from(canon.strip_prefix(r"\\?\").unwrap_or(&canon)).join("out");
+        assert_eq!(destination(&src, &rule, &out.to_string_lossy(), true).unwrap(), real_out.join("src").join("a.txt"));
+        assert_eq!(destination(&src, &rule, &out.to_string_lossy(), false).unwrap(), real_out.join("a.txt"));
         // Datei-Regel: Regelordner = Ordner der Datei, das Ziel darf nicht die Quelle sein.
         let r2 = src.parent().unwrap();
         assert_eq!(destination(&src, r2, &src.parent().unwrap().to_string_lossy(), false), Err(CopyRefusal::InsideRuleFolder));

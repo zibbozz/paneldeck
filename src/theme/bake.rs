@@ -248,8 +248,11 @@ pub fn prepare_file(path: &Path) -> Result<Prepared, String> {
 
 /// Freier Dateiname für ein Bild aus `original` (Name der gewählten Datei) mit Endung `ext`: nur Buchstaben, Ziffern,
 /// `-` und `_`, höchstens 40 Zeichen, nicht in `taken` (ohne Groß-/Kleinschreibung) – sonst „name-2.ext“ usw.
+/// Der Ordner fällt weg, egal mit welchem Trenner: Ein Windows-Pfad (`C:\Users\…`) gilt auch unter Linux/macOS, wo
+/// `Path` nur `/` trennt (z. B. ein Theme oder Name, der unter Windows entstand).
 pub fn file_name_for(original: &str, ext: &str, taken: &[String]) -> String {
-    let stem = Path::new(original).file_stem().and_then(|s| s.to_str()).unwrap_or("");
+    let base = original.rsplit(['/', '\\']).next().unwrap_or(original);
+    let stem = Path::new(base).file_stem().and_then(|s| s.to_str()).unwrap_or("");
     let mut s = String::new();
     for c in stem.chars() {
         if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
@@ -983,6 +986,8 @@ mod tests {
     #[test]
     fn file_names_for_imported_images_are_safe_and_unique() {
         assert_eq!(file_name_for("C:\\Users\\x\\Mein Foto (1).JPG", "jpg", &[]), "mein-foto-1.jpg");
+        assert_eq!(file_name_for("/home/x/Mein Foto (1).JPG", "jpg", &[]), "mein-foto-1.jpg", "beide Trenner auf jedem System");
+        assert_eq!(file_name_for("C:\\x/y\\bild.png", "png", &[]), "bild.png");
         assert_eq!(file_name_for("con.png", "png", &[]), "background.png");
         assert_eq!(file_name_for("???.png", "png", &[]), "background.png");
         assert_eq!(file_name_for("a.png", "png", &["A.png".into(), "a-2.png".into()]), "a-3.png");

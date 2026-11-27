@@ -241,7 +241,9 @@ impl Ctx<'_> {
 
 const ANSI: [&str; 16] = ["ansi0", "ansi1", "ansi2", "ansi3", "ansi4", "ansi5", "ansi6", "ansi7", "ansi8", "ansi9", "ansi10", "ansi11", "ansi12", "ansi13", "ansi14", "ansi15"];
 
-/// Alle Hinweise der eingeschalteten Regeln (ohne Regel „Hintergrund“, siehe [`run_with`]).
+/// Alle Hinweise der eingeschalteten Regeln (ohne Regel „Hintergrund“, siehe [`run_with`]). Nur in Tests; die
+/// Oberfläche nimmt [`run_with`].
+#[cfg(test)]
 pub fn run(t: &Theme, on: impl Fn(Rule) -> bool) -> Vec<Hint> {
     run_with(t, None, on)
 }
