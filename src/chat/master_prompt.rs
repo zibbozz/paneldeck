@@ -2041,9 +2041,8 @@ mod tests {
                 assert_eq!(choose(auto, full), Variant::Full, "{level:?} {expert}: automatischer Kontext {auto}");
                 assert_eq!(choose(8192, full), Variant::Compact, "{level:?} {expert}");
                 assert_eq!(choose(1 << 20, full), Variant::Full);
-                // bei 32768 voll, außer Steuern (mit Zeit und Kalender, #164) bzw. Lesen im Expertenmodus mit Agenten-Werkzeugen
-                // (brauchen 65536)
-                let big = level == McpLevel::Control || (expert && agent);
+                // bei 32768 voll, außer Steuern (mit Zeit und Kalender, #164: braucht 65536)
+                let big = level == McpLevel::Control;
                 assert_eq!(choose(32768, full), if big { Variant::Compact } else { Variant::Full }, "{level:?} {expert} agent={agent}: {full}");
                 assert_eq!(choose(65536, full), Variant::Full);
             }

@@ -32,14 +32,14 @@ pub const MAX_LAPS: usize = 1000;
 
 fn paging() -> Value {
     json!({
-        "limit": {"type": "integer", "description": "1-500, default 100"},
-        "offset": {"type": "integer", "description": "Skip this many entries (default 0)"}
+        "limit": {"type": "integer", "description": "1-500"},
+        "offset": {"type": "integer"}
     })
 }
 
 fn paging_laps() -> Value {
     let mut p = paging();
-    p["laps_limit"] = json!({"type": "integer", "description": "Newest laps per stopwatch, 0-1000, default 20"});
+    p["laps_limit"] = json!({"type": "integer", "description": "0-1000, default 20"});
     p
 }
 
@@ -181,11 +181,11 @@ pub fn defs() -> Vec<ToolDef> {
 /// Kurzbeschreibungen für den Systemprompt (`sysprompt::short_desc`), (de, en).
 pub fn short_desc(name: &str) -> Option<(&'static str, &'static str)> {
     Some(match name {
-        "list_alarms" => ("Wecker des Reiters „Zeit“ (Uhrzeit, Tage, nächstes Klingeln).", "Alarms of the Time tab (time, days, next ring)."),
-        "list_timers" => ("Timer (Restzeit, Zustand) und Timer-Vorlagen.", "Timers (remaining time, state) and timer presets."),
-        "list_stopwatches" => ("Stoppuhren mit Zeit und Runden.", "Stopwatches with time and laps."),
-        "list_clocks" => ("Weltuhren (Zone, Uhrzeit, Abstand) – nur lesen.", "World clocks (zone, time, offset) – read-only."),
-        "list_birthdays" => ("Geburtstage mit Alter und Countdown – nur lesen.", "Birthdays with age and countdown – read-only."),
+        "list_alarms" => ("Wecker des Reiters „Zeit“ (Uhrzeit, Tage, nächstes Klingeln).", "Alarms (time, days, next ring)."),
+        "list_timers" => ("Timer (Restzeit, Zustand) und Timer-Vorlagen.", "Timers (state, remaining) and presets."),
+        "list_stopwatches" => ("Stoppuhren mit Zeit und Runden.", "Stopwatches (time, laps)."),
+        "list_clocks" => ("Weltuhren (Zone, Uhrzeit, Abstand) – nur lesen.", "World clocks (zone, time, offset)."),
+        "list_birthdays" => ("Geburtstage mit Alter und Countdown – nur lesen.", "Birthdays (age, countdown)."),
         "create_alarm" => ("Wecker anlegen.", "Create an alarm."),
         "update_alarm" => ("Wecker ändern oder ein-/ausschalten.", "Change an alarm or switch it on/off."),
         "create_timer" => ("Timer anlegen (Dauer oder Vorlage) und starten.", "Create a timer (duration or preset) and start it."),
