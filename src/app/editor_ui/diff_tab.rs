@@ -190,6 +190,10 @@ impl StaticSide {
     }
 }
 
+fn e_title(docs: &BTreeMap<u64, DocEntry>, d: u64) -> String {
+    docs.get(&d).map(|e| e.title(Lang::En)).unwrap_or_default()
+}
+
 fn file_name(p: &Path) -> String {
     p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| p.to_string_lossy().to_string())
 }
@@ -221,7 +225,15 @@ fn sha_file(p: &Path) -> Option<(u64, String)> {
 }
 
 fn decoded(bytes: &[u8], enc: Option<TextEncoding>) -> (String, Facts, bool) {
-    let d = crate::editor::encoding::decode(bytes, enc);
+    facts_of(crate::editor::encoding::decode(bytes, enc), bytes)
+}
+
+/// Ein Stand in git: reiner ASCII-Inhalt in der Kodierung des Dokuments (keine falsche Kodierungs-Meldung).
+fn decoded_git(bytes: &[u8], enc: Option<TextEncoding>) -> (String, Facts, bool) {
+    facts_of(git_base::decode_like(bytes, enc), bytes)
+}
+
+fn facts_of(d: crate::editor::encoding::Decoded, bytes: &[u8]) -> (String, Facts, bool) {
     let facts = Facts { encoding: Some(d.encoding.label().to_string()), eol: compare::eol_label(&d.eol_stats), final_newline: d.text.ends_with('\n') };
     let binary = compare::looks_binary(bytes);
     (d.text, facts, binary)
@@ -262,7 +274,7 @@ fn load_source(source: &Source, prev: Option<u64>, repo: Option<Option<RepoFile>
             match git_base::blobs(&r, std::slice::from_ref(rev), max) {
                 Ok(v) => match v.into_iter().next() {
                     Some(Blob::Bytes(b)) => {
-                        let (text, facts, binary) = decoded(&b, None);
+                        let (text, facts, binary) = decoded_git(&b, enc);
                         Loaded::Data { text, facts, raw_len: b.len() as u64, raw_sha: sha_hex(&b), binary, stamp, note: None, repo: Some(repo) }
                     }
                     Some(Blob::TooLarge(n)) => Loaded::Data { text: String::new(), facts: Facts::default(), raw_len: n, raw_sha: String::new(), binary: false, stamp, note: Some(t("Zu groß zum Vergleichen", "Too large to compare").into()), repo: Some(repo) },
@@ -642,6 +654,14 @@ impl DiffTab {
         self.cancelled = None;
     }
 
+    /// Eine Seite ließ sich nicht lesen (Datei fehlt, keine Rechte): Text der Meldung.
+    pub(crate) fn side_error(&self, docs: &BTreeMap<u64, DocEntry>) -> Option<String> {
+        [&self.left, &self.right].iter().find_map(|s| match s {
+            Side::Doc(d) => docs.get(d).and_then(|e| e.load_error.clone()).map(|e| format!("{}: {e}", e_title(docs, *d))),
+            Side::Text(_) => None,
+        })
+    }
+
     fn key(&self, docs: &BTreeMap<u64, DocEntry>) -> Option<JobKey> {
         Some(JobKey { l: self.left.version(docs)?, r: self.right.version(docs)?, ws: self.ignore_ws })
     }
@@ -687,6 +707,10 @@ impl DiffTab {
                 Ok(None) | Err(mpsc::TryRecvError::Disconnected) => self.job = None,
                 Err(mpsc::TryRecvError::Empty) => busy = true,
             }
+        }
+        // Eine Seite ist nicht lesbar: nichts zu tun (die Meldung steht im Reiter), nicht ewig neu zeichnen.
+        if self.side_error(docs).is_some() {
+            return busy;
         }
         let Some(key) = self.key(docs) else { return true };
         let stale = self.out.as_ref().is_none_or(|o| o.key != key);
@@ -1051,6 +1075,10 @@ pub(super) fn show(ui: &mut Ui, rect: Rect, dt: &mut DiffTab, docs: &mut BTreeMa
             dt.cancel();
         }
         body.min.y += 30.0;
+    }
+    if let Some(e) = dt.side_error(docs) {
+        ui.painter().text(body.center(), Align2::CENTER_CENTER, format!("{} {e}", lang.t("Nicht lesbar –", "Cannot be read –")), FontId::proportional(13.0), style::ui().error);
+        return out;
     }
     let Some(o) = dt.out.clone() else {
         let msg = if dt.cancelled.is_some() { lang.t("Abgebrochen.", "Cancelled.") } else { lang.t("wird verglichen …", "comparing …") };
@@ -1711,14 +1739,15 @@ fn keyboard(ui: &mut Ui, dt: &mut DiffTab, docs: &mut BTreeMap<u64, DocEntry>, b
                     Key::PageUp => dt.scroll_y -= body.height() - row_h * 2.0,
                     Key::Home if ctrl => dt.scroll_y = 0.0,
                     Key::End if ctrl => dt.scroll_y = total,
-                    Key::ArrowLeft if m.alt => {
+                    // Nur Alt (AltGr meldet Strg+Alt und darf keine Blöcke übernehmen).
+                    Key::ArrowLeft if m.alt && !ctrl => {
                         if let Some(k) = dt.current
                             && let Err(e) = dt.apply(k, true, docs, lang)
                         {
                             cmds.push(Cmd::Hint(e));
                         }
                     }
-                    Key::ArrowRight if m.alt => {
+                    Key::ArrowRight if m.alt && !ctrl => {
                         if let Some(k) = dt.current
                             && let Err(e) = dt.apply(k, false, docs, lang)
                         {

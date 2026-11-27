@@ -134,7 +134,7 @@ Gespeichert in `settings.json` als `editor` ([Datenformat](data-and-backups.md#n
 
 ## Agenten
 Agenten (Claude Code und andere über die [Agenten-Schnittstelle](agent-interface.md#editor) sowie [Chats mit lokalen Modellen](chat.md)) können den Editor benutzen:
-- **Lesen** (`editor_list`, `editor_read`) geht ab der Stufe *Nur lesen* – auch ungespeicherte Änderungen. **`editor_diff`** (seit 3.2.0, Stufe *Nur lesen*, nur externe Agenten) vergleicht ein Dokument mit seiner gespeicherten Datei, git HEAD/Index oder einem anderen offenen Dokument.
+- **Lesen** (`editor_list`, `editor_read`) geht ab der Stufe *Nur lesen* – auch ungespeicherte Änderungen. **`editor_diff`** (seit 3.2.0, Stufe *Nur lesen* wie `editor_read`; nur externe Agenten) vergleicht ein Dokument mit seiner gespeicherten Datei, git HEAD/Index oder einem anderen offenen Dokument.
 - Drei Schalter unter *Einstellungen → Editor → Agenten*, **alle standardmäßig aus** und nur bei der Stufe **Steuern** wirksam (für Chats: die Stufe des Modells):
   - **Agenten dürfen Dateien öffnen** – in einem neuen Tab; nur lokale Pfade, nie Netzwerk-/UNC-Pfade (`\\server\freigabe`, `\\wsl.localhost\…`, Netzlaufwerke) oder Geräte. Ein Agent darf auch einen unbenannten Tab mit Text öffnen.
   - **Agenten dürfen offene Dateien bearbeiten** – die Änderung bleibt **ungespeichert**, ist als Änderung des Agenten markiert (*Von einem Agenten geöffnet oder geändert*) und lässt sich rückgängig machen.

@@ -48,7 +48,7 @@ Ein Werkzeug oberhalb der aktuellen Stufe liefert `forbidden`. Die Stufe wird im
 | `list_processes`, `read_process_output` | Lesen | Die [Prozessliste](#prozessliste): Einträge mit Status, erkannten lokalen Adressen und Fehlerzahl; die Ausgabe eines Eintrags |
 | `start_process`, `stop_process`, `restart_process` | Steuern | Einen Eintrag oder eine Gruppe der Prozessliste starten, stoppen (Strg+C, nach 5 s der ganze Baum) und neu starten |
 | `editor_list`, `editor_read` | Lesen | Die im [Editor-Reiter](#editor) offenen Dokumente und ihre Zeilen, auch ungespeicherte Änderungen (seit 3.0.0) |
-| `editor_diff` | Lesen | Ein offenes Dokument mit seiner gespeicherten Datei, git HEAD/Index oder einem anderen offenen Dokument vergleichen: Unified Diff und geänderte Blöcke (seit 3.2.0; nicht für Chats) |
+| `editor_diff` | Lesen | Ein offenes Dokument mit seiner gespeicherten Datei, git HEAD/Index oder einem anderen offenen Dokument vergleichen: Unified Diff und geänderte Blöcke (seit 3.2.0; wie `editor_read` ohne Schalter; nicht für Chats – in ihrer Kurzfassung des Prompts ist kein Platz mehr) |
 | `editor_open`, `editor_edit`, `editor_save` | Steuern + Schalter | Lokale Datei oder unbenannten Tab öffnen, offenes Dokument ändern (ungespeichert, als „vom Agenten“ markiert, rückgängig machbar), offene vorhandene Datei speichern – jeweils nur mit seinem Schalter unter *Einstellungen → Editor → Agenten* (seit 3.0.0) |
 | `list_todos` | Lesen | Die Karten der einfachen Todo-Liste (in jedem Modus; bei eingeschaltetem Expertenmodus nur lesbar) |
 | `add_todo`, `set_todo_done` | Steuern | **Expertenmodus aus:** Karte anlegen, abhaken oder wieder öffnen |

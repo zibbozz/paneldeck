@@ -572,6 +572,55 @@ pub(super) fn find_files_window<'a>(ctx: &egui::Context, lang: Lang) -> egui::Wi
     style::fit_to_screen(ctx, style::movable(ctx, Id::new("editor_find_files"), egui::Window::new(lang.t("In Dateien suchen", "Search in files"))), [520.0, 420.0], [340.0, 200.0]).collapsible(false)
 }
 
+/// Gespeicherter Stand einer Datei für `editor_diff` (#385): `disk`, `head` oder `index` (lokales git, Zeitgrenze
+/// [`crate::editor_svc::git_base::GIT_TIMEOUT`]). Blockiert – im Hilfsthread aufrufen.
+fn read_base(path: &Path, enc: Option<crate::editor::TextEncoding>, base: &str, max: u64) -> Result<Option<String>, String> {
+    use crate::editor_svc::git_base::{self, Blob, Rev};
+    match base {
+        "disk" => match std::fs::metadata(path) {
+            Ok(m) if m.len() > max => Err(state::t("Die Datei auf der Platte ist zu groß.", "The file on disk is too large.").to_string()),
+            Ok(_) => std::fs::read(path).map(|b| Some(crate::editor::encoding::decode(&b, enc).text)).map_err(|e| e.to_string()),
+            Err(_) => Ok(None),
+        },
+        "head" | "index" => {
+            let repo = git_base::locate(path).ok_or_else(|| state::t("Die Datei liegt in keinem git-Repository (oder git fehlt).", "The file is not in a git repository (or git is missing).").to_string())?;
+            let rev = if base == "head" { Rev::Head } else { Rev::Index };
+            match git_base::blobs(&repo, &[rev], max)?.into_iter().next() {
+                Some(Blob::Bytes(b)) => Ok(Some(git_base::decode_like(&b, enc).text)),
+                Some(Blob::TooLarge(_)) => Err(state::t("Der Stand in git ist zu groß.", "The state in git is too large.").to_string()),
+                _ => Ok(None),
+            }
+        }
+        _ => Err("disk, head, index".into()),
+    }
+}
+
+impl App {
+    /// `editor_diff` (#385) ohne die Oberfläche anzuhalten: Argumente und Texte jetzt, Lesen des Stands (git, Platte) und
+    /// Vergleichen im Hilfsthread. Das Ergebnis kommt über den Kanal (der Hub wartet in `McpState::pending`).
+    pub(super) fn mcp_editor_diff(&mut self, ctx: &egui::Context, args: &Value) -> Result<std::sync::mpsc::Receiver<Result<Value, (String, String)>>, (String, String)> {
+        let plan = {
+            let mut host = BridgeHost { app: self };
+            tools::diff_plan(&mut host, args)?
+        };
+        let path = plan.doc.path.clone();
+        let enc = crate::editor::TextEncoding::from_id(&plan.doc.encoding);
+        let max = self.settings.editor.large_file_bytes();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let c = ctx.clone();
+        std::thread::spawn(move || {
+            let base = match (&plan.base, &path) {
+                (tools::DiffBase::Read(a), Some(p)) => read_base(p, enc, a, max),
+                (tools::DiffBase::Read(_), None) => Err(state::t("Ein unbenannter Tab hat keinen gespeicherten Stand.", "An untitled tab has no saved state.").to_string()),
+                (tools::DiffBase::Text(_), _) => Ok(None),
+            };
+            let _ = tx.send(tools::diff_finish(plan, base));
+            c.request_repaint();
+        });
+        Ok(rx)
+    }
+}
+
 /// Die App als `EditorHost` für die MCP-Werkzeuge (nur im Hauptdurchlauf).
 struct BridgeHost<'a> {
     app: &'a mut App,
@@ -629,29 +678,9 @@ impl EditorHost for BridgeHost<'_> {
     }
 
     fn base_text(&mut self, doc: u64, base: &str) -> Result<Option<String>, String> {
-        use crate::editor_svc::git_base::{self, Blob, Rev};
         let info = self.app.editor_list().into_iter().find(|d| d.id == doc).ok_or_else(|| state::t("Das Dokument ist nicht mehr offen.", "The document is no longer open.").to_string())?;
         let path = info.path.ok_or_else(|| state::t("Ein unbenannter Tab hat keinen gespeicherten Stand.", "An untitled tab has no saved state.").to_string())?;
-        let enc = crate::editor::TextEncoding::from_id(&info.encoding);
-        let max = self.app.settings.editor.large_file_bytes();
-        let decode = |b: &[u8], enc| crate::editor::encoding::decode(b, enc).text;
-        match base {
-            "disk" => match std::fs::metadata(&path) {
-                Ok(m) if m.len() > max => Err(state::t("Die Datei auf der Platte ist zu groß.", "The file on disk is too large.").to_string()),
-                Ok(_) => std::fs::read(&path).map(|b| Some(decode(&b, enc))).map_err(|e| e.to_string()),
-                Err(_) => Ok(None),
-            },
-            "head" | "index" => {
-                let repo = git_base::locate(&path).ok_or_else(|| state::t("Die Datei liegt in keinem git-Repository (oder git fehlt).", "The file is not in a git repository (or git is missing).").to_string())?;
-                let rev = if base == "head" { Rev::Head } else { Rev::Index };
-                match git_base::blobs(&repo, &[rev], max)?.into_iter().next() {
-                    Some(Blob::Bytes(b)) => Ok(Some(decode(&b, None))),
-                    Some(Blob::TooLarge(_)) => Err(state::t("Der Stand in git ist zu groß.", "The state in git is too large.").to_string()),
-                    _ => Ok(None),
-                }
-            }
-            _ => Err("disk, head, index".into()),
-        }
+        read_base(&path, crate::editor::TextEncoding::from_id(&info.encoding), base, self.app.settings.editor.large_file_bytes())
     }
 
     fn save(&mut self, doc: u64) -> Result<(), String> {

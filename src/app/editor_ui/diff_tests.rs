@@ -261,8 +261,16 @@ fn markers_are_drawn_click_opens_the_popup_revert_and_f7() {
     let (line, _) = ed.panes.groups[&g].tabs[0].view.cursor_linecol(&ed.docs[&id]);
     assert_eq!(line, 4);
     assert_eq!(ed.mark_popup.as_ref().map(|p| p.line), Some(4), "das Fenster wandert mit");
+    // Veraltete Marken (Text inzwischen geändert): nichts zurücksetzen, Hinweis, neu berechnen
+    let before = text_of(&ed, id);
+    ed.docs.get_mut(&id).unwrap().apply_user_edit(crate::editor::compare::minimal_edit(&before, &format!("x{before}")));
+    assert!(ed.revert_mark(id, 1, Lang::En).is_err());
+    assert_eq!(text_of(&ed, id), format!("x{before}"), "nichts zurückgesetzt");
+    assert!(ed.docs.get_mut(&id).unwrap().undo_user());
+    let rev = ed.docs[&id].revision();
+    settle(&ctx, &mut ed, &mut t, WIDE, &prefs, |ed| ed.docs[&id].marks.fresh_for(rev));
     // Zurücksetzen: ein Rückgängig-Schritt
-    assert!(ed.revert_mark(id, 1));
+    assert!(ed.revert_mark(id, 1, Lang::En).unwrap());
     assert_eq!(text_of(&ed, id), "alpha\nbeta\ngamma\ndelta\nnew\n");
     assert!(ed.mark_popup.is_none());
     assert!(ed.docs.get_mut(&id).unwrap().undo_user());
@@ -321,5 +329,52 @@ fn git_markers_and_head_comparison_in_a_temp_repo() {
     git(&["apply", "--check", "x.patch"]);
     // Unbekannte Revision: Fehler, kein Reiter
     assert!(ed.compare(id, Target::Rev("--all".into()), &prefs, Lang::En).is_err());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn replacing_a_dirty_side_keeps_it_open_and_unreadable_sides_stop_working() {
+    let dir = test_dir("side");
+    let data = dir.join("data");
+    std::fs::create_dir_all(&data).unwrap();
+    let a = write(&dir, "a.txt", b"one\n");
+    let b = write(&dir, "b.txt", b"two\n");
+    let prefs = EditorPrefs::default();
+    let ctx = egui::Context::default();
+    let mut t = 0.0;
+    let mut ed = EditorUi::default();
+    let diff = ed.compare_paths(&a, &b, &prefs).unwrap();
+    settle(&ctx, &mut ed, &mut t, WIDE, &prefs, diff_settled);
+    let (la, lb) = (ed.diffs[&diff].left.doc().unwrap(), ed.diffs[&diff].right.doc().unwrap());
+    // linke Seite ungespeichert ändern, dann durch einen festen Stand ersetzen
+    let mut docs = std::mem::take(&mut ed.docs);
+    ed.diffs.get_mut(&diff).unwrap().apply(0, true, &mut docs, Lang::En).unwrap();
+    ed.docs = docs;
+    assert!(ed.docs[&la].dirty());
+    ed.set_diff_left(diff, Side::Text(Box::new(super::diff_tab::StaticSide::new(super::diff_tab::Source::Disk(b.clone())))), &data);
+    assert!(ed.docs.contains_key(&la), "ungespeicherte Seite bleibt offen");
+    assert_eq!(ed.panes.file_tabs_of(la).len(), 1, "als Datei-Reiter");
+    let (g, i) = ed.panes.diff_tab(diff).unwrap();
+    let tab = &ed.panes.groups[&g].tabs[i];
+    assert_eq!((tab.doc, tab.extra), (lb, None), "Reiter kennt die neuen Seiten");
+    assert_eq!(ed.panes.groups[&g].active, i, "der Vergleich bleibt aktiv");
+    // Tauschen hält die Dokumente des Reiters aktuell
+    ed.swap_diff(diff);
+    let tab = &ed.panes.groups[&g].tabs[i];
+    assert_eq!((tab.doc, tab.extra), (lb, None));
+    assert!(ed.docs.contains_key(&lb));
+    // Unlesbare Seite: Meldung, kein ewiges Neuzeichnen
+    let mut ed2 = EditorUi::default();
+    let gone = dir.join("missing-dir").join("x.txt");
+    let id = ed2.alloc_doc_for_test(&gone);
+    ed2.docs.get_mut(&id).unwrap().load_error = Some("not readable".into());
+    let other = ed2.compare_paths(&a, &b, &prefs).unwrap();
+    let dt = ed2.diffs.get_mut(&other).unwrap();
+    dt.set_left(Side::Doc(id));
+    let mut docs = std::mem::take(&mut ed2.docs);
+    assert!(dt.side_error(&docs).is_some());
+    for _ in 0..3 {
+        assert!(!dt.tick(&mut docs, &prefs, 0, Instant::now()) || dt.side_error(&docs).is_none(), "nicht beschäftigt");
+    }
     let _ = std::fs::remove_dir_all(&dir);
 }

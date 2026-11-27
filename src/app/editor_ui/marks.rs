@@ -67,6 +67,17 @@ impl Marks {
     pub(crate) fn clear(&mut self) {
         *self = Marks::default();
     }
+
+    /// Passen die Marken zum Text mit diesem Stand (`DocEntry::revision`) und läuft keine Neuberechnung?
+    pub(crate) fn fresh_for(&self, rev: Option<u64>) -> bool {
+        rev.is_some() && self.result_rev.map(|r| r.0) == rev && self.job.is_none()
+    }
+
+    /// Sofort neu berechnen (ohne die Verzögerung nach dem Tippen).
+    pub(crate) fn recompute(&mut self) {
+        self.result_rev = None;
+        self.changed_at = None;
+    }
 }
 
 /// Je Bild für ein sichtbares Dokument mit eingeschalteten Marken: Grundlage lesen/prüfen, Marken neu berechnen. Liefert,
@@ -182,7 +193,7 @@ fn load_base(path: &Path, enc: Option<TextEncoding>, base: MarkerBase, prev: Opt
     match git_base::blobs(&r, &[Rev::Index, Rev::Head], max) {
         Ok(v) => {
             let text = |b: &Blob| match b {
-                Blob::Bytes(x) => Some(decode(x)),
+                Blob::Bytes(x) => Some(git_base::decode_like(x, enc).text),
                 _ => None,
             };
             let (index, head) = (text(&v[0]), v.get(1).and_then(text));

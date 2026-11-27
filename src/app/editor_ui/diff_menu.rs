@@ -148,8 +148,8 @@ pub(super) fn palette_entries(ed: &EditorUi, prefs: &super::EditorPrefs, lang: L
 /// Daten der Auswahl (im Hilfsthread gelesen).
 pub(super) struct PickerData {
     pub repo: Option<RepoFile>,
-    pub branches: Vec<String>,
-    pub tags: Vec<String>,
+    pub branches: Vec<git_base::RefName>,
+    pub tags: Vec<git_base::RefName>,
     pub commits: Vec<Commit>,
 }
 
@@ -267,8 +267,9 @@ impl RevPicker {
                         }
                     }
                 };
-                section(ui, lang.t("Zweige", "Branches"), data.branches.iter().filter(|b| hit(b)).map(|b| (b.clone(), String::new(), Rev::Commit(b.clone()))).collect());
-                section(ui, lang.t("Tags", "Tags"), data.tags.iter().filter(|t| hit(t)).map(|t| (t.clone(), String::new(), Rev::Commit(t.clone()))).collect());
+                // Volle Ref-Namen (`refs/heads/…`, `refs/tags/…`): eindeutig, auch wenn ein Zweig wie ein Tag heißt.
+                section(ui, lang.t("Zweige", "Branches"), data.branches.iter().filter(|b| hit(&b.short)).map(|b| (b.short.clone(), b.full.clone(), Rev::Commit(b.full.clone()))).collect());
+                section(ui, lang.t("Tags", "Tags"), data.tags.iter().filter(|t| hit(&t.short)).map(|t| (t.short.clone(), t.full.clone(), Rev::Commit(t.full.clone()))).collect());
                 section(
                     ui,
                     lang.t("Letzte Commits der Datei", "Recent commits of the file"),

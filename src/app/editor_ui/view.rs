@@ -450,7 +450,9 @@ impl super::super::App {
                 }
             }
             Cmd::RevertMark(doc, line) => {
-                self.ed.revert_mark(doc, line);
+                if let Err(e) = self.ed.revert_mark(doc, line, lang) {
+                    self.ed.set_hint(e);
+                }
             }
             Cmd::MarkToDiff(doc, line) => {
                 let target = self.ed.docs.get(&doc).and_then(|d| {
@@ -618,8 +620,9 @@ impl super::super::App {
     fn editor_pick_revision(&mut self, ctx: &egui::Context, path: PathBuf, diff: Option<u64>, rev: crate::editor_svc::git_base::Rev) {
         use super::diff_tab::{Side, Source, StaticSide, Target};
         use crate::editor_svc::git_base::Rev;
-        if let Some(d) = diff.and_then(|d| self.ed.diffs.get_mut(&d)) {
-            d.set_left(Side::Text(Box::new(StaticSide::new(Source::Git { path, rev }))));
+        if let Some(d) = diff.filter(|d| self.ed.diffs.contains_key(d)) {
+            let dir = self.dir.clone();
+            self.ed.set_diff_left(d, Side::Text(Box::new(StaticSide::new(Source::Git { path, rev }))), &dir);
             return;
         }
         let doc = match self.ed.doc_for_path(&path) {

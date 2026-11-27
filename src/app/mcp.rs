@@ -91,6 +91,8 @@ enum Pend {
     Create { rx: std::sync::mpsc::Receiver<crate::wsl::DirCheck>, distro: String, path: String },
     /// `run_command` im Terminal eines Chats (#338): wartet, bis die Shell des (frisch gestarteten) Terminals bereit ist.
     AgentRun,
+    /// Arbeit im Hilfsthread (z. B. `editor_diff`, #385): das Ergebnis kommt über den Kanal.
+    Job { rx: std::sync::mpsc::Receiver<R> },
 }
 
 pub(super) struct PendingMcp {
@@ -773,6 +775,21 @@ impl App {
                 self.agent_ready(p);
                 continue;
             }
+            if let Pend::Job { rx } = &p.kind {
+                match rx.try_recv() {
+                    Ok(r) => self.mcp_finish(&p.reply, &p.tool, &p.args, p.caller, p.how, r),
+                    Err(std::sync::mpsc::TryRecvError::Empty) if Instant::now() < p.deadline => self.mcp.pending.push(p),
+                    Err(std::sync::mpsc::TryRecvError::Empty) => {
+                        let r = Err(er("timeout", tr("Der Vergleich dauerte zu lange.", "The comparison took too long.")));
+                        self.mcp_finish(&p.reply, &p.tool, &p.args, p.caller, p.how, r);
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        let r = Err(er("internal", "job failed"));
+                        self.mcp_finish(&p.reply, &p.tool, &p.args, p.caller, p.how, r);
+                    }
+                }
+                continue;
+            }
             if let Pend::Create { rx, distro, path } = &p.kind {
                 // Ordnerprüfung fertig (oder Frist um: dann gilt „unbekannt“ und die Sitzung wird trotzdem angelegt).
                 // Lange danach (der Aufrufer hat aufgegeben) wird nichts mehr angelegt.
@@ -1078,6 +1095,15 @@ impl App {
             "list_processes" | "read_process_output" | "start_process" | "stop_process" | "restart_process" => Out::Now(self.mcp_procs(ctx, tool, args)),
             "theme_list" => Out::Now(Ok(theme_list_json(&self.themes, &self.theme_issues, &self.settings.theme))),
             "theme_get" => Out::Now(theme_get_json(&self.themes, &self.settings.theme, args)),
+            // Vergleich (#385): git und Vergleich im Hilfsthread, die Oberfläche wartet nie darauf.
+            "editor_diff" => match self.mcp_editor_diff(ctx, args) {
+                Err(e) => Out::Now(Err(e)),
+                Ok(rx) => {
+                    self.mcp.pending.push(PendingMcp { reply: reply.clone(), tool: tool.to_string(), args: args.clone(), caller, how, session: 0, deadline: Instant::now() + Duration::from_secs(30), kind: Pend::Job { rx } });
+                    ctx.request_repaint_after(Duration::from_millis(50));
+                    Out::Later
+                }
+            },
             // Editor-Reiter (#54): Schalter und Pfadregeln in `editor_svc::tools`.
             t if crate::editor_svc::tools::TOOLS.contains(&t) => Out::Now(self.mcp_editor(ctx, t, args)),
             "send_text" => Out::Now(self.mcp_send_text(args, caller)),
@@ -1987,7 +2013,7 @@ impl App {
                 }
                 None
             }
-            Pend::Shot { .. } | Pend::Create { .. } | Pend::AgentRun => None,
+            Pend::Shot { .. } | Pend::Create { .. } | Pend::AgentRun | Pend::Job { .. } => None,
             Pend::Run { cmd, prompt0, cwd0, start_abs, max_lines, cmd_shell, started, mark0, nested, zsh } => {
                 let Some(s) = &e.live else { return Some(Err(er("session_not_running", tr("Die Sitzung läuft nicht mehr.", "The session is no longer running.")))) };
                 let (advanced, exit, mark) = {

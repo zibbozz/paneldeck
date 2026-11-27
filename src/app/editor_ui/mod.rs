@@ -409,6 +409,14 @@ impl EditorUi {
         Some(id)
     }
 
+    /// Neues Dokument zu einem Pfad ohne Reiter (Tests).
+    #[cfg(test)]
+    pub(super) fn alloc_doc_for_test(&mut self, path: &Path) -> u64 {
+        let id = self.alloc_doc();
+        self.docs.insert(id, DocEntry::pending(Some(path.to_path_buf()), 0, None));
+        id
+    }
+
     /// Dokument zu einer Datei: schon offen, sonst neu (noch ohne Reiter – der Vergleich hält es offen).
     fn doc_for_file(&mut self, path: &Path) -> u64 {
         match self.doc_for_path(path) {
@@ -538,10 +546,16 @@ impl EditorUi {
 
     /// Änderungsmarke in Zeile `line` zurücksetzen: die alten Zeilen wiederherstellen (ein Rückgängig-Schritt). Liefert, ob
     /// sich etwas geändert hat.
-    pub(super) fn revert_mark(&mut self, doc: u64, line: usize) -> bool {
+    /// Veraltete Marken (der Text hat sich seitdem geändert, die Neuberechnung läuft noch) setzen nichts zurück: Fehler
+    /// mit Hinweis, die Marken werden sofort neu berechnet.
+    pub(super) fn revert_mark(&mut self, doc: u64, line: usize, lang: crate::state::Lang) -> Result<bool, String> {
+        let Some(d) = self.docs.get_mut(&doc) else { return Ok(false) };
+        if !d.marks.fresh_for(d.revision()) {
+            d.marks.recompute();
+            return Err(lang.t("Die Änderungsmarken werden gerade neu berechnet – gleich noch einmal.", "The change markers are being recomputed – try again in a moment.").to_string());
+        }
         let mut changed = false;
-        if let Some(d) = self.docs.get_mut(&doc)
-            && let Some(m) = d.marks.result.clone()
+        if let Some(m) = d.marks.result.clone()
             && let Some(k) = m.at(line)
             && m.hunks[k].revertable
             && let Some(text) = d.text()
@@ -550,7 +564,42 @@ impl EditorUi {
         }
         self.mark_popup = None;
         self.want_focus = true;
-        changed
+        Ok(changed)
+    }
+
+    /// Linke Seite eines Vergleichs ersetzen (andere Revision). Ein Dokument, das dadurch aus dem Vergleich fällt, bleibt
+    /// mit ungespeicherten Änderungen als Datei-Reiter offen (nichts geht verloren, auch kein Hot-Exit-Inhalt), sonst
+    /// wird es frei. Der Reiter merkt sich die neuen Dokumente.
+    pub(super) fn set_diff_left(&mut self, diff: u64, side: diff_tab::Side, dir: &Path) {
+        let Some(dt) = self.diffs.get_mut(&diff) else { return };
+        let old = dt.left.doc();
+        dt.set_left(side);
+        let docs = dt.tab_docs();
+        let place = self.panes.diff_tab(diff);
+        if let (Some((g, i)), Some((doc, extra))) = (place, docs)
+            && let Some(t) = self.panes.groups.get_mut(&g).and_then(|grp| grp.tabs.get_mut(i))
+        {
+            t.doc = doc;
+            t.extra = extra;
+        }
+        if let Some(o) = old
+            && !self.panes.shows(o)
+        {
+            if self.docs.get(&o).is_some_and(|e| e.dirty()) {
+                if let Some((g, _)) = place {
+                    self.panes.focused = g;
+                }
+                self.panes.open(o);
+                // Der Vergleich bleibt der aktive Reiter.
+                if let Some((g, i)) = self.panes.diff_tab(diff)
+                    && let Some(grp) = self.panes.groups.get_mut(&g)
+                {
+                    grp.active = i;
+                }
+            } else {
+                self.release_doc(o, dir);
+            }
+        }
     }
 
     /// Nächste bzw. vorige Änderung (F7 / Umschalt+F7): im Vergleichs-Reiter der nächste Block, im normalen Reiter die

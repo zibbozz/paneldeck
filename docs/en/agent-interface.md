@@ -48,7 +48,7 @@ A tool above the current level returns `forbidden`. The level is checked in the 
 | `list_processes`, `read_process_output` | Read | The [process list](#process-list): entries with status, detected local addresses and error count; the output of an entry |
 | `start_process`, `stop_process`, `restart_process` | Control | Start, stop (Ctrl+C, after 5 s the whole tree) and restart an entry or a group of the process list |
 | `editor_list`, `editor_read` | Read | The documents open in the [Editor tab](#editor) and their lines, unsaved changes included (since 3.0.0) |
-| `editor_diff` | Read | Compare an open document with its saved file, git HEAD/index or another open document: unified diff and changed blocks (since 3.2.0; not offered to chats) |
+| `editor_diff` | Read | Compare an open document with its saved file, git HEAD/index or another open document: unified diff and changed blocks (since 3.2.0; like `editor_read` without a switch; not offered to chats – their compact prompt has no room left) |
 | `editor_open`, `editor_edit`, `editor_save` | Control + switch | Open a local file or an untitled tab, change an open document (unsaved, marked "by agent", undoable), save an open existing file – each only with its switch in *Settings → Editor → Agents* (since 3.0.0) |
 | `list_todos` | Read | The cards of the simple to-do list (every mode; read-only when expert mode is on) |
 | `add_todo`, `set_todo_done` | Control | **Expert mode off:** add a card, tick it off or reopen it |

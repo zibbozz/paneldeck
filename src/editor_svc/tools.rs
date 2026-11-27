@@ -275,7 +275,9 @@ pub fn offered_to_chats(name: &str, bits: u8) -> bool {
         "editor_edit" => docs && bits & 2 != 0,
         "editor_save" => docs && bits & 4 != 0,
         "editor_list" | "editor_read" => docs,
-        // Vergleich (#385): nur für externe Agenten – in der Kurzfassung des Chat-Prompts ist bei Steuern kein Platz mehr.
+        // Vergleich (#385): für externe Agenten wie `editor_read` (Stufe Lesen, kein Schalter). Chats bekommen ihn nicht:
+        // die Kurzfassung des Chat-Prompts hat dafür keinen Platz mehr (Tests `the_compact_prompt_fits_into_8192…`,
+        // `plan_instructions_fit_into_small_contexts`).
         "editor_diff" => false,
         _ => true,
     }
@@ -641,8 +643,29 @@ fn cut_text(s: &str, max: usize) -> (String, bool) {
 }
 
 /// `editor_diff` (#385).
-pub fn diff(host: &mut dyn EditorHost, args: &Value) -> R {
-    use crate::editor::compare;
+/// Was `editor_diff` noch braucht, nachdem die Argumente geprüft und die Texte der offenen Dokumente geholt sind: entweder
+/// den Text des anderen Dokuments oder einen gespeicherten Stand (Platte/git), den der Hub im Hilfsthread liest.
+pub struct DiffPlan {
+    pub doc: DocInfo,
+    new_text: String,
+    context: usize,
+    ws: bool,
+    old_name: String,
+    new_name: String,
+    against: String,
+    pub base: DiffBase,
+}
+
+/// Womit verglichen wird.
+pub enum DiffBase {
+    /// Text eines anderen offenen Dokuments.
+    Text(String),
+    /// `disk`, `head` oder `index` der Datei des Dokuments.
+    Read(String),
+}
+
+/// `editor_diff`, Teil 1 (im Hauptdurchlauf, schnell): Argumente, Regeln, Texte der Dokumente.
+pub fn diff_plan(host: &mut dyn EditorHost, args: &Value) -> Result<DiffPlan, (String, String)> {
     let docs = host.docs();
     let d = resolve(&docs, args)?;
     let against = str_arg(args, "against")?;
@@ -669,10 +692,11 @@ pub fn diff(host: &mut dyn EditorHost, args: &Value) -> R {
     };
     let new_text = host.text(d.id).ok_or_else(|| er("not_found", t("Das Dokument ist nicht mehr offen.", "The document is no longer open.")))?;
     let name = |x: &DocInfo| x.path.as_ref().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| x.title.clone()).replace(' ', "_");
-    let (old_text, old_name, base, missing) = match &other {
+    let new_name = format!("b/{}", name(&d));
+    let (base, old_name, against) = match &other {
         Some(od) => {
             let t = host.text(od.id).ok_or_else(|| er("not_found", t("Das andere Dokument ist nicht mehr offen.", "The other document is no longer open.")))?;
-            (t, format!("a/{}", name(od)), format!("doc {}", od.id), false)
+            (DiffBase::Text(t), format!("a/{}", name(od)), format!("doc {}", od.id))
         }
         None => {
             let a = against.unwrap_or("disk");
@@ -684,20 +708,29 @@ pub fn diff(host: &mut dyn EditorHost, args: &Value) -> R {
             };
             // Nur lokale Dateien (wie beim Öffnen und Speichern).
             agent_path::check_syntax(&path.to_string_lossy())?;
-            match host.base_text(d.id, a) {
-                Ok(Some(t)) => (t, format!("a/{}", name(&d)), a.to_string(), false),
-                Ok(None) => (String::new(), format!("a/{}", name(&d)), a.to_string(), true),
-                Err(e) => return Err(er("not_found", e)),
-            }
+            (DiffBase::Read(a.to_string()), format!("a/{}", name(&d)), a.to_string())
         }
+    };
+    Ok(DiffPlan { doc: d, new_text, context, ws, old_name, new_name, against, base })
+}
+
+/// `editor_diff`, Teil 2 (darf im Hilfsthread laufen): vergleichen und die Antwort bauen. `base` = der gelesene Stand
+/// (`Ok(None)`: gibt es in diesem Stand nicht).
+pub fn diff_finish(p: DiffPlan, base: Result<Option<String>, String>) -> R {
+    use crate::editor::compare;
+    let (old_text, missing) = match (p.base, base) {
+        (DiffBase::Text(t), _) => (t, false),
+        (DiffBase::Read(_), Ok(Some(t))) => (t, false),
+        (DiffBase::Read(_), Ok(None)) => (String::new(), true),
+        (DiffBase::Read(_), Err(e)) => return Err(er("not_found", e)),
     };
     if old_text.len() > 64 * 1024 * 1024 {
         return Err(er("too_large", t("Der Vergleichsstand ist zu groß.", "The state to compare with is too large.")));
     }
-    let (l, r) = (compare::split_lines(&old_text), compare::split_lines(&new_text));
-    let o = compare::compare(&l.lines, &r.lines, &compare::Options { ignore_whitespace: ws, timeout: compare::LIVE_TIMEOUT }, None);
+    let (l, r) = (compare::split_lines(&old_text), compare::split_lines(&p.new_text));
+    let o = compare::compare(&l.lines, &r.lines, &compare::Options { ignore_whitespace: p.ws, timeout: compare::LIVE_TIMEOUT }, None);
     let (added, deleted) = o.counts();
-    let unified = compare::unified(&l, &r, &o.hunks, context, &old_name, &format!("b/{}", name(&d)), false);
+    let unified = compare::unified(&l, &r, &o.hunks, p.context, &p.old_name, &p.new_name, false);
     let (unified, truncated) = cut_text(&unified, DIFF_MAX_BYTES);
     let blocks: Vec<Value> = o
         .hunks
@@ -706,8 +739,8 @@ pub fn diff(host: &mut dyn EditorHost, args: &Value) -> R {
         .map(|h| json!({"old_start": h.old.start + 1, "old_lines": h.old.len(), "new_start": h.new.start + 1, "new_lines": h.new.len(), "kind": h.kind().as_str()}))
         .collect();
     Ok(json!({
-        "doc": d.id,
-        "against": base,
+        "doc": p.doc.id,
+        "against": p.against,
         "identical": o.hunks.is_empty() && l.final_newline == r.final_newline && !missing,
         "missing": missing,
         "summary": {"added": added, "deleted": deleted, "blocks": o.hunks.len()},
@@ -719,6 +752,16 @@ pub fn diff(host: &mut dyn EditorHost, args: &Value) -> R {
         "truncated": truncated,
         "note": untrusted(),
     }))
+}
+
+/// `editor_diff` in einem Zug (Tests, Ersatz-Editor); der Hub nimmt [`diff_plan`] + [`diff_finish`] im Hilfsthread.
+pub fn diff(host: &mut dyn EditorHost, args: &Value) -> R {
+    let p = diff_plan(host, args)?;
+    let base = match &p.base {
+        DiffBase::Text(_) => Ok(None),
+        DiffBase::Read(a) => host.base_text(p.doc.id, a),
+    };
+    diff_finish(p, base)
 }
 
 /// Ein Werkzeug ausführen (für den Ausführer im Hub).
@@ -1080,6 +1123,7 @@ mod tests {
         for n in ["editor_list", "editor_read", "list_sessions"] {
             assert!(offered_to_chats(n, DOCS_OPEN), "{n}");
         }
+        assert!(!offered_to_chats("editor_diff", DOCS_OPEN | 7), "Vergleichen nur für externe Agenten (#385)");
         assert!(offered_to_chats("list_sessions", 0));
         assert!(!offered_to_chats("editor_list", 0) && !offered_to_chats("editor_read", 0), "ohne offene Dokumente nichts zu lesen");
         assert!(!offered_to_chats("editor_open", DOCS_OPEN) && !offered_to_chats("editor_edit", DOCS_OPEN) && !offered_to_chats("editor_save", DOCS_OPEN));
