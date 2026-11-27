@@ -1,5 +1,5 @@
-//! Aktionen beim Speichern (#383) in der App: der eine Haken beim Speichern ([`App::editor_save_with`] – Formatieren
-//! beim Speichern (#381) und Text-Aktionen vor dem Schreiben, danach die übrigen Aktionen in die Warteschlange), die Laufzeit der Befehle (Pseudokonsole ohne
+//! Aktionen beim Speichern (#383) in der App: der eine Haken beim Speichern ([`App::editor_save_with`] – Text-Aktionen
+//! der Regeln, auch *Formatieren* (#381), vor dem Schreiben, danach die übrigen Aktionen in die Warteschlange), die Laufzeit der Befehle (Pseudokonsole ohne
 //! Fenster in einem eigenen Job Object wie die Prozessliste, wahlweise sichtbar als Terminal in der Seitenleiste),
 //! Kopieren im Hilfsthread, Paneldeck-Aktionen, Verlauf (letzte 100 Läufe, nur im Speicher), Hinweise/Benachrichtigungen,
 //! Rückfrage beim Beenden und die MCP-Auskünfte. Oberfläche (Einstellungen, Regel-Dialog, Ausgabe): `save_actions_dialog`.
@@ -791,15 +791,14 @@ impl App {
     /// Dokument speichern – **alle** Speicherwege des Editors laufen hier durch (Speichern, Speichern unter, Alle
     /// speichern, Rückfrage beim Schließen, automatisches Speichern, Agenten). Reihenfolge:
     /// 1. Plan der passenden Regeln (Herkunft, Pause, *Ohne Aktionen speichern*),
-    /// 2. vor dem Schreiben, zusammen **ein** Rückgängig-Schritt ([`editor_ui::EditorUi::save_doc`]): Formatieren beim
-    ///    Speichern (#381; nur beim ausdrücklichen Speichern durch den Nutzer, nie automatisch oder durch Agenten), dann
-    ///    die eingebauten Aktionen der Regeln (#383; *Formatieren* nur einmal),
+    /// 2. vor dem Schreiben, zusammen **ein** Rückgängig-Schritt ([`editor_ui::EditorUi::save_doc`]): die eingebauten
+    ///    Aktionen der passenden Regeln (#383, auch *Formatieren*). Ohne passende Regel (oder mit *Ohne Aktionen
+    ///    speichern*) wird genau der Text des Editors geschrieben – formatiert wird nie von allein (#381),
     /// 3. schreiben – scheitert das, wird Schritt 2 zurückgenommen und nichts weiter getan,
     /// 4. danach: Verlauf, Bericht für `editor_save` und die übrigen Aktionen in die Warteschlange.
     ///
     /// Die Datei wird immer gespeichert, auch wenn eine Aktion scheitert. Hot Exit speichert nie (geht hier nicht durch).
-    /// `Ok(Hinweis)` = Hinweis des Formatierens beim Speichern (zu groß, ungültig) für die Statusleiste.
-    pub(crate) fn editor_save_with(&mut self, id: u64, path: Option<PathBuf>, origin: SaveOrigin) -> Result<Option<String>, String> {
+    pub(crate) fn editor_save_with(&mut self, id: u64, path: Option<PathBuf>, origin: SaveOrigin) -> Result<(), String> {
         let lang = self.settings.language;
         let prefs = self.editor_prefs();
         let without = std::mem::take(&mut self.save_actions.without_next);
@@ -820,9 +819,9 @@ impl App {
         if !self.ed.docs.contains_key(&id) {
             return Err(lang.t("Kein solches Dokument", "No such document").to_string());
         }
-        // Vor dem Schreiben: Formatieren beim Speichern und Text-Aktionen (ein rückgängig machbarer Schritt), dann schreiben.
+        // Vor dem Schreiben: Text-Aktionen der Regeln (ein rückgängig machbarer Schritt), dann schreiben.
         let list: Vec<Builtin> = plan.builtins.iter().map(|(b, ..)| b.clone()).collect();
-        let saved = self.ed.save_doc(id, path, origin.explicit(), &list, &prefs, lang, &keep_lines)?;
+        let saved = self.ed.save_doc(id, path, &list, &prefs, lang, &keep_lines)?;
         // Vergleiche und Änderungsmarken lesen den gespeicherten Stand neu (#385).
         self.ed.generation += 1;
         let mut failed_rules: Vec<(u64, String)> = Vec::new();
@@ -870,7 +869,7 @@ impl App {
         } else if !plan.builtins.is_empty() {
             self.save_actions.file_failed.insert(key, !failed_rules.is_empty());
         }
-        Ok(saved.hint)
+        Ok(())
     }
 
     /// *Jetzt ausführen* bzw. *Für Datei testen → Ausführen*: die Aktionen nach dem Schreiben der passenden Regeln (oder

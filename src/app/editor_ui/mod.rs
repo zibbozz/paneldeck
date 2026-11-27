@@ -8,7 +8,7 @@
 //! - `view`: Bereich zeichnen (Baum, Teilungen, Reiterleisten, Hinweisleisten, Statusleiste, Dialoge),
 //! - `find`: Suchen/Ersetzen-Leiste und „Gehe zu Zeile“,
 //! - `menu`: Menüleiste je Teilung (#381, *Datei · Bearbeiten · Ansicht · Format*),
-//! - `format`: JSON/XML formatieren im Hintergrund, Fortschritt, Meldungen, Formatieren beim Speichern (#381),
+//! - `format`: JSON/XML formatieren im Hintergrund, Fortschritt, Meldungen (#381; formatiert wird nie von allein),
 //! - `tree`: Ordnerbaum, `persist`: `editor-state.json`,
 //! - `diff_tab`, `diff_menu`, `marks`: Vergleichs-Reiter, seine Menüeinträge/Revisionsauswahl und die Änderungsmarken am
 //!   Rand (#385, 3.2.0).
@@ -57,9 +57,6 @@ pub(crate) struct EditorPrefs {
     pub syntax: SyntaxPrefs,
     /// Menüleiste je Teilung (#381, Standard an).
     pub menu_bar: bool,
-    /// Formatieren beim Speichern (#381, Standard aus).
-    pub format_on_save_json: bool,
-    pub format_on_save_xml: bool,
     /// Tastenkürzel für die Menüs (Kennung → Kürzel wie in `keys::DEFAULTS`, z. B. `ed_format` → `Alt+Shift+F`).
     pub keys: BTreeMap<String, String>,
     /// Änderungsmarken am Rand (#385; Standard aus) und ihre Grundlage.
@@ -83,8 +80,6 @@ impl Default for EditorPrefs {
             autosave: None,
             syntax: SyntaxPrefs::default(),
             menu_bar: true,
-            format_on_save_json: false,
-            format_on_save_xml: false,
             keys,
             markers: false,
             marker_base: Default::default(),
@@ -993,7 +988,7 @@ impl super::App {
     /// Dokument speichern (für `editor_save` und Chats; der Aufrufer prüft die Regeln, z. B. nur vorhandene Dateien).
     /// Auslöser „Agent“ für die Aktionen beim Speichern (#383).
     pub(crate) fn editor_save_doc(&mut self, id: u64) -> Result<(), String> {
-        self.editor_save_with(id, None, crate::save_actions::SaveOrigin::Agent).map(|_| ())
+        self.editor_save_with(id, None, crate::save_actions::SaveOrigin::Agent)
     }
 
     /// Pfade der offenen Dateien (für die Überwachung auf Änderungen).

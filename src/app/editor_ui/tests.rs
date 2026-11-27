@@ -717,20 +717,23 @@ fn menu_bar_opens_menus_greys_entries_and_folds_in_narrow_splits() {
     assert_eq!(de.iter().map(|m| m.title).collect::<Vec<_>>(), ["Datei", "Bearbeiten", "Ansicht", "Format"]);
     assert_eq!(de[3].item("format").unwrap().shortcut, "Alt+Umschalt+F");
     // JSON: alles aktiv, Kürzel aus den Einstellungen; XML: Schlüssel sortieren ausgegraut
-    ed.open_path(&json, false);
+    let json_id = ed.open_path(&json, false);
     frame(&ctx, &mut ed, vec![], &mut t);
     let m = menus(&mut ed, g, &prefs, en);
     for id in ["format", "minify", "validate", "sort_keys", "format_on_save"] {
         assert!(m[3].item(id).unwrap().enabled, "{id}");
     }
     assert_eq!(m[3].item("format").unwrap().label, "Format JSON");
-    assert_eq!(m[3].item("format_on_save").unwrap().checked, Some(false));
+    // Kein Schalter mehr: der Eintrag öffnet den Regel-Dialog für die Datei (Formatieren nie von allein).
+    let fos = m[3].item("format_on_save").unwrap();
+    assert_eq!(fos.label, "Format on save …");
+    assert_eq!(fos.checked, None, "kein Haken");
+    assert_eq!(fos.cmds, vec![Cmd::FocusGroup(g), Cmd::OnSaveMenu(crate::app::save_actions_dialog::OnSaveMenu::FormatRule(Some(json_id)))]);
+    assert_eq!(menus(&mut ed, g, &prefs, crate::state::Lang::De)[3].item("format_on_save").unwrap().label, "Beim Speichern formatieren …");
     let mut p2 = prefs.clone();
     p2.keys.insert("ed_format".into(), "Ctrl+Shift+J".into());
-    p2.format_on_save_json = true;
     let m2 = menus(&mut ed, g, &p2, en);
     assert_eq!(m2[3].item("format").unwrap().shortcut, "Ctrl+Shift+J");
-    assert_eq!(m2[3].item("format_on_save").unwrap().cmds, vec![Cmd::SetFormatOnSave(Kind::Json, false)]);
     ed.open_path(&xml, false);
     frame(&ctx, &mut ed, vec![], &mut t);
     let m = menus(&mut ed, g, &prefs, en);
@@ -916,7 +919,7 @@ fn undo_key() -> Event {
 }
 
 #[test]
-fn jsonc_minify_asks_first_and_format_on_save_never_loses_the_save() {
+fn jsonc_minify_asks_first_and_saving_never_formats_by_itself() {
     let dir = test_dir("fmtsave");
     let p = write(&dir, "tsconfig.json", "{ \"a\": 1, \"b\": 2 }\n");
     let ctx = egui::Context::default();
@@ -945,33 +948,29 @@ fn jsonc_minify_asks_first_and_format_on_save_never_loses_the_save() {
     settle(&ctx, &mut ed, &mut t);
     assert_eq!(active_text(&ed), "{\"a\":1,\"b\":2}\n", "bestätigt");
 
-    // Formatieren beim Speichern: aus → nichts; an → formatiert; ungültig → unverändert mit Hinweis; zu groß → Hinweis
-    let mut prefs = EditorPrefs::default();
-    assert_eq!(ed.format_before_save(id, None, &prefs, en), (None, false));
+    // Speichern ohne Regel schreibt genau den Text des Editors: nie von allein formatiert (JSON, XML, ungültig).
+    let prefs = EditorPrefs::default();
+    ed.save_doc(id, None, &[], &prefs, en, &[]).unwrap();
+    assert_eq!(std::fs::read_to_string(&p).unwrap(), "{\"a\":1,\"b\":2}\n");
     assert_eq!(active_text(&ed), "{\"a\":1,\"b\":2}\n");
-    prefs.format_on_save_json = true;
-    assert_eq!(ed.format_before_save(id, None, &prefs, en), (None, true));
-    assert_eq!(active_text(&ed), "{\"a\":1,\n  \"b\":2}\n");
-    prefs.format_on_save_json = false;
-    prefs.format_on_save_xml = true;
-    let x = write(&dir, "c.xml", "<a>!</a>\n");
+    let x = write(&dir, "c.xml", "<a><b>1</b></a>\n");
     let idx = ed.open_path(&x, false);
     frame(&ctx, &mut ed, vec![], &mut t);
-    let h = ed.format_before_save(idx, None, &prefs, en).0.expect("Hinweis");
-    assert!(h.starts_with("Saved unchanged: invalid XML at line 1, column 4"), "{h}");
-    assert_eq!(active_text(&ed), "<a>!</a>\n");
-    let big = write(&dir, "big.xml", &format!("<a>{}</a>\n", "x".repeat(crate::editor_svc::format_job::SAVE_MAX_BYTES + 10)));
-    let idb = ed.open_path(&big, false);
+    ed.save_doc(idx, None, &[], &prefs, en, &[]).unwrap();
+    assert_eq!(std::fs::read_to_string(&x).unwrap(), "<a><b>1</b></a>\n");
+    let bad = write(&dir, "bad.xml", "<a>!</a>\n");
+    let idbad = ed.open_path(&bad, false);
     frame(&ctx, &mut ed, vec![], &mut t);
-    let _ = ed.docs.get_mut(&idb).map(|d| d.ensure_loaded_now(&prefs));
-    assert!(ed.format_before_save(idb, None, &prefs, en).0.is_some_and(|h| h.contains("over 1 MB")));
+    ed.save_doc(idbad, None, &[], &prefs, en, &[]).unwrap();
+    assert_eq!(std::fs::read_to_string(&bad).unwrap(), "<a>!</a>\n");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Review #381: Speichern unter richtet sich nach dem neuen Namen; scheitert das Speichern, wird das Formatieren
-/// zurückgenommen; schreibgeschützte Dateien werden nicht formatiert; *Prüfen* prüft mit Auswahl die ganze Datei.
+/// Speichern formatiert nie von allein (auch nicht bei *Speichern unter* mit JSON-Endung); eine Regel mit der Aktion
+/// *Formatieren* tut es und wird zurückgenommen, wenn das Schreiben scheitert; *Prüfen* prüft mit Auswahl die ganze Datei.
 #[test]
-fn format_on_save_follows_save_as_and_is_undone_when_the_save_fails() {
+fn saving_never_formats_by_itself_and_a_rule_format_is_undone_when_the_save_fails() {
+    use crate::save_actions::Builtin;
     let dir = test_dir("fmtsave2");
     let p = write(&dir, "draft.txt", "[1,2]\n");
     let ctx = egui::Context::default();
@@ -979,35 +978,24 @@ fn format_on_save_follows_save_as_and_is_undone_when_the_save_fails() {
     let mut ed = EditorUi::default();
     ed.fmt.runner = Some(fake_fmt());
     let en = crate::state::Lang::En;
-    let prefs = EditorPrefs { format_on_save_json: true, ..EditorPrefs::default() };
+    let prefs = EditorPrefs::default();
     let id = ed.open_path(&p, false);
     frame(&ctx, &mut ed, vec![], &mut t);
     frame(&ctx, &mut ed, vec![], &mut t);
-    // .txt: kein JSON (kein Raten am Inhalt) → unverändert gespeichert
-    assert_eq!(ed.save_with_format(id, None, &prefs, en), Ok(None));
+    assert!(ed.save_doc(id, None, &[], &prefs, en, &[]).is_ok());
     assert_eq!(std::fs::read_to_string(&p).unwrap(), "[1,2]\n");
-    // Speichern unter … .json: formatiert
+    // Speichern unter … .json: ebenfalls unverändert
     let j = dir.join("data.json");
-    assert_eq!(ed.save_with_format(id, Some(j.clone()), &prefs, en), Ok(None));
-    assert_eq!(std::fs::read_to_string(&j).unwrap(), "[1,\n  2]\n");
-    // Speichern scheitert (Zeichen passt nicht in Windows-1252): das Formatieren wird zurückgenommen
+    assert!(ed.save_doc(id, Some(j.clone()), &[], &prefs, en, &[]).is_ok());
+    assert_eq!(std::fs::read_to_string(&j).unwrap(), "[1,2]\n");
+    // Mit einer Regel (Aktion *Formatieren*) wird formatiert; scheitert das Schreiben (Zeichen passt nicht in
+    // Windows-1252), ist das Formatieren zurückgenommen.
     let k = write(&dir, "k.json", "[1,\"中\"]\n");
     let idk = ed.open_path(&k, false);
     frame(&ctx, &mut ed, vec![], &mut t);
     let _ = ed.docs.get_mut(&idk).unwrap().set_encoding("windows-1252", en);
-    assert!(ed.save_with_format(idk, None, &prefs, en).is_err());
+    assert!(ed.save_doc(idk, None, &[Builtin::Format], &prefs, en, &[]).is_err());
     assert_eq!(ed.docs[&idk].text().unwrap(), "[1,\"中\"]\n", "Dokument wie vorher");
-    // Schreibgeschützt: nicht formatieren
-    let r = write(&dir, "ro.json", "[3,4]\n");
-    let orig = std::fs::metadata(&r).unwrap().permissions();
-    let mut perm = orig.clone();
-    perm.set_readonly(true);
-    std::fs::set_permissions(&r, perm).unwrap();
-    let idr = ed.open_path(&r, false);
-    frame(&ctx, &mut ed, vec![], &mut t);
-    assert_eq!(ed.format_before_save(idr, None, &prefs, en), (None, false));
-    assert_eq!(ed.docs[&idr].text().unwrap(), "[3,4]\n");
-    let _ = std::fs::set_permissions(&r, orig);
     // Prüfen mit Auswahl: die ganze Datei (gültig), nicht nur die Auswahl
     let v = write(&dir, "v.json", "{\"a\": [1,2]}\n");
     let idv = ed.open_path(&v, false);
@@ -1024,12 +1012,11 @@ fn format_on_save_follows_save_as_and_is_undone_when_the_save_fails() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Ein Speicherweg (#381 + #383, `EditorUi::save_doc`): Formatieren beim Speichern und die Text-Aktionen der Regeln
-/// sind **ein** Rückgängig-Schritt; *Formatieren* einer Regel läuft nach dem Formatieren beim Speichern nicht noch einmal;
-/// ohne `format` (automatisch, Agent) kein Formatieren; scheitert das Schreiben, ist alles zurückgenommen (auch
-/// Zeilenenden).
+/// Ein Speicherweg (#383, `EditorUi::save_doc`): die Text-Aktionen der Regeln (auch *Formatieren*) sind **ein**
+/// Rückgängig-Schritt; ohne Regel wird genau der Text des Editors geschrieben (kein Formatieren von allein); scheitert das
+/// Schreiben, ist alles zurückgenommen (auch Zeilenenden).
 #[test]
-fn save_doc_formats_and_runs_builtins_as_one_undo_step() {
+fn save_doc_runs_builtins_as_one_undo_step_and_formats_only_through_a_rule() {
     use crate::editor::LineEnding;
     use crate::save_actions::Builtin;
     let dir = test_dir("savedoc");
@@ -1038,17 +1025,21 @@ fn save_doc_formats_and_runs_builtins_as_one_undo_step() {
     let mut ed = EditorUi::default();
     ed.fmt.runner = Some(fake_fmt());
     let en = crate::state::Lang::En;
-    let prefs = EditorPrefs { format_on_save_json: true, ..EditorPrefs::default() };
+    let prefs = EditorPrefs::default();
     let p = write(&dir, "a.json", "[1,2]  ");
     let id = ed.open_path(&p, false);
     frame(&ctx, &mut ed, vec![], &mut t);
     frame(&ctx, &mut ed, vec![], &mut t);
+    // Ohne Regel: genau der Text des Editors, nichts formatiert.
+    let raw = write(&dir, "raw.json", "[1,2]  ");
+    let idr = ed.open_path(&raw, false);
+    frame(&ctx, &mut ed, vec![], &mut t);
+    ed.save_doc(idr, None, &[], &prefs, en, &[]).unwrap();
+    assert_eq!(std::fs::read_to_string(&raw).unwrap(), "[1,2]  ");
+    // Mit einer Regel (Formatieren, Leerraum, Zeilenende): formatiert, ein Rückgängig-Schritt.
     let list = [Builtin::Format, Builtin::TrimWhitespace, Builtin::FinalNewline];
-    let s = ed.save_doc(id, None, true, &list, &prefs, en, &[]).unwrap();
-    // Der Ersatz-Formatierer schreibt „[1,\n  2]“; der echte (die Aktion *Formatieren*) hätte „[\n  1,\n  2\n]“ daraus gemacht.
-    // Ohne Zeilenende in der Datei gilt das Standard-Zeilenende des Systems.
-    assert_eq!(std::fs::read_to_string(&p).unwrap().replace("\r\n", "\n"), "[1,\n  2]\n");
-    assert_eq!(s.hint, None);
+    let s = ed.save_doc(id, None, &list, &prefs, en, &[]).unwrap();
+    assert_eq!(std::fs::read_to_string(&p).unwrap().replace("\r\n", "\n"), "[\n    1,\n    2\n]\n");
     assert_eq!(s.builtins, vec![(Builtin::Format, Ok(None)), (Builtin::TrimWhitespace, Ok(None)), (Builtin::FinalNewline, Ok(None))]);
     {
         let d = ed.docs.get_mut(&id).unwrap();
@@ -1058,19 +1049,19 @@ fn save_doc_formats_and_runs_builtins_as_one_undo_step() {
         assert_eq!(doc.text(), "[1,2]  ", "Formatieren und Aktionen zusammen zurück");
         assert!(!doc.can_undo());
     }
-    // Ohne Formatieren (automatisches Speichern, Agent): nur die Aktionen.
+    // Nur die Aktionen, die die Regeln nennen.
     let b = write(&dir, "b.json", "[5,6]  \n");
     let idb = ed.open_path(&b, false);
     frame(&ctx, &mut ed, vec![], &mut t);
-    let s = ed.save_doc(idb, None, false, &[Builtin::TrimWhitespace], &prefs, en, &[]).unwrap();
+    let s = ed.save_doc(idb, None, &[Builtin::TrimWhitespace], &prefs, en, &[]).unwrap();
     assert_eq!(std::fs::read_to_string(&b).unwrap(), "[5,6]\n");
     assert_eq!(s.builtins, vec![(Builtin::TrimWhitespace, Ok(None))]);
-    // Ungültig: Hinweis des Formatierens, die Aktion *Formatieren* der Regel bekommt den Fehler (ohne zweiten Lauf).
+    // Ungültig: die Aktion *Formatieren* der Regel meldet den Fehler, der Text bleibt.
     let v = write(&dir, "v.json", "[1!]\n");
     let idv = ed.open_path(&v, false);
     frame(&ctx, &mut ed, vec![], &mut t);
-    let s = ed.save_doc(idv, None, true, &[Builtin::Format], &prefs, en, &[]).unwrap();
-    assert!(s.hint.as_deref().is_some_and(|h| h.starts_with("Saved unchanged: invalid JSON at line 1, column 3")), "{s:?}");
+    let s = ed.save_doc(idv, None, &[Builtin::Format], &prefs, en, &[]).unwrap();
+    assert_eq!(std::fs::read_to_string(&v).unwrap(), "[1!]\n");
     assert!(matches!(&s.builtins[..], [(Builtin::Format, Err(e))] if e.starts_with("Invalid content, not formatted: 1:3")), "{s:?}");
     // Schreiben scheitert (Zeichen passt nicht in Windows-1252): Text und Zeilenenden wie vorher.
     let k = write(&dir, "k.json", "[1,\"中\"]  \n");
@@ -1078,7 +1069,7 @@ fn save_doc_formats_and_runs_builtins_as_one_undo_step() {
     frame(&ctx, &mut ed, vec![], &mut t);
     let _ = ed.docs.get_mut(&idk).unwrap().set_encoding("windows-1252", en);
     let before = ed.docs[&idk].doc.as_ref().unwrap().format_state();
-    assert!(ed.save_doc(idk, None, true, &[Builtin::TrimWhitespace, Builtin::LineEndings(LineEnding::CrLf)], &prefs, en, &[]).is_err());
+    assert!(ed.save_doc(idk, None, &[Builtin::TrimWhitespace, Builtin::LineEndings(LineEnding::CrLf)], &prefs, en, &[]).is_err());
     let doc = ed.docs[&idk].doc.as_ref().unwrap();
     assert_eq!(doc.text(), "[1,\"中\"]  \n", "Dokument wie vorher");
     assert!(doc.format_state() == before, "Zeilenenden/Kodierung wie vorher");

@@ -85,8 +85,6 @@ pub(super) enum Cmd {
     FormatDismiss(u64),
     /// Antwort auf die Rückfrage vor *Minify* von JSONC.
     MinifyConfirm(bool),
-    /// Formatieren beim Speichern für JSON bzw. XML (Einstellung).
-    SetFormatOnSave(crate::editor::format::Kind, bool),
     /// Einträge der Aktionen beim Speichern im Menü *Datei* (#383).
     OnSaveMenu(super::super::save_actions_dialog::OnSaveMenu),
     // ---- Vergleich und Änderungsmarken (#385)
@@ -363,13 +361,13 @@ impl super::super::App {
                 if untitled {
                     self.editor_cmd(ctx, Cmd::SaveAs(id));
                 } else if self.ed.docs.contains_key(&id) {
-                    // Formatieren beim Speichern (#381) und Aktionen beim Speichern (#383): nie auf Kosten des Speicherns.
+                    // Aktionen beim Speichern (#383): nie auf Kosten des Speicherns.
                     match self.editor_save_with(id, None, crate::save_actions::SaveOrigin::User) {
-                        Ok(fos) => {
+                        Ok(()) => {
                             if let Some(d) = self.ed.docs.get_mut(&id) {
                                 d.drop_hot(&dir);
                                 let t = d.title(lang);
-                                self.ed.set_hint(fos.unwrap_or_else(|| format!("{t}: {}", lang.t("gespeichert", "saved"))));
+                                self.ed.set_hint(format!("{t}: {}", lang.t("gespeichert", "saved")));
                             }
                         }
                         Err(e) => self.notify_text(e),
@@ -577,15 +575,11 @@ impl super::super::App {
                     self.ed.start_format(g, crate::editor::format::Op::Minify, true, move || c.request_repaint(), lang);
                 }
             }
-            Cmd::SetFormatOnSave(kind, on) => match kind {
-                crate::editor::format::Kind::Xml => self.settings.editor.format_on_save_xml = on,
-                _ => self.settings.editor.format_on_save_json = on,
-            },
             Cmd::OnSaveMenu(m) => self.on_save_menu_items(m),
         }
     }
 
-    /// *Datei → Alle speichern*: alle ungespeicherten Dateien mit Pfad (Formatieren und Aktionen beim Speichern wie bei
+    /// *Datei → Alle speichern*: alle ungespeicherten Dateien mit Pfad (Aktionen beim Speichern wie bei
     /// *Speichern*, Auslöser „Alle speichern“; je Datei ein Lauf); unbenannte Reiter brauchen *Speichern unter*.
     fn editor_save_all(&mut self) {
         let lang = self.settings.language;
@@ -630,12 +624,8 @@ impl super::super::App {
         let start = d.path.as_ref().and_then(|p| p.parent()).map(|p| p.to_path_buf()).or_else(|| self.ed.root.clone());
         if let Some(p) = crate::platform::notify::save_any(start.as_deref(), &name) {
             let other = self.ed.doc_for_path(&p).filter(|o| *o != id);
-            // Formatieren beim Speichern nach der Art des neuen Namens.
             match self.editor_save_with(id, Some(p.clone()), crate::save_actions::SaveOrigin::SaveAs) {
-                Ok(fos) => {
-                    if let Some(h) = fos {
-                        self.ed.set_hint(h);
-                    }
+                Ok(()) => {
                     if let Some(d) = self.ed.docs.get_mut(&id) {
                         d.drop_hot(&dir);
                     }

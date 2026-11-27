@@ -260,8 +260,6 @@ Alle Felder sind optional; ältere Versionen ignorieren sie, fehlende Felder bed
   | Feld | Standard | Bedeutung |
   |---|---|---|
   | `menu_bar` | `true` | Menüleiste über jeder Teilung des Editors; nur ein ausdrückliches `false` schaltet sie ab |
-  | `format_on_save_json` | `false` | JSON (auch JSONC) beim Speichern formatieren (Dateien bis 1 MB) |
-  | `format_on_save_xml` | `false` | XML beim Speichern formatieren (Dateien bis 1 MB) |
   | `agent_format` | `false` | Schalter *Agenten dürfen formatieren* (MCP `format_file` außer `validate`); nur ein ausdrückliches `true` schaltet ihn ein |
 
 - `settings.json` → `keys` → `ed_format`, `ed_minify`, `ed_validate`, `ed_sort_keys`: eigene Kürzel der Format-Befehle (Standard `Alt+Shift+F`, `Alt+Shift+M`, `Alt+Shift+V`, keins); zweite Belegungen `ed_format_alt` (`Ctrl+Shift+I`), `ed_minify_alt`, `ed_validate_alt` (keine).

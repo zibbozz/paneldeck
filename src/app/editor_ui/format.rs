@@ -1,12 +1,12 @@
 //! Formatieren im Editor (#381, 3.2.0): JSON/XML formatieren, minifizieren, prüfen, Schlüssel sortieren – aus der
-//! Menüleiste, über Tastenkürzel und die Befehls-Palette, beim Speichern und für Agenten (MCP `format_file`).
+//! Menüleiste, über Tastenkürzel und die Befehls-Palette und für Agenten (MCP `format_file`).
 //!
 //! Die Arbeit läuft im Hilfsthread ([`crate::editor_svc::format_job`]); hier liegt, was die Oberfläche dazu braucht:
 //! laufende Läufe je Dokument (Fortschrittszeile mit *Abbrechen* in jeder Teilung, die das Dokument zeigt), das
 //! Anwenden des Ergebnisses als **ein** Rückgängig-Schritt (nur wenn das Dokument unverändert ist; Cursor bleibt auf
 //! seiner Zeile/Spalte), Meldungen (*Gültig*, Fehler mit Zeile/Spalte und *Gehe zu*), die Rückfrage vor *Minify* bei
-//! JSONC (Kommentare fallen weg) und das Formatieren beim Speichern (synchron, nur kleine Dateien, nie auf Kosten des
-//! Speicherns).
+//! JSONC (Kommentare fallen weg). Formatiert wird nie von allein: nur auf Knopfdruck oder über eine Regel mit der
+//! Aktion *Formatieren* beim Speichern (#383, [`crate::save_actions::builtin::format_text`]).
 
 use super::doc::DocEntry;
 use super::view::Cmd;
@@ -20,23 +20,9 @@ use eframe::egui::{self, Id};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-/// Ergebnis des Formatierens beim Speichern.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub(super) struct SaveFormat {
-    /// Hinweis, wenn nicht formatiert wurde (zu groß, ungültig).
-    pub hint: Option<String>,
-    /// Der Text wurde geändert.
-    pub formatted: bool,
-    /// Der Formatierer lief über das ganze Dokument: `Ok` = gültig (formatiert oder schon so), `Err` = ungültig (Meldung
-    /// wie bei der Aktion *Formatieren* einer Regel). `None` = nicht gelaufen (aus, zu groß, schreibgeschützt, keine Art).
-    pub ran: Option<Result<(), String>>,
-}
-
 /// Ergebnis von [`EditorUi::save_doc`].
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct SavedDoc {
-    /// Hinweis des Formatierens beim Speichern (für die Statusleiste).
-    pub hint: Option<String>,
     /// Je eingebauter Aktion der Regeln: `Ok(None)`, `Ok(Some(hinweis))` (nichts geändert) oder `Err(fehler)`.
     pub builtins: Vec<(crate::save_actions::Builtin, Result<Option<String>, String>)>,
 }
@@ -318,109 +304,28 @@ impl EditorUi {
         d.apply_agent_edit(chars, Lang::En).map_err(|_| ("internal", "edit"))
     }
 
-    /// Reiter, dessen Cursor beim Formatieren beim Speichern zählen (fokussierte Teilung, sonst irgendeiner).
+    /// Reiter, dessen Cursor beim Zurücknehmen zählen (fokussierte Teilung, sonst irgendeiner).
     fn save_tab(&self, id: u64) -> Option<(u64, usize)> {
         self.panes.groups.get(&self.panes.focused).and_then(|g| g.find(id)).map(|i| (self.panes.focused, i)).or_else(|| self.panes.tabs_of(id).first().copied())
     }
 
-    /// Formatieren beim Speichern (Einstellung je Sprache): synchron, nur bis [`format_job::SAVE_MAX_BYTES`], ab
-    /// [`format_job::SAVE_DIFF_MAX_BYTES`] ohne Zeilenvergleich (ein einziger Ersatz) – so bleibt die Zeit im UI-Thread
-    /// klein. `path` = Ziel von *Speichern unter* (die Art richtet sich nach ihm). Nichts bei schreibgeschützten
-    /// Dateien. Liefert einen Hinweis, wenn nicht formatiert wurde (zu groß, ungültig), ob formatiert wurde und ob der
-    /// Formatierer über das ganze Dokument lief ([`SaveFormat::ran`]).
-    pub(super) fn format_on_save(&mut self, id: u64, path: Option<&std::path::Path>, prefs: &super::EditorPrefs, lang: Lang) -> SaveFormat {
-        let none = SaveFormat::default();
-        if !prefs.format_on_save_json && !prefs.format_on_save_xml || self.fmt.job_for(id).is_some() {
-            return none;
-        }
-        let Some(d) = self.docs.get(&id) else { return none };
-        let Some(doc) = d.doc.as_ref() else { return none };
-        let target = path.map(std::path::Path::to_path_buf).or_else(|| d.path.clone());
-        // Schreibgeschützt: Speichern scheitert ohnehin – das Dokument nicht vorher verändern.
-        if target.as_ref().and_then(|p| std::fs::metadata(p).ok()).is_some_and(|m| m.permissions().readonly()) {
-            return none;
-        }
-        let Some(kind) = format_job::quick_kind(target.as_deref(), doc.rope(), d.syntax.lang.as_deref()) else { return none };
-        let on = match kind {
-            Kind::Json | Kind::Jsonc => prefs.format_on_save_json,
-            Kind::Xml => prefs.format_on_save_xml,
-        };
-        if !on {
-            return none;
-        }
-        let name = format_job::kind_name(kind);
-        if doc.len_bytes() > format_job::SAVE_MAX_BYTES {
-            let h = match lang {
-                Lang::De => format!("Nicht formatiert gespeichert: {name} über 1 MB wird beim Speichern nicht formatiert (Format → {name} formatieren)."),
-                Lang::En => format!("Saved without formatting: {name} over 1 MB is not formatted on save (Format → Format {name})."),
-            };
-            return SaveFormat { hint: Some(h), ..none };
-        }
-        let Some((mut req, _)) = d.format_request(Op::Format, None, false) else { return none };
-        req.path = target;
-        req.diff_max = format_job::SAVE_DIFF_MAX_BYTES;
-        let cancel = std::sync::atomic::AtomicBool::new(false);
-        let done = match &self.fmt.runner {
-            Some(r) => format_job::compute_with(&req, &cancel, &|_| {}, &**r),
-            None => format_job::compute(&req, &cancel, &|_| {}),
-        };
-        match done {
-            Done::Changed { edits, .. } => {
-                let at = self.save_tab(id);
-                let EditorUi { panes, docs, .. } = self;
-                let sels = at.and_then(|(g, i)| panes.groups.get_mut(&g).and_then(|grp| grp.tabs.get_mut(i))).and_then(|t| t.view.sels.as_mut());
-                let Some(d) = docs.get_mut(&id) else { return none };
-                let formatted = d.apply_format(sels, edits, false, EditOrigin::User).unwrap_or(false);
-                SaveFormat { hint: None, formatted, ran: Some(Ok(())) }
-            }
-            Done::Unchanged(_) => SaveFormat { ran: Some(Ok(())), ..none },
-            Done::Invalid(k, e) => SaveFormat {
-                hint: Some(match lang {
-                    Lang::De => format!("Unverändert gespeichert: ungültiges {} in Zeile {}, Spalte {}.", format_job::kind_name(k), e.line, e.column),
-                    Lang::En => format!("Saved unchanged: invalid {} at line {}, column {}.", format_job::kind_name(k), e.line, e.column),
-                }),
-                formatted: false,
-                // Wie die Aktion *Formatieren* einer Regel ([`crate::save_actions::builtin::apply_text`]) es meldet.
-                ran: Some(Err(format!("{} {}:{} {}", lang.t("Ungültiger Inhalt, nicht formatiert:", "Invalid content, not formatted:"), e.line, e.column, e.message))),
-            },
-            _ => none,
-        }
-    }
-
-    /// Wie [`EditorUi::format_on_save`], nur Hinweis und ob formatiert wurde (Tests).
-    #[cfg(test)]
-    pub(super) fn format_before_save(&mut self, id: u64, path: Option<&std::path::Path>, prefs: &super::EditorPrefs, lang: Lang) -> (Option<String>, bool) {
-        let r = self.format_on_save(id, path, prefs, lang);
-        (r.hint, r.formatted)
-    }
-
     /// Das Schreiben eines Dokuments – der einzige Weg dorthin ist [`crate::app::App::editor_save_with`] (alle
-    /// Speicherwege des Editors). Vor dem Schreiben, zusammen **ein** Rückgängig-Schritt:
-    /// 1. Formatieren beim Speichern (#381, nur mit `format` = ausdrückliches Speichern durch den Nutzer; synchron, bis
-    ///    1 MB, nichts bei schreibgeschützten Dateien, die Art nach `path` bei *Speichern unter*),
-    /// 2. die eingebauten Aktionen der Regeln beim Speichern (#383, `builtins` in Laufreihenfolge). *Formatieren* einer
-    ///    Regel läuft nicht noch einmal, wenn das Formatieren beim Speichern schon über das Dokument lief (es bekommt
-    ///    dessen Ergebnis).
+    /// Speicherwege des Editors). Gespeichert wird der Text des Editors; formatiert wird **nie von allein**. Vor dem
+    /// Schreiben laufen nur die eingebauten Aktionen der passenden Regeln (#383, `builtins` in Laufreihenfolge, auch
+    /// *Formatieren*, wenn eine Regel es hat), zusammen **ein** Rückgängig-Schritt. Ohne Regeln (`builtins` leer, auch bei
+    /// *Ohne Aktionen speichern*) bleibt der Text, wie er ist.
     ///
-    /// Scheitert das Schreiben (schreibgeschützt, Zeichen passt nicht in die Kodierung, Platte), werden beide
-    /// zurückgenommen – Text, Zeilenenden und Kodierung bleiben, wie sie waren. `Ok` mit Hinweis des Formatierens und
-    /// dem Ergebnis je eingebauter Aktion.
+    /// Scheitert das Schreiben (schreibgeschützt, Zeichen passt nicht in die Kodierung, Platte), werden die Aktionen
+    /// zurückgenommen – Text, Zeilenenden und Kodierung bleiben, wie sie waren. `Ok` mit dem Ergebnis je eingebauter Aktion.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn save_doc(&mut self, id: u64, path: Option<std::path::PathBuf>, format: bool, builtins: &[crate::save_actions::Builtin], prefs: &super::EditorPrefs, lang: Lang, keep_lines: &[usize]) -> Result<SavedDoc, String> {
-        use crate::save_actions::Builtin;
+    pub(crate) fn save_doc(&mut self, id: u64, path: Option<std::path::PathBuf>, builtins: &[crate::save_actions::Builtin], prefs: &super::EditorPrefs, lang: Lang, keep_lines: &[usize]) -> Result<SavedDoc, String> {
         let Some(d) = self.docs.get(&id) else { return Ok(SavedDoc::default()) };
         let Some(before) = d.doc.as_ref().map(|x| (x.state_id(), x.format_state())) else { return Ok(SavedDoc::default()) };
-        let fos = if format { self.format_on_save(id, path.as_deref(), prefs, lang) } else { SaveFormat::default() };
-        let mut out = SavedDoc { hint: fos.hint, builtins: Vec::new() };
+        let mut out = SavedDoc::default();
         if !builtins.is_empty() {
-            // *Formatieren* nur einmal (Formatieren beim Speichern und eine Regel).
-            let (dup, list): (Vec<Builtin>, Vec<Builtin>) = builtins.iter().cloned().partition(|b| *b == Builtin::Format && fos.ran.is_some());
             let target = path.clone().or_else(|| self.docs.get(&id).and_then(|d| d.path.clone()));
             let Some(d) = self.docs.get_mut(&id) else { return Ok(out) };
-            let mut res = d.apply_save_builtins(&list, target.as_deref(), prefs, lang, keep_lines);
-            if let Some(r) = fos.ran.as_ref().filter(|_| !dup.is_empty()) {
-                res.push((Builtin::Format, r.clone().map(|()| None)));
-            }
+            let mut res = d.apply_save_builtins(builtins, target.as_deref(), prefs, lang, keep_lines);
             // In der Reihenfolge der Regeln melden.
             out.builtins = builtins.iter().filter_map(|b| res.iter().position(|(x, _)| x == b).map(|i| res.swap_remove(i))).collect();
         }
@@ -443,13 +348,7 @@ impl EditorUi {
         }
     }
 
-    /// Speichern nur mit dem Formatieren beim Speichern (Tests des Formatierens).
-    #[cfg(test)]
-    pub(super) fn save_with_format(&mut self, id: u64, path: Option<std::path::PathBuf>, prefs: &super::EditorPrefs, lang: Lang) -> Result<Option<String>, String> {
-        self.save_doc(id, path, true, &[], prefs, lang, &[]).map(|s| s.hint)
-    }
-
-    /// Den letzten Schritt (das Formatieren beim Speichern) zurücknehmen.
+    /// Den letzten Schritt (die Aktionen beim Speichern) zurücknehmen.
     fn undo_format(&mut self, id: u64) {
         let at = self.save_tab(id);
         let EditorUi { panes, docs, .. } = self;

@@ -3,7 +3,8 @@
 //! diesen Wert den Standard, unbekannte Werte werden ignoriert. Die drei Agenten-Schalter sind immer aus, wenn sie nicht
 //! ausdrücklich `true` sind. Ab 3.1.0 (#312, Syntax-Modus): `default_mode`, `language_modes`, `language_map`.
 //! Ab 3.2.0 (#381): `menu_bar` (Menüleiste je Teilung, Standard an – aus nur bei ausdrücklichem `false`),
-//! `format_on_save_json`, `format_on_save_xml` (Standard aus) und der Agenten-Schalter `agent_format` (Standard aus).
+//! und der Agenten-Schalter `agent_format` (Standard aus). Formatiert wird nie von allein: nur auf Knopfdruck oder über
+//! eine Regel mit der Aktion *Formatieren* (Aktionen beim Speichern, #383); es gibt keine eigene Einstellung dafür.
 //! Ab 3.2.0 (#385, Vergleich und Änderungsmarken): `change_markers`, `marker_base`, `diff_context`,
 //! `diff_ignore_whitespace`, `diff_layout`.
 
@@ -103,10 +104,6 @@ pub struct EditorSettings {
     pub language_map: BTreeMap<String, String>,
     /// Menüleiste (*Datei · Bearbeiten · Ansicht · Format*) über jeder Teilung (#381). Standard an.
     pub menu_bar: bool,
-    /// JSON (auch JSONC) beim Speichern formatieren (#381). Standard aus.
-    pub format_on_save_json: bool,
-    /// XML beim Speichern formatieren (#381). Standard aus.
-    pub format_on_save_xml: bool,
     /// Agenten dürfen offene JSON/XML-Dokumente formatieren (MCP `format_file` außer `validate`; ungespeichert, als
     /// „vom Agenten“ markiert, rückgängig zu machen). Standard aus.
     pub agent_format: bool,
@@ -138,8 +135,6 @@ impl Default for EditorSettings {
             language_modes: BTreeMap::new(),
             language_map: BTreeMap::new(),
             menu_bar: true,
-            format_on_save_json: false,
-            format_on_save_xml: false,
             agent_format: false,
             change_markers: false,
             marker_base: MarkerBase::Git,
@@ -217,8 +212,6 @@ impl EditorSettings {
                 .unwrap_or_default(),
             // Standard an: aus nur bei ausdrücklichem `false`.
             menu_bar: o.get("menu_bar").and_then(Value::as_bool) != Some(false),
-            format_on_save_json: flag("format_on_save_json"),
-            format_on_save_xml: flag("format_on_save_xml"),
             agent_format: flag("agent_format"),
             change_markers: flag("change_markers"),
             marker_base: o.get("marker_base").and_then(Value::as_str).and_then(MarkerBase::from_id).unwrap_or_default(),
@@ -306,7 +299,6 @@ mod tests {
         assert!(!d.autosave && !d.search_include_ignored);
         assert!(!d.agent_open && !d.agent_edit && !d.agent_save && !d.agent_format, "Agenten-Schalter sind standardmäßig aus");
         assert!(d.menu_bar, "Menüleiste standardmäßig an (#381)");
-        assert!(!d.format_on_save_json && !d.format_on_save_xml, "Formatieren beim Speichern standardmäßig aus");
         assert_eq!(d.large_file_bytes(), 20 * 1024 * 1024);
         for r in [AgentRight::Open, AgentRight::Edit, AgentRight::Save, AgentRight::Format] {
             assert!(!d.allows(r));
@@ -317,7 +309,7 @@ mod tests {
         keys.sort();
         assert_eq!(
             keys,
-            ["agent_edit", "agent_format", "agent_open", "agent_save", "autosave", "autosave_delay_ms", "change_markers", "default_mode", "diff_context", "diff_ignore_whitespace", "diff_layout", "font", "format_on_save_json", "format_on_save_xml", "language_map", "language_modes", "large_file_mb", "marker_base", "menu_bar", "search_exclude", "search_include_ignored"]
+            ["agent_edit", "agent_format", "agent_open", "agent_save", "autosave", "autosave_delay_ms", "change_markers", "default_mode", "diff_context", "diff_ignore_whitespace", "diff_layout", "font", "language_map", "language_modes", "large_file_mb", "marker_base", "menu_bar", "search_exclude", "search_include_ignored"]
         );
         assert!(!d.change_markers, "Änderungsmarken sind standardmäßig aus (#385)");
         assert_eq!((v["marker_base"].as_str(), v["diff_layout"].as_str(), d.diff_context), (Some("git"), Some("auto"), 3));
@@ -359,10 +351,12 @@ mod tests {
     fn format_settings_of_3_2_0_round_trip_and_old_files_load() {
         // Datei von 3.1.0 ohne die neuen Felder: Menüleiste an, alles andere aus.
         let old = EditorSettings::from_value(&json!({"font": "", "agent_edit": true}));
-        assert!(old.menu_bar && !old.format_on_save_json && !old.format_on_save_xml && !old.agent_format);
+        assert!(old.menu_bar && !old.agent_format);
         assert_eq!(switch_bits(&old) & FORMAT, 0);
         let s = EditorSettings::from_value(&json!({"menu_bar": false, "format_on_save_json": true, "format_on_save_xml": "yes", "agent_format": true}));
-        assert!(!s.menu_bar && s.format_on_save_json && !s.format_on_save_xml && s.agent_format);
+        // Die Schlüssel `format_on_save_*` gab es nur in Vorabständen von 3.2.0: sie werden ignoriert.
+        assert!(!s.menu_bar && s.agent_format);
+        assert!(!serde_json::to_value(&s).unwrap().as_object().unwrap().keys().any(|k| k.starts_with("format_on_save")));
         assert!(s.allows(AgentRight::Format) && !s.allows(AgentRight::Edit));
         assert_eq!(switch_bits(&s), FORMAT);
         // Falscher Typ: Menüleiste bleibt an (Standard).
