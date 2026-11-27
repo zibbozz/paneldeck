@@ -281,6 +281,7 @@ pub const CONTROL_SIMPLE_AUTO_CONTEXT: u32 = 32768;
 
 /// Obergrenze des automatischen Kontexts für diese Werkzeug-Regeln: [`CONTROL_SIMPLE_AUTO_CONTEXT`] bei Steuern ohne
 /// Expertenmodus, sonst keine (dann gilt `llm::config::MAX_AUTO_CONTEXT`).
+/// Gerechnet mit der wirksamen Stufe (Modell und Projekt, Review 3.2.0).
 pub fn auto_context_cap(policy: &ToolPolicy) -> Option<u32> {
     (policy.prompt_level() == McpLevel::Control && !policy.expert).then_some(CONTROL_SIMPLE_AUTO_CONTEXT)
 }
@@ -289,6 +290,14 @@ pub fn auto_context_cap(policy: &ToolPolicy) -> Option<u32> {
 /// `llm::config::auto_context` für genau diesen Prompt), dann die Wahl zwischen voller Fassung und Kurzfassung nach
 /// `llm::config::prompt_fits` – abgeschaltete Teile machen den Prompt kleiner und zählen bei beiden Entscheidungen mit.
 pub fn plan_prompt(server: &crate::llm::config::LlmServer, model: &str, policy: &ToolPolicy, cx: &TurnContext) -> PromptPlan {
+    // Die Stufe des Projekts gilt immer (Review 3.2.0): auch wenn der Aufrufer sie in `policy` nicht gesetzt hat.
+    let capped;
+    let policy = if cx.project_cap < policy.project_cap {
+        capped = policy.clone().with_project_cap(cx.project_cap);
+        &capped
+    } else {
+        policy
+    };
     let scale = if cx.token_scale.is_finite() { cx.token_scale.clamp(1.0, 4.0) } else { 1.0 };
     let tokens_of = |tools: &[llm::ToolSpec]| if tools.is_empty() { 0 } else { llm::tokens::estimate_tokens(&serde_json::to_string(tools).unwrap_or_default()) };
     let real = |n: usize| (n as f64 * scale as f64).ceil() as usize;
@@ -342,7 +351,9 @@ fn build(meta: &ChatMeta, history: &[ChatMsg], cx: &TurnContext, with_key: bool)
     let cfg = server.model_cfg(model);
     let endpoint = if with_key { server.endpoint(lang)? } else { Endpoint::new(server.kind, &server.url) };
     // Über `more_tools` nachgeladene Werkzeuge (#393) listet die Kurzfassung mit – nur, soweit die Regeln sie erlauben.
-    let policy = ToolPolicy::new(cfg.clone(), server.tools_supported(model), cx.expert).with_agent(cx.agent.clone()).with_loaded(super::more_tools::loaded(history));
+    // Stufe des Projekts (#386, Review 3.2.0): ein gesperrtes oder nur lesbares Projekt bekommt weder Schemas noch Doku
+    // verbotener Werkzeuge, und der Prompt nennt die wirksame Stufe.
+    let policy = ToolPolicy::new(cfg.clone(), server.tools_supported(model), cx.expert).with_agent(cx.agent.clone()).with_loaded(super::more_tools::loaded(history)).with_project_cap(cx.project_cap);
     // Bilder (#357): an alle Modelle außer denen, die sicher keine lesen (unbekannt = versuchen; lehnt der Server ab,
     // merkt sich die App „keine Bilder“). Ohne Bildverständnis ein Hinweis, wenn die laufende Runde Bilder hat.
     let vision = server.vision_supported(model);
@@ -1733,5 +1744,30 @@ mod tests {
         s.set_model_cfg(LlmModel { level: McpLevel::Read, level_chosen: true, context_length: Some(1024), ..LlmModel::named("m1") });
         let p = prepare(&meta(), &[msg(store::Role::User, "q")], &cx(vec![s])).unwrap();
         assert!(p.note.is_some() && !p.request.messages[0].content.contains(full_marker), "{:?}", p.note);
+    }
+
+    /// Review 3.2.0: Die Anfrage folgt der Stufe des Projekts (`TurnContext::project_cap`): keine Schemas und keine Doku
+    /// verbotener Werkzeuge, der Prompt nennt die wirksame Stufe; ein gesperrtes Projekt hat keine Paneldeck-Werkzeuge.
+    #[test]
+    fn the_request_follows_the_project_cap() {
+        let cfg = LlmModel { level: McpLevel::Control, level_chosen: true, context_length: Some(65536), ..LlmModel::named("m1") };
+        let mut s = server("http://localhost:11434", ServerKind::Ollama);
+        s.set_model_cfg(cfg.clone());
+        let names = |c: &TurnContext| prepare(&meta(), &[msg(store::Role::User, "q")], c).unwrap().request.tools.into_iter().map(|t| t.name).collect::<Vec<_>>();
+        let open = cx(vec![s.clone()]);
+        assert!(names(&open).iter().any(|n| n == "send_text"), "ohne Grenze wie bisher");
+        let ro = TurnContext { project_cap: McpLevel::Read, ..cx(vec![s.clone()]) };
+        let tools = names(&ro);
+        assert!(tools.iter().any(|n| n == "list_sessions") && !tools.iter().any(|n| n == "send_text" || n == "close_session" || n == "create_ticket"), "{tools:?}");
+        let p = prepare(&meta(), &[msg(store::Role::User, "q")], &ro).unwrap();
+        let sys = &p.request.messages[0].content;
+        assert!(sys.contains("Tool level: **Read**") && sys.contains("limits the Paneldeck tools to **Read**"), "wirksame Stufe im Prompt");
+        assert!(!sys.contains("### send_text"), "keine Doku verbotener Werkzeuge");
+        let locked = TurnContext { project_cap: McpLevel::Off, ..cx(vec![s]) };
+        let left = names(&locked);
+        assert!(left.iter().all(|n| super::super::agent::is_agent_tool(n) || n == super::super::more_tools::NAME), "gesperrt: nur die eigenen Werkzeuge des Chats: {left:?}");
+        assert!(!left.iter().any(|n| n == "list_sessions"));
+        let p = prepare(&meta(), &[msg(store::Role::User, "q")], &locked).unwrap();
+        assert!(!p.request.messages[0].content.contains("### list_sessions"));
     }
 }

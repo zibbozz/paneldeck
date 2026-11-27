@@ -189,9 +189,11 @@ impl App {
     }
 
     /// MCP-Werkzeuge `editor_*` (Stufe prüft der Hub bzw. die Werkzeug-Regeln des Chats; die Schalter prüft `tools`).
-    pub(super) fn mcp_editor(&mut self, ctx: &egui::Context, tool: &str, args: &Value) -> Result<Value, (String, String)> {
+    /// `hidden` = Ordner der für den Agenten gesperrten Projekte (#386, Review 3.2.0): solche Dokumente sieht er nicht,
+    /// solche Dateien öffnet er nicht.
+    pub(super) fn mcp_editor(&mut self, ctx: &egui::Context, tool: &str, args: &Value, hidden: Vec<String>) -> Result<Value, (String, String)> {
         let settings = self.settings.editor.clone();
-        let mut host = BridgeHost { app: self };
+        let mut host = BridgeHost { app: self, hidden };
         let r = tools::call(tool, &mut host, &settings, args);
         if r.is_ok() && matches!(tool, "editor_open" | "editor_edit" | "editor_save") {
             ctx.request_repaint();
@@ -201,9 +203,10 @@ impl App {
 
     /// MCP `format_file` (#381) starten: Regeln prüfen (`tools::plan_format`; die Stufe nach `op` prüft der Hub bzw. die
     /// Werkzeug-Regeln des Chats), dann den Lauf im Hilfsthread. Liefert Lauf, Dokument und Befehl.
-    pub(super) fn mcp_format_start(&mut self, ctx: &egui::Context, args: &Value) -> Result<(crate::editor_svc::format_job::Job, u64, crate::editor::format::Op), (String, String)> {
+    pub(super) fn mcp_format_start(&mut self, ctx: &egui::Context, args: &Value, hidden: &[String]) -> Result<(crate::editor_svc::format_job::Job, u64, crate::editor::format::Op), (String, String)> {
         let settings = self.settings.editor.clone();
-        let docs: Vec<DocInfo> = self.editor_list().into_iter().map(doc_info).collect();
+        // Dokumente in Ordnern gesperrter Projekte gibt es für den Agenten nicht (Review 3.2.0).
+        let docs: Vec<DocInfo> = self.editor_list().into_iter().map(doc_info).filter(|d| !doc_hidden(d, hidden)).collect();
         let (d, op) = tools::plan_format(&docs, &settings, args)?;
         let confirmed = args.get("remove_comments").and_then(Value::as_bool) == Some(true);
         let job = self.editor_start_agent_format(ctx, d.id, op, confirmed).map_err(|e| ("internal".to_string(), e))?;
@@ -707,9 +710,9 @@ fn read_base(path: &Path, enc: Option<crate::editor::TextEncoding>, base: &str, 
 impl App {
     /// `editor_diff` (#385) ohne die Oberfläche anzuhalten: Argumente und Texte jetzt, Lesen des Stands (git, Platte) und
     /// Vergleichen im Hilfsthread. Das Ergebnis kommt über den Kanal (der Hub wartet in `McpState::pending`).
-    pub(super) fn mcp_editor_diff(&mut self, ctx: &egui::Context, args: &Value) -> Result<std::sync::mpsc::Receiver<Result<Value, (String, String)>>, (String, String)> {
+    pub(super) fn mcp_editor_diff(&mut self, ctx: &egui::Context, args: &Value, hidden: Vec<String>) -> Result<std::sync::mpsc::Receiver<Result<Value, (String, String)>>, (String, String)> {
         let plan = {
-            let mut host = BridgeHost { app: self };
+            let mut host = BridgeHost { app: self, hidden };
             tools::diff_plan(&mut host, args)?
         };
         let path = plan.doc.path.clone();
@@ -733,6 +736,13 @@ impl App {
 /// Die App als `EditorHost` für die MCP-Werkzeuge (nur im Hauptdurchlauf).
 struct BridgeHost<'a> {
     app: &'a mut App,
+    /// Ordner der für den Agenten gesperrten Projekte (#386, Review 3.2.0).
+    hidden: Vec<String>,
+}
+
+/// Liegt das Dokument im Ordner eines gesperrten Projekts (`hidden`)? Unbenannte Tabs nie.
+fn doc_hidden(d: &DocInfo, hidden: &[String]) -> bool {
+    d.path.as_deref().is_some_and(|p| super::mcp::access_gate::path_hidden(p, hidden))
 }
 
 fn doc_info(d: super::editor_ui::DocInfo) -> DocInfo {
@@ -763,7 +773,7 @@ fn doc_info(d: super::editor_ui::DocInfo) -> DocInfo {
 
 impl EditorHost for BridgeHost<'_> {
     fn docs(&self) -> Vec<DocInfo> {
-        self.app.editor_list().into_iter().map(doc_info).collect()
+        self.app.editor_list().into_iter().map(doc_info).filter(|d| !doc_hidden(d, &self.hidden)).collect()
     }
 
     fn text(&mut self, doc: u64) -> Option<String> {
@@ -811,5 +821,9 @@ impl EditorHost for BridgeHost<'_> {
     /// Datenordner (und der Ordner der laufenden Instanz bei Profilen) – nie für Agenten (#383).
     fn protected(&self, path: &Path) -> bool {
         crate::save_actions::is_inside(path, &self.app.dir) || crate::save_actions::is_inside(&crate::save_actions::copy::normalize(path), &self.app.dir)
+    }
+
+    fn hidden(&self, path: &Path) -> bool {
+        super::mcp::access_gate::path_hidden(path, &self.hidden)
     }
 }

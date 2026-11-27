@@ -177,8 +177,9 @@ impl PromptUi {
 /// Agenten-Werkzeuge (#338) mit ihren Standard-Einstellungen sind dabei (der größte übliche Fall).
 pub(super) fn plan_for(server: &LlmServer, model: &str, global: PromptParts, expert: bool) -> PromptPlan {
     let agent = crate::chat::agent::AgentEnv { root: Some(std::path::PathBuf::from("project")), ..Default::default() };
-    let policy = ToolPolicy::new(server.model_cfg(model), server.tools_supported(model), expert).with_agent(agent.clone());
-    let cx = crate::chat::TurnContext { expert, prompt_parts: global, agent, ..crate::chat::TurnContext::default() };
+    // Ohne Projekt: keine Grenze des Projekts (`TurnContext::project_cap` = Steuern) – dieselbe Regel wie bei einer Anfrage.
+    let cx = crate::chat::TurnContext { expert, prompt_parts: global, agent: agent.clone(), ..crate::chat::TurnContext::default() };
+    let policy = ToolPolicy::new(server.model_cfg(model), server.tools_supported(model), expert).with_agent(agent).with_project_cap(cx.project_cap);
     crate::chat::llm_backend::plan_prompt(server, model, &policy, &cx)
 }
 

@@ -38,6 +38,23 @@ pub struct PendingCall {
     pub call: ToolCall,
     pub state: CallState,
     rx: Option<Receiver<ToolResult>>,
+    /// Prüfung mit Plattenzugriff (sensible Dateien, Vorschau; `agent::file_check`) – im Hintergrund, je Aufruf einmal.
+    files: FileState,
+}
+
+impl PendingCall {
+    fn new(call: ToolCall, state: CallState) -> Self {
+        PendingCall { call, state, rx: None, files: FileState::None }
+    }
+}
+
+/// Stand der Prüfung mit Plattenzugriff eines Aufrufs (Review 3.2.0: nie in der UI-Schleife).
+#[derive(Default)]
+enum FileState {
+    #[default]
+    None,
+    Pending(Receiver<super::agent::FileCheck>),
+    Done(super::agent::FileCheck),
 }
 
 /// Entscheidung des Nutzers zu einem schreibenden Aufruf.
@@ -169,6 +186,9 @@ pub struct ChatState {
     /// Eine Nachricht von Paneldeck kam während der Runde und steht schon im Verlauf: der nächste `tool_step` fragt das
     /// Modell noch einmal an (geht nicht verloren, wenn sie außerhalb von `tool_step` einsortiert wurde).
     events_resume: bool,
+    /// Prüfungen mit Plattenzugriff (`agent::file_check`) sofort statt im Hintergrund ausführen – nur in Tests (dort
+    /// standardmäßig an, damit sie ohne Warten ablaufen; ein Test schaltet es ab und prüft das Warten).
+    pub(crate) file_checks_inline: bool,
 }
 
 /// Wartende Nachricht von Paneldeck.
@@ -296,6 +316,7 @@ impl ChatState {
             ask: None,
             events: Vec::new(),
             events_resume: false,
+            file_checks_inline: cfg!(test),
         };
         if fixed > 0 {
             c.touch();
@@ -386,7 +407,7 @@ impl ChatState {
     /// Nur für die Doku-Bilder (`readme-shots`): ein laufender `ask_user`-Aufruf mit offenem Formular, ohne Hub.
     #[cfg(feature = "readme-shots")]
     pub fn shot_ask(&mut self, call: ToolCall, form: super::ask::AskForm) {
-        self.calls.push(PendingCall { call, state: CallState::Running, rx: None });
+        self.calls.push(PendingCall::new(call, CallState::Running));
         self.open_ask(form);
     }
 
@@ -453,7 +474,55 @@ impl ChatState {
 
     /// Ein Werkzeug läuft gerade im Hub.
     pub fn tool_running(&self) -> bool {
-        self.calls.iter().any(|c| c.state == CallState::Running)
+        // Auch eine Prüfung im Hintergrund (Review 3.2.0): die App zeichnet dann regelmäßig neu und holt sie ab.
+        self.calls.iter().any(|c| c.state == CallState::Running || matches!(c.files, FileState::Pending(_)))
+    }
+
+    /// Vorschau der Freigabe-Zeile des wartenden Aufrufs aus der Prüfung im Hintergrund (`agent::file_check`).
+    pub fn pending_file_preview(&self) -> Option<(String, super::agent::files::Preview)> {
+        let p = self.calls.iter().find(|c| c.state == CallState::Approval)?;
+        match &p.files {
+            FileState::Done(fc) => fc.preview.clone().map(|pr| (p.call.id.clone(), pr)),
+            _ => None,
+        }
+    }
+
+    /// Prüfung mit Plattenzugriff des ersten Aufrufs (`agent::file_check`): starten (im Hintergrund, in Tests sofort) bzw.
+    /// abholen. `None` = läuft noch. Endet der Prüf-Thread ohne Ergebnis, gilt der Aufruf als sensibel (fragt immer).
+    fn first_file_check(&mut self, policy: &ToolPolicy) -> Option<bool> {
+        let inline = self.file_checks_inline;
+        let p = self.calls.first_mut()?;
+        if let FileState::None = p.files {
+            let (tx, rx) = std::sync::mpsc::sync_channel(1);
+            let (call, env) = (p.call.clone(), policy.agent.clone());
+            if inline {
+                let _ = tx.send(super::agent::file_check(&call, &env));
+            } else {
+                let spawned = std::thread::Builder::new().name("chat-file-check".into()).spawn(move || {
+                    let _ = tx.send(super::agent::file_check(&call, &env));
+                });
+                if spawned.is_err() {
+                    p.files = FileState::Done(super::agent::FileCheck { sensitive: true, preview: None });
+                    return Some(true);
+                }
+                // Abgeholt wird im nächsten Schritt (die App zeichnet dafür neu, `tool_running`).
+                p.files = FileState::Pending(rx);
+                return None;
+            }
+            p.files = FileState::Pending(rx);
+        }
+        let got = match &p.files {
+            FileState::Done(fc) => return Some(fc.sensitive),
+            FileState::Pending(rx) => match rx.try_recv() {
+                Ok(fc) => fc,
+                Err(TryRecvError::Empty) => return None,
+                Err(TryRecvError::Disconnected) => super::agent::FileCheck { sensitive: true, preview: None },
+            },
+            FileState::None => return None,
+        };
+        let s = got.sensitive;
+        p.files = FileState::Done(got);
+        Some(s)
     }
 
     /// Die letzte Antwort brach mit einem Fehler ab.
@@ -989,7 +1058,7 @@ impl ChatState {
         m.content = found.rest;
         m.tool_calls = calls;
         m.repairs = repairs;
-        self.calls = m.tool_calls.iter().map(|c| PendingCall { call: c.clone(), state: CallState::Queued, rx: None }).collect();
+        self.calls = m.tool_calls.iter().map(|c| PendingCall::new(c.clone(), CallState::Queued)).collect();
         self.next_request = true;
         self.changed(i);
         true
@@ -1056,7 +1125,23 @@ impl ChatState {
                 self.pause(None);
                 return ToolStep::Idle;
             }
-            let checked = policy.check(&p.call).and_then(|ask| match plan_round.filter(|_| !approved) {
+            // Berührt der Aufruf eine sensible Datei? Kanonisieren, WSL über 9P und Ordner durchlaufen laufen im Hintergrund
+            // (Review 3.2.0: nie in der UI-Schleife); bis das Ergebnis da ist, wartet der Aufruf. Ein ohnehin abgewiesener
+            // Aufruf braucht die Prüfung nicht (die Antwort ist der letzte Schritt von `check`).
+            let sensitive = if super::agent::needs_file_check(&p.call) {
+                if policy.check_with(&p.call, Some(false)).is_ok() {
+                    match self.first_file_check(policy) {
+                        Some(s) => Some(s),
+                        None => return ToolStep::Idle,
+                    }
+                } else {
+                    Some(false)
+                }
+            } else {
+                None
+            };
+            let p = &self.calls[0];
+            let checked = policy.check_with(&p.call, sensitive).and_then(|ask| match plan_round.filter(|_| !approved) {
                 Some(level) => plan::gate(level, &p.call, self.planning.research, self.grants).map(|()| ask),
                 None => Ok(ask),
             });
@@ -1085,7 +1170,7 @@ impl ChatState {
                 if plan_round.is_some() && !plan::budget_free(&self.calls[0].call.name) {
                     self.planning.research += 1;
                 }
-                if policy.needs_approval(ask, &self.calls[0].call, &self.file.always_allow) {
+                if policy.needs_approval_with(ask, &self.calls[0].call, &self.file.always_allow, sensitive) {
                     self.calls[0].state = CallState::Approval;
                     self.touch();
                     return ToolStep::Idle;
@@ -1316,7 +1401,7 @@ impl ChatState {
                                     m.repairs.push(CallRepair { id: c.id.clone(), text_call: false, fixes });
                                 }
                             }
-                            self.calls = m.tool_calls.iter().map(|c| PendingCall { call: c.clone(), state: CallState::Queued, rx: None }).collect();
+                            self.calls = m.tool_calls.iter().map(|c| PendingCall::new(c.clone(), CallState::Queued)).collect();
                             self.next_request = true;
                             ended = false;
                         } else if repair::may_contain_call(&m.content) {
@@ -1475,7 +1560,7 @@ mod tests {
         };
         let run = |c: &mut ChatState, id: &str, v: serde_json::Value| {
             let call = ToolCall { id: id.into(), name: "screenshot".into(), arguments: serde_json::json!({}) };
-            c.calls.push(PendingCall { call, state: CallState::Running, rx: None });
+            c.calls.push(PendingCall::new(call, CallState::Running));
             c.record_result("screenshot", Ok(v));
         };
         // Ohne Zusage (kein Bild-Ziel vergeben): kein Bild in den Chat
@@ -2376,6 +2461,47 @@ mod tests {
             std::thread::sleep(Duration::from_millis(1));
         }
         c.tool_step(p)
+    }
+
+    /// Review 3.2.0: Die Prüfung auf sensible Dateien läuft im Hintergrund – bis sie da ist, wartet der Aufruf (kein
+    /// Plattenzugriff in der UI-Schleife); danach dieselbe Entscheidung wie vorher (sensibel → Freigabe, sonst frei).
+    #[test]
+    fn file_checks_run_in_the_background_and_decide_like_before() {
+        let (d, env) = crate::chat::agent::paths::tests::tmp_root("session-bg-check");
+        std::fs::write(d.join(".env"), "SECRET=1").unwrap();
+        std::fs::write(d.join("a.txt"), "x").unwrap();
+        let p = policy(crate::mcp::McpLevel::Read, 10).with_agent(env);
+        for (path, asks) in [(".env", true), ("a.txt", false)] {
+            let b = Script::new(vec![vec![tc("r", "read_file", serde_json::json!({"path": path})), TurnEvent::Done], text("ok")]);
+            let mut c = ChatState::new(ChatFile::default(), None);
+            c.file_checks_inline = false;
+            start(&mut c, &b, "read");
+            let mut first = true;
+            let mut outcome = None;
+            for _ in 0..2000 {
+                let s = step(&mut c, &p);
+                if first {
+                    assert!(matches!(s, ToolStep::Idle) && c.tool_running(), "{path}: wartet auf die Prüfung im Hintergrund");
+                    first = false;
+                }
+                match s {
+                    ToolStep::Execute(_) => {
+                        outcome = Some(false);
+                        break;
+                    }
+                    ToolStep::Idle if c.awaiting_approval() => {
+                        outcome = Some(true);
+                        break;
+                    }
+                    _ => std::thread::sleep(Duration::from_millis(1)),
+                }
+            }
+            assert_eq!(outcome, Some(asks), "{path}");
+            if asks {
+                assert!(c.pending_file_preview().is_some_and(|(id, pr)| id == "r" && pr.sensitive), "Hinweis aus der Prüfung im Hintergrund");
+            }
+        }
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     /// `ask_user` (#356): der Aufruf läuft, bis der Nutzer absendet; solange „braucht dich“. Abbrechen sagt es dem Modell,

@@ -548,6 +548,25 @@ pub fn parse_automount_root(conf: &str) -> Option<String> {
     Some(if v.ends_with('/') { v } else { format!("{v}/") })
 }
 
+/// `wsl.exe`-Argumente: echten Pfad eines vorhandenen Linux-Pfads ermitteln (`readlink -f`, ohne Shell; GNU und
+/// BusyBox). Der Pfad ist absolut (beginnt mit `/`), wird also nie als Option gelesen.
+pub fn realpath_args(distro: &str, path: &str) -> Vec<String> {
+    ["-d", distro, "-e", "readlink", "-f", path].iter().map(|s| s.to_string()).collect()
+}
+
+/// Echter Linux-Pfad (alle Verknüpfungen aufgelöst) eines vorhandenen absoluten Pfads, von der Linux-Seite ermittelt
+/// (Review 3.2.0: Windows zeigt Linux-Verknüpfungen über 9P nicht verlässlich an). Blockiert bis [`FAST_TIMEOUT`] – nur
+/// im Hintergrund aufrufen. `None` = nicht ermittelbar (kein WSL, Zeit überschritten, ungewöhnlicher Pfad); in Tests
+/// immer (kein echtes `wsl.exe`).
+pub fn real_linux_path(distro: &str, path: &str) -> Option<String> {
+    if cfg!(test) || !cfg!(windows) || !valid_distro(distro) || !path.starts_with('/') || validate_linux_path(path).is_err() {
+        return None;
+    }
+    let out = run(&realpath_args(distro, path), FAST_TIMEOUT).filter(|o| o.code == Some(0) && !o.truncated)?;
+    let p = String::from_utf8_lossy(&out.stdout).trim_end_matches(['\r', '\n']).to_string();
+    (p.starts_with('/') && validate_linux_path(&p).is_ok()).then_some(p)
+}
+
 /// `wsl.exe`-Argumente: `/etc/wsl.conf` lesen (ohne Shell, feste Argumente).
 pub fn mount_args(distro: &str) -> Vec<String> {
     ["-d", distro, "-e", "cat", "/etc/wsl.conf"].iter().map(|s| s.to_string()).collect()

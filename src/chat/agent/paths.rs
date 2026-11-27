@@ -27,6 +27,8 @@ pub enum Access {
 #[derive(Clone, Debug)]
 pub struct Root {
     pub canon: PathBuf,
+    /// WSL-Projektordner (Review 3.2.0): (Distribution, echter Pfad auf der Linux-Seite mit aufgelösten Verknüpfungen).
+    pub linux: Option<(String, String)>,
 }
 
 /// Ein geprüfter Pfad im Projektordner.
@@ -118,7 +120,11 @@ pub fn root(env: &AgentEnv) -> Result<Root, ToolErr> {
     let Some(r) = env.root.as_ref().filter(|r| !r.as_os_str().is_empty()) else {
         return Err(err("no_project_folder", "This chat has no project folder, so file, search and git tools are not available. Ask the user to start the chat in a project folder."));
     };
+    // WSL (Review 3.2.0, sicherer Fall): solange Einhängepunkt der Laufwerke und Home der Distribution unbekannt sind,
+    // gilt kein Ordner dort als geprüft – die Abfrage läuft im Hintergrund an.
+    wsl_ready(r)?;
     let canon = std::fs::canonicalize(r).map_err(|e| err("no_project_folder", format!("The chat's project folder {} is not accessible ({e}).", r.display())))?;
+    wsl_ready(&canon)?;
     if !canon.is_dir() {
         return Err(err("no_project_folder", format!("The chat's project folder {} is not a folder.", r.display())));
     }
@@ -133,7 +139,43 @@ pub fn root(env: &AgentEnv) -> Result<Root, ToolErr> {
     if let Some(why) = blocked(&canon, &[], Access::Read, env) {
         return Err(err("blocked", format!("The chat's project folder is off-limits: {why}.")));
     }
-    Ok(Root { canon })
+    // WSL (Review 3.2.0): der echte Ordner auf der Linux-Seite (Verknüpfungen aufgelöst) – gegen ihn prüft `resolve`
+    // jedes Ziel noch einmal, falls Windows über 9P eine Verknüpfung nicht als solche zeigt.
+    let linux = match crate::wsl::unc_to_linux(&canon.to_string_lossy()) {
+        None => None,
+        Some((d, l)) => {
+            let real = crate::wsl::real_linux_path(&d, &l).ok_or_else(wsl_unverified)?;
+            if linux_contains_mount(&d, &real) || real.trim_end_matches('/').is_empty() {
+                return Err(err("unsafe_project_folder", format!("The chat's project folder {} contains the Windows drives of WSL (/mnt …); file tools only work inside a project folder.", r.display())));
+            }
+            if let Some(why) = blocked(&PathBuf::from(crate::wsl::linux_to_unc(&d, &real)), &[], Access::Read, env) {
+                return Err(err("blocked", format!("The chat's project folder is off-limits: {why}.")));
+            }
+            Some((d, real))
+        }
+    };
+    Ok(Root { canon, linux })
+}
+
+/// Sind Einhängepunkt und Home der Distribution dieses WSL-Pfads bekannt? Sonst `busy` (und die Abfrage läuft an).
+/// Andere Pfade: immer.
+fn wsl_ready(p: &Path) -> Result<(), ToolErr> {
+    let Some((d, _)) = crate::wsl::unc_to_linux(&p.to_string_lossy()) else { return Ok(()) };
+    if crate::wsl::cached_mount(&d).is_some() && crate::wsl::cached_home(&d).is_some() {
+        return Ok(());
+    }
+    crate::wsl::prefetch(Some(&d));
+    Err(err("busy", format!("WSL is still being checked (distribution {}): where it mounts the Windows drives and its home folder are not known yet. Try again in a few seconds.", crate::mcp::short(&d, 60))))
+}
+
+/// Ließ sich ein WSL-Pfad nicht auf der Linux-Seite prüfen (`wsl.exe` antwortete nicht)? Sicherer Fall: kein Zugriff.
+fn wsl_unverified() -> ToolErr {
+    err("busy", "The path could not be checked inside WSL (wsl.exe did not answer in time); nothing was done. Try again.")
+}
+
+/// Ist der WSL-Projektordner ein WSL-Ordner (Linux-Seite bekannt)?
+pub fn is_wsl_root(root: &Root) -> bool {
+    root.linux.is_some() || crate::wsl::is_wsl_unc(&root.canon.to_string_lossy())
 }
 
 /// Lexikalische Probleme eines eingegebenen Pfads (vor jedem Dateizugriff). `None` = in Ordnung.
@@ -206,11 +248,25 @@ pub fn resolve(root: &Root, env: &AgentEnv, input: &str, access: Access) -> Resu
     if let Some(link) = wsl_symlink_below(&root.canon, &cand) {
         return Err(err("blocked", format!("“{}” goes through the symbolic link {}; links are not followed in WSL project folders.", crate::mcp::short(trimmed, 200), display(&link))));
     }
-    let (real, exists) = real_path(&cand).map_err(|e| err("bad_path", format!("Cannot resolve “{}”: {e}.", crate::mcp::short(trimmed, 200))))?;
+    let (real, exists, existing, rest) = real_path(&cand).map_err(|e| err("bad_path", format!("Cannot resolve “{}”: {e}.", crate::mcp::short(trimmed, 200))))?;
     let Ok(rel_path) = real.strip_prefix(&root.canon) else { return Err(outside(trimmed, root)) };
     let comps: Vec<String> = rel_path.components().filter_map(|c| if let Component::Normal(n) = c { Some(n.to_string_lossy().into_owned()) } else { None }).collect();
     if let Some(why) = blocked(&real, &comps, access, env) {
         return Err(err("blocked", format!("Access to “{}” is not allowed: {why}.", crate::mcp::short(trimmed, 200))));
+    }
+    // WSL (Review 3.2.0, sicherer Fall): Zeigt Windows über 9P eine Linux-Verknüpfung nicht als solche, löste der Server
+    // sie beim Öffnen trotzdem auf. Darum den vorhandenen Teil des Ziels auf der Linux-Seite auflösen: Er muss im echten
+    // Projektordner liegen, und die Sperren gelten auch für den echten Pfad. Nicht prüfbar = kein Zugriff.
+    if let Some((d, root_real)) = &root.linux {
+        let Some((_, linux_existing)) = crate::wsl::unc_to_linux(&existing.to_string_lossy()) else { return Err(outside(trimmed, root)) };
+        let real_existing = crate::wsl::real_linux_path(d, &linux_existing).ok_or_else(wsl_unverified)?;
+        let full = linux_join(&real_existing, &rest);
+        if let Err(why) = linux_target_ok(root_real, &full) {
+            return Err(err("blocked", format!("“{}” {why}; links are not followed in WSL project folders.", crate::mcp::short(trimmed, 200))));
+        }
+        if let Some(why) = blocked(&PathBuf::from(crate::wsl::linux_to_unc(d, &full)), &comps, access, env) {
+            return Err(err("blocked", format!("Access to “{}” is not allowed: {why}.", crate::mcp::short(trimmed, 200))));
+        }
     }
     let is_dir = exists && real.is_dir();
     let rel = if comps.is_empty() { ".".to_string() } else { comps.join("/") };
@@ -227,9 +283,34 @@ pub fn display(p: &Path) -> String {
     s.strip_prefix(r"\\?\").map(str::to_string).unwrap_or(s)
 }
 
+/// Echter Linux-Pfad `base` mit den (noch nicht vorhandenen) Abschnitten `rest`.
+fn linux_join(base: &str, rest: &[String]) -> String {
+    let mut s = base.trim_end_matches('/').to_string();
+    for r in rest {
+        s.push('/');
+        s.push_str(r);
+    }
+    if s.is_empty() { "/".to_string() } else { s }
+}
+
+/// Liegt der echte Linux-Pfad `target` im echten Projektordner `root_real` (oder ist er es)? Sonst der Grund.
+fn linux_target_ok(root_real: &str, target: &str) -> Result<(), String> {
+    let r = root_real.trim_end_matches('/');
+    let t = target.trim_end_matches('/');
+    if r.is_empty() {
+        return Err("lies in a WSL folder that contains the whole Linux file system".into());
+    }
+    if t == r || t.strip_prefix(r).is_some_and(|x| x.starts_with('/')) {
+        Ok(())
+    } else {
+        Err(format!("leads outside the project folder inside WSL (to {})", crate::mcp::short(t, 120)))
+    }
+}
+
 /// Längster vorhandener Anfang (auch ein Symlink selbst zählt als vorhanden) kanonisiert, der Rest angehängt; (Pfad,
-/// ganz vorhanden). Ein Symlink, dessen Ziel fehlt, ist ein Fehler (sonst schriebe man durch ihn hindurch).
-fn real_path(p: &Path) -> std::io::Result<(PathBuf, bool)> {
+/// ganz vorhanden, kanonischer vorhandener Anfang, fehlende Abschnitte). Ein Symlink, dessen Ziel fehlt, ist ein Fehler
+/// (sonst schriebe man durch ihn hindurch).
+fn real_path(p: &Path) -> std::io::Result<(PathBuf, bool, PathBuf, Vec<String>)> {
     let mut existing = p.to_path_buf();
     let mut rest: Vec<std::ffi::OsString> = Vec::new();
     loop {
@@ -244,12 +325,15 @@ fn real_path(p: &Path) -> std::io::Result<(PathBuf, bool)> {
             _ => return Err(std::io::Error::new(std::io::ErrorKind::NotFound, "no existing parent folder")),
         }
     }
-    let mut real = std::fs::canonicalize(&existing).map_err(|e| std::io::Error::new(e.kind(), format!("{e} (a link whose target is missing?)")))?;
+    let canon_existing = std::fs::canonicalize(&existing).map_err(|e| std::io::Error::new(e.kind(), format!("{e} (a link whose target is missing?)")))?;
     let exists = rest.is_empty();
+    let mut real = canon_existing.clone();
+    let mut missing = Vec::with_capacity(rest.len());
     for n in rest.into_iter().rev() {
+        missing.push(n.to_string_lossy().into_owned());
         real.push(n);
     }
-    Ok((real, exists))
+    Ok((real, exists, canon_existing, missing))
 }
 
 /// Warum dieser (kanonische) Pfad gesperrt ist; `comps` = Abschnitte relativ zum Projektordner.
@@ -313,11 +397,17 @@ fn windows_blocked(real: &Path, env: &AgentEnv) -> Option<String> {
 const SEP: &str = if cfg!(windows) { "\\" } else { "/" };
 
 /// Vergleichsform eines Pfads: unter Windows klein, `/` → `\`, ohne `\\?\` bzw. `\\?\UNC\` (→ `\\`), ohne
-/// Trenner am Ende.
+/// Trenner am Ende. Unter macOS (Dateisystem meist ohne Groß-/Kleinschreibung) ebenfalls klein – sonst entginge
+/// `~/.SSH` der Sperre (Review 3.2.0; so prüfte es vorher `starts_with_ci`).
 fn norm_win(p: &Path) -> String {
-    let s = p.to_string_lossy().to_string();
-    if !cfg!(windows) {
-        return s.trim_end_matches('/').to_string();
+    norm_path(&p.to_string_lossy(), cfg!(windows), cfg!(target_os = "macos"))
+}
+
+/// [`norm_win`] für ein bestimmtes System (testbar auf jedem): `windows` = Windows-Form, `fold` = ohne Groß-/Kleinschreibung.
+fn norm_path(s: &str, windows: bool, fold: bool) -> String {
+    if !windows {
+        let s = s.trim_end_matches('/').to_string();
+        return if fold { s.to_lowercase() } else { s };
     }
     let s = s.replace('/', "\\").to_lowercase();
     let s = if let Some(r) = s.strip_prefix(r"\\?\unc\") { format!(r"\\{r}") } else { s.strip_prefix(r"\\?\").map(str::to_string).unwrap_or(s) };
@@ -359,6 +449,11 @@ fn wsl_drive_paths(real: &Path) -> Vec<PathBuf> {
 /// eingehängtes Laufwerk selbst wie `/mnt/c`)?
 fn wsl_root_contains_mount(canon: &Path) -> bool {
     let Some((d, linux)) = crate::wsl::unc_to_linux(&canon.to_string_lossy()) else { return false };
+    linux_contains_mount(&d, &linux)
+}
+
+/// [`wsl_root_contains_mount`] für einen Linux-Pfad `linux` der Distribution `d`.
+fn linux_contains_mount(d: &str, linux: &str) -> bool {
     let l = linux.trim_end_matches('/');
     if l.is_empty() {
         return true;
@@ -383,7 +478,7 @@ fn wsl_symlink_below(root: &Path, cand: &Path) -> Option<PathBuf> {
     for c in rel.components() {
         cur.push(c);
         match std::fs::symlink_metadata(&cur) {
-            Ok(m) if m.file_type().is_symlink() => return Some(cur),
+            Ok(m) if m.file_type().is_symlink() || reparse_point(&m) => return Some(cur),
             Ok(_) => {}
             Err(_) => return None,
         }
@@ -391,19 +486,44 @@ fn wsl_symlink_below(root: &Path, cand: &Path) -> Option<PathBuf> {
     None
 }
 
+/// Unter Windows: jeder Analysepunkt (Reparse Point) zählt als Verknüpfung – auch einer, den `is_symlink` nicht als
+/// solche erkennt (Review 3.2.0, WSL-Verknüpfungen über 9P; sicherer Fall).
+#[cfg(windows)]
+fn reparse_point(m: &std::fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+    m.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+#[cfg(not(windows))]
+fn reparse_point(_m: &std::fs::Metadata) -> bool {
+    false
+}
+
 /// Gesperrt, weil der Pfad in einer WSL-Distribution unter einem Linux-Home in [`BLOCKED_HOME`] liegt (`/root/…`,
-/// `/home/<u>/…`)?
+/// `/home/<u>/…` und – Review 3.2.0 – das Home der Distribution, wie WSL es meldet, z. B. `/srv/users/u`)?
 fn wsl_blocked(real: &Path) -> Option<String> {
     let s = real.to_string_lossy();
-    let (_, linux) = crate::wsl::unc_to_linux(&s)?;
+    let (d, linux) = crate::wsl::unc_to_linux(&s)?;
+    wsl_home_blocked(&linux, crate::wsl::cached_home(&d).as_deref())
+}
+
+/// [`wsl_blocked`] für einen Linux-Pfad und das (bekannte) Home der Distribution.
+fn wsl_home_blocked(linux: &str, home: Option<&str>) -> Option<String> {
     let parts: Vec<&str> = linux.split('/').filter(|c| !c.is_empty()).collect();
-    let rest: &[&str] = match parts.as_slice() {
-        ["root", rest @ ..] => rest,
-        ["home", _, rest @ ..] => rest,
-        _ => return None,
-    };
-    let rel = rest.join("/");
-    BLOCKED_HOME.iter().find(|b| rel == **b || rel.starts_with(&format!("{b}/"))).map(|b| format!("~/{b} holds the user's secrets or settings (in WSL)"))
+    let mut rests: Vec<String> = Vec::new();
+    match parts.as_slice() {
+        ["root", rest @ ..] => rests.push(rest.join("/")),
+        ["home", _, rest @ ..] => rests.push(rest.join("/")),
+        _ => {}
+    }
+    if let Some(h) = home.map(|h| h.trim_end_matches('/')).filter(|h| h.starts_with('/') && h.len() > 1) {
+        let l = format!("/{}", parts.join("/"));
+        if let Some(r) = l.strip_prefix(h).filter(|r| r.is_empty() || r.starts_with('/')) {
+            rests.push(r.trim_start_matches('/').to_string());
+        }
+    }
+    rests.iter().find_map(|rel| BLOCKED_HOME.iter().find(|b| rel.as_str() == **b || rel.starts_with(&format!("{b}/")))).map(|b| format!("~/{b} holds the user's secrets or settings (in WSL)"))
 }
 
 /// `starts_with` ohne Rücksicht auf Groß-/Kleinschreibung unter Windows und macOS.
@@ -680,6 +800,61 @@ pub(crate) mod tests {
         assert!(under_norm(&norm_win(Path::new(r"\\?\C:\Users\U\AppData\x")), &norm_win(Path::new(r"c:\users\u\appdata"))) == cfg!(windows));
     }
 
+    /// Review 3.2.0: Solange Einhängepunkt oder Home einer Distribution unbekannt sind, gilt ein WSL-Ordner nie als
+    /// Projektordner (`busy`, „noch in Prüfung“) – vorher galten dann nur `/mnt/` und `/`, ein eigener Einhängepunkt
+    /// (`/etc/wsl.conf` `[automount] root=/win/`) öffnete so die Windows-Platte.
+    #[test]
+    fn wsl_roots_wait_until_mount_and_home_are_known() {
+        let unknown = AgentEnv { root: Some(PathBuf::from(crate::wsl::linux_to_unc("Unknown-Distro-392", "/win"))), ..AgentEnv::default() };
+        let e = root(&unknown).unwrap_err();
+        assert_eq!(e.0, "busy", "{e:?}");
+        assert!(e.1.contains("still being checked") && e.1.contains("Try again"), "{}", e.1);
+        // Nur der Einhängepunkt bekannt: weiter „in Prüfung“ (das Home fehlt für die Sperren).
+        crate::wsl::set_cached("Half-Known-Distro", None, Some("/win/"));
+        assert!(wsl_ready(&PathBuf::from(crate::wsl::linux_to_unc("Half-Known-Distro", "/srv/p"))).is_err());
+        crate::wsl::set_cached("Half-Known-Distro", Some("/srv/users/u"), None);
+        assert!(wsl_ready(&PathBuf::from(crate::wsl::linux_to_unc("Half-Known-Distro", "/srv/p"))).is_ok());
+        assert!(wsl_ready(Path::new(r"C:\Users\u\proj")).is_ok(), "Windows-Ordner: keine WSL-Prüfung");
+        // Ohne Antwort von wsl.exe (in Tests immer) gilt ein WSL-Pfad als nicht geprüft.
+        assert_eq!(crate::wsl::real_linux_path("Half-Known-Distro", "/srv/p"), None);
+    }
+
+    /// Review 3.2.0: Ziele in WSL-Ordnern werden auf der Linux-Seite aufgelöst und müssen im echten Projektordner liegen.
+    #[test]
+    fn wsl_targets_must_stay_in_the_real_project_folder() {
+        assert!(linux_target_ok("/home/u/proj", "/home/u/proj").is_ok());
+        assert!(linux_target_ok("/home/u/proj", "/home/u/proj/src/a.rs").is_ok());
+        assert!(linux_target_ok("/home/u/proj/", "/home/u/proj/x").is_ok());
+        assert!(linux_target_ok("/home/u/proj", "/home/u/.ssh/id_rsa").unwrap_err().contains("outside"), "Verknüpfung nach ~/.ssh");
+        assert!(linux_target_ok("/home/u/proj", "/home/u/project2/x").is_err(), "nur ganze Ordnernamen");
+        assert!(linux_target_ok("/", "/etc/passwd").is_err(), "Stammordner ist nie ein Projektordner");
+        assert_eq!(linux_join("/home/u/proj", &["new".into(), "a.rs".into()]), "/home/u/proj/new/a.rs");
+        assert_eq!(linux_join("/", &[]), "/");
+        assert!(linux_contains_mount("Any-Distro", "/") && linux_contains_mount("Any-Distro", "/mnt/c"));
+    }
+
+    /// Review 3.2.0: Das Home, das WSL meldet, ist gesperrt wie `/home/<u>` – auch an anderer Stelle.
+    #[test]
+    fn wsl_reported_home_secrets_are_blocked() {
+        assert!(wsl_home_blocked("/srv/users/u/.ssh/id_rsa", Some("/srv/users/u")).is_some());
+        assert!(wsl_home_blocked("/srv/users/u/.aws", Some("/srv/users/u/")).is_some());
+        assert!(wsl_home_blocked("/srv/users/u/proj/src", Some("/srv/users/u")).is_none());
+        assert!(wsl_home_blocked("/srv/users/uu/.ssh", Some("/srv/users/u")).is_none(), "nur ganze Ordnernamen");
+        assert!(wsl_home_blocked("/home/u/.ssh", None).is_some(), "wie bisher");
+        assert!(wsl_home_blocked("/srv/users/u/.ssh", Some("/")).is_none(), "„/“ als Home sperrte alles – nicht als Home werten");
+        crate::wsl::set_cached("Home-Distro-392", Some("/data/me"), Some("/mnt/"));
+        assert!(wsl_blocked(&PathBuf::from(crate::wsl::linux_to_unc("Home-Distro-392", "/data/me/.config/gh/hosts.yml"))).is_some());
+    }
+
+    /// Review 3.2.0: Unter macOS ohne Groß-/Kleinschreibung verglichen (wie früher `starts_with_ci`), unter Linux mit.
+    #[test]
+    fn secret_folders_compare_case_insensitively_on_macos() {
+        assert_eq!(norm_path("/Users/U/.SSH/", false, true), "/users/u/.ssh");
+        assert_eq!(norm_path("/home/U/.SSH", false, false), "/home/U/.SSH");
+        assert_eq!(norm_path(r"\\?\C:\Users\U\", true, true), r"c:\users\u");
+        assert!(under_norm(&norm_path("/Users/U/.SSH/id_rsa", false, true), &norm_path("/Users/u/.ssh", false, true)) == !cfg!(windows));
+    }
+
     #[test]
     fn wsl_secret_folders_are_blocked() {
         // #392: Projektordner über \\wsl.localhost – die Geheimnis-Ordner im Linux-Home bleiben gesperrt.
@@ -779,7 +954,7 @@ pub(crate) mod tests {
         let root = root(&env).unwrap();
         let r = resolve(&root, &env, "a.txt", Access::Read).unwrap();
         assert!(open_read(&root, &r).is_ok());
-        let other = Root { canon: std::fs::canonicalize(std::env::temp_dir()).unwrap().join("pd-agent-not-here") };
+        let other = Root { canon: std::fs::canonicalize(std::env::temp_dir()).unwrap().join("pd-agent-not-here"), linux: None };
         assert!(open_read(&other, &r).is_err(), "geöffnete Datei außerhalb des (anderen) Projektordners");
         let _ = std::fs::remove_dir_all(&d);
     }

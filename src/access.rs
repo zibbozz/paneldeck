@@ -247,6 +247,7 @@ impl AccessMap {
             },
             may_create_projects,
             may_delete,
+            sessions: None,
         }
     }
 }
@@ -271,9 +272,21 @@ pub struct AgentView {
     pub may_create_projects: bool,
     /// Schalter „Agenten dürfen Tickets/Kommentare löschen“ (in den Papierkorb).
     pub may_delete: bool,
+    /// Sitzungen, die der Agent sieht (Review 3.2.0: Terminal-Verknüpfungen nennen nur diese); `None` = keine Grenze
+    /// (Tests, interne Aufrufe). Die App setzt sie immer.
+    pub sessions: Option<std::collections::HashSet<u64>>,
 }
 
 impl AgentView {
+    /// Darf der Agent eine Terminal-Verknüpfung (`session:<id>`) sehen? Nur sichtbare Sitzungen; ein Ziel, das keine
+    /// Sitzung nennt, nur ohne Grenze.
+    pub fn terminal_visible(&self, session: Option<u64>) -> bool {
+        match &self.sessions {
+            None => true,
+            Some(v) => session.is_some_and(|s| v.contains(&s)),
+        }
+    }
+
     pub fn ticket_level(&self, project: i64) -> McpLevel {
         self.projects.get(&project).copied().unwrap_or(McpLevel::Off)
     }
@@ -370,17 +383,24 @@ pub enum ToolScope {
     Own,
 }
 
-/// Einteilung der Werkzeuge (für die Prüfung vor der Ausführung, siehe `App::mcp_access_gate`).
+/// Werkzeuge, die ihre Ziele selbst prüfen und Listen selbst filtern ([`ToolScope::Own`]): ausdrücklich aufgezählt –
+/// ein neues, nicht eingeteiltes Werkzeug gilt als „Allgemein“ (sicherer Fall, nie „prüft selbst“).
+const OWN_TOOLS: &[&str] = &["whoami", "list_sessions", "screenshot", "create_session", "list_processes", "read_process_output", "start_process", "stop_process", "restart_process"];
+
+/// Werkzeuge mit einer Ziel-Sitzung `session` ([`ToolScope::Session`]).
+const SESSION_TOOLS: &[&str] = &["read_terminal", "send_text", "send_keys", "run_command", "wait_for_status", "queue_prompt", "rename_session", "focus_session", "close_session", "read_chat", "send_chat_message"];
+
+/// Einteilung der Werkzeuge (für die Prüfung vor der Ausführung, siehe `App::mcp_access_gate`). Alles, was weder eine
+/// Ziel-Sitzung hat noch in [`OWN_TOOLS`], bei den Todo-/Ticket- oder den Kalender-Werkzeugen steht, gehört zu
+/// „Allgemein“ (Editor, Zeit, Themes, Modelle, Verlauf, Aktionen beim Speichern, `get_usage` ohne Sitzung – und jedes
+/// künftige Werkzeug, bis es ausdrücklich eingeteilt ist).
 pub fn tool_scope(tool: &str, args: &Value) -> ToolScope {
     let has_session = args.get("session").is_some_and(|s| !s.is_null());
     match tool {
-        "read_terminal" | "send_text" | "send_keys" | "run_command" | "wait_for_status" | "queue_prompt" | "rename_session" | "focus_session" | "close_session" | "read_chat"
-        | "send_chat_message" => ToolScope::Session,
+        t if SESSION_TOOLS.contains(&t) => ToolScope::Session,
         "get_usage" if has_session => ToolScope::Session,
-        // `list_save_actions` (#383): die Regeln der Aktionen beim Speichern sind Einstellungen ohne Projekt.
-        "get_usage" | "search_history" | "list_models" | "cleanup_sizes" | "theme_list" | "theme_get" | "list_save_actions" => ToolScope::General,
-        t if crate::editor_svc::tools::TOOLS.contains(&t) || crate::time::agent::TOOLS.contains(&t) => ToolScope::General,
-        _ => ToolScope::Own,
+        t if OWN_TOOLS.contains(&t) || crate::planning::agent::TOOLS.contains(&t) || crate::calendar::agent::TOOLS.contains(&t) => ToolScope::Own,
+        _ => ToolScope::General,
     }
 }
 
@@ -508,6 +528,10 @@ mod tests {
         let e = m.view(Caller::External, true, true);
         assert_eq!((e.home, e.home_level), (None, Off));
         assert!(e.may_create_projects && e.may_delete);
+        // Terminal-Verknüpfungen (Review 3.2.0): ohne Grenze alle, mit Grenze nur sichtbare Sitzungen, nie unbekannte Ziele.
+        assert!(e.terminal_visible(Some(9)) && e.terminal_visible(None));
+        let limited = AgentView { sessions: Some([3, 4].into_iter().collect()), ..e };
+        assert!(limited.terminal_visible(Some(3)) && !limited.terminal_visible(Some(9)) && !limited.terminal_visible(None));
     }
 
     #[test]
@@ -583,5 +607,33 @@ mod tests {
         assert_eq!(tool_scope("list_sessions", &json!({})), ToolScope::Own);
         assert_eq!(tool_scope("screenshot", &json!({})), ToolScope::Own);
         assert_eq!(tool_scope("search_tickets", &json!({})), ToolScope::Own);
+        assert_eq!(tool_scope("list_calendar_events", &json!({})), ToolScope::Own);
+        assert_eq!(tool_scope("start_process", &json!({})), ToolScope::Own);
+    }
+
+    /// Review 3.2.0: jedes Werkzeug ist ausdrücklich eingeteilt; ein unbekanntes (künftiges, vergessenes) Werkzeug gilt
+    /// als „Allgemein“ – nie als „prüft selbst“ (das ließe es ohne Prüfung durch).
+    #[test]
+    fn every_tool_is_classified_and_unknown_tools_fall_into_general() {
+        use serde_json::json;
+        let general: &[&str] = &["get_usage", "search_history", "list_models", "cleanup_sizes", "theme_list", "theme_get", "list_save_actions"];
+        for def in crate::mcp::tools() {
+            let n = def.name;
+            let explicit = SESSION_TOOLS.contains(&n)
+                || OWN_TOOLS.contains(&n)
+                || crate::planning::agent::TOOLS.contains(&n)
+                || crate::calendar::agent::TOOLS.contains(&n)
+                || general.contains(&n)
+                || crate::editor_svc::tools::TOOLS.contains(&n)
+                || crate::time::agent::TOOLS.contains(&n);
+            assert!(explicit, "{n}: nicht eingeteilt");
+            let scope = tool_scope(n, &json!({}));
+            if general.contains(&n) || crate::editor_svc::tools::TOOLS.contains(&n) || crate::time::agent::TOOLS.contains(&n) {
+                assert_eq!(scope, ToolScope::General, "{n}");
+            }
+        }
+        for unknown in ["new_tool_2027", "delete_everything", ""] {
+            assert_eq!(tool_scope(unknown, &json!({})), ToolScope::General, "{unknown}");
+        }
     }
 }

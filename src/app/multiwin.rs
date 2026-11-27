@@ -440,6 +440,12 @@ impl Wins {
     pub(super) fn is_empty(&self) -> bool {
         self.list.is_empty()
     }
+
+    /// Zeigen alle weiteren Fenster den Terminal Hub (Review 3.2.0: Bedingung für einen Screenshot des ganzen Fensters)?
+    /// Auch verborgene zählen (sicherer Fall).
+    pub(super) fn all_show_terminals(&self) -> bool {
+        self.list.iter().all(|w| w.view.mode == titlebar::Mode::Terminals)
+    }
 }
 
 fn icon() -> Arc<egui::IconData> {

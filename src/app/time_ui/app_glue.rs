@@ -277,7 +277,9 @@ impl App {
     }
 
     /// MCP-Werkzeuge des Reiters (`time::agent`).
-    pub(in crate::app) fn mcp_time(&mut self, tool: &str, args: &Value, caller: Option<u64>) -> Result<Value, (String, String)> {
+    pub(in crate::app) fn mcp_time(&mut self, tool: &str, args: &Value, caller: Option<u64>, how: &str) -> Result<Value, (String, String)> {
+        // Sicht des Agenten (Review 3.2.0): verknüpfte Tickets nur, wenn er sie sieht.
+        let view = self.agent_view(caller, how);
         let conn = self.db.as_ref().map(|d| &d.conn);
         self.time.ensure_loaded(conn);
         if conn.is_none() || self.time.unavailable {
@@ -291,6 +293,7 @@ impl App {
             lang,
             ringing_alarms: self.time.ringing.iter().filter_map(|r| if let RingKind::Alarm(id) = r.what { Some(id) } else { None }).collect(),
             ringing_timers: self.time.ringing.iter().filter_map(|r| if let RingKind::Timer(id) = r.what { Some(id) } else { None }).collect(),
+            view: Some(&view),
         };
         let done = agent::call(&ctx, &mut self.time.data, tool, args)?;
         for id in done.silence_alarms {
@@ -300,7 +303,8 @@ impl App {
             self.time.stop_ring(RingKind::Timer(id));
         }
         if let Some(c) = done.change {
-            let who = caller.and_then(|id| self.entries.get(&id).map(|e| e.display_name().to_string())).filter(|n| !n.trim().is_empty());
+            // Der Sitzungsname kann vom Agenten stammen: entschärft (Review 3.2.0).
+            let who = caller.and_then(|id| self.entries.get(&id).map(|e| crate::app::mcp::access_gate::toast_name(&e.display_name()))).filter(|n| !n.trim().is_empty());
             let label = match who {
                 Some(n) => format!("{} ({n})", lang.t("Agent", "Agent")),
                 None => lang.t("Agent", "Agent").to_string(),

@@ -65,6 +65,10 @@ pub struct ToolPolicy {
     /// Obergrenze für die Paneldeck-Werkzeuge (#386): die Stufe des Projekts, in dem der Chat liegt („wie global“ = wie das
     /// Modell). Die eigenen Agenten-Werkzeuge des Chats (Dateien, Befehle) gelten unabhängig davon weiter.
     pub project_cap: McpLevel,
+    /// Stufe des Bereichs „Allgemein“ für diesen Chat (#386, Review 3.2.0; Editor, Zeit, Themes, Modelle …): Aufrufe
+    /// dorthin prüft [`ToolPolicy::check`] mit ihrer Stufe nach den Argumenten (`mcp::call_level`) schon vor der
+    /// Freigabe-Frage; der Hub prüft beim Ausführen noch einmal.
+    pub general_cap: McpLevel,
     /// Schalter „Projekte anlegen“/„Löschen“ (#386, `access::AGENT_SWITCHES`), beim Anlegen gelesen.
     pub access_switches: u8,
     /// Über `more_tools` nachgeladene Werkzeuge (#393, `more_tools::loaded` aus dem Verlauf): Die Kurzfassung listet sie
@@ -153,7 +157,7 @@ impl ToolPolicy {
             cfg.level = McpLevel::Off;
         }
         let editor_switches = crate::editor_svc::settings::AGENT_SWITCHES.load(std::sync::atomic::Ordering::Relaxed);
-        ToolPolicy { cfg, tools_supported, expert, origin_sessions: Vec::new(), agent: AgentEnv::default(), editor_switches, project_cap: McpLevel::Control, access_switches: crate::access::AGENT_SWITCHES.load(std::sync::atomic::Ordering::Relaxed), loaded: Vec::new() }
+        ToolPolicy { cfg, tools_supported, expert, origin_sessions: Vec::new(), agent: AgentEnv::default(), editor_switches, project_cap: McpLevel::Control, general_cap: McpLevel::Control, access_switches: crate::access::AGENT_SWITCHES.load(std::sync::atomic::Ordering::Relaxed), loaded: Vec::new() }
     }
 
     /// Dieselbe Momentaufnahme mit den über `more_tools` nachgeladenen Werkzeugen (#393).
@@ -179,6 +183,12 @@ impl ToolPolicy {
     /// Dieselbe Momentaufnahme mit der Stufe des Projekts des Chats (#386): es gilt die niedrigere von Modell und Projekt.
     pub fn with_project_cap(mut self, cap: McpLevel) -> Self {
         self.project_cap = cap;
+        self
+    }
+
+    /// Dieselbe Momentaufnahme mit der Stufe des Bereichs „Allgemein“ für diesen Chat (#386, Review 3.2.0).
+    pub fn with_general_cap(mut self, cap: McpLevel) -> Self {
+        self.general_cap = cap;
         self
     }
 
@@ -215,9 +225,21 @@ impl ToolPolicy {
         self.tools_supported != Some(false) && self.cfg.level != McpLevel::Off
     }
 
-    /// Stufe, für die der Systemprompt gerendert wird: ohne Werkzeuge „Aus“.
+    /// Stufe, für die der Systemprompt gerendert wird: die wirksame Stufe der Paneldeck-Werkzeuge (Modell und Projekt,
+    /// Review 3.2.0); ohne Werkzeuge „Aus“.
     pub fn prompt_level(&self) -> McpLevel {
-        if self.enabled() { self.cfg.level } else { McpLevel::Off }
+        if self.enabled() { self.paneldeck_level() } else { McpLevel::Off }
+    }
+
+    /// Begrenzt das Projekt die Paneldeck-Werkzeuge unter die Stufe des Modells (#386)? Dann nennt der Prompt das.
+    pub fn project_limited(&self) -> bool {
+        self.enabled() && self.project_cap < self.cfg.level
+    }
+
+    /// Kann der Chat etwas ändern (Paneldeck-Werkzeuge der Stufe Steuern oder eigene schreibende Werkzeuge)? `defs` = die
+    /// angebotenen Werkzeuge. Bestimmt die Sätze zu Freigaben im Prompt.
+    pub fn can_write(&self, defs: &[mcp::ToolDef]) -> bool {
+        self.prompt_level() == McpLevel::Control || defs.iter().any(|d| d.level >= McpLevel::Control)
     }
 
     fn allowed(&self, def: &mcp::ToolDef) -> bool {
@@ -262,6 +284,12 @@ impl ToolPolicy {
     /// Ergebnis-Nachricht für das Modell (Status, Inhalt).
     /// Geprüft wird bei der Ausführung, nicht beim Senden: die Einstellungen können sich dazwischen ändern.
     pub fn check(&self, call: &ToolCall) -> Result<bool, (ToolStatus, String)> {
+        self.check_with(call, None)
+    }
+
+    /// [`ToolPolicy::check`] mit schon ermittelter Antwort auf „berührt eine sensible Datei“ (`agent::file_check` im
+    /// Hintergrund, Review 3.2.0): dann ohne Plattenzugriff. `None` = selbst prüfen (blockiert; Tests, einmalige Prüfungen).
+    pub fn check_with(&self, call: &ToolCall, sensitive: Option<bool>) -> Result<bool, (ToolStatus, String)> {
         // `more_tools` (#393): liest nur – ab Stufe Lesen, ohne Freigabe; was es nennt, folgt `specs`.
         if call.name == super::more_tools::NAME {
             if !self.enabled() {
@@ -273,7 +301,7 @@ impl ToolPolicy {
             return Ok(false);
         }
         if agent::is_local(call) {
-            return self.check_agent(call);
+            return self.check_agent(call, sensitive);
         }
         let Some(def) = mcp::tools().into_iter().find(|d| d.name == call.name) else {
             return Err((ToolStatus::Error, error_json("unknown_tool", &self.unknown_tool_message(&call.name))));
@@ -299,6 +327,16 @@ impl ToolPolicy {
                 (crate::access::LOCKED_CODE, "The project of this chat is locked for agents: no Paneldeck tools (only the user can release it in Settings -> Agents).")
             } else {
                 ("forbidden", "The project of this chat only allows reading for agents (Settings -> Agents).")
+            };
+            return Err((ToolStatus::Denied, error_json(code, msg)));
+        }
+        // Werkzeuge ohne Projekt (Bereich „Allgemein“) mit ihrer Stufe nach den Argumenten (Review 3.2.0: `format_file`
+        // mit `op` ≠ `validate` braucht Steuern auch dort).
+        if self.enabled() && level <= self.paneldeck_level() && level > self.general_cap && crate::access::tool_scope(def.name, &call.arguments) == crate::access::ToolScope::General {
+            let (code, msg) = if self.general_cap == McpLevel::Off {
+                (crate::access::LOCKED_CODE, "The area General (tools without a project: editor, time, themes, models, history) is locked for agents (only the user can release it in Settings -> Agents).")
+            } else {
+                ("forbidden", "The area General (tools without a project: editor, time, themes, models, history) only allows reading for agents (Settings -> Agents).")
             };
             return Err((ToolStatus::Denied, error_json(code, msg)));
         }
@@ -333,7 +371,7 @@ impl ToolPolicy {
     /// [`ToolPolicy::check`] für ein Agenten-Werkzeug (#338): Stufe, Sperre, angeboten (Projektordner, Einstellungen),
     /// Argumente; dann `Ok(fragen)` nach seiner Freigaberegel. Die Kette der auslösenden Agenten gilt auch hier (kein
     /// Start der MCP-Brücke über `run_command`).
-    fn check_agent(&self, call: &ToolCall) -> Result<bool, (ToolStatus, String)> {
+    fn check_agent(&self, call: &ToolCall, sensitive: Option<bool>) -> Result<bool, (ToolStatus, String)> {
         let Some(def) = agent::def(&call.name) else {
             return Err((ToolStatus::Error, error_json("unknown_tool", &self.unknown_tool_message(&call.name))));
         };
@@ -353,7 +391,10 @@ impl ToolPolicy {
         if let Some(msg) = spawn_forbidden(&call.name, &call.arguments, &self.origin_sessions) {
             return Err((ToolStatus::Denied, error_json("forbidden", msg)));
         }
-        Ok(agent::asks(&def, call, &self.agent))
+        Ok(match sensitive {
+            Some(s) => agent::asks_with(&def, call, s),
+            None => agent::asks(&def, call, &self.agent),
+        })
     }
 
     /// Meldung für einen Aufruf ohne oder mit unbekanntem Werkzeugnamen: nennt die Werkzeuge, die das Modell hat (#340).
@@ -371,8 +412,19 @@ impl ToolPolicy {
     /// Chats (passen nur bei gleichem Werkzeug und gleicher Ziel-Sitzung).
     /// Aufrufe, die eine sensible Datei berühren (#338: lesen, ändern, verschieben), fragen immer – auch wenn „Vor
     /// Schreib-Aktionen nachfragen“ aus ist und trotz „Immer für diesen Chat“.
+    #[cfg(test)]
     pub fn needs_approval(&self, ask: bool, call: &ToolCall, always: &[AllowRule]) -> bool {
-        if ask && agent::must_ask(call, &self.agent) {
+        self.needs_approval_with(ask, call, always, None)
+    }
+
+    /// [`ToolPolicy::needs_approval`] mit schon ermittelter Antwort auf „sensibel“ (`agent::file_check`, Review 3.2.0);
+    /// `None` = selbst prüfen (blockiert).
+    pub fn needs_approval_with(&self, ask: bool, call: &ToolCall, always: &[AllowRule], sensitive: Option<bool>) -> bool {
+        let must = match sensitive {
+            Some(s) => agent::is_local(call) && s,
+            None => agent::must_ask(call, &self.agent),
+        };
+        if ask && must {
             return true;
         }
         ask && self.cfg.ask_write && !always.iter().any(|r| r.matches(call))
@@ -797,6 +849,43 @@ mod tests {
         assert_eq!(on.check(&fc("minify")), Ok(true), "schreibend: Freigabe");
         assert_eq!(on.check(&fc("validate")), Ok(false));
         assert!(all_checked(policy(McpLevel::Control, &["format_file"], false)).with_editor_switches(DOCS_OPEN | FORMAT).check(&call("format_file", json!({"op": "validate"}))).unwrap_err().1.contains("forbidden"), "abwählbar");
+    }
+
+    /// Review 3.2.0 (Blocker): Ein Chat in einem Projekt mit *Steuern* formatiert nicht, wenn „Allgemein“ nur Lesen
+    /// erlaubt – geprüft mit der Stufe nach den Argumenten, vor der Freigabe-Frage.
+    #[test]
+    fn general_read_blocks_writing_format_calls_of_chats() {
+        use crate::editor_svc::settings::{DOCS_OPEN, FORMAT};
+        let fc = |op: &str| call("format_file", json!({"path": "C:\\a.json", "op": op}));
+        let base = all_checked(policy(McpLevel::Control, &[], false)).with_editor_switches(DOCS_OPEN | FORMAT).with_project_cap(McpLevel::Control);
+        let ro = base.clone().with_general_cap(McpLevel::Read);
+        for op in ["format", "minify", "sort_keys"] {
+            let (st, body) = ro.check(&fc(op)).unwrap_err();
+            assert!(st == ToolStatus::Denied && body.contains("forbidden") && body.contains("General"), "{op}: {body}");
+        }
+        assert_eq!(ro.check(&fc("validate")), Ok(false), "Lesen bleibt");
+        let off = base.clone().with_general_cap(McpLevel::Off);
+        assert!(off.check(&fc("validate")).unwrap_err().1.contains(crate::access::LOCKED_CODE));
+        assert!(off.check(&call("list_alarms", json!({}))).unwrap_err().1.contains(crate::access::LOCKED_CODE), "alle Werkzeuge ohne Projekt");
+        assert!(off.check(&call("list_sessions", json!({}))).is_ok(), "Werkzeuge mit eigener Prüfung bleiben");
+        assert_eq!(base.check(&fc("format")), Ok(true), "Allgemein Steuern: schreibend mit Freigabe");
+    }
+
+    /// Review 3.2.0: Die Anfrage nennt die wirksame Stufe (Modell und Projekt); `auto_context_cap` rechnet mit ihr.
+    #[test]
+    fn the_prompt_level_is_the_effective_level() {
+        let ctl = policy(McpLevel::Control, &[], false);
+        assert_eq!(ctl.prompt_level(), McpLevel::Control);
+        assert!(!ctl.project_limited());
+        let ro = ctl.clone().with_project_cap(McpLevel::Read);
+        assert_eq!(ro.prompt_level(), McpLevel::Read);
+        assert!(ro.project_limited());
+        assert!(!names(&ro).iter().any(|n| n == "send_text" || n == "create_session"), "keine schreibenden Paneldeck-Werkzeuge");
+        assert_eq!(crate::chat::llm_backend::auto_context_cap(&ro), None, "Grenze für Steuern gilt nicht");
+        assert_eq!(crate::chat::llm_backend::auto_context_cap(&ctl), Some(crate::chat::llm_backend::CONTROL_SIMPLE_AUTO_CONTEXT));
+        let locked = ctl.clone().with_project_cap(McpLevel::Off);
+        assert_eq!(locked.prompt_level(), McpLevel::Off);
+        assert!(locked.enabled(), "eigene Werkzeuge des Chats bleiben");
     }
 
     fn names(p: &ToolPolicy) -> Vec<String> {
