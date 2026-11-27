@@ -274,6 +274,17 @@ impl PromptPlan {
     }
 }
 
+/// Höchster automatischer Kontext für Steuern ohne Expertenmodus (Entscheidung des Nutzers, 3.2.0): Er bleibt bei
+/// 32768 – passt die volle Fassung dort nicht, bekommt der Chat die Kurzfassung mit `more_tools` (wie Steuern im
+/// Expertenmodus bei 32768). Nichts wird dafür gekürzt.
+pub const CONTROL_SIMPLE_AUTO_CONTEXT: u32 = 32768;
+
+/// Obergrenze des automatischen Kontexts für diese Werkzeug-Regeln: [`CONTROL_SIMPLE_AUTO_CONTEXT`] bei Steuern ohne
+/// Expertenmodus, sonst keine (dann gilt `llm::config::MAX_AUTO_CONTEXT`).
+pub fn auto_context_cap(policy: &ToolPolicy) -> Option<u32> {
+    (policy.prompt_level() == McpLevel::Control && !policy.expert).then_some(CONTROL_SIMPLE_AUTO_CONTEXT)
+}
+
 /// Plant den Prompt: voller Master-Prompt mit den eingeschalteten Teilen, Kontextlänge (ohne eigene Angabe nach
 /// `llm::config::auto_context` für genau diesen Prompt), dann die Wahl zwischen voller Fassung und Kurzfassung nach
 /// `llm::config::prompt_fits` – abgeschaltete Teile machen den Prompt kleiner und zählen bei beiden Entscheidungen mit.
@@ -288,7 +299,12 @@ pub fn plan_prompt(server: &crate::llm::config::LlmServer, model: &str, policy: 
     let mut sys_tokens = llm::tokens::message_tokens(&ChatMessage::new(Role::System, system.clone()));
     // Ohne eigene Angabe: so viel Kontext, wie der volle Prompt und die Werkzeuge samt Platz für das Gespräch brauchen
     // (in echten Tokens). Ohne Werkzeuge (Stufe Aus, keine Werkzeug-Fähigkeit) bleibt es bei 8192.
-    let ctx_len = server.request_context(model, policy.enabled().then_some(real(sys_tokens + tool_tokens)));
+    let mut ctx_len = server.request_context(model, policy.enabled().then_some(real(sys_tokens + tool_tokens)));
+    // Obergrenze des automatischen Kontexts je Stufe/Modus (nur ohne eigene Angabe und nur, wo Paneldeck den Kontext
+    // selbst bemisst – Ollama): passt die volle Fassung darunter nicht, gilt die Kurzfassung mit `more_tools`.
+    if let Some(cap) = auto_context_cap(policy).filter(|_| server.kind == llm::ServerKind::Ollama && server.user_context(model).is_none()) {
+        ctx_len = ctx_len.min(cap);
+    }
     // Passt der volle Prompt nicht gut in diesen Kontext (eigene kleine Angabe, OpenAI-kompatibler Server ohne
     // gemeldete Länge, kleines Modell), gilt die Kurzfassung mit knappen Werkzeug-Beschreibungen (#340).
     let variant = super::master_prompt::choose(ctx_len, real(sys_tokens + tool_tokens));
@@ -1483,7 +1499,11 @@ mod tests {
         });
         let mut s = server(&base, ServerKind::Ollama);
         s.set_model_cfg(LlmModel { level: McpLevel::Control, level_chosen: true, ..LlmModel::named("m1") });
-        let ev = collect(&LlmBackend::new().start(&meta(), &[msg(store::Role::User, "hi")], &cx(vec![s]), Arc::new(|| {})));
+        // Steuern im Expertenmodus: der volle Prompt mit allen Werkzeugen (ohne Expertenmodus bliebe es bei 32768 und der
+        // Kurzfassung, `auto_context_cap`).
+        let mut c = cx(vec![s]);
+        c.expert = true;
+        let ev = collect(&LlmBackend::new().start(&meta(), &[msg(store::Role::User, "hi")], &c, Arc::new(|| {})));
         assert_eq!(text(&ev), "Hi", "{ev:?}");
         assert_eq!(ev.last(), Some(&TurnEvent::Done));
         let (head, len, body) = h.join().unwrap();
@@ -1590,12 +1610,21 @@ mod tests {
                     let sys = llm::tokens::estimate_tokens(&system_prompt(&policy, model, &cx)) + 4;
                     let tools = llm::tokens::estimate_tokens(&serde_json::to_string(&policy.specs()).unwrap());
                     eprintln!("SIZES {model} expert={expert} {level:?}: system {sys} + tools {tools} = {}", sys + tools);
-                    // ohne eigene Angabe passt jede Stufe in den automatisch gewählten Kontext (höchstens 65536)
-                    let ctx = crate::llm::config::auto_context(sys + tools, None);
-                    assert!(!crate::llm::config::context_too_small(ctx, sys + tools), "{model} {expert} {level:?}: {ctx}");
-                    eprintln!("SIZES   -> auto context {ctx}");
-                    // Steuern (mit Zeit und Kalender, #164) braucht mehr als 32768; Lesen bleibt darunter.
-                    assert!(ctx <= 32768 || level == McpLevel::Control,"{model} {expert} {level:?}: {ctx}");
+                    // Ollama ohne eigene Angabe: der automatische Kontext (wie `prepare`)
+                    let mut s = server("http://localhost:11434", ServerKind::Ollama);
+                    s.last_models = vec![ModelInfo { name: model.into(), tools: Some(true), context_length: Some(131_072), vision: None }];
+                    let plan = plan_prompt(&s, model, &policy, &cx);
+                    let ctx = plan.ctx_len;
+                    eprintln!("SIZES   -> auto context {ctx}, {:?}, sent {} tokens", plan.variant, plan.sys_tokens + plan.tool_tokens);
+                    // Die gesendete Fassung passt immer in den gewählten Kontext und lässt dem Gespräch Platz.
+                    assert!(!crate::llm::config::context_too_small(ctx, plan.sys_tokens + plan.tool_tokens), "{model} {expert} {level:?}: {ctx}");
+                    // Lesen: voll in höchstens 32768. Steuern ohne Expertenmodus (Entscheidung des Nutzers, 3.2.0): bleibt bei
+                    // 32768, dort die Kurzfassung mit `more_tools` – nie 65536. Steuern im Expertenmodus: voll in 65536.
+                    match (level, expert) {
+                        (McpLevel::Control, false) => assert_eq!((ctx, plan.variant), (32768, super::super::master_prompt::Variant::Compact), "{model}"),
+                        (McpLevel::Control, true) => assert_eq!((ctx, plan.variant), (65536, super::super::master_prompt::Variant::Full), "{model}"),
+                        _ => assert!(ctx <= 32768 && plan.variant == super::super::master_prompt::Variant::Full, "{model} {expert} {level:?}: {ctx} {:?}", plan.variant),
+                    }
                 }
             }
         }
@@ -1685,12 +1714,19 @@ mod tests {
             let p = prepare(&meta(), &[msg(store::Role::User, "q")], &c).unwrap();
             assert!(p.request.messages[0].content.contains(full_marker), "{level:?} {expert}: voller Prompt");
             assert_eq!(p.request.tools, ToolPolicy::new(cfg.clone(), None, expert).specs());
-            // Ollama ohne eigene Angabe: automatischer Kontext, voller Prompt
+            // Ollama ohne eigene Angabe: automatischer Kontext, voller Prompt – außer Steuern ohne Expertenmodus: bleibt bei
+            // 32768 mit der Kurzfassung (Entscheidung des Nutzers, 3.2.0)
             let mut s = server("http://localhost:11434", ServerKind::Ollama);
             s.set_model_cfg(cfg.clone());
             c.servers = vec![s];
             let p = prepare(&meta(), &[msg(store::Role::User, "q")], &c).unwrap();
-            assert!(p.request.messages[0].content.contains(full_marker) && p.note.is_none() && p.context_notice.is_none(), "{level:?} {expert}");
+            assert!(p.note.is_none() && p.context_notice.is_none(), "{level:?} {expert}");
+            if level == McpLevel::Control && !expert {
+                assert!(!p.request.messages[0].content.contains(full_marker) && p.request.num_ctx == Some(32768), "{level:?} {expert}: {:?}", p.request.num_ctx);
+                assert!(p.request.tools.iter().any(|t| t.name == super::super::more_tools::NAME));
+            } else {
+                assert!(p.request.messages[0].content.contains(full_marker), "{level:?} {expert}");
+            }
         }
         // Selbst die Kurzfassung passt nicht: der bisherige Hinweis bleibt.
         let mut s = server("http://localhost:11434", ServerKind::Ollama);

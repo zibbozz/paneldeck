@@ -2124,10 +2124,11 @@ mod tests {
                 assert_eq!(choose(auto, full), Variant::Full, "{level:?} {expert}: automatischer Kontext {auto}");
                 assert_eq!(choose(8192, full), Variant::Compact, "{level:?} {expert}");
                 assert_eq!(choose(1 << 20, full), Variant::Full);
-                // bei 32768 voll, außer Steuern im Expertenmodus bzw. Steuern mit Agenten-Werkzeugen (brauchen 65536). Gemessen
-                // wird der Standard (#393: Zeit, Kalender und die übrigen Standard-aus-Werkzeuge nicht angehakt – dieselbe
-                // Werkzeugmenge wie vor #393); angehakt siehe `all_default_off_tools_checked_still_give_a_working_prompt`.
-                let big = level == McpLevel::Control && (expert || agent);
+                // bei 32768 voll, außer Steuern: jede Kombination mit Steuern bekommt bei 32768 die Kurzfassung mit
+                // `more_tools` (Entscheidung des Nutzers, 3.2.0 – nichts gekürzt; ohne Expertenmodus bleibt der automatische
+                // Kontext dort, siehe `llm_backend::auto_context_cap`). Gemessen wird der Standard (#393: die
+                // Standard-aus-Werkzeuge nicht angehakt); angehakt siehe `all_default_off_tools_checked_still_give_a_working_prompt`.
+                let big = level == McpLevel::Control;
                 assert_eq!(choose(32768, full), if big { Variant::Compact } else { Variant::Full }, "{level:?} {expert} agent={agent}: {full}");
                 assert_eq!(choose(65536, full), Variant::Full);
             }
@@ -2180,20 +2181,23 @@ mod tests {
                 let p = all_checked(policy(level, expert).with_agent(bg.clone()));
                 let default = policy(level, expert).with_agent(bg.clone());
                 let full = request_tokens(&p, model, Variant::Full);
-                let auto = crate::llm::config::auto_context(full, None);
+                // wie `llm_backend::plan_prompt` bei Ollama ohne eigene Angabe (Steuern ohne Expertenmodus höchstens 32768)
+                let cap = crate::chat::llm_backend::auto_context_cap(&p);
+                let auto = cap.map_or(crate::llm::config::auto_context(full, None), |c| crate::llm::config::auto_context(full, None).min(c));
                 let compact = request_tokens(&p, model, Variant::Compact);
                 let default_compact = request_tokens(&default, model, Variant::Compact);
                 eprintln!(
                     "ALL CHECKED {level:?} expert={expert} {model}: full {full} (default {}), auto context {auto}; compact {compact} (default {default_compact}) of {budget}",
                     request_tokens(&default, model, Variant::Full)
                 );
-                // großer Kontext: die volle Fassung passt in den automatischen Kontext – oder, wo sie selbst in den größten
-                // automatischen Kontext nicht passt, bekommt der Chat dort die Kurzfassung mit `more_tools` (ohne Hinweis)
+                // großer Kontext: die volle Fassung passt in den automatischen Kontext – oder, wo sie in den größten bzw. den
+                // für Steuern ohne Expertenmodus festen automatischen Kontext nicht passt, bekommt der Chat dort die
+                // Kurzfassung mit `more_tools` (ohne Hinweis)
                 if choose(auto, full) == Variant::Full {
                     assert!(!crate::llm::config::context_too_small(auto, full), "{level:?} {expert} {model}: {full} in {auto}");
                 } else {
                     eprintln!("ALL CHECKED {level:?} expert={expert} {model}: full {full} does not fit {auto}, compact version with more_tools");
-                    assert_eq!(auto, crate::llm::config::MAX_AUTO_CONTEXT, "{level:?} {expert} {model}");
+                    assert!(auto == crate::llm::config::MAX_AUTO_CONTEXT || cap == Some(auto), "{level:?} {expert} {model}: {auto}");
                     assert!(!crate::llm::config::context_too_small(auto, compact), "{level:?} {expert} {model}: Kurzfassung {compact} in {auto}");
                 }
                 // kleiner Kontext: Kurzfassung – die angehakten Werkzeuge kosten dort nichts (nur `more_tools` nennt sie)

@@ -402,10 +402,11 @@ pub fn offered_to_chats(name: &str, bits: u8) -> bool {
         "editor_edit" => docs && bits & 2 != 0,
         "editor_save" => docs && bits & 4 != 0,
         "editor_list" | "editor_read" => docs,
-        // Nur mit dem Schalter *Agenten dürfen formatieren*: sonst passte die Kurzfassung des Chat-Prompts nicht mehr in
-        // 8192 Tokens (Tests `the_compact_prompt_fits_into_8192_with_room_left`, `plan_instructions_fit_into_small_contexts`).
-        // Externe Agenten bekommen `validate` immer ab der Stufe Lesen.
-        "format_file" => docs && bits & super::settings::FORMAT != 0,
+        // Wie bei externen Agenten (Entscheidung des Nutzers, 3.2.0): `validate` ab Stufe Lesen ohne Schalter; formatieren,
+        // minifizieren und sortieren erst mit Steuern und dem Schalter *Agenten dürfen formatieren* – das prüft
+        // `chat::tools::ToolPolicy::check` vor der Freigabe-Frage (und der Hub beim Ausführen). Wie die übrigen Editor-
+        // Werkzeuge nur, solange ein Dokument offen ist (es arbeitet nur auf offenen Dokumenten).
+        "format_file" => docs,
         // Vergleich (#385): wie `editor_read` (Stufe Lesen, kein Schalter) – nur, solange ein Dokument offen ist.
         "editor_diff" => docs,
         _ => true,
@@ -1364,7 +1365,8 @@ mod tests {
         assert_eq!(format_reply(d, Op::Format, &Done::Cancelled).unwrap_err().0, "timeout");
         // Chats: nur mit offenem Dokument und eingeschaltetem Schalter (Platz im Kontext kleiner Modelle)
         use crate::editor_svc::settings::{DOCS_OPEN, FORMAT};
-        assert!(offered_to_chats("format_file", DOCS_OPEN | FORMAT) && !offered_to_chats("format_file", DOCS_OPEN) && !offered_to_chats("format_file", FORMAT));
+        // wie bei externen Agenten ohne Schalter angeboten (`validate` ab Lesen); nur mit offenem Dokument
+        assert!(offered_to_chats("format_file", DOCS_OPEN | FORMAT) && offered_to_chats("format_file", DOCS_OPEN) && !offered_to_chats("format_file", FORMAT));
         assert_eq!(log_info("format_file", &json!({"op": "minify", "path": r"C:\a.json"})), r"minify C:\a.json");
         assert_eq!(log_info("format_file", &json!({"op": "format", "doc": 3})), "format doc 3");
     }

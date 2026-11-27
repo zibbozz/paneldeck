@@ -104,7 +104,8 @@ pub const CHAT_DEFAULT_OFF: &[&str] = &[
     "list_calendar_events",
     "create_calendar_event",
     "update_calendar_event",
-    // Editor: Vergleich (#385), Aktionen beim Speichern (#383)
+    // Editor: Formatieren (#381), Vergleich (#385), Aktionen beim Speichern (#383)
+    "format_file",
     "editor_diff",
     "list_save_actions",
     // Projekte anlegen, Papierkorb, Kommentare von Agenten (#386; dazu ihre Schalter in *Einstellungen → Agenten*)
@@ -283,6 +284,11 @@ impl ToolPolicy {
         // den Namen errät oder ihn aus einem früheren Verlauf kennt.
         if !tool_checked(&self.cfg, def.name) {
             return Err((ToolStatus::Denied, error_json("forbidden", "This tool is not allowed for this model (Settings → Models).")));
+        }
+        // `format_file` (#381) wie bei externen Agenten: `validate` ohne Schalter, alles andere nur mit „Agenten dürfen
+        // formatieren“ – geprüft vor der Freigabe-Frage (der Hub prüft beim Ausführen noch einmal).
+        if def.name == "format_file" && level >= McpLevel::Control && self.editor_switches & crate::editor_svc::settings::FORMAT == 0 {
+            return Err((ToolStatus::Denied, error_json("forbidden", "The user has not allowed this (Settings -> Editor -> Agents: \"Agents may format\"); only op validate works without it.")));
         }
         if !crate::access::allowed_for_chats(def.name, self.access_switches) {
             return Err((ToolStatus::Denied, error_json("forbidden", "The user has not allowed this (Settings -> Agents: \"Agents may create projects\" / \"Agents may delete tickets/comments\").")));
@@ -766,16 +772,31 @@ mod tests {
         ToolCall { id: "c".into(), name: name.into(), arguments: args }
     }
 
-    /// #381: `format_file` mit `validate` gilt als Lesen (ohne Freigabe), alles andere als Steuern (mit Freigabe).
+    /// #381: `format_file` mit `validate` gilt als Lesen (ohne Freigabe, ohne Schalter), alles andere als Steuern (mit
+    /// Freigabe) und nur mit dem Schalter „Agenten dürfen formatieren“ – wie bei externen Agenten. Für Chats ist es
+    /// standardmäßig aus (#393) und erst angehakt da.
     #[test]
     fn format_file_level_follows_the_op() {
-        let read = policy(McpLevel::Read, &[], false);
-        assert_eq!(read.check(&call("format_file", json!({"path": "C:\\a.json", "op": "validate"}))), Ok(false));
-        assert!(read.check(&call("format_file", json!({"path": "C:\\a.json", "op": "format"}))).unwrap_err().1.contains("forbidden"));
-        let ctl = policy(McpLevel::Control, &[], false);
-        assert_eq!(ctl.check(&call("format_file", json!({"path": "C:\\a.json", "op": "minify"}))), Ok(true), "schreibend: Freigabe");
-        assert_eq!(ctl.check(&call("format_file", json!({"path": "C:\\a.json", "op": "validate"}))), Ok(false));
-        assert!(policy(McpLevel::Control, &["format_file"], false).check(&call("format_file", json!({"op": "validate"}))).unwrap_err().1.contains("forbidden"), "abwählbar");
+        use crate::editor_svc::settings::{DOCS_OPEN, FORMAT};
+        let fc = |op: &str| call("format_file", json!({"path": "C:\\a.json", "op": op}));
+        // standardmäßig aus
+        assert!(policy(McpLevel::Control, &[], false).with_editor_switches(DOCS_OPEN | FORMAT).check(&fc("validate")).unwrap_err().1.contains("Settings → Models"));
+        assert!(!names(&policy(McpLevel::Read, &[], false).with_editor_switches(DOCS_OPEN)).contains(&"format_file".to_string()));
+        // angehakt, ohne Schalter: Prüfen ab Lesen, angeboten mit offenem Dokument
+        let read = all_checked(policy(McpLevel::Read, &[], false)).with_editor_switches(DOCS_OPEN);
+        assert!(names(&read).contains(&"format_file".to_string()), "validate ohne Schalter");
+        assert!(!names(&all_checked(policy(McpLevel::Read, &[], false)).with_editor_switches(0)).contains(&"format_file".to_string()), "nur mit offenem Dokument");
+        assert_eq!(read.check(&fc("validate")), Ok(false));
+        assert!(read.check(&fc("format")).unwrap_err().1.contains("forbidden"));
+        let ctl = all_checked(policy(McpLevel::Control, &[], false)).with_editor_switches(DOCS_OPEN);
+        assert_eq!(ctl.check(&fc("validate")), Ok(false));
+        let (st, body) = ctl.check(&fc("minify")).unwrap_err();
+        assert!(st == ToolStatus::Denied && body.contains("forbidden") && body.contains("Agents may format"), "ohne Schalter: vor der Freigabe abgelehnt: {body}");
+        // mit Schalter: schreibend mit Freigabe
+        let on = all_checked(policy(McpLevel::Control, &[], false)).with_editor_switches(DOCS_OPEN | FORMAT);
+        assert_eq!(on.check(&fc("minify")), Ok(true), "schreibend: Freigabe");
+        assert_eq!(on.check(&fc("validate")), Ok(false));
+        assert!(all_checked(policy(McpLevel::Control, &["format_file"], false)).with_editor_switches(DOCS_OPEN | FORMAT).check(&call("format_file", json!({"op": "validate"}))).unwrap_err().1.contains("forbidden"), "abwählbar");
     }
 
     fn names(p: &ToolPolicy) -> Vec<String> {
@@ -821,8 +842,8 @@ mod tests {
     #[test]
     fn new_tools_are_off_by_default_and_can_be_checked_per_model() {
         assert!(NOT_FOR_CHATS.is_empty(), "derzeit nichts ausgeschlossen: {NOT_FOR_CHATS:?}");
-        assert_eq!(CHAT_DEFAULT_OFF.len(), 20, "14 Zeit/Kalender + editor_diff + list_save_actions + 4 aus #386");
-        for t in crate::time::agent::TOOLS.iter().chain(crate::calendar::agent::TOOLS.iter()).chain(["editor_diff", "list_save_actions", "create_project", "delete_ticket", "update_comment", "delete_comment"].iter()) {
+        assert_eq!(CHAT_DEFAULT_OFF.len(), 21, "14 Zeit/Kalender + format_file + editor_diff + list_save_actions + 4 aus #386");
+        for t in crate::time::agent::TOOLS.iter().chain(crate::calendar::agent::TOOLS.iter()).chain(["format_file", "editor_diff", "list_save_actions", "create_project", "delete_ticket", "update_comment", "delete_comment"].iter()) {
             assert!(default_off(t), "{t}");
         }
         let mut seen = std::collections::HashSet::new();
