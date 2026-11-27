@@ -145,11 +145,8 @@ impl App {
                     self.ed.set_hint(format!("{title}: {}", lang.t("gespeichert", "saved")));
                     // Aktionen beim Speichern (#383), Vergleiche und Marken (#385) erst jetzt – die Datei ist geschrieben.
                     self.sa_disk_job_done(id, true);
-                    // „Speichern“ in der Rückfrage beim Schließen: jetzt weiter schließen.
-                    if self.ed.close_ask.as_ref().and_then(|a| a.tabs.first()).is_some_and(|(_, d)| *d == id) && self.ed.docs.get(&id).is_some_and(|d| !d.dirty()) {
-                        let dir = self.dir.clone();
-                        self.editor_close_step(&dir);
-                    }
+                    // Hot-Exit-Kopie erst jetzt löschen, anderer Reiter derselben Datei, Schließen fortsetzen.
+                    self.editor_background_saved(id);
                 }
                 DiskJobDone::Reloaded(s) => {
                     self.ed.set_hint(format!("{title}: {}{}", lang.t("von der Platte neu geladen", "reloaded from disk"), if s.is_empty() { String::new() } else { format!(" ({s})") }));
@@ -157,10 +154,13 @@ impl App {
                 }
                 DiskJobDone::Failed(e) => {
                     let extra = self.sa_disk_job_done(id, false);
-                    self.notify_text(match extra {
+                    let msg = match extra {
                         Some(x) => format!("{title}: {e} {x}"),
                         None => format!("{title}: {e}"),
-                    });
+                    };
+                    // Hot-Exit-Kopie bleibt; eine wartende Schließen-Rückfrage zeigt den Fehler.
+                    self.editor_background_save_failed(id, &msg);
+                    self.notify_text(msg);
                 }
                 DiskJobDone::Conflict | DiskJobDone::Deleted | DiskJobDone::Unchanged => {}
             }

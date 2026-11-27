@@ -350,7 +350,7 @@ impl super::super::App {
                 self.ed.want_focus = true;
             }
             Cmd::Close(tabs) => {
-                self.ed.close_ask = Some(CloseAsk { tabs });
+                self.ed.close_ask = Some(CloseAsk::new(tabs));
                 self.editor_close_step(&dir);
             }
             Cmd::Split(g, d) => {
@@ -367,7 +367,11 @@ impl super::super::App {
                     // Aktionen beim Speichern (#383): nie auf Kosten des Speicherns.
                     match self.editor_save_with(id, None, crate::save_actions::SaveOrigin::User) {
                         Ok(()) => {
-                            if let Some(d) = self.ed.docs.get_mut(&id) {
+                            // WSL (#392): läuft das Schreiben noch im Hintergrund, folgen Hinweis und Löschen der
+                            // Hot-Exit-Kopie erst mit dem Ergebnis (`editor_background_saved`).
+                            if let Some(d) = self.ed.docs.get_mut(&id)
+                                && !d.disk_busy()
+                            {
                                 d.drop_hot(&dir);
                                 let t = d.title(lang);
                                 self.ed.set_hint(format!("{t}: {}", lang.t("gespeichert", "saved")));
@@ -594,14 +598,18 @@ impl super::super::App {
         let dir = self.dir.clone();
         let ids: Vec<u64> = self.ed.docs.iter().filter(|(_, d)| d.dirty() && d.path.is_some()).map(|(id, _)| *id).collect();
         let mut saved = 0;
+        let mut pending = 0;
         for id in ids {
             match self.editor_save_with(id, None, crate::save_actions::SaveOrigin::SaveAll) {
-                Ok(_) => {
-                    if let Some(d) = self.ed.docs.get_mut(&id) {
+                Ok(_) => match self.ed.docs.get_mut(&id) {
+                    // WSL (#392): schreibt noch im Hintergrund – Hot-Exit-Kopie bleibt bis zum Ergebnis.
+                    Some(d) if d.disk_busy() => pending += 1,
+                    Some(d) => {
                         d.drop_hot(&dir);
+                        saved += 1;
                     }
-                    saved += 1;
-                }
+                    None => {}
+                },
                 Err(e) => {
                     let t = self.ed.docs.get(&id).map(|d| d.title(lang)).unwrap_or_default();
                     self.notify_text(format!("{t}: {e}"));
@@ -613,6 +621,12 @@ impl super::super::App {
             Lang::De => format!("{saved} Datei(en) gespeichert"),
             Lang::En => format!("{saved} file(s) saved"),
         };
+        if pending > 0 {
+            msg.push_str(&match lang {
+                Lang::De => format!(" – {pending} werden noch gespeichert (WSL)"),
+                Lang::En => format!(" – {pending} still being saved (WSL)"),
+            });
+        }
         if untitled > 0 {
             msg.push_str(&match lang {
                 Lang::De => format!(" – {untitled} unbenannte(r) Reiter: „Speichern unter …“"),
@@ -634,19 +648,82 @@ impl super::super::App {
             let other = self.ed.doc_for_path(&p).filter(|o| *o != id);
             match self.editor_save_with(id, Some(p.clone()), crate::save_actions::SaveOrigin::SaveAs) {
                 Ok(()) => {
-                    if let Some(d) = self.ed.docs.get_mut(&id) {
-                        d.drop_hot(&dir);
-                    }
                     super::persist::push_recent(&mut self.ed.recent_files, &p.to_string_lossy());
-                    if other.is_some() {
-                        // Dieselbe Datei war noch in einem anderen Reiter offen: der lädt sie neu.
-                        if let Some(o) = other.and_then(|o| self.ed.docs.get_mut(&o)) {
-                            let _ = o.reload_from_disk(&prefs);
+                    if self.ed.docs.get(&id).is_some_and(|d| d.disk_busy()) {
+                        // WSL (#392): Schreiben läuft noch – Hot-Exit-Kopie und der andere Reiter folgen mit dem
+                        // Ergebnis (`editor_background_saved`).
+                        if let Some(o) = other {
+                            self.ed.reload_after_save.insert(id, o);
+                        }
+                    } else {
+                        if let Some(d) = self.ed.docs.get_mut(&id) {
+                            d.drop_hot(&dir);
+                        }
+                        if let Some(o) = other {
+                            self.editor_refresh_other(o, &prefs);
                         }
                     }
                 }
                 Err(e) => self.notify_text(e),
             }
+        }
+    }
+
+    /// Dieselbe Datei ist noch in einem anderen Reiter offen und wurde eben per *Speichern unter* überschrieben: ohne
+    /// eigene Änderungen neu laden, sonst nie überschreiben – die Leiste „auf der Platte geändert“ (*Meine behalten* /
+    /// *Von der Platte laden* / *Unterschied*) entscheidet.
+    pub(super) fn editor_refresh_other(&mut self, other: u64, prefs: &super::EditorPrefs) {
+        let Some(o) = self.ed.docs.get_mut(&other) else { return };
+        if o.doc.is_none() {
+            // Noch nicht gelesen: liest beim Zeigen ohnehin den neuen Stand.
+            return;
+        }
+        if o.dirty() {
+            o.disk_conflict = true;
+        } else {
+            let _ = o.reload_from_disk(prefs);
+        }
+        self.ed.generation += 1;
+    }
+
+    /// Ein Speichern im Hintergrund (WSL, #392) ist geschrieben: Hot-Exit-Kopie löschen (nur ohne neue Änderungen), den
+    /// anderen Reiter derselben Datei auffrischen (*Speichern unter*), eine wartende Schließen-Rückfrage fortsetzen.
+    pub(in crate::app) fn editor_background_saved(&mut self, id: u64) {
+        let dir = self.dir.clone();
+        let prefs = self.editor_prefs();
+        if let Some(d) = self.ed.docs.get_mut(&id)
+            && !d.dirty()
+        {
+            d.drop_hot(&dir);
+        }
+        if let Some(o) = self.ed.reload_after_save.remove(&id) {
+            self.editor_refresh_other(o, &prefs);
+        }
+        let first = self.ed.close_ask.as_ref().and_then(|a| a.tabs.first()).map(|(_, d)| *d);
+        if first == Some(id)
+            && let Some(ask) = self.ed.close_ask.as_mut()
+            && ask.saving
+        {
+            ask.saving = false;
+            ask.error = None;
+            // Sauber: weiter schließen; während des Schreibens weiter bearbeitet: noch einmal fragen.
+            if self.ed.docs.get(&id).is_some_and(|d| !d.dirty()) {
+                self.editor_close_step(&dir);
+            }
+        }
+    }
+
+    /// Ein Speichern im Hintergrund ist gescheitert: Hot-Exit-Kopie bleibt; eine wartende Schließen-Rückfrage fragt
+    /// wieder und zeigt den Fehler.
+    pub(in crate::app) fn editor_background_save_failed(&mut self, id: u64, msg: &str) {
+        self.ed.reload_after_save.remove(&id);
+        let first = self.ed.close_ask.as_ref().and_then(|a| a.tabs.first()).map(|(_, d)| *d);
+        if first == Some(id)
+            && let Some(ask) = self.ed.close_ask.as_mut()
+            && ask.saving
+        {
+            ask.saving = false;
+            ask.error = Some(msg.to_string());
         }
     }
 
@@ -662,6 +739,9 @@ impl super::super::App {
                 return;
             }
             ask.tabs.remove(0);
+            // Hinweis und Fehler galten dem eben geschlossenen Reiter.
+            ask.saving = false;
+            ask.error = None;
             self.editor_close_now(g, doc, dir);
         }
     }
@@ -681,68 +761,119 @@ impl super::super::App {
         let dir = self.dir.clone();
         // Schließen mit ungespeicherten Änderungen
         if let Some(ask) = self.ed.close_ask.clone() {
-            let Some(&(g, doc)) = ask.tabs.first() else {
-                self.ed.close_ask = None;
-                return;
-            };
-            let name = self.ed.docs.get(&doc).map(|d| d.title(lang)).unwrap_or_default();
-            let mut choice = None;
-            let r = style::modal(Id::new("ed_close_ask")).show(ctx, |ui| {
-                ui.set_max_width(420.0);
-                ui.heading(lang.t("Änderungen speichern?", "Save changes?"));
-                ui.add_space(style::S2);
-                ui.label(format!("{} {}", lang.q(&name), lang.t("hat ungespeicherte Änderungen.", "has unsaved changes.")));
-                if ask.tabs.len() > 1 {
-                    ui.weak(format!("{} {}", ask.tabs.len() - 1, lang.t("weitere Reiter werden danach geschlossen.", "more tabs will be closed afterwards.")));
-                }
-                ui.add_space(style::S3);
-                ui.horizontal(|ui| {
-                    if ui.button(lang.t("Speichern", "Save")).clicked() || ui.input(|i| i.key_pressed(Key::Enter)) {
-                        choice = Some(0);
-                    }
-                    if ui.button(lang.t("Nicht speichern", "Don't save")).clicked() {
-                        choice = Some(1);
-                    }
-                    if ui.button(lang.t("Abbrechen", "Cancel")).clicked() {
-                        choice = Some(2);
-                    }
-                });
-            });
-            if r.should_close() && choice.is_none() {
-                choice = Some(2);
-            }
-            match choice {
-                Some(0) => {
-                    let untitled = self.ed.docs.get(&doc).is_some_and(|d| d.path.is_none());
-                    if untitled {
-                        self.ed.close_ask = None;
-                        self.editor_cmd(ctx, Cmd::SaveAs(doc));
-                        if self.ed.docs.get(&doc).is_some_and(|d| !d.dirty()) {
-                            self.ed.close_ask = Some(ask);
-                            self.editor_close_step(&dir);
+            'ask: {
+                let Some(&(g, doc)) = ask.tabs.first() else {
+                    self.ed.close_ask = None;
+                    return;
+                };
+                let name = self.ed.docs.get(&doc).map(|d| d.title(lang)).unwrap_or_default();
+                let mut choice = None;
+                // WSL (#392): „Speichern“ gewählt, das Schreiben läuft noch – Hinweis statt Rückfrage, geschlossen wird mit
+                // dem Ergebnis (`editor_background_saved`). Läuft nichts mehr, ohne dass ein Ergebnis kam, gilt wieder die
+                // Rückfrage.
+                if ask.saving {
+                    if self.ed.docs.get(&doc).is_some_and(|d| d.disk_busy()) {
+                        let mut stop = false;
+                        style::modal(Id::new("ed_close_ask")).show(ctx, |ui| {
+                            ui.set_max_width(420.0);
+                            ui.horizontal(|ui| {
+                                ui.spinner();
+                                ui.label(format!("{} {}", lang.q(&name), lang.t("wird gespeichert …", "is being saved …")));
+                            });
+                            if ask.tabs.len() > 1 {
+                                ui.weak(format!("{} {}", ask.tabs.len() - 1, lang.t("weitere Reiter werden danach geschlossen.", "more tabs will be closed afterwards.")));
+                            }
+                            ui.add_space(style::S3);
+                            // Hängt WSL: nicht schließen, das Speichern läuft weiter (Ergebnis wie sonst als Hinweis).
+                            if ui.button(lang.t("Nicht schließen", "Don't close")).clicked() {
+                                stop = true;
+                            }
+                        });
+                        if stop {
+                            self.ed.close_ask = None;
+                        } else {
+                            ctx.request_repaint_after(std::time::Duration::from_millis(100));
                         }
-                    } else if self.ed.docs.contains_key(&doc) {
-                        match self.editor_save_with(doc, None, crate::save_actions::SaveOrigin::Close) {
-                            Ok(_) => self.editor_close_step(&dir),
-                            Err(e) => {
-                                self.ed.close_ask = None;
-                                self.notify_text(e);
+                        break 'ask;
+                    }
+                    if let Some(a) = self.ed.close_ask.as_mut() {
+                        a.saving = false;
+                    }
+                }
+                let r = style::modal(Id::new("ed_close_ask")).show(ctx, |ui| {
+                    ui.set_max_width(420.0);
+                    ui.heading(lang.t("Änderungen speichern?", "Save changes?"));
+                    ui.add_space(style::S2);
+                    ui.label(format!("{} {}", lang.q(&name), lang.t("hat ungespeicherte Änderungen.", "has unsaved changes.")));
+                    if let Some(e) = &ask.error {
+                        ui.add_space(style::S2);
+                        ui.colored_label(style::ui().error, e);
+                    }
+                    if ask.tabs.len() > 1 {
+                        ui.weak(format!("{} {}", ask.tabs.len() - 1, lang.t("weitere Reiter werden danach geschlossen.", "more tabs will be closed afterwards.")));
+                    }
+                    ui.add_space(style::S3);
+                    ui.horizontal(|ui| {
+                        if ui.button(lang.t("Speichern", "Save")).clicked() || ui.input(|i| i.key_pressed(Key::Enter)) {
+                            choice = Some(0);
+                        }
+                        if ui.button(lang.t("Nicht speichern", "Don't save")).clicked() {
+                            choice = Some(1);
+                        }
+                        if ui.button(lang.t("Abbrechen", "Cancel")).clicked() {
+                            choice = Some(2);
+                        }
+                    });
+                });
+                if r.should_close() && choice.is_none() {
+                    choice = Some(2);
+                }
+                match choice {
+                    Some(0) => {
+                        let untitled = self.ed.docs.get(&doc).is_some_and(|d| d.path.is_none());
+                        if untitled {
+                            self.ed.close_ask = None;
+                            self.editor_cmd(ctx, Cmd::SaveAs(doc));
+                            if self.ed.docs.get(&doc).is_some_and(|d| d.disk_busy()) {
+                                // *Speichern unter* auf einen WSL-Pfad (#392): schließen, wenn das Schreiben fertig ist.
+                                self.ed.close_ask = Some(CloseAsk { saving: true, error: None, ..ask });
+                            } else if self.ed.docs.get(&doc).is_some_and(|d| !d.dirty()) {
+                                self.ed.close_ask = Some(ask);
+                                self.editor_close_step(&dir);
+                            }
+                        } else if self.ed.docs.get(&doc).is_some_and(|d| d.disk_busy()) {
+                            // WSL (#392): Es wird gerade schon gespeichert (z. B. automatisch) oder gelesen – abwarten; danach
+                            // schließt es (sauber) bzw. fragt erneut.
+                            self.ed.close_ask = Some(CloseAsk { saving: true, error: None, ..ask });
+                        } else if self.ed.docs.contains_key(&doc) {
+                            match self.editor_save_with(doc, None, crate::save_actions::SaveOrigin::Close) {
+                                // WSL (#392): Schreiben läuft noch – „wird gespeichert …“, geschlossen wird mit dem Ergebnis.
+                                Ok(_) if self.ed.docs.get(&doc).is_some_and(|d| d.disk_busy()) => {
+                                    self.ed.close_ask = Some(CloseAsk { saving: true, error: None, ..ask });
+                                }
+                                Ok(_) => self.editor_close_step(&dir),
+                                Err(e) => {
+                                    self.ed.close_ask = None;
+                                    self.notify_text(e);
+                                }
                             }
                         }
                     }
-                }
-                Some(1) => {
-                    if let Some(d) = self.ed.docs.get_mut(&doc) {
-                        d.discard_changes();
+                    Some(1) => {
+                        if let Some(d) = self.ed.docs.get_mut(&doc) {
+                            d.discard_changes();
+                        }
+                        let mut ask = ask;
+                        ask.tabs.remove(0);
+                        ask.saving = false;
+                        ask.error = None;
+                        self.editor_close_now(g, doc, &dir);
+                        self.ed.close_ask = Some(ask);
+                        self.editor_close_step(&dir);
                     }
-                    let mut ask = ask;
-                    ask.tabs.remove(0);
-                    self.editor_close_now(g, doc, &dir);
-                    self.ed.close_ask = Some(ask);
-                    self.editor_close_step(&dir);
+                    Some(_) => self.ed.close_ask = None,
+                    None => {}
                 }
-                Some(_) => self.ed.close_ask = None,
-                None => {}
             }
         }
         // Gehe zu Zeile

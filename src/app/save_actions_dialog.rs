@@ -662,7 +662,10 @@ impl App {
         self.save_actions.without_next = true;
         match self.editor_save_with(doc, None, SaveOrigin::User) {
             Ok(()) => {
-                if let Some(d) = self.ed.docs.get_mut(&doc) {
+                // WSL (#392): läuft das Schreiben noch, folgen Hinweis und Löschen der Hot-Exit-Kopie mit dem Ergebnis.
+                if let Some(d) = self.ed.docs.get_mut(&doc)
+                    && !d.disk_busy()
+                {
                     d.drop_hot(&dir);
                     let t = d.title(lang);
                     self.ed.set_hint(format!("{t}: {}", lang.t("ohne Aktionen gespeichert", "saved without actions")));

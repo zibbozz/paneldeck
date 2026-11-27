@@ -146,6 +146,9 @@ pub(crate) struct DocEntry {
     pub touched: bool,
     /// Lesen im Hintergrund (große Dateien).
     loading: Option<std::sync::mpsc::Receiver<Result<Document, String>>>,
+    /// Wiederherstellen aus dem Hot-Exit-Speicher im Hintergrund (WSL-Dateien, #392: `.editorconfig` suchen und die
+    /// Datei prüfen berührt WSL). `pending_hot` bleibt bis dahin stehen (Tab gilt als ungespeichert).
+    restoring: Option<std::sync::mpsc::Receiver<std::io::Result<core::Restored>>>,
     /// Auswahlen für Änderungen ohne Ansicht (Agent, Neu laden, Formatieren ohne Ansicht).
     pub(super) scratch: Selections,
     /// Syntax-Modus (#312).
@@ -226,6 +229,70 @@ mod wsl_io_tests {
         let _ = std::fs::remove_dir_all(&dir);
         assert!(is_wsl_path(std::path::Path::new(r"\\wsl.localhost\U\x")) && !is_wsl_path(std::path::Path::new(r"C:\x")));
     }
+
+    /// #392: Ungespeicherter Inhalt (Hot Exit) einer WSL-Datei wird im Hilfsthread wiederhergestellt – `.editorconfig`
+    /// suchen und die Datei prüfen berühren WSL und dürfen den UI-Thread nicht blockieren. Bis dahin gilt der Tab als
+    /// ungespeichert und „wird geladen“.
+    #[test]
+    fn hot_exit_restore_of_a_wsl_file_runs_in_the_background() {
+        let dir = std::env::temp_dir().join(format!("pd-hot-wsl-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = core::HotExitStore::new(dir.join(HOT_DIR));
+        let wsl = PathBuf::from(r"\\wsl.localhost\pd-test-no-such-distro\home\u\a.txt");
+        let opts = core::OpenOptions { use_editorconfig: false, ..Default::default() };
+        let (d, _) = Document::from_bytes(b"hot text\n", Some(&wsl), &opts);
+        let sels = d.new_selections(0);
+        let entry = store.save("tab-wsl", &d, &sels, None).unwrap();
+        let mut e = DocEntry::pending(Some(wsl.clone()), 0, Some((store, entry)));
+        let prefs = super::super::EditorPrefs::default();
+        e.ensure_loaded(&prefs);
+        assert!(e.restoring.is_some() && e.doc.is_none(), "im Hilfsthread, nicht im UI-Thread");
+        assert!(e.is_loading() && e.dirty(), "wird geladen, gilt als ungespeichert");
+        e.ensure_loaded_now(&prefs);
+        assert_eq!(e.text().as_deref(), Some("hot text\n"));
+        assert!(e.dirty() && !e.is_loading());
+        assert!(e.hot_key().is_some(), "Eintrag bleibt verknüpft (wird nach dem Speichern gelöscht)");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// #392: Speichern im Hilfsthread (wie bei WSL-Dateien): Ein zweites Speichern während des Schreibens scheitert mit
+    /// „wird noch gespeichert“; wer währenddessen weiter tippt, bleibt fürs automatische Speichern fällig (`edited_at`),
+    /// sonst ist es danach erledigt.
+    #[test]
+    fn background_save_keeps_autosave_due_when_edited_meanwhile() {
+        let dir = std::env::temp_dir().join(format!("pd-bg-save-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("a.txt");
+        std::fs::write(&p, "eins\n").unwrap();
+        let prefs = super::super::EditorPrefs::default();
+        let wait = |e: &mut DocEntry| {
+            let until = std::time::Instant::now() + std::time::Duration::from_secs(20);
+            loop {
+                if let Some(r) = e.poll_disk_job(Lang::En) {
+                    return r;
+                }
+                assert!(std::time::Instant::now() < until, "Speichern endet nicht");
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        };
+        let mut e = DocEntry::pending(Some(p.clone()), 0, None);
+        e.ensure_loaded(&prefs);
+        assert!(e.apply_user_edit(core::TextEdit::new(0..0, "A".to_string())));
+        e.save_in_background(p.clone(), Lang::En).unwrap();
+        assert!(e.disk_busy());
+        assert!(e.save_in_background(p.clone(), Lang::En).is_err(), "noch beim Schreiben");
+        // währenddessen weiter getippt
+        assert!(e.apply_user_edit(core::TextEdit::new(0..0, "B".to_string())));
+        assert_eq!(wait(&mut e), DiskJobDone::Saved);
+        assert!(e.dirty() && e.edited_at.is_some(), "neue Änderung bleibt fürs automatische Speichern fällig");
+        // ohne weitere Änderung: erledigt
+        e.save_in_background(p.clone(), Lang::En).unwrap();
+        assert_eq!(wait(&mut e), DiskJobDone::Saved);
+        assert!(!e.dirty() && e.edited_at.is_none());
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "BAeins\n");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
 
 /// Ab dieser Dateigröße wird im Hilfsthread gelesen (die Oberfläche bleibt bedienbar).
@@ -233,7 +300,7 @@ pub(super) const BACKGROUND_BYTES: u64 = 4 * 1024 * 1024;
 
 impl DocEntry {
     fn blank(path: Option<PathBuf>, untitled: u32) -> Self {
-        DocEntry { path, untitled, doc: None, load_error: None, pending_hot: None, initial_text: None, hot: Default::default(), opened_by_agent: false, agent_edited: false, agent_note_dismissed: false, large_dismissed: false, disk_conflict: false, disk_deleted: false, edited_at: None, touched: false, loading: None, scratch: Selections::default(), syntax: SyntaxDoc::default(), marks: Default::default(), width: Default::default(), disk_job: None }
+        DocEntry { path, untitled, doc: None, load_error: None, pending_hot: None, initial_text: None, hot: Default::default(), opened_by_agent: false, agent_edited: false, agent_note_dismissed: false, large_dismissed: false, disk_conflict: false, disk_deleted: false, edited_at: None, touched: false, loading: None, restoring: None, scratch: Selections::default(), syntax: SyntaxDoc::default(), marks: Default::default(), width: Default::default(), disk_job: None }
     }
 
     /// Noch nicht gelesenes Dokument (Datei und/oder Hot-Exit-Inhalt).
@@ -265,7 +332,18 @@ impl DocEntry {
 
     /// Wird die Datei gerade im Hintergrund gelesen?
     pub fn is_loading(&self) -> bool {
-        self.loading.is_some()
+        self.loading.is_some() || self.restoring.is_some()
+    }
+
+    /// Ergebnis der Wiederherstellung übernehmen (wie früher im UI-Thread).
+    fn apply_restored(&mut self, r: core::Restored) {
+        self.disk_conflict = matches!(r.disk_state, core::DiskState::Modified(_));
+        self.disk_deleted = matches!(r.disk_state, core::DiskState::Deleted) && self.path.is_some();
+        *self.hot.get_mut() = Some((r.entry.id.clone(), u64::MAX));
+        self.pending_hot = None;
+        self.scratch = r.selections;
+        self.doc = Some(r.doc);
+        self.touched = self.path.is_some();
     }
 
     fn load(&mut self, prefs: &super::EditorPrefs, wait: bool) {
@@ -293,17 +371,38 @@ impl DocEntry {
             }
             return;
         }
+        if let Some(rx) = &self.restoring {
+            let r = if wait { rx.recv().map_err(|_| ()) } else { rx.try_recv().map_err(|_| ()) };
+            match r {
+                Ok(Ok(restored)) => {
+                    self.restoring = None;
+                    self.apply_restored(restored);
+                    return;
+                }
+                Err(()) if !wait && matches!(rx.try_recv(), Err(std::sync::mpsc::TryRecvError::Empty)) => return,
+                // Hot-Exit-Inhalt nicht lesbar: wie bisher die Datei lesen (unten, für WSL im Hilfsthread).
+                _ => {
+                    self.restoring = None;
+                    self.pending_hot = None;
+                }
+            }
+        }
         let opts = open_options(prefs);
-        // Ungespeicherter Inhalt aus dem letzten Lauf (Hot Exit) geht vor der Datei.
+        // Ungespeicherter Inhalt aus dem letzten Lauf (Hot Exit) geht vor der Datei. Bei WSL-Dateien (#392) im
+        // Hilfsthread: `.editorconfig` suchen und die Datei auf der Platte prüfen (lesen, Hash) berührt WSL und kann die
+        // VM starten – der Konflikt-Hinweis folgt dann, sobald die Prüfung fertig ist.
+        if let Some((store, entry)) = self.pending_hot.clone().filter(|_| self.path.as_deref().is_some_and(is_wsl_path)) {
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let _ = tx.send(store.restore(&entry, &opts));
+            });
+            self.restoring = Some(rx);
+            return self.load(prefs, wait);
+        }
         if let Some((store, entry)) = self.pending_hot.take()
             && let Ok(r) = store.restore(&entry, &opts)
         {
-            self.disk_conflict = matches!(r.disk_state, core::DiskState::Modified(_));
-            self.disk_deleted = matches!(r.disk_state, core::DiskState::Deleted) && self.path.is_some();
-            *self.hot.get_mut() = Some((entry.id.clone(), u64::MAX));
-            self.scratch = r.selections;
-            self.doc = Some(r.doc);
-            self.touched = self.path.is_some();
+            self.apply_restored(r);
             return;
         }
         // WSL-Dateien (#392) immer im Hilfsthread (schon das Prüfen kann die WSL-VM starten und blockieren); eine noch
@@ -606,7 +705,10 @@ impl DocEntry {
                     self.disk_conflict = false;
                     self.disk_deleted = false;
                     self.touched = true;
-                    self.edited_at = None;
+                    // Während des Schreibens weiter getippt: das automatische Speichern bleibt fällig.
+                    if !self.dirty() {
+                        self.edited_at = None;
+                    }
                     self.agent_edited = false;
                     Some(DiskJobDone::Saved)
                 }

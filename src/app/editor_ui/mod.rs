@@ -131,6 +131,17 @@ impl SyntaxPrefs {
 pub(super) struct CloseAsk {
     /// Zu schließende Reiter (Gruppe, Dokument); die Rückfrage gilt dem ersten mit ungespeicherten Änderungen.
     pub tabs: Vec<(u64, u64)>,
+    /// „Speichern“ gewählt, das Schreiben läuft noch im Hintergrund (WSL, #392): statt der Rückfrage ein Hinweis
+    /// „wird gespeichert …“; geschlossen wird mit dem Ergebnis (`DiskJobDone::Saved`).
+    pub saving: bool,
+    /// Speichern ist gescheitert: die Rückfrage zeigt den Fehler.
+    pub error: Option<String>,
+}
+
+impl CloseAsk {
+    pub(super) fn new(tabs: Vec<(u64, u64)>) -> Self {
+        CloseAsk { tabs, saving: false, error: None }
+    }
 }
 
 /// Gerade gezogener Reiter.
@@ -204,6 +215,9 @@ pub(crate) struct EditorUi {
     pub(super) pending_goto: Option<(u64, usize)>,
     /// Speichern im Hintergrund (WSL, #392), dessen Formatieren/Text-Aktionen bei einem Fehler zurückzunehmen sind.
     pub(super) pending_saves: HashMap<u64, format::PendingSave>,
+    /// *Speichern unter* auf eine Datei, die in einem anderen Reiter offen ist, schreibt im Hintergrund (WSL, #392):
+    /// gespeichertes Dokument → anderes Dokument, das nach dem Schreiben neu lädt (bzw. die Leiste zeigt).
+    pub(super) reload_after_save: HashMap<u64, u64>,
 }
 
 impl EditorUi {
@@ -401,6 +415,7 @@ impl EditorUi {
         // Geschlossene Dokumente: nichts mehr zurückzunehmen.
         let docs = &self.docs;
         self.pending_saves.retain(|id, _| docs.contains_key(id));
+        self.reload_after_save.retain(|id, _| docs.contains_key(id));
         (out, busy)
     }
 
@@ -833,6 +848,13 @@ impl super::App {
         for (id, d) in self.ed.docs.iter() {
             let Some(at) = d.edited_at else { continue };
             if d.path.is_none() || !d.dirty() || d.disk_conflict {
+                continue;
+            }
+            // WSL (#392): Speichern/Lesen läuft noch im Hintergrund – nicht jetzt (scheiterte mit „wird noch
+            // gespeichert“), aber `edited_at` bleibt, damit es danach erneut versucht wird.
+            if d.disk_busy() {
+                let rest = std::time::Duration::from_millis(250);
+                next = Some(next.map_or(rest, |n| n.min(rest)));
                 continue;
             }
             let age = at.elapsed();
