@@ -32,6 +32,7 @@ Einträge, die gerade nicht passen, sind **ausgegraut**; beim Überfahren steht,
 - **Gehe zu Zeile** (*Zeile[:Spalte]*).
 - **Suchen und Ersetzen** in der offenen Datei: *Groß-/Kleinschreibung beachten*, *Nur ganze Wörter*, *Regulärer Ausdruck* (Syntax der Rust-Crate `regex`; im Ersatztext `$1`, `${name}`), *Ersetzen*, *Alle ersetzen*; Enter / Umschalt+Enter springen zum nächsten / vorigen Treffer.
 - **Minimap** und Zeilenumbruch (beides aus bei [großen Dateien](#große-dateien)).
+- **Waagerechte Bildlaufleiste** *(seit 3.2.0)*: Bei ausgeschaltetem Zeilenumbruch zeigt jede Teilung unten am Text eine Bildlaufleiste, wenn Zeilen breiter sind als die Ansicht (sonst ist sie ausgeblendet). Den Griff ziehen oder daneben klicken, um eine Seite nach links oder rechts zu blättern; Umschalt+Mausrad, das Mausrad über der Leiste und seitliches Wischen auf dem Touchpad gehen ebenso, und beim Tippen folgt die Ansicht dem Cursor. Gerollt wird bis kurz hinter das Ende der längsten Zeile (Tabs und breite Zeichen wie Chinesisch oder Emoji zählen wie auf dem Bildschirm). Die Leiste verdeckt nie die letzte Zeile; bei großen Dateien wird die längste Zeile im Hintergrund gemessen, die Leiste kann daher einen Moment nach dem Öffnen erscheinen.
 - Rückgängig/Wiederholen je Dokument; Änderungen eines Agenten sind eigene Rückgängig-Schritte.
 
 ## Syntaxfarben
@@ -106,7 +107,7 @@ Paneldeck bemerkt, wenn ein anderes Programm eine offene Datei ändert (z. B. Cl
 ![Suche in Dateien mit den Treffern nach Dateien gruppiert](../images/de/editor-search.png)
 
 ## Große Dateien
-Dateien ab **20 MB** (*Einstellungen → Editor → Große Dateien ab*) öffnen im Modus für große Dateien: Der Editor bleibt auch bei mehreren hundert Megabyte flüssig, aber **Minimap, Zeilenumbruch und Syntaxfarben sind aus**, und eine Infoleiste sagt das. Die Suche in Dateien überspringt sie; Agenten können sie lesen, aber nicht bearbeiten.
+Dateien ab **20 MB** (*Einstellungen → Editor → Große Dateien ab*) öffnen im Modus für große Dateien: Der Editor bleibt auch bei mehreren hundert Megabyte flüssig, aber **Minimap, Zeilenumbruch und Syntaxfarben sind aus** (die [waagerechte Bildlaufleiste](#bearbeiten) bleibt), und eine Infoleiste sagt das. Die Suche in Dateien überspringt sie; Agenten können sie lesen, aber nicht bearbeiten.
 
 ## Einstellungen
 *Einstellungen → Editor*:

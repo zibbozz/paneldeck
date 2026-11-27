@@ -18,6 +18,9 @@
 mod doc;
 mod find;
 pub(crate) mod format;
+mod hscroll;
+#[cfg(test)]
+mod hscroll_tests;
 mod menu;
 mod panes;
 mod persist;

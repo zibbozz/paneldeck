@@ -323,10 +323,13 @@ fn whats_new_lists_the_steps_since_a_version() {
     // Der Editor (#54) kam mit 3.0.0: die Tour „Was ist neu“ für 2.x zeigt ihn, mit dem Schritt der kurzen Tour zuerst.
     let editor = ids("2.7.0", "3.0.0");
     assert!(editor.contains(&"basics.editor") && editor.contains(&"editor.agents") && editor.contains(&"editor.search"), "{editor:?}");
-    assert!(steps::tour("editor").is_some_and(|t| t.steps.iter().all(|s| s.since == "3.0.0" || s.id == "editor.format")));
+    assert!(steps::tour("editor").is_some_and(|t| t.steps.iter().all(|s| s.since == "3.0.0" || s.since == "3.2.0")));
     // Menüleiste und Formatieren (#381) kamen mit 3.2.0.
     let fmt = ids("3.1.0", "3.2.0");
     assert!(fmt.contains(&"editor.format") && !fmt.contains(&"editor.status"), "{fmt:?}");
+    // Waagerechte Bildlaufleiste (#389) kam mit 3.2.0, Ziel ist das Textfeld.
+    assert!(fmt.contains(&"editor.hscroll") && !fmt.contains(&"editor.minimap"), "{fmt:?}");
+    assert_eq!(steps::tour("editor").and_then(|t| t.steps.iter().find(|s| s.id == "editor.hscroll")).map(|s| s.spot), Some(Some(Spot::EditorText)));
     assert_eq!(steps::tour("editor").and_then(|t| t.steps.iter().find(|s| s.id == "editor.format")).map(|s| s.spot), Some(Some(Spot::EditorMenuBar)));
     assert!(steps::tour("time").is_some_and(|t| t.steps.iter().all(|s| s.since == "3.2.0")));
 }
