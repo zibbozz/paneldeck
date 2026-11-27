@@ -222,6 +222,22 @@ Alle Felder sind optional; ältere Versionen ignorieren sie, fehlende Felder bed
   | `agent_format` | `false` | Schalter *Agenten dürfen formatieren* (MCP `format_file` außer `validate`); nur ein ausdrückliches `true` schaltet ihn ein |
 
 - `settings.json` → `keys` → `ed_format`, `ed_minify`, `ed_validate`, `ed_sort_keys`: eigene Kürzel der Format-Befehle (Standard `Alt+Shift+F`, `Alt+Shift+M`, `Alt+Shift+V`, keins); zweite Belegungen `ed_format_alt` (`Ctrl+Shift+I`), `ed_minify_alt`, `ed_validate_alt` (keine).
+Siehe [Umgebungsvariablen](terminals.md#umgebungsvariablen).
+- `state.json` → je Sitzung `env` und `templates.json` → je Sitzung `env`: die eigenen Umgebungsvariablen der Sitzung, eine Liste von Objekten:
+
+  | Feld | Bedeutung |
+  |---|---|
+  | `name` | Name der Variable (`PANELDECK_*` und interne Namen werden nicht geladen) |
+  | `value` | Wert im Klartext – nur bei normalen Variablen |
+  | `value_protected` | verschlüsselter Wert (Base64 des DPAPI-Blobs für deinen Windows-Benutzer; Linux/macOS: Schlüsselbund bzw. Master-Passwort) – nur mit `secret` |
+  | `secret` | `true` = geheimer Wert (nie im Klartext gespeichert) |
+  | `mode` | `"replace"` (Standard, wird nicht geschrieben), `"prepend"` oder `"append"` |
+  | `remove` | `true` = die geerbte Variable entfernen |
+  | `wsl_path` | `true` = WSL: als Pfad umrechnen (`WSLENV /p`, Listen `/l`) |
+  | `by_agent` | `true` = von einem Agenten gesetzt (`create_session` mit `env`) |
+
+  Nur geschrieben, wenn nicht leer. Unlesbare Einträge, geschützte Namen und doppelte (der letzte gilt) fallen weg; ein von Hand eingetragener Klartext-`value` einer geheimen Variable wird beim Laden verschlüsselt. Ein `value_protected`, der sich nicht entschlüsseln lässt (anderer Benutzer oder Rechner), sperrt die Sitzung beim Start, bis die Werte neu eingegeben sind.
+- `settings.json` → `mcp_session_env` (Standard `false`): *Agenten dürfen Umgebungsvariablen setzen*; `mcp_env_allow` (Standard `[]`): erlaubte Namensmuster wie `"APP_*"`.
 
 ## Sicherungen
 *Einstellungen → Daten & Sicherung* steuert die automatischen Sicherungen von `paneldeck.db`: Standard ist eine Kopie alle 24 Stunden, behalten werden zwei (zusätzlich zur Datenbank selbst). War der Rechner zur fälligen Zeit aus, wird die Sicherung beim nächsten Start nachgeholt; mehrere verpasste ergeben nur eine. Du kannst einen anderen Sicherungsordner wählen, ihn öffnen, mit **Jetzt sichern** eine Kopie anlegen (manuelle Kopien werden nie automatisch gelöscht) und jede Kopie aus der Liste **wiederherstellen** – dabei wird zuerst der aktuelle Stand gesichert, danach beendet sich Paneldeck und spielt die Wiederherstellung beim nächsten Start ein. Vor jedem Datenbank-Update (Migration) legt Paneldeck ebenfalls eine Kopie an und fasst eine Datenbank einer neueren Version nie an.

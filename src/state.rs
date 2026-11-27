@@ -192,6 +192,11 @@ pub struct Settings {
     pub mcp_level: crate::mcp::McpLevel,
     /// Agenten dürfen auch Sitzungen schließen, die sie nicht selbst angelegt haben.
     pub mcp_close_any: bool,
+    /// Agenten dürfen Umgebungsvariablen setzen (#384, 3.2.0): nur in Sitzungen, die sie selbst anlegen (`create_session`
+    /// mit `env`), nie in bestehenden, nie im laufenden Terminal. Standard: aus.
+    pub mcp_session_env: bool,
+    /// Erlaubte Namensmuster für Variablen von Agenten (#384, z. B. `APP_*`); leer = alle außer der festen Sperrliste.
+    pub mcp_env_allow: Vec<String>,
     /// Sprache des Systemprompts für Agenten (`initialize`), unabhängig von der Sprache der Oberfläche. Standard: Englisch;
     /// ein ungültiger Wert ergibt Englisch (die Datei bleibt lesbar).
     #[serde(deserialize_with = "crate::mcp::sysprompt::de_lang")]
@@ -404,6 +409,8 @@ impl Default for Settings {
             session_budget: 0.0,
             mcp_level: crate::mcp::McpLevel::Off,
             mcp_close_any: false,
+            mcp_session_env: false,
+            mcp_env_allow: Vec::new(),
             mcp_prompt_lang: Lang::En,
             backup_interval_hours: 24,
             backup_keep: 2,
@@ -521,6 +528,11 @@ pub struct SessionMeta {
     /// Lesen und Setzen nur über [`SessionMeta::resume_mode`] / [`SessionMeta::set_resume_mode`].
     #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "ResumeMode::lenient")]
     pub claude_resume_mode: Option<ResumeMode>,
+    /// Eigene Umgebungsvariablen der Sitzung (seit 3.2.0, #384): Name, Wert (normal im Klartext, geheim nur als
+    /// `value_protected`), `secret`, `mode`, `remove`, `wsl_path`, `by_agent` (`session_env::EnvVar`). Fehlt, wenn leer;
+    /// unlesbare oder geschützte Einträge laden nicht.
+    #[serde(skip_serializing_if = "Vec::is_empty", deserialize_with = "crate::session_env::lenient_list")]
+    pub env: Vec<crate::session_env::EnvVar>,
 }
 
 /// „Fortsetzen nach Neustart“ einer Claude-Sitzung (#302).
@@ -682,6 +694,7 @@ impl Default for SessionMeta {
             claude_resume_mode: None,
             claude_opts: Default::default(),
             agent_chain: Vec::new(),
+            env: Vec::new(),
         }
     }
 }

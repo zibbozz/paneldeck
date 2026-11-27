@@ -62,6 +62,10 @@ pub struct TplItem {
     /// [`TplItem::set_resume_mode`] lesen und setzen.
     #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "crate::state::ResumeMode::lenient")]
     pub claude_resume_mode: Option<crate::state::ResumeMode>,
+    /// Umgebungsvariablen der Sitzung (seit 3.2.0, #384), wie `state.json` `sessions[].env`; geheime Werte nur
+    /// verschlüsselt (auf einem anderen Rechner nicht lesbar – dann neu eingeben). Die Sitzung kopiert sie beim Start.
+    #[serde(skip_serializing_if = "Vec::is_empty", deserialize_with = "crate::session_env::lenient_list")]
+    pub env: Vec<crate::session_env::EnvVar>,
 }
 
 #[derive(Clone, Serialize, Deserialize, Default, PartialEq, Debug)]

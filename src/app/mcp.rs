@@ -255,6 +255,35 @@ fn parse_status(s: &str) -> Option<ClaudeStatus> {
     })
 }
 
+/// `env` von `create_session` (#384): nur mit Schalter (`allowed`, sonst `forbidden`), nur für Terminals, geprüft nach
+/// `session_env::agent_vars` (Sperrliste, Muster `allow`, Grenzen, nie geheim → `bad_args`). Fehlt `env`: leer.
+fn agent_env_of(args: &Value, chat: bool, allowed: bool, allow: &[String]) -> Result<Vec<crate::session_env::EnvVar>, (String, String)> {
+    match args.get("env").filter(|v| !v.is_null()) {
+        None => Ok(Vec::new()),
+        Some(_) if chat => Err(er("bad_args", tr("env gibt es nur für Terminals (nicht mit kind = „chat“).", "env only applies to terminals (not with kind = “chat”)."))),
+        Some(_) if !allowed => Err(er(
+            "forbidden",
+            tr(
+                "Umgebungsvariablen setzen Agenten nur, wenn der Nutzer es erlaubt (Einstellungen → Agenten → „Agenten dürfen Umgebungsvariablen setzen“).",
+                "Agents set environment variables only when the user allows it (Settings → Agents → “Agents may set environment variables”).",
+            ),
+        )),
+        Some(v) => crate::session_env::agent_vars(v, allow).map_err(|(d, e)| er("bad_args", if de() { d } else { e })),
+    }
+}
+
+/// Protokoll von `create_session`: Name und – bei `env` (#384) – nur die Namen der Variablen, nie Werte.
+fn create_log_info(args: &Value) -> String {
+    let name = mcp::short(args["name"].as_str().unwrap_or(""), 120);
+    match args.get("env").and_then(|v| v.as_object()) {
+        Some(m) if !m.is_empty() => {
+            let names: Vec<String> = m.keys().take(20).map(|k| mcp::short(k, 40)).collect();
+            format!("{name} env: {}", names.join(", ")).trim().to_string()
+        }
+        _ => name,
+    }
+}
+
 /// Kurzfassung eines Aufrufs der Todo-/Ticket-Werkzeuge für das Aufrufprotokoll (ohne große Texte).
 fn planning_log_info(tool: &str, args: &Value) -> String {
     let s = |k: &str| args.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
@@ -958,7 +987,9 @@ impl App {
             (_, "queue_prompt") => mcp::short(args["prompt"].as_str().unwrap_or(""), 120),
             (_, "send_chat_message") => mcp::short(args["text"].as_str().unwrap_or(""), 120),
             (_, "search_history") => mcp::short(args["query"].as_str().unwrap_or(""), 120),
-            (_, "rename_session") | (_, "create_session") => mcp::short(args["name"].as_str().unwrap_or(""), 120),
+            (_, "rename_session") => mcp::short(args["name"].as_str().unwrap_or(""), 120),
+            // Umgebungsvariablen (#384): nur Namen ins Protokoll, nie Werte.
+            (_, "create_session") => create_log_info(args),
             // Todo-Liste und Tickets: nur Kennungen und Kurztitel ins Protokoll, nie Kommentar- oder Beschreibungstexte.
             (_, t) if agent::TOOLS.contains(&t) => planning_log_info(t, args),
             // Editor (#54): Dokument bzw. Pfad, nie Dateiinhalt.
@@ -1309,6 +1340,8 @@ impl App {
             "children": children,
             // Sitzungen, in die dieser Agent nicht schreiben darf (er stammt von ihnen ab, #152).
             "agent_chain": super::taint::ancestors(&self.entries, Some(id)),
+            // Eigene Umgebungsvariablen der Sitzung (#384): nur Namen und Kennzeichen, nie Werte.
+            "env": crate::session_env::exposed(&e.meta.env),
         });
         add_claude_opts(&mut v, e);
         v
@@ -1356,6 +1389,8 @@ impl App {
                     "agent_chain": super::taint::ancestors(&self.entries, Some(*id)),
                     "you": caller == Some(*id),
                     "error": e.error,
+                    // Eigene Umgebungsvariablen (#384): nur Namen und Kennzeichen, nie Werte.
+                    "env": crate::session_env::exposed(&e.meta.env),
                 });
                 add_claude_opts(&mut v, e);
                 v
@@ -1512,6 +1547,9 @@ impl App {
             None => None,
         };
         let item = tpl.as_ref().map(|(_, it)| it);
+        // Umgebungsvariablen eines Agenten (#384): nur mit Schalter, nur für Terminals, geprüft (Sperrliste, eigene Muster,
+        // Grenzen, nie geheim). Werte stehen nie in Fehlertexten oder im Protokoll.
+        let agent_env = agent_env_of(args, chat, self.settings.mcp_session_env, &self.settings.mcp_env_allow)?;
         if chat {
             return self.mcp_create_chat(ctx, args, caller).map(Ok);
         }
@@ -1645,7 +1683,12 @@ impl App {
         // Ordners kann einer anderen Sitzung, einem von Hand gestarteten Claude oder `claude -p` gehören. So hat es der
         // Nutzer entschieden.
         let resume_mode = item.map(|it| it.resume_mode());
-        let id = self.new_session(ctx, NewOpts { shell_id: shell, cwd, name, claude, claude_opts: Some(copts), prompt, group, resume_mode, profile: tpl_profile, quiet: true, window: Some(window), project: Some(project), ..NewOpts::default() });
+        // Variablen der Vorlage (#384) bis auf die, die ein Agent nie setzen dürfte (die Datei kann weitergegeben sein);
+        // die des Agenten gehen vor.
+        // Geheime Variablen der Vorlage auch nicht (Review #384): der Agent könnte ihre Werte in seiner Sitzung lesen.
+        let (tpl_env, tpl_env_ignored) = crate::session_env::agent_template_env(&item.map(|it| it.env.clone()).unwrap_or_default());
+        let env = crate::session_env::merge(&tpl_env, &agent_env);
+        let id = self.new_session(ctx, NewOpts { shell_id: shell, cwd, name, claude, claude_opts: Some(copts), prompt, group, resume_mode, profile: tpl_profile, quiet: true, window: Some(window), project: Some(project), env, ..NewOpts::default() });
         debug_assert!(!before.contains(&id));
         if let Some(err) = self.entries.get(&id).and_then(|e| e.error.clone()) {
             self.close_session(id);
@@ -1657,7 +1700,7 @@ impl App {
         self.mcp.created.insert(id, self.creator_of(caller));
         self.mcp_taint_create(caller, id);
         let e = &self.entries[&id];
-        let mut v = json!({"id": id, "name": e.display_name(), "group": e.meta.group, "parent": self.mcp.created.get(&id).and_then(|c| c.parent()), "shell": e.eff_shell(), "cwd": e.cwd_now(), "claude": e.is_claude(), "note": tr("Die Sitzung ist angelegt, aber nicht im Fenster geöffnet (focus_session zeigt sie).", "The session was created but is not opened in the window (focus_session shows it).")});
+        let mut v = json!({"id": id, "name": e.display_name(), "group": e.meta.group, "parent": self.mcp.created.get(&id).and_then(|c| c.parent()), "shell": e.eff_shell(), "cwd": e.cwd_now(), "claude": e.is_claude(), "env": crate::session_env::exposed(&e.meta.env), "note": tr("Die Sitzung ist angelegt, aber nicht im Fenster geöffnet (focus_session zeigt sie).", "The session was created but is not opened in the window (focus_session shows it).")});
         add_claude_opts(&mut v, e);
         // Linux-`cwd`: ob der Ordner geprüft werden konnte (false = WSL antwortete nicht rechtzeitig, trotzdem angelegt).
         if let Some(c) = cwd_checked {
@@ -1665,8 +1708,11 @@ impl App {
         }
         if let Some((t, it)) = &tpl {
             v["template"] = json!(t.name);
-            // Optionen der Vorlage, die für Agenten nie gelten (immer da, leer = nichts weggelassen).
-            v["template_ignored"] = json!(it.agent_ignored());
+            // Optionen der Vorlage, die für Agenten nie gelten (immer da, leer = nichts weggelassen), dazu Variablen der
+            // Vorlage, die ein Agent nie setzen dürfte („env:NAME“, #384).
+            let mut ignored: Vec<String> = it.agent_ignored().iter().map(|s| s.to_string()).collect();
+            ignored.extend(tpl_env_ignored.iter().map(|n| format!("env:{n}")));
+            v["template_ignored"] = json!(ignored);
         }
         Ok(Ok(v))
     }
@@ -2300,6 +2346,42 @@ impl App {
             style::toggle(ui, &mut self.settings.mcp_close_any);
             ui.label(RichText::new(lang.t("Agenten dürfen auch fremde Sitzungen schließen (nicht nur selbst angelegte)", "Agents may also close sessions they did not create")).small());
         });
+        // Umgebungsvariablen (#384): Schalter (Standard aus), eigene Muster.
+        let top = ui.cursor().min.y;
+        ui.horizontal(|ui| {
+            if style::toggle(ui, &mut self.settings.mcp_session_env).changed() {
+                // Sicherheitseinstellung: sofort sichern.
+                state::save_json(&self.dir.join("settings.json"), &self.settings);
+            }
+            ui.label(RichText::new(lang.t("Agenten dürfen Umgebungsvariablen setzen (nur in Sitzungen, die sie selbst anlegen)", "Agents may set environment variables (only in sessions they create themselves)")).small());
+        });
+        if self.settings.mcp_session_env {
+            ui.label(
+                RichText::new(lang.t(
+                    "Über create_session mit env, Stufe Steuern: höchstens 20 Variablen, nie geheim, nie in bestehenden Sitzungen. Pfad-, Start-, Lade-, Proxy-, Git-, Claude- und Paneldeck-Variablen (PATH, NODE_OPTIONS, LD_PRELOAD …) sind immer gesperrt. Agenten sehen nur Namen, nie Werte.",
+                    "Via create_session with env, level Control: at most 20 variables, never secret, never in existing sessions. Path, startup, loader, proxy, Git, Claude and Paneldeck variables (PATH, NODE_OPTIONS, LD_PRELOAD …) are always blocked. Agents only see names, never values.",
+                ))
+                .small()
+                .color(style::dim(ui)),
+            );
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(lang.t("Erlaubte Namen", "Allowed names")).small());
+                let mut text = self.settings.mcp_env_allow.join(", ");
+                let r = ui.add(egui::TextEdit::singleline(&mut text).desired_width(260.0).hint_text(lang.t("leer = alle außer gesperrten, z. B. APP_*, *_URL", "empty = all but blocked, e.g. APP_*, *_URL")));
+                if r.changed() {
+                    self.settings.mcp_env_allow = text.split(',').map(|p| p.trim().to_string()).filter(|p| !p.is_empty()).collect();
+                    if text.trim_end().ends_with(',') {
+                        // Weiter tippen können: das Komma bleibt im Feld, bis das nächste Muster folgt.
+                        self.settings.mcp_env_allow.push(String::new());
+                    }
+                }
+                if r.lost_focus() {
+                    self.settings.mcp_env_allow.retain(|p| !p.is_empty());
+                    state::save_json(&self.dir.join("settings.json"), &self.settings);
+                }
+            });
+        }
+        super::tutorial::spot_since(ui, Spot::McpSessionEnv, top);
         ui.add_space(S2);
         ui.separator();
         ui.add_space(S1);
@@ -2754,6 +2836,27 @@ mod tests {
         assert!(terminal_link_allowed(None, 10, &created));
         assert!(!terminal_link_allowed(None, 8, &created));
         assert!(!terminal_link_allowed(None, 5, &created));
+    }
+
+    #[test]
+    fn create_session_env_needs_the_switch_and_valid_names() {
+        let args = json!({"env": {"APP_MODE": "dev"}});
+        assert_eq!(agent_env_of(&json!({}), false, false, &[]).unwrap(), vec![], "ohne env nichts, auch ohne Schalter");
+        assert_eq!(agent_env_of(&args, false, false, &[]).unwrap_err().0, "forbidden", "Schalter aus");
+        assert_eq!(agent_env_of(&args, true, true, &[]).unwrap_err().0, "bad_args", "nicht für Chats");
+        let v = agent_env_of(&args, false, true, &[]).unwrap();
+        assert!(v[0].by_agent && !v[0].secret && v[0].value == "dev");
+        for bad in [json!({"env": {"PATH": "x"}}), json!({"env": {"GH_TOKEN": "x"}}), json!({"env": {"A": "a\nb"}}), json!({"env": "A=1"})] {
+            let e = agent_env_of(&bad, false, true, &[]).unwrap_err();
+            assert_eq!(e.0, "bad_args", "{bad}");
+            assert!(!e.1.contains("\"x\"") && !e.1.contains("a\nb"), "kein Wert im Text: {}", e.1);
+        }
+        assert_eq!(agent_env_of(&args, false, true, &["WEB_*".to_string()]).unwrap_err().0, "bad_args", "eigene Muster");
+        // Protokoll: nur Namen
+        let i = create_log_info(&json!({"name": "API", "env": {"APP_MODE": "very-secret-value"}}));
+        assert_eq!(i, "API env: APP_MODE");
+        assert!(!i.contains("very-secret-value"));
+        assert_eq!(create_log_info(&json!({"name": "API"})), "API");
     }
 
     #[test]

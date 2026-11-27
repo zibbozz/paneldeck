@@ -426,6 +426,7 @@ impl App {
     }
 
     /// Prozess in einer neuen Pseudokonsole starten (der alte Lauf samt Ausgabe wird ersetzt).
+    /// Unter WSL gehen die eigenen Variablen über `WSLENV` mit (#384, [`proc_wslenv`]).
     fn proc_spawn(&mut self, ctx: &egui::Context, id: u64) {
         let lang = self.settings.language;
         let Some(def) = self.procs.defs.iter().find(|d| d.id == id).cloned() else { return };
@@ -445,6 +446,10 @@ impl App {
             let flavor = procs::flavor_of(shell);
             let (spec, mut env) = procs::launch_spec(shell, &def.command);
             let (vals, bad) = procs::env_values(&def);
+            // WSL (#384): die Variablen der Prozessliste kommen nur über WSLENV in die Linux-Umgebung.
+            if flavor == procs::Flavor::Wsl && !vals.is_empty() {
+                env.push(("WSLENV".to_string(), proc_wslenv(std::env::var("WSLENV").ok().as_deref(), &vals)));
+            }
             env.extend(vals);
             warn_env = bad;
             // cmd ersetzt `%NAME%` im übergebenen Befehl nicht selbst – vorher in derselben Umgebung ersetzen.
@@ -464,6 +469,7 @@ impl App {
                     initial_input: None,
                     scrollback_lines: procs::OUTPUT_LINES,
                     env,
+                    user_env: Vec::new(),
                     view: None,
                     inherit_env: self.settings.inherit_env,
                 },
@@ -1311,9 +1317,21 @@ impl App {
     }
 }
 
+/// `WSLENV` für einen Prozess der Prozessliste in WSL (#384): das vorhandene (`base`) und die eigenen Variablen.
+fn proc_wslenv(base: Option<&str>, vals: &[(String, String)]) -> String {
+    vals.iter().fold(base.unwrap_or_default().to_string(), |w, (k, _)| super::wslenv_with(&w, k, ""))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn process_variables_reach_wsl_via_wslenv() {
+        let vals = vec![("APP_ENV".to_string(), "dev".to_string()), ("TOKEN".to_string(), "x".to_string())];
+        assert_eq!(proc_wslenv(None, &vals), "APP_ENV:TOKEN");
+        assert_eq!(proc_wslenv(Some("USERPROFILE/p:APP_ENV"), &vals), "USERPROFILE/p:APP_ENV:TOKEN", "vorhandenes WSLENV bleibt, nichts doppelt");
+    }
 
     #[test]
     fn editor_builds_entries_and_checks_input() {

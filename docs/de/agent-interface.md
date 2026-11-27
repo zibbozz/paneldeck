@@ -103,6 +103,18 @@ Ein Agent hat immer nur die Möglichkeiten des gerade eingestellten Modus (Schal
 
 **Agenten können keine Updates** von Paneldeck auslösen.
 
+## Umgebungsvariablen
+Sitzungen können [eigene Umgebungsvariablen](terminals.md#umgebungsvariablen) haben. Agenten **sehen nur Namen und Kennzeichen, nie Werte:** `list_sessions` und `whoami` (und die Antwort von `create_session`) haben ein Feld `env` – eine Liste von `{"name": "API_URL", "secret": false, "set_by_agent": false}`, dazu `"remove": true` bzw. `"mode": "prepend"`/`"append"`, wo gesetzt.
+
+**Setzen** dürfen Agenten Variablen nur, wenn du es erlaubst: *Einstellungen → Agenten → Agenten dürfen Umgebungsvariablen setzen* (Standard aus, Stufe *Steuern*). Dann nimmt `create_session` `env`, ein Objekt wie `{"APP_MODE": "dev", "API_URL": "http://localhost:3000"}` – nur für die Sitzung, die der Agent mit diesem Aufruf anlegt, nie für bestehende oder fremde Sitzungen und nie im laufenden Terminal. Regeln:
+- höchstens 20 Variablen, Werte höchstens 1 KB ohne Steuerzeichen, wörtlich übernommen;
+- nie geheim: Namen, die nach Geheimnis aussehen (`TOKEN`, `KEY`, `SECRET`, `PASS`, `PWD`, `AUTH`), werden abgelehnt;
+- Namen nur aus ASCII-Buchstaben, Ziffern und `_` (nicht mit einer Ziffer am Anfang);
+- eine feste Sperrliste gilt immer (auch ganze Familien wie `BASH_*`, `NODE_*`, `PYTHON*`, `BUN_*`, `JAVA_*`, `GRADLE_*`, `MAVEN_*`, `*_OPTS`, `SSH_*`, `GIT_*` sowie `HOMEDRIVE`, `HOMEPATH`, `HOMESHARE`, `KUBECONFIG`, `AWS_CONFIG_FILE`, `AWS_SHARED_CREDENTIALS_FILE`, `DOCKER_HOST`, `DOCKER_CONFIG`, `GCONV_PATH`): Pfade (`PATH`, `PATHEXT` …), Start und Prompt der Shell (`BASH_ENV`, `ENV`, `PROMPT_COMMAND`, `PS0`–`PS4`, `ZDOTDIR` …), Lader und Laufzeiten (`LD_*`, `DYLD_*`, `NODE_OPTIONS`, `PYTHONPATH`, `JAVA_TOOL_OPTIONS`, `CARGO_*` …), Programme, die andere Werkzeuge starten (`EDITOR`, `PAGER`, `GIT_*` …), Proxys und Zertifikate, Benutzer- und Systemordner, `ANTHROPIC_*`, `CLAUDE_*` und `PANELDECK_*`;
+- wahlweise eigene **erlaubte Namen** (Muster wie `APP_*`, `*_URL`; leer = alles außer der Sperrliste).
+
+Verstöße liefern `bad_args` (die Meldung nennt die Variable, nie ihren Wert); `env` bei ausgeschaltetem Schalter liefert `forbidden`, `env` mit `kind: "chat"` `bad_args`. Variablen einer [Vorlage](#claude-startoptionen), die ein Agent nie setzen dürfte, **und alle geheimen Variablen der Vorlage** (ihre Werte wären in der Sitzung des Agenten lesbar) fallen weg und stehen als `env:NAME` in `template_ignored`; die eigenen Variablen des Agenten gehen denen der Vorlage vor. Das Aufrufprotokoll (`mcp-log.jsonl`) enthält nur die Namen. Von einem Agenten gesetzte Variablen sind mit `set_by_agent` gekennzeichnet (in `state.json` `by_agent`).
+
 ## Chats
 [Chats mit lokalen Modellen](chat.md) sind ebenfalls Sitzungen, und Agenten können sie nutzen:
 

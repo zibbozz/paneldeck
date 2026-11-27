@@ -1,4 +1,4 @@
-//! Reiter der Sitzungsdialoge (#292): *Allgemein* | *Claude* | *Zugriff* | *Erweitert* – im Dialog „Neue Sitzung“, in
+//! Reiter der Sitzungsdialoge (#292): *Allgemein* | *Claude* | *Zugriff* | *Erweitert* | *Umgebung* (#384) – im Dialog „Neue Sitzung“, in
 //! den Einstellungen der Sitzung, im Vorlagen-Editor und (ohne *Allgemein*) unter Einstellungen → Claude → Standards.
 //!
 //! - Alle Reiter haben dieselbe feste Höhe ([`body`]); nur auf sehr kleinen Bildschirmen scrollt der Inhalt (#241:
@@ -23,6 +23,8 @@ pub(super) enum Tab {
     Claude,
     Access,
     Advanced,
+    /// Umgebungsvariablen der Sitzung (#384).
+    Environment,
 }
 
 impl Tab {
@@ -32,13 +34,26 @@ impl Tab {
             Tab::Claude => "Claude",
             Tab::Access => lang.t("Zugriff", "Access"),
             Tab::Advanced => lang.t("Erweitert", "Advanced"),
+            Tab::Environment => lang.t("Umgebung", "Environment"),
         }
     }
 }
 
-/// Reiter der Sitzungsdialoge: ohne Claude nur *Allgemein*.
+/// Reiter der Sitzungsdialoge: ohne Claude nur *Allgemein* und *Umgebung*.
 pub(super) fn session_tabs(claude: bool) -> Vec<Tab> {
-    if claude { vec![Tab::General, Tab::Claude, Tab::Access, Tab::Advanced] } else { vec![Tab::General] }
+    session_tabs_env(claude, true)
+}
+
+/// Wie [`session_tabs`]; `env` = mit *Umgebung* (nicht bei Chats und Gruppen-Vorlagen).
+pub(super) fn session_tabs_env(claude: bool, env: bool) -> Vec<Tab> {
+    let mut v = vec![Tab::General];
+    if claude {
+        v.extend([Tab::Claude, Tab::Access, Tab::Advanced]);
+    }
+    if env {
+        v.push(Tab::Environment);
+    }
+    v
 }
 
 /// Reiter der Standards (Einstellungen → Claude).
@@ -404,7 +419,7 @@ mod tests {
         assert_eq!(step(vec![], Modifiers::NONE).0, Tab::General);
         assert_eq!(step(vec![key(Key::Tab, Modifiers::CTRL)], Modifiers::NONE), (Tab::Claude, 0), "gewechselt und verbraucht");
         assert_eq!(step(vec![key(Key::Tab, Modifiers::CTRL | Modifiers::SHIFT)], Modifiers::NONE).0, Tab::General);
-        assert_eq!(step(vec![key(Key::Tab, Modifiers::CTRL | Modifiers::SHIFT)], Modifiers::NONE).0, Tab::Advanced, "rundum");
+        assert_eq!(step(vec![key(Key::Tab, Modifiers::CTRL | Modifiers::SHIFT)], Modifiers::NONE).0, Tab::Environment, "rundum");
         assert_eq!(step(vec![key(Key::Num3, Modifiers::ALT)], Modifiers::NONE).0, Tab::Access);
         // Alt gehalten: erst beim Loslassen; Alt+Ziffernblock-Code (mehrere Ziffern) wechselt nicht.
         assert_eq!(step(vec![key(Key::Num1, Modifiers::ALT)], Modifiers::ALT).0, Tab::Access);
@@ -413,8 +428,11 @@ mod tests {
         assert_eq!(step(vec![key(Key::Num2, Modifiers::ALT)], Modifiers::ALT).0, Tab::General);
         assert_eq!(step(vec![key(Key::Num8, Modifiers::ALT)], Modifiers::ALT).0, Tab::General);
         assert_eq!(step(vec![], Modifiers::NONE).0, Tab::General, "Alt+0228 ist ein Zeichen, kein Reiterwechsel");
-        // Ohne Claude gibt es nur „Allgemein“.
+        // Ohne Claude gibt es nur „Allgemein“ und „Umgebung“ (#384), bei Chats nur „Allgemein“.
         assert_eq!(current(&ctx, "t", &session_tabs(false)), Tab::General);
+        assert_eq!(session_tabs(false), vec![Tab::General, Tab::Environment]);
+        assert_eq!(session_tabs_env(false, false), vec![Tab::General]);
+        assert_eq!(*session_tabs(true).last().unwrap(), Tab::Environment);
         // Vorab abgeholt (vor den globalen Kürzeln): wirkt im Dialog.
         run(&ctx, vec![key(Key::Num4, Modifiers::ALT)], Modifiers::NONE, |ctx| {
             grab_keys(ctx, "t", Id::new(WIN));
@@ -429,7 +447,7 @@ mod tests {
             grab_keys(ctx, "t", Id::new(WIN));
             assert_eq!(ctx.input(|i| i.events.len()), 1, "nicht verbraucht");
         });
-        for t in [Tab::General, Tab::Access, Tab::Advanced] {
+        for t in [Tab::General, Tab::Access, Tab::Advanced, Tab::Environment] {
             assert_ne!(t.label(Lang::De), t.label(Lang::En));
         }
         assert_eq!(TabInfo { tab: Tab::Access, count: 2, mark: Mark::Warn }.text(Lang::En), "Access (2)");

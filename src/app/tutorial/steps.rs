@@ -1184,6 +1184,19 @@ const MCP: &[Step] = &[
         need: Some(Need::Claude),
     },
     Step {
+        id: "mcp.session_env",
+        since: "3.2.0",
+        spot: Some(Spot::McpSessionEnv),
+        title: tx("Umgebungsvariablen für Agenten", "Environment variables for agents"),
+        body: tx(
+            "Jede Sitzung kann eigene Umgebungsvariablen haben (Reiter „Umgebung“ in „Neue Sitzung“ und in den Einstellungen der Sitzung). Agenten sehen davon nur die Namen. Mit diesem Schalter dürfen sie Variablen für Sitzungen setzen, die sie selbst anlegen – nie geheime, nie PATH, Lade- oder Startvariablen; die erlaubten Namen grenzt du mit Mustern wie APP_* ein.",
+            "Every session can have its own environment variables (tab “Environment” in “New session” and in the session settings). Agents only see their names. With this switch they may set variables for sessions they create themselves – never secret ones, never PATH, loader or startup variables; you limit the allowed names with patterns such as APP_*.",
+        ),
+        prep: &[Prep::Terminals, Prep::Settings(S_AGENTS)],
+        done: None,
+        need: None,
+    },
+    Step {
         id: "mcp.system_prompt",
         since: "2.1.0",
         spot: Some(Spot::McpSysprompt),

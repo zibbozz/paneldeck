@@ -45,6 +45,8 @@ mod dialogs;
 mod dragdrop;
 pub(crate) mod editor_ui;
 mod empty_hub;
+mod env_ui;
+use env_ui::env_locked_text;
 // Editor-Reiter (#54): Einstellungen, MCP-Werkzeuge, Plattenänderungen, --edit, Explorer-Eintrag, Suche in Dateien.
 mod editor_services;
 mod editor_search_ui;
@@ -148,13 +150,20 @@ struct Entry {
     track: claude_status::Track,
     /// Die Sitzung wartet vor ihrem Start auf die Auswahl der Konversation (#302, `conv_pick`).
     pick_pending: bool,
+    /// Geheime Umgebungsvariablen ließen sich beim Start nicht entschlüsseln (#384): die Sitzung wartet auf
+    /// „Entsperren und starten“ bzw. neue Werte.
+    env_locked: Option<crate::session_env::Locked>,
+    /// Geänderte Umgebungsvariablen gelten erst nach einem Neustart (#384, oranger Punkt in der Kopfzeile).
+    env_pending: bool,
+    /// Variablen, die die laufende Shell hat: beim Start festgehalten, nach „Jetzt setzen“ fortgeschrieben (#384).
+    env_live: Vec<crate::session_env::EnvVar>,
 }
 
 impl Entry {
     fn new(meta: SessionMeta) -> Self {
         let launched_claude = meta.claude && meta.kind != SessionKind::Chat;
         let launched_opts = if launched_claude { meta.claude_opts_eff().0 } else { Default::default() };
-        Entry { meta, live: None, error: None, status: ClaudeStatus::Unknown, status_msg: String::new(), attention: false, live_cwd: String::new(), start_cwd: String::new(), hook_seen: false, queue_active: false, perm_since: None, budget_warned: false, shell_eff: String::new(), shell_flavor: None, chat: None, session_key: String::new(), hook_conv: Default::default(), hook_keyed: false, launched_claude, launched_opts, launch_note: None, progress: None, track: Default::default(), pick_pending: false }
+        Entry { meta, live: None, error: None, status: ClaudeStatus::Unknown, status_msg: String::new(), attention: false, live_cwd: String::new(), start_cwd: String::new(), hook_seen: false, queue_active: false, perm_since: None, budget_warned: false, shell_eff: String::new(), shell_flavor: None, chat: None, session_key: String::new(), hook_conv: Default::default(), hook_keyed: false, launched_claude, launched_opts, launch_note: None, progress: None, track: Default::default(), pick_pending: false, env_locked: None, env_pending: false, env_live: Vec::new() }
     }
     /// Chat-Sitzung mit geladenem Verlauf (kein Terminal, keine PTY).
     fn new_chat(meta: SessionMeta, chat: ChatState) -> Self {
@@ -491,6 +500,12 @@ enum Action {
     ChatImage(u64, chat_images_ui::ImageReq),
     /// Tutorial (#143): Tour starten, fortsetzen, „Was ist neu“, Hinweis ausblenden.
     Tutorial(tutorial::Cmd),
+    /// Umgebungsvariablen (#384): kopieren, einfügen, als .env kopieren, gesperrte entsperren und starten, bearbeiten.
+    EnvCopy(u64),
+    EnvPaste(u64),
+    EnvCopyDotenv(u64),
+    EnvUnlock(u64),
+    EnvEdit(u64),
 }
 
 struct NewDialog {
@@ -521,6 +536,8 @@ struct NewDialog {
     notes: String,
     /// Vorhandene Tags für die Vorschläge (setzt die App beim Öffnen).
     tag_values: Vec<planning_ui::value_suggest::Counted>,
+    /// Reiter „Umgebung“ (#384).
+    env: env_ui::EnvEditor,
 }
 
 #[derive(Default)]
@@ -556,6 +573,8 @@ struct NewOpts {
     color: Option<[u8; 3]>,
     tags: Vec<String>,
     notes: String,
+    /// Umgebungsvariablen der Sitzung (#384; aus Dialog, Vorlage, Duplikat oder MCP `env`).
+    env: Vec<crate::session_env::EnvVar>,
 }
 
 /// Farbe einer neuen Sitzung: eigene (Dialog „Neue Sitzung“, #292), sonst die des Profils, sonst automatisch.
@@ -596,6 +615,7 @@ impl NewDialog {
             tags: String::new(),
             notes: String::new(),
             tag_values: Vec::new(),
+            env: Default::default(),
         }
     }
 
@@ -855,6 +875,10 @@ pub struct App {
     reload_ask: Option<session_settings::ReloadAsk>,
     /// Auswahl der Konversation vor Neu laden/Neustart/Programmstart (#302); global, erscheint im Hauptfenster.
     conv_pick: conv_pick::ConvPick,
+    /// Kopierte Umgebungsvariablen einer Sitzung (#384, Kontextmenü): bleiben in Paneldeck, nie in der Zwischenablage.
+    env_clip: Option<Vec<crate::session_env::EnvVar>>,
+    /// Rückfrage *Neu starten / Jetzt setzen / Später* nach geänderten Variablen einer laufenden Sitzung (#384).
+    env_ask: Option<(u64, env_ui::EnvLive)>,
     /// Rückfrage vor dem Einfügen mehrerer Zeilen (#183).
     paste_ask: Option<paste_ask::PasteAsk>,
     /// Dialog „Einstellungen der Sitzung“ (#170).
@@ -1243,6 +1267,8 @@ impl App {
             confirm_close: None,
             reload_ask: None,
             conv_pick: Default::default(),
+            env_clip: None,
+            env_ask: None,
             paste_ask: None,
             session_settings: None,
             settings_open: false,
@@ -1930,7 +1956,7 @@ impl App {
             self.hooks_global,
             self.hooks_incomplete,
             self.hooks_foreign.is_some(),
-            self.profile(meta.profile).map_or("", |p| p.env.as_str()),
+            &self.env_lines_of(meta),
             hooks::global_settings_path().as_deref(),
         ) {
             // Ohne globale Hooks immer; mit ihnen, wenn das Profil ein anderes CLAUDE_CONFIG_DIR setzt (dort gelten sie
@@ -2119,23 +2145,15 @@ impl App {
         };
         let profile = self.profile(entry.meta.profile).cloned();
         let startup = profile.as_ref().map(|p| p.startup.trim().to_string()).filter(|s| !s.is_empty());
-        let initial = match (&startup, claude_cmd) {
+        let mut initial = match (&startup, claude_cmd) {
             (Some(st), Some(c)) => Some(format!("{st}\r{c}")),
             (Some(st), None) => Some(format!("{st}\r")),
             (None, c) => c,
         };
-        entry.track.launch_lines = claude_status::launch_lines(initial.as_deref());
         // Schlüssel an zweiter Stelle: er landet so auch in WSLENV (siehe unten, alles ab Index 1 wird durchgereicht).
         entry.session_key = hooks::random_hex();
         let mut env = vec![(hooks::ENV_SESSION.to_string(), entry.meta.id.to_string()), (hooks::ENV_SESSION_KEY.to_string(), entry.session_key.clone())];
         if let Some(p) = &profile {
-            for line in p.env.lines() {
-                if let Some((k, v)) = line.split_once('=') {
-                    if !k.trim().is_empty() {
-                        env.push((k.trim().to_string(), v.trim().to_string()));
-                    }
-                }
-            }
             if p.admin && l.restore {
                 // Beim Programmstart (auch Autostart im Tray) nicht für jede gespeicherte Admin-Sitzung eine UAC-Abfrage öffnen.
                 entry.error = Some(self.settings.language.t(
@@ -2154,6 +2172,46 @@ impl App {
                 return;
             }
         }
+        // Umgebungsvariablen (#384): Profil < Sitzung (die Vorlage ist beim Anlegen in die Sitzung kopiert). Geschützte
+        // Namen (`PANELDECK_*`, intern) fallen weg – ein Profil überschreibt `PANELDECK_SESSION`/`_KEY` nicht mehr.
+        // Lässt sich ein geheimer Wert nicht entschlüsseln, wartet die Sitzung („Entsperren und starten“, wie
+        // Administrator-Sitzungen beim Programmstart).
+        let user_vars = crate::session_env::merge(&profile.as_ref().map(|p| crate::session_env::from_profile(&p.env)).unwrap_or_default(), &entry.meta.env);
+        let mut user_ops = match crate::session_env::resolve(&user_vars, crate::llm::secret::unprotect) {
+            Ok(ops) => ops,
+            Err(locked) => {
+                entry.error = Some(env_locked_text(&locked, self.settings.language));
+                entry.env_locked = Some(locked);
+                entry.live = None;
+                return;
+            }
+        };
+        entry.env_locked = None;
+        entry.env_pending = false;
+        entry.env_live = entry.meta.env.clone();
+        // WSL: nur gesetzte Werte gehen über WSLENV; Voranstellen/Anhängen/Entfernen wirken auf die Linux-Werte und gehen
+        // deshalb als sichtbarer Befehl (führendes Leerzeichen) vor den Startbefehl – geheime nie, die fehlen mit Hinweis.
+        let mut wsl_live: Vec<crate::session_env::Op> = Vec::new();
+        if wsl {
+            let (set, rest): (Vec<_>, Vec<_>) = user_ops.into_iter().partition(|o| matches!(o.kind, crate::session_env::OpKind::Set(_)));
+            user_ops = set;
+            let (secret, normal): (Vec<_>, Vec<_>) = rest.into_iter().partition(|o| o.secret);
+            wsl_live = normal;
+            if !secret.is_empty() {
+                let names: Vec<String> = secret.iter().map(|o| o.name.clone()).collect();
+                self.spawn_notes.borrow_mut().push(format!(
+                    "{} ({}): {}",
+                    state::t("Geheime Variablen zum Voranstellen/Anhängen/Entfernen gehen in WSL nicht, weggelassen", "Secret variables to prepend/append/remove do not work in WSL, left out"),
+                    entry.display_name(),
+                    names.join(", ")
+                ));
+            }
+        }
+        // Ein WSLENV des Nutzers wird zusammengeführt (Paneldecks Einträge kommen dazu), nicht ersetzt.
+        let user_wslenv = user_ops.iter().rev().find(|o| o.name.eq_ignore_ascii_case("WSLENV")).and_then(|o| match &o.kind {
+            crate::session_env::OpKind::Set(v) => Some(v.clone()),
+            _ => None,
+        });
         if let Some(h) = &self.hook_server {
             env.push((hooks::ENV_PORT.to_string(), h.port.to_string()));
             env.push((hooks::ENV_TOKEN.to_string(), h.token.clone()));
@@ -2163,7 +2221,8 @@ impl App {
             env.push((crate::paths::ENV_HUB_BASE.to_string(), crate::paths::get().base.display().to_string()));
         }
         if wsl {
-            // Variablen an WSL durchreichen (und zurück an die Windows-.exe beim Hook-Aufruf); dazu die Profilvariablen.
+            // Variablen an WSL durchreichen (und zurück an die Windows-.exe beim Hook-Aufruf); dazu die Variablen von
+            // Profil und Sitzung (je mit `/p` bzw. `/l`, wenn „Pfad umrechnen“ gewählt ist).
             // Dazu Name/Version des Terminals (`terminal::term_env`), wie Windows Terminal es mit WT_SESSION macht.
             let mut names = vec![
                 hooks::ENV_SESSION.to_string(),
@@ -2178,17 +2237,26 @@ impl App {
                 }
             }
             let ours = names.join(":");
-            let wslenv = match std::env::var("WSLENV") {
-                Ok(v) if !v.is_empty() => format!("{v}:{ours}"),
-                _ => ours,
-            };
+            let base = user_wslenv.clone().or_else(|| std::env::var("WSLENV").ok()).unwrap_or_default();
+            let mut wslenv = if base.is_empty() { ours } else { format!("{base}:{ours}") };
+            for op in user_ops.iter().filter(|o| !o.name.eq_ignore_ascii_case("WSLENV")) {
+                wslenv = wslenv_with(&wslenv, &op.name, crate::session_env::wslenv_flag(op));
+            }
             env.push(("WSLENV".to_string(), wslenv));
         }
         entry.shell_eff = shell.id.clone();
         entry.status = ClaudeStatus::Unknown;
         if self.settings.shell_integration {
-            // zsh/fish (#57): Hilfsdateien im Datenordner; ein ZDOTDIR aus dem Profil bleibt das des Nutzers.
-            let plan = shells::integration(&shell, &self.dir, &crate::shellinit::EnvCtx { env: &env, inherit: self.settings.inherit_env });
+            // zsh/fish (#57): Hilfsdateien im Datenordner; ein ZDOTDIR aus Profil oder Sitzung bleibt das des Nutzers.
+            let mut known: Vec<(String, String)> = user_ops
+                .iter()
+                .filter_map(|o| match &o.kind {
+                    crate::session_env::OpKind::Set(v) => Some((o.name.clone(), v.clone())),
+                    _ => None,
+                })
+                .collect();
+            known.extend(env.iter().cloned());
+            let plan = shells::integration(&shell, &self.dir, &crate::shellinit::EnvCtx { env: &known, inherit: self.settings.inherit_env });
             entry.shell_flavor = plan.flavor;
             shell.args.extend(plan.args);
             for (k, v) in plan.env {
@@ -2205,6 +2273,37 @@ impl App {
         } else {
             entry.shell_flavor = None;
         }
+        // Voranstellen/Anhängen/Entfernen in WSL (#384 Review): in der Syntax der erkannten Login-Shell (fish eigene);
+        // ohne erkannte Shell oder für nicht wörtlich setzbare Schritte nicht – mit Hinweis, nie still.
+        if !wsl_live.is_empty() {
+            let lang = self.settings.language;
+            let mut left: Vec<String> = Vec::new();
+            match entry.shell_flavor.map(crate::session_env::LiveShell::of) {
+                None => left.extend(wsl_live.iter().map(|o| o.name.clone())),
+                Some(sh) => {
+                    for o in &wsl_live {
+                        if let Some(i) = crate::session_env::live_issue(sh, true, o) {
+                            left.push(format!("{} ({})", o.name, i.text(lang)));
+                        }
+                    }
+                    if let Some(cmd) = crate::session_env::live_command(sh, true, &wsl_live) {
+                        initial = Some(format!("{cmd}\r{}", initial.unwrap_or_default()));
+                    }
+                }
+            }
+            if !left.is_empty() {
+                self.spawn_notes.borrow_mut().push(format!(
+                    "{} ({}): {}",
+                    lang.t(
+                        "Voranstellen/Anhängen/Entfernen in WSL braucht eine erkannte Shell (Shell-Integration) und wörtlich setzbare Werte – weggelassen",
+                        "Prepend/append/remove in WSL needs a detected shell (shell integration) and values that can be set literally – left out",
+                    ),
+                    entry.display_name(),
+                    left.join(", ")
+                ));
+            }
+        }
+        entry.track.launch_lines = claude_status::launch_lines(initial.as_deref());
         match Session::spawn(
             ctx,
             SpawnOptions {
@@ -2214,6 +2313,7 @@ impl App {
                 initial_input: initial.as_deref(),
                 scrollback_lines: self.settings.scrollback_lines,
                 env,
+                user_env: user_ops,
                 // Farb- und Größenabfragen ab dem ersten Byte richtig beantworten (#183), auch ungezeichnet.
                 view: Some(self.reply_view_for(ctx, entry.meta.profile)),
                 inherit_env: self.settings.inherit_env,
@@ -2280,6 +2380,8 @@ impl App {
             transcript: o.transcript.clone(),
             group: o.group.as_deref().map(state::clean_folder_path).unwrap_or_default(),
             window,
+            // Chats bekommen keine Umgebungsvariablen (#384).
+            env: if chat_meta.is_some() { Vec::new() } else { crate::session_env::clean(o.env.clone()) },
             ..SessionMeta::default()
         };
         meta.set_resume_mode(o.resume_mode.unwrap_or_default());
@@ -2520,6 +2622,8 @@ impl App {
             project,
             profile: self.entries[&target].meta.profile,
             window,
+            // Teilen kopiert die Umgebungsvariablen (#384); danach sind sie unabhängig.
+            env: self.entries[&target].meta.env.clone(),
             ..SessionMeta::default()
         };
         let mut entry = Entry::new(meta);
@@ -4152,9 +4256,16 @@ impl App {
                     if !e.meta.custom_name {
                         it.name = String::new();
                     }
+                    // Geheime Werte (#384) kommen nur nach Rückfrage in die Vorlage (Haken im Reiter „Umgebung“).
+                    let secrets = e.meta.env.iter().any(|v| v.secret && v.value_protected.is_some());
+                    it.env = e.meta.env.clone();
                     let base = templates::unique_name(&name, &self.templates);
                     self.want_focus = None;
-                    self.tpl.form = Some(tpl_lib::TplForm::of(None, &Template::terminal(&base, it)));
+                    let mut f = tpl_lib::TplForm::of(None, &Template::terminal(&base, it));
+                    if secrets {
+                        f.env.keep_secrets = Some(false);
+                    }
+                    self.tpl.form = Some(f);
                 }
             }
             Action::ToggleTree => {
@@ -4288,6 +4399,25 @@ impl App {
                     self.entries.insert(id, e);
                 }
             }
+            Action::EnvCopy(id) => self.env_copy(id),
+            Action::EnvPaste(id) => self.env_paste(id),
+            Action::EnvCopyDotenv(id) => self.env_copy_dotenv(ctx, id),
+            Action::EnvUnlock(id) => {
+                // Gesperrte geheime Variablen (#384): erneut starten – unter Linux/macOS fragt das Fenster dabei nach dem
+                // Master-Passwort; lassen sich die Werte nicht entschlüsseln, die Einstellungen der Sitzung öffnen.
+                let reentry = self.entries.get(&id).and_then(|e| e.env_locked.as_ref()).is_some_and(|l| l.needs_reentry());
+                if reentry {
+                    self.apply(ctx, Action::EnvEdit(id));
+                } else if self.entries.get(&id).is_some_and(|e| e.live.is_none()) {
+                    self.apply(ctx, Action::Restart(id));
+                }
+            }
+            Action::EnvEdit(id) => {
+                self.open_session_settings(id);
+                if let Some(f) = self.session_settings.as_mut() {
+                    f.start_tab = Some(opts_tabs::Tab::Environment);
+                }
+            }
             Action::Duplicate(id) => {
                 if let Some(src) = self.entries.get(&id) {
                     if src.is_chat() {
@@ -4321,6 +4451,8 @@ impl App {
                         profile: Some(src.meta.profile),
                         window: Some(src.meta.window),
                         project: Some(src.meta.project),
+                        // Duplizieren kopiert die Umgebungsvariablen (#384), danach unabhängig.
+                        env: src.meta.env.clone(),
                         ..NewOpts::default()
                     };
                     let new = self.new_session(ctx, o);
@@ -4930,6 +5062,13 @@ fn show_pane(ui: &mut Ui, id: u64, rect: Rect, cx: &mut PaneCx) {
     if let Some(g) = cx.git.get(id).filter(|_| !entry.is_chat()) {
         infos.push(git_line(&g));
     }
+    // Umgebungsvariablen (#384): `$ n`, Tooltip mit den Namen, oranger Punkt bis zum Neustart.
+    if !entry.is_chat() && x - name_end > 40.0 {
+        let w = env_ui::header_badge(ui, id, &entry.meta.env, entry.env_pending, Pos2::new(x, cy), lang);
+        if w > 0.0 {
+            x -= w + 10.0;
+        }
+    }
     for text in infos {
         let g = ui.painter().layout_no_wrap(text, FontId::proportional(11.5), weak);
         let w = g.size().x;
@@ -5090,6 +5229,20 @@ fn show_pane(ui: &mut Ui, id: u64, rect: Rect, cx: &mut PaneCx) {
                         }
                         if ui.button(lang.t("Ohne Auswahl neu starten", "Start new without choosing")).clicked() {
                             cx.actions.push(Action::ConvPickFresh(id));
+                        }
+                    });
+                    return;
+                }
+                if let Some(l) = &entry.env_locked {
+                    // Geheime Variablen gesperrt (#384): kein Fehler, die Sitzung wartet wie eine Administrator-Sitzung.
+                    ui.label(RichText::new(&msg).color(crate::style::ui().warning));
+                    ui.horizontal(|ui| {
+                        if l.needs_reentry() {
+                            if ui.button(lang.t("Variablen bearbeiten …", "Edit variables …")).clicked() {
+                                cx.actions.push(Action::EnvEdit(id));
+                            }
+                        } else if ui.button(lang.t("Entsperren und starten", "Unlock and start")).clicked() {
+                            cx.actions.push(Action::EnvUnlock(id));
                         }
                     });
                     return;
@@ -5355,6 +5508,10 @@ fn shell_is_wsl(spec: Option<&ShellSpec>, shell_id: &str) -> bool {
 /// `WSLENV` mit `name` (und Kennzeichen wie `/p`) am Ende; ein früherer Eintrag desselben Namens fällt weg (sonst gälte
 /// womöglich der ohne `/p`, etwa ein `ZDOTDIR` aus dem Profil).
 fn wslenv_with(wslenv: &str, name: &str, flag: &str) -> String {
+    // Ein Name mit `:`, `/` oder `=` zerlegte WSLENV (z. B. `X:PATH/l`): nie eintragen (#384 Review).
+    if name.is_empty() || name.contains([':', '/', '=']) || name.chars().any(|c| c.is_control() || c.is_whitespace()) {
+        return wslenv.to_string();
+    }
     let mut parts: Vec<&str> = wslenv.split(':').filter(|p| !p.is_empty() && p.split('/').next() != Some(name)).collect();
     let add = format!("{name}{flag}");
     parts.push(&add);

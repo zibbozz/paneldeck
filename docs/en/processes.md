@@ -56,7 +56,7 @@ The *Processes* section sits in the Terminals sidebar above the templates (in th
 | Group, Order | Entries with the same group start and stop together: in ascending *Order* when starting (e.g. backend 1, frontend 2), in reverse when stopping. *Order* is only the order of starting: the next entry starts as soon as the previous one has been started – Paneldeck does not wait until it is ready (e.g. listening on its port). |
 | Start automatically | *Never (only by hand)* (default), *With Paneldeck* or *When the project is opened* (also at start when it is the open project; once per run). |
 | Log file | Also write the output to `process-logs/<id>-<name>.log` in the data folder (off by default). Each line gets a time stamp; at 5 MB the file is rotated (`.1` … `.3`). |
-| Environment variables | Name and value. Values are stored **encrypted** (Windows DPAPI, readable only by the same Windows user on the same computer) and never shown to agents or written to logs. When editing, an empty value keeps the stored one. |
+| Environment variables | Name and value. Values are stored **encrypted** (Windows DPAPI, readable only by the same Windows user on the same computer) and never shown to agents or written to logs. When editing, an empty value keeps the stored one. With a WSL shell they reach the Linux process through `WSLENV` (since 3.2.0). |
 
 Changes to a running entry apply from its next start. An entry can only be deleted when it is not running.
 

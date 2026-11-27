@@ -103,6 +103,18 @@ An agent always has only the options of the mode that is currently set (switch *
 
 **Agents cannot trigger updates** of Paneldeck.
 
+## Environment variables
+Sessions can have their [own environment variables](terminals.md#environment-variables). Agents **only see names and flags, never values:** `list_sessions` and `whoami` (and the answer of `create_session`) have a field `env` – a list of `{"name": "API_URL", "secret": false, "set_by_agent": false}`, plus `"remove": true` or `"mode": "prepend"`/`"append"` where set.
+
+Agents may **set** variables only when you allow it: *Settings → Agents → Agents may set environment variables* (off by default, level *Control*). Then `create_session` takes `env`, an object such as `{"APP_MODE": "dev", "API_URL": "http://localhost:3000"}` – only for the session the agent creates in that call, never for existing or foreign sessions and never live in a running terminal. Rules:
+- at most 20 variables, values at most 1 KB without control characters, used literally;
+- never secret: names that look like secrets (`TOKEN`, `KEY`, `SECRET`, `PASS`, `PWD`, `AUTH`) are refused;
+- names only from ASCII letters, digits and `_` (not starting with a digit);
+- a fixed block list always applies (including whole families such as `BASH_*`, `NODE_*`, `PYTHON*`, `BUN_*`, `JAVA_*`, `GRADLE_*`, `MAVEN_*`, `*_OPTS`, `SSH_*`, `GIT_*`, and `HOMEDRIVE`, `HOMEPATH`, `HOMESHARE`, `KUBECONFIG`, `AWS_CONFIG_FILE`, `AWS_SHARED_CREDENTIALS_FILE`, `DOCKER_HOST`, `DOCKER_CONFIG`, `GCONV_PATH`): paths (`PATH`, `PATHEXT` …), shell startup and prompt (`BASH_ENV`, `ENV`, `PROMPT_COMMAND`, `PS0`–`PS4`, `ZDOTDIR` …), loaders and runtimes (`LD_*`, `DYLD_*`, `NODE_OPTIONS`, `PYTHONPATH`, `JAVA_TOOL_OPTIONS`, `CARGO_*` …), programs other tools start (`EDITOR`, `PAGER`, `GIT_*` …), proxies and certificates, user and system folders, `ANTHROPIC_*`, `CLAUDE_*` and `PANELDECK_*`;
+- optionally your own **allowed names** (patterns such as `APP_*`, `*_URL`; empty = everything except the block list).
+
+Violations return `bad_args` (the message names the variable, never its value); `env` while the switch is off returns `forbidden`, `env` with `kind: "chat"` `bad_args`. Variables of a [template](#claude-start-options) that an agent could never set **and all secret variables of the template** (their values would be readable in the agent's session) are left out and listed as `env:NAME` in `template_ignored`; the agent's own variables override the template's. The call log (`mcp-log.jsonl`) contains only the names. Variables set by an agent are marked `set_by_agent` (and in `state.json` `by_agent`).
+
 ## Chats
 [Chats with local models](chat.md) are sessions too, and agents can use them:
 
