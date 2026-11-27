@@ -111,7 +111,7 @@ impl H {
         loop {
             self.frame(vec![]);
             let tab = self.doc().tab_width().max(1);
-            if !self.view.hscroll.measuring() && self.view.hscroll.is_current(self.doc(), tab) {
+            if !self.d.width.measuring() && self.d.width.is_current(self.doc(), tab) {
                 break;
             }
             assert!(start.elapsed() < Duration::from_secs(20), "Messung im Hintergrund wird fertig");
@@ -337,24 +337,24 @@ fn large_documents_are_measured_once_per_revision_in_the_background() {
     h.frames(1);
     assert!(near(h.view.scroll_x, max), "Grenze nach der Messung: {} statt {max}", h.view.scroll_x);
     // Ohne Änderung wird nicht neu gemessen, egal wie viele Bilder
-    let scans = h.view.hscroll.scans;
+    let scans = h.d.width.scans;
     let t = Instant::now();
     for _ in 0..30 {
         h.frame(vec![]);
     }
-    assert_eq!(h.view.hscroll.scans, scans, "kein Durchlauf je Bild");
+    assert_eq!(h.d.width.scans, scans, "kein Durchlauf je Bild");
     assert!(t.elapsed() < Duration::from_secs(5), "Bilder bleiben schnell: {:?}", t.elapsed());
-    assert!(!h.view.hscroll.measuring());
+    assert!(!h.d.width.measuring());
     // Änderung: ein neuer Durchlauf im Hintergrund, danach wieder Ruhe
     h.view.scroll_x = 0.0;
     let rev = h.doc().revision();
     h.frame(vec![Event::Text("q".into())]);
     assert!(h.doc().revision() > rev, "getippt");
     h.settle();
-    assert!(h.view.hscroll.scans > scans, "neuer Stand wird gemessen");
-    let scans = h.view.hscroll.scans;
+    assert!(h.d.width.scans > scans, "neuer Stand wird gemessen");
+    let scans = h.d.width.scans;
     h.frames(10);
-    assert_eq!(h.view.hscroll.scans, scans);
+    assert_eq!(h.d.width.scans, scans);
 }
 
 #[test]
@@ -376,21 +376,27 @@ fn a_single_huge_line_scrolls_to_its_end_without_slow_frames() {
 
 // ---- im ganzen Editor: jede Teilung ----
 
-fn editor_frame(ctx: &egui::Context, ed: &mut EditorUi, t: &mut f64) {
+fn editor_frame(ctx: &egui::Context, ed: &mut EditorUi, t: &mut f64) -> Duration {
     *t += 0.05;
     let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1400.0, 900.0))), time: Some(*t), ..Default::default() };
     let mut cmds = Vec::new();
     let th = crate::theme::all()[0].clone();
     let prefs = EditorPrefs::default();
-    let _ = ctx.run(input, |ctx| view::draw(ctx, ed, &th, &prefs, crate::state::Lang::En, &mut cmds));
+    let out = ctx.run(input, |ctx| view::draw(ctx, ed, &th, &prefs, crate::state::Lang::En, &mut cmds));
+    out.viewport_output.get(&egui::ViewportId::ROOT).map(|v| v.repaint_delay).unwrap_or(Duration::MAX)
+}
+
+fn test_dir(name: &str) -> std::path::PathBuf {
+    let base = std::env::var("PANELDECK_TEST_ROOT").map(std::path::PathBuf::from).unwrap_or_else(|_| std::env::temp_dir());
+    let dir = base.join(format!("pd-edui-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
 }
 
 #[test]
 fn every_split_gets_its_own_bar_and_the_find_bar_and_minimap_stay_intact() {
-    let base = std::env::var("PANELDECK_TEST_ROOT").map(std::path::PathBuf::from).unwrap_or_else(|_| std::env::temp_dir());
-    let dir = base.join(format!("pd-edui-hscroll-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = test_dir("hscroll");
     let p = dir.join("wide.txt");
     std::fs::write(&p, long_doc(900, 30)).unwrap();
     let ctx = egui::Context::default();
@@ -425,4 +431,89 @@ fn every_split_gets_its_own_bar_and_the_find_bar_and_minimap_stay_intact() {
     }
     assert!(ed.panes.groups.values().all(|grp| grp.tabs[grp.active].view.hscroll.last_bar.is_none()), "Umbruch: keine Leiste");
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn splitting_during_a_background_measurement_settles_both_views_without_endless_repaints() {
+    let dir = test_dir("hscroll-split");
+    let p = dir.join("big.txt");
+    let text = long_doc(2500, 100_000);
+    assert!(text.len() > hscroll::SYNC_BYTES && (text.len() as u64) < super::doc::BACKGROUND_BYTES);
+    std::fs::write(&p, &text).unwrap();
+    let ctx = egui::Context::default();
+    let mut t = 0.0;
+    let mut ed = EditorUi::default();
+    ed.set_root(&dir);
+    ed.open_path(&p, false);
+    editor_frame(&ctx, &mut ed, &mut t);
+    let id = ed.active_doc().unwrap();
+    // Die erste Messung läuft (oder ist gerade fertig) – jetzt teilen: die neue Ansicht ist ein Klon der alten.
+    let g = ed.panes.focused;
+    ed.panes.split(g, Dir::Horizontal).unwrap();
+    let start = Instant::now();
+    let mut delay = Duration::ZERO;
+    for _ in 0..2000 {
+        delay = editor_frame(&ctx, &mut ed, &mut t);
+        let d = &ed.docs[&id];
+        let ready = !d.width.measuring() && d.width.is_current(d.doc.as_ref().unwrap(), d.doc.as_ref().unwrap().tab_width());
+        if ready && ed.panes.groups.values().all(|grp| grp.tabs[grp.active].view.hscroll.last_bar.is_some()) {
+            break;
+        }
+        assert!(start.elapsed() < Duration::from_secs(20), "beide Ansichten bekommen die Messung");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(ed.panes.groups.len(), 2);
+    for grp in ed.panes.groups.values() {
+        assert!(grp.tabs[grp.active].view.hscroll.last_bar.is_some(), "jede Teilung zeigt ihre Leiste");
+    }
+    // Eine Messung für das Dokument, keine für jede Ansicht
+    assert_eq!(ed.docs[&id].width.scans, 1, "einmal gemessen, für beide Teilungen");
+    // Danach kein Nachsehen alle 30 ms mehr
+    for _ in 0..3 {
+        delay = editor_frame(&ctx, &mut ed, &mut t);
+    }
+    assert!(delay > Duration::from_millis(100), "keine Dauer-Neuzeichnung: {delay:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn every_cursor_line_counts_while_the_background_measurement_is_pending() {
+    // Breite der Zeilen unter allen Cursorn, nicht nur unter dem Hauptcursor
+    let doc = Document::from_text(&format!("abcde\n{}\n\t\t1234\n{}", "y".repeat(40), "z".repeat(90)));
+    let mut sels = doc.new_selections(doc.line_to_char(0) + 2);
+    sels.push(crate::editor::Selection::cursor(doc.line_to_char(1) + 3));
+    sels.push(crate::editor::Selection::cursor(doc.line_to_char(2)));
+    assert_eq!(sels.len(), 3);
+    let mut hs = hscroll::HScroll::default();
+    assert_eq!(hs.head_cols(&doc, &sels, 4), 40, "breiteste Zeile unter einem Cursor (nicht die 90er ohne Cursor)");
+    assert_eq!(hs.head_cols(&doc, &sels, 32), 2 * 32 + 4, "neu gerechnet für eine andere Tabbreite (Tabs jetzt breiter)");
+    // Großes Dokument (Messung im Hintergrund), zwei Cursor am Ende kurzer Zeilen, viel einfügen: im selben Bild
+    // gilt schon die neue Breite, der Hauptcursor bleibt sichtbar und nichts springt nach links zurück.
+    let mut h = H::new(&long_doc(20, 100_000));
+    h.settle();
+    let doc = h.doc();
+    let (a, b) = (doc.line_to_char(10) + doc.line_len(10), doc.line_to_char(20) + doc.line_len(20));
+    let mut sels = doc.new_selections(a);
+    sels.push(crate::editor::Selection::cursor(b));
+    h.view.sels = Some(sels);
+    h.frames(1);
+    assert!(h.bar().is_none(), "vorher passt alles");
+    h.frame(vec![Event::Paste("w".repeat(700))]);
+    assert!(h.doc().line_len(10) > 700 && h.doc().line_len(20) > 700, "an beiden Cursorn eingefügt");
+    let (cw, _) = h.metrics();
+    let head = h.view.sels.as_ref().unwrap().primary().head;
+    let lc = et::pos_to_linecol(h.doc().rope(), head);
+    assert!(lc.col > 700);
+    // Im Bild des Einfügens (die Messung des Dokuments kennt den neuen Stand noch nicht): gerollt bis zum Cursor
+    let want = lc.col as f32 * cw;
+    assert!(h.view.scroll_x > want - 800.0, "nicht nach links zurückgesprungen: {}", h.view.scroll_x);
+    h.frames(1);
+    let bar = h.bar().expect("Leiste");
+    let text_left = bar.left() + 6.0;
+    let x = text_left + want - h.view.scroll_x;
+    assert!(x > text_left && x < text_left + h.text_w(), "Hauptcursor sichtbar: x {x}");
+    h.settle();
+    h.view.scroll_x = 1.0e7;
+    h.frames(1);
+    assert!(near(h.view.scroll_x, h.max_for(h.doc().line_len(10).max(h.doc().line_len(20)))), "nach der Messung: längste Zeile");
 }

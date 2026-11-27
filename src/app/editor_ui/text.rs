@@ -321,7 +321,7 @@ pub(super) fn show(ui: &mut Ui, rect: Rect, d: &mut DocEntry, view: &mut View, c
     let gutter = Rect::from_min_max(rect.min, Pos2::new(rect.left() + gutter_w, rect.bottom()));
     let mut text = Rect::from_min_max(Pos2::new(gutter.right() + 6.0, rect.top() + 2.0), Pos2::new(text_right.max(gutter.right() + 20.0), rect.bottom()));
     let wrap_cols = (cx.wrap && !large).then(|| ((text.width() / cw).floor() as usize).max(8));
-    let mut hbar = hbar_prepare(ui, doc, view, wrap_cols.is_none(), tab, cw, &mut text, gutter.right(), minimap.map(|m| m.left()).unwrap_or(scrollbar.left()), rect.bottom());
+    let mut hbar = hbar_prepare(ui, doc, &mut d.width, view, wrap_cols.is_none(), tab, cw, &mut text, gutter.right(), minimap.map(|m| m.left()).unwrap_or(scrollbar.left()), rect.bottom());
     let geo = Geo { text, gutter, scrollbar, row_h, cw, wrap_cols, tab };
 
     // ---- Eingaben ----
@@ -1301,22 +1301,25 @@ fn ime_output(ui: &Ui, rect: Rect, doc: &Document, view: &View, g: &Geo, rows: &
 
 /// Ohne Umbruch: längste Zeile messen und, wenn sie nicht passt, die Leiste unter den Text legen (`text` wird kürzer).
 #[allow(clippy::too_many_arguments)]
-fn hbar_prepare(ui: &Ui, doc: &Document, view: &mut View, no_wrap: bool, tab: usize, cw: f32, text: &mut Rect, left: f32, right: f32, bottom: f32) -> Option<super::hscroll::Layout> {
+fn hbar_prepare(ui: &Ui, doc: &Document, width: &mut super::hscroll::DocWidth, view: &mut View, no_wrap: bool, tab: usize, cw: f32, text: &mut Rect, left: f32, right: f32, bottom: f32) -> Option<super::hscroll::Layout> {
     if !no_wrap {
         view.hscroll.last_bar = None;
         return None;
     }
-    // Die Zeile des Cursors zählt sofort (Tippen am Ende der längsten Zeile, während im Hintergrund gemessen wird).
-    let cur = view.sels.as_ref().map(|s| super::hscroll::line_cols(doc.line(doc.char_to_line(s.primary().head)), tab)).unwrap_or(0);
-    Some(super::hscroll::prepare(&mut view.hscroll, ui.ctx(), doc, tab, cw, cur, text, left, right, bottom))
+    // Die Zeilen der Cursor zählen sofort (Tippen am Ende der längsten Zeile, während im Hintergrund gemessen wird).
+    let cur = match &view.sels {
+        Some(s) => view.hscroll.head_cols(doc, s, tab),
+        None => 0,
+    };
+    Some(super::hscroll::prepare(width, &mut view.hscroll, ui.ctx(), doc, tab, cw, cur, text, left, right, bottom))
 }
 
-/// Waagerechten Bildlauf auf die längste Zeile begrenzen (ohne Umbruch). Die Zeile des Cursors zählt nach Eingaben
-/// in diesem Bild schon mit (Einfügen am Ende der längsten Zeile: der Cursor bleibt sichtbar).
+/// Waagerechten Bildlauf auf die längste Zeile begrenzen (ohne Umbruch). Die Zeilen der Cursor zählen nach Eingaben
+/// in diesem Bild schon mit (Einfügen am Ende der längsten Zeile, auch mit mehreren Cursorn: sie bleiben sichtbar).
 fn hbar_clamp(doc: &Document, view: &mut View, tab: usize, h: Option<&mut super::hscroll::Layout>) {
     let Some(h) = h else { return };
     if let Some(s) = &view.sels {
-        h.include(super::hscroll::line_cols(doc.line(doc.char_to_line(s.primary().head)), tab));
+        h.include(view.hscroll.head_cols(doc, s, tab));
     }
     view.scroll_x = view.scroll_x.clamp(0.0, h.max);
 }

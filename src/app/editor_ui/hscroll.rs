@@ -4,7 +4,8 @@
 //!
 //! Die Breite der längsten Zeile wird je Stand des Dokuments (Revision, Tabbreite) einmal gemessen – kleine Dokumente
 //! sofort, größere (ab [`SYNC_BYTES`], also auch der Modus für große Dateien) in einem Hilfsthread auf einem Klon des
-//! Ropes; bis das Ergebnis da ist, gilt der letzte Stand. Gemessen wird wie gezeichnet: Tabs bis zum nächsten Tabstopp,
+//! Ropes; bis das Ergebnis da ist, gilt der letzte Stand. Die Messung liegt am Dokument ([`DocWidth`] in `DocEntry`), alle
+//! Teilungen mit derselben Datei teilen sie; je Ansicht bleibt nur der Zustand der Leiste ([`HScroll`]). Gemessen wird wie gezeichnet: Tabs bis zum nächsten Tabstopp,
 //! breite Zeichen (Ostasiatisch, Emoji) doppelt, sehr lange Zeilen ([`super::text::LONG_LINE`]) ein Zeichen = eine Spalte.
 //!
 //! Nur Pixel und Spalten, kein Dokument-Zustand: [`bar`] ist auch für andere Textansichten gedacht (z. B. den Vergleich).
@@ -47,30 +48,25 @@ impl Key {
     }
 }
 
-#[derive(Clone, Debug)]
 struct Job {
     key: Key,
     slot: Arc<Mutex<Option<usize>>>,
 }
 
-/// Zustand der Leiste in einer Ansicht: gemessene Breite, laufende Messung, Ziehen des Griffs.
-#[derive(Clone, Debug, Default)]
-pub(crate) struct HScroll {
-    /// Breite der längsten Zeile (visuelle Spalten) und der Stand, zu dem sie gehört.
+/// Breite der längsten Zeile eines Dokuments (liegt am Dokument, alle Ansichten teilen sich Messung und Ergebnis).
+#[derive(Default)]
+pub(crate) struct DocWidth {
+    /// Breite (visuelle Spalten) und der Stand, zu dem sie gehört.
     cols: usize,
     measured: Option<Key>,
     job: Option<Job>,
     job_started: Option<Instant>,
-    /// Versatz des Zeigers im Griff beim Ziehen.
-    pub(super) drag: Option<f32>,
-    /// Fläche der Leiste im letzten Bild (`None` = ausgeblendet).
-    pub(super) last_bar: Option<Rect>,
     /// Zahl der Messungen (sofort oder im Hintergrund gestartet).
     #[cfg(test)]
     pub(super) scans: usize,
 }
 
-impl HScroll {
+impl DocWidth {
     /// Breite der längsten Zeile in Spalten: gemessen für den aktuellen Stand, sonst (solange im Hintergrund gemessen
     /// wird) der letzte Stand. Durchläuft das Dokument höchstens einmal je Stand.
     pub(super) fn longest_cols(&mut self, doc: &Document, tab: usize, ctx: &egui::Context) -> usize {
@@ -149,6 +145,42 @@ impl HScroll {
     #[cfg(test)]
     pub(super) fn measuring(&self) -> bool {
         self.job.is_some()
+    }
+}
+
+/// Zustand der Leiste in einer Ansicht: Ziehen des Griffs, Fläche im letzten Bild, Breite der Zeilen unter den Cursorn.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct HScroll {
+    /// Versatz des Zeigers im Griff beim Ziehen.
+    pub(super) drag: Option<f32>,
+    /// Fläche der Leiste im letzten Bild (`None` = ausgeblendet).
+    pub(super) last_bar: Option<Rect>,
+    /// Breitste Zeile unter den Cursorn und der Stand dazu (Revision, Tabbreite, Zahl und Summe der Cursor).
+    heads: Option<((u64, usize, usize, usize), usize)>,
+}
+
+impl HScroll {
+    /// Breite der breitesten Zeile, in der ein Cursor steht (sie zählt sicher, auch während die Messung des ganzen
+    /// Dokuments im Hintergrund läuft: Tippen/Einfügen mit einem oder mehreren Cursorn). Je Stand einmal gerechnet.
+    pub(super) fn head_cols(&mut self, doc: &Document, sels: &crate::editor::Selections, tab: usize) -> usize {
+        let key = (doc.revision(), tab, sels.len(), sels.iter().fold(0usize, |a, s| a.wrapping_add(s.head)));
+        if let Some((k, cols)) = self.heads
+            && k == key
+        {
+            return cols;
+        }
+        let mut cols = 0;
+        let mut last = None;
+        for s in sels.iter() {
+            let line = doc.char_to_line(s.head);
+            if last == Some(line) {
+                continue;
+            }
+            last = Some(line);
+            cols = cols.max(line_cols(doc.line(line), tab));
+        }
+        self.heads = Some((key, cols));
+        cols
     }
 }
 
@@ -268,10 +300,10 @@ impl Layout {
 
 /// Vor den Eingaben eines Bildes: längste Zeile messen (bzw. den letzten Stand nehmen), bei Bedarf die Leiste unter den
 /// Text legen (`text` wird um ihre Höhe kürzer) und den größten Bildlauf liefern. `extra_cols`: Breite einer Zeile, die
-/// sicher zählt, auch während die Messung im Hintergrund noch läuft (Zeile des Cursors).
+/// sicher zählt, auch während die Messung im Hintergrund noch läuft (Zeilen der Cursor).
 #[allow(clippy::too_many_arguments)]
-pub(super) fn prepare(hs: &mut HScroll, ctx: &egui::Context, doc: &Document, tab: usize, cw: f32, extra_cols: usize, text: &mut Rect, left: f32, right: f32, bottom: f32) -> Layout {
-    let cols = hs.longest_cols(doc, tab, ctx).max(extra_cols);
+pub(super) fn prepare(width: &mut DocWidth, hs: &mut HScroll, ctx: &egui::Context, doc: &Document, tab: usize, cw: f32, extra_cols: usize, text: &mut Rect, left: f32, right: f32, bottom: f32) -> Layout {
+    let cols = width.longest_cols(doc, tab, ctx).max(extra_cols);
     let content = content_width(cols, cw);
     let area = layout(text, left, right, bottom, content);
     hs.last_bar = area;
