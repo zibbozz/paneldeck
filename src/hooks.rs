@@ -72,6 +72,11 @@ pub struct HookMsg {
     pub trigger: Option<String>,
     /// `reason` bei SessionEnd (`clear`, `resume`, `logout`, `prompt_input_exit`, `other`).
     pub reason: Option<String>,
+    /// Kennung des Werkzeugaufrufs (`tool_use_id`) bei PreToolUse/PostToolUse (fehlt bei älteren Claude-Versionen).
+    pub tool_use_id: Option<String>,
+    /// Kurzfassung der Werkzeug-Eingabe bei PreToolUse (#390, [`tool_detail`]): Befehl, Pfad, Adresse … – fremder
+    /// Text, nur für die Freigabe-Karte, nie gespeichert.
+    pub tool_detail: Option<String>,
 }
 
 /// Meldet SessionEnd, dass Claude wirklich beendet ist? Bei `/clear` und `/resume` endet nur die Konversation –
@@ -322,6 +327,132 @@ pub fn permission_tool(message: &str) -> Option<&str> {
     let rest = message.trim().strip_prefix("Claude needs your permission to use ")?;
     let tool = rest.trim().trim_end_matches('.');
     (!tool.is_empty()).then_some(tool)
+}
+
+/// Höchstlänge (Zeichen) der Kurzfassung einer Werkzeug-Eingabe: genug für die Karte (2–3 Zeilen) und den Tooltip.
+pub const DETAIL_MAX: usize = 2000;
+/// So viele offene Werkzeugaufrufe merkt sich [`ToolLog`] höchstens (die ältesten fallen heraus).
+const TOOL_LOG_MAX: usize = 16;
+
+/// Fremden Text für die Anzeige entschärfen (#390): Zeilenumbrüche bleiben, Tabulatoren werden Leerzeichen, andere
+/// Steuerzeichen sowie unsichtbare und Richtungszeichen (die Text anders aussehen lassen können, als er ist) werden
+/// zu `�`; höchstens `max` Zeichen, dann `…`. Leerraum am Anfang und Ende fällt weg.
+pub fn untrusted_text(s: &str, max: usize) -> String {
+    let mut out = String::new();
+    for (n, ch) in s.trim().chars().filter(|c| *c != '\r').enumerate() {
+        if n == max {
+            out.push('…');
+            break;
+        }
+        out.push(match ch {
+            '\n' => '\n',
+            '\t' => ' ',
+            '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2060}'..='\u{2069}' | '\u{FEFF}' => '\u{FFFD}',
+            c if c.is_control() => '\u{FFFD}',
+            c => c,
+        });
+    }
+    out
+}
+
+/// Kurzfassung einer Werkzeug-Eingabe (`tool_input` von Claude Code, Argumente eines Chat-Werkzeugs) für die
+/// Freigabe-Karte (#390): der Befehl (`command`), sonst der Pfad, die Adresse, die Suche … – ohne diese Felder die
+/// Eingabe als kompaktes JSON. Entschärft und gekürzt ([`untrusted_text`], [`DETAIL_MAX`]); `None` ohne Inhalt.
+pub fn tool_detail(input: &Value) -> Option<String> {
+    let obj = input.as_object()?;
+    let get = |k: &str| obj.get(k).and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty());
+    const KEYS: [&str; 10] = ["command", "file_path", "notebook_path", "url", "query", "pattern", "path", "description", "prompt", "text"];
+    let text = match KEYS.iter().find_map(|k| get(k).map(|v| (*k, v))) {
+        // Glob/Grep: Muster und Ordner
+        Some(("pattern", p)) => match get("path") {
+            Some(dir) => format!("{p} · {dir}"),
+            None => p.to_string(),
+        },
+        Some((_, v)) => v.to_string(),
+        None if obj.is_empty() => return None,
+        None => serde_json::to_string(input).ok()?,
+    };
+    let t = untrusted_text(&text, DETAIL_MAX);
+    (!t.is_empty()).then_some(t)
+}
+
+/// Was eine offene Freigabe-Frage verlangt (#390): Werkzeug und Kurzfassung der Eingabe aus der PreToolUse-Meldung
+/// davor. `others` = Kurzfassungen weiterer offener Aufrufe desselben Werkzeugs (die Frage kann auch einem davon
+/// gelten), neueste zuerst. Nur im Speicher, nie in `state.json`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ToolRequest {
+    pub tool: String,
+    pub detail: String,
+    pub others: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+struct OpenTool {
+    id: Option<String>,
+    tool: String,
+    detail: String,
+}
+
+/// Werkzeugaufrufe, die begonnen (PreToolUse), aber noch nicht beendet (PostToolUse) sind – daraus erfährt die
+/// Freigabe-Karte, was eine Frage „Claude needs your permission to use Bash“ verlangt (die Benachrichtigung selbst
+/// nennt nur das Werkzeug). Eine neue Runde, Stop und ein neuer Start räumen auf.
+#[derive(Debug, Clone, Default)]
+pub struct ToolLog {
+    open: Vec<OpenTool>,
+}
+
+impl ToolLog {
+    /// Eine angenommene Hook-Meldung vermerken.
+    pub fn note(&mut self, m: &HookMsg) {
+        match m.event.as_str() {
+            "PreToolUse" | "PermissionRequest" => {
+                let Some(tool) = m.tool_name.as_deref().filter(|t| !t.is_empty()) else { return };
+                if m.tool_use_id.is_some() && self.open.iter().any(|o| o.id == m.tool_use_id) {
+                    return;
+                }
+                if self.open.len() >= TOOL_LOG_MAX {
+                    self.open.remove(0);
+                }
+                let detail = m.tool_detail.as_deref().map(|d| untrusted_text(d, DETAIL_MAX)).unwrap_or_default();
+                self.open.push(OpenTool { id: m.tool_use_id.clone(), tool: tool.to_string(), detail });
+            }
+            "PostToolUse" => {
+                let by_id = m.tool_use_id.as_ref().and_then(|id| self.open.iter().position(|o| o.id.as_ref() == Some(id)));
+                let i = by_id.or_else(|| self.open.iter().position(|o| Some(o.tool.as_str()) == m.tool_name.as_deref()));
+                if let Some(i) = i {
+                    self.open.remove(i);
+                }
+            }
+            "UserPromptSubmit" | "Stop" | "SessionStart" | "SessionEnd" => self.open.clear(),
+            _ => {}
+        }
+    }
+
+    /// Was die Freigabe-Frage für `tool` verlangt: der neueste offene Aufruf dieses Werkzeugs. Ist das Werkzeug
+    /// unbekannt (leer), nur wenn genau ein Aufruf offen ist – sonst wäre es geraten.
+    pub fn request_for(&self, tool: &str) -> Option<ToolRequest> {
+        let matching: Vec<&OpenTool> = if tool.is_empty() {
+            if self.open.len() == 1 { self.open.iter().collect() } else { Vec::new() }
+        } else {
+            self.open.iter().filter(|o| o.tool == tool).collect()
+        };
+        let (newest, rest) = matching.split_last()?;
+        let mut others: Vec<String> = Vec::new();
+        for o in rest.iter().rev() {
+            if o.detail != newest.detail && !others.contains(&o.detail) {
+                others.push(o.detail.clone());
+            }
+        }
+        Some(ToolRequest { tool: newest.tool.clone(), detail: newest.detail.clone(), others })
+    }
+
+    /// Den Aufruf vergessen, den [`Self::request_for`] für `tool` gerade nennt (Frage über die Karte abgelehnt: Claude
+    /// meldet für ihn kein PostToolUse).
+    pub fn forget_newest(&mut self, tool: &str) {
+        if let Some(i) = self.open.iter().rposition(|o| tool.is_empty() || o.tool == tool) {
+            self.open.remove(i);
+        }
+    }
 }
 
 /// Status nach einer Hook-Meldung; `turn` wird fortgeschrieben.
@@ -832,16 +963,30 @@ fn parse_message(raw: &str, token: &str) -> Option<HookMsg> {
         agent_id: s("agent_id"),
         trigger: s("trigger"),
         reason: s("reason"),
+        tool_use_id: s("tool_use_id"),
+        // Kurzfassung vom Hook-Aufruf (`slim_payload`); kommt die volle Eingabe an, fasst der Hub sie selbst zusammen.
+        // Fremder Text: hier noch einmal entschärft und gekürzt.
+        tool_detail: s("tool_detail").map(|d| untrusted_text(&d, DETAIL_MAX)).filter(|d| !d.is_empty()).or_else(|| p.get("tool_input").and_then(tool_detail)),
     })
 }
 
 /// Felder des Ereignisses, die der Hub auswertet (kurze Texte; nie Prompts, Werkzeug-Eingaben oder -Ausgaben).
-const KEEP: [&str; 11] = ["hook_event_name", "notification_type", "message", "tool_name", "session_id", "transcript_path", "cwd", "source", "agent_id", "trigger", "reason"];
+const KEEP: [&str; 12] = ["hook_event_name", "notification_type", "message", "tool_name", "tool_use_id", "session_id", "transcript_path", "cwd", "source", "agent_id", "trigger", "reason"];
 
-/// Ereignis-JSON von Claude auf die Felder kürzen, die der Hub braucht.
+/// Ereignis-JSON von Claude auf die Felder kürzen, die der Hub braucht. Bei PreToolUse (und PermissionRequest) kommt
+/// statt der Werkzeug-Eingabe nur ihre Kurzfassung `tool_detail` mit (#390, [`tool_detail`]: Befehl, Pfad …,
+/// höchstens [`DETAIL_MAX`] Zeichen) – für die Freigabe-Karte; Inhalte (`content`, `new_string` …) nie.
 fn slim_payload(payload: Value) -> Value {
     match payload {
-        Value::Object(m) => Value::Object(m.into_iter().filter(|(k, v)| KEEP.contains(&k.as_str()) && v.is_string()).collect()),
+        Value::Object(mut m) => {
+            let asks = matches!(m.get("hook_event_name").and_then(Value::as_str), Some("PreToolUse" | "PermissionRequest"));
+            let detail = if asks { m.get("tool_input").and_then(tool_detail) } else { None };
+            m.retain(|k, v| KEEP.contains(&k.as_str()) && v.is_string());
+            if let Some(d) = detail {
+                m.insert("tool_detail".into(), Value::String(d));
+            }
+            Value::Object(m)
+        }
         other => other,
     }
 }
@@ -1307,6 +1452,116 @@ mod tests {
         let m = parse_message(&raw, "t").unwrap();
         assert_eq!((m.tool_name.as_deref(), m.agent_id.as_deref(), m.trigger.as_deref()), (Some("Bash"), Some("a1"), Some("auto")));
         assert_eq!(slim_payload(Value::Null), Value::Null);
+    }
+
+    /// Hook-Aufruf → Hub für die Ereignisse einer Freigabe, so wie Claude Code sie schickt (#390).
+    fn through_hook(payload: Value) -> HookMsg {
+        let raw = json!({"token": "t", "session": 3, "key": "k", "payload": slim_payload(payload)}).to_string();
+        parse_message(&raw, "t").unwrap()
+    }
+
+    /// PreToolUse vor einer Freigabe: Statt der Eingabe geht nur die Kurzfassung (Befehl) mit, dazu die Aufruf-Kennung.
+    #[test]
+    fn pre_tool_use_forwards_a_short_summary_of_the_request() {
+        let pre = json!({
+            "session_id": "abc123", "transcript_path": "C:\\Users\\u\\.claude\\projects\\acme\\abc123.jsonl", "cwd": "C:\\Dev\\acme",
+            "permission_mode": "default", "hook_event_name": "PreToolUse", "tool_name": "Bash",
+            "tool_input": {"command": "cargo test --release", "description": "Run the tests", "timeout": 600000}, "tool_use_id": "toolu_01ABC"
+        });
+        let slim = slim_payload(pre.clone());
+        assert_eq!(slim["tool_detail"], json!("cargo test --release"));
+        assert!(slim.get("tool_input").is_none() && slim.get("permission_mode").is_none());
+        let m = through_hook(pre);
+        assert_eq!((m.event.as_str(), m.tool_name.as_deref(), m.tool_use_id.as_deref()), ("PreToolUse", Some("Bash"), Some("toolu_01ABC")));
+        assert_eq!(m.tool_detail.as_deref(), Some("cargo test --release"));
+        // Edit/Write: der Pfad, nie der Inhalt
+        let edit = json!({
+            "session_id": "abc123", "hook_event_name": "PreToolUse", "tool_name": "Write", "tool_use_id": "toolu_02",
+            "tool_input": {"file_path": "C:\\Dev\\acme\\.env", "content": "API_KEY=geheim"}
+        });
+        let slim = slim_payload(edit);
+        assert_eq!(slim["tool_detail"], json!("C:\\Dev\\acme\\.env"));
+        assert!(!slim.to_string().contains("geheim"));
+        // PermissionRequest (neuere Versionen; Paneldeck trägt sich nicht dafür ein, versteht es aber)
+        let req = json!({
+            "session_id": "abc123", "hook_event_name": "PermissionRequest", "tool_name": "WebFetch",
+            "tool_input": {"url": "https://example.com/docs", "prompt": "Summarize"}, "permission_suggestions": [{"type": "addRules"}]
+        });
+        assert_eq!(through_hook(req).tool_detail.as_deref(), Some("https://example.com/docs"));
+        // PostToolUse und die Benachrichtigung tragen keine Kurzfassung
+        let post = json!({"hook_event_name": "PostToolUse", "tool_name": "Bash", "tool_use_id": "toolu_01ABC", "tool_input": {"command": "x"}, "tool_response": {"stdout": "ok"}});
+        let m = through_hook(post);
+        assert_eq!((m.tool_detail, m.tool_use_id.as_deref()), (None, Some("toolu_01ABC")));
+        let note = json!({
+            "session_id": "abc123", "transcript_path": "C:\\t.jsonl", "cwd": "C:\\Dev\\acme", "hook_event_name": "Notification",
+            "message": "Claude needs your permission to use Bash", "notification_type": "permission_prompt"
+        });
+        let m = through_hook(note);
+        assert_eq!((m.kind.as_deref(), m.tool_detail.as_deref()), (Some("permission_prompt"), None));
+        assert_eq!(m.message.as_deref().and_then(permission_tool), Some("Bash"));
+    }
+
+    /// Die Kurzfassung ist fremder Text: Steuer- und Richtungszeichen werden entschärft, lange Eingaben gekürzt; ein
+    /// gefälschtes `tool_detail` wird im Hub noch einmal entschärft.
+    #[test]
+    fn tool_details_are_sanitized_and_capped() {
+        let evil = json!({"command": "echo ok\u{1b}[2J\u{202e}txt.exe\r\nrm -rf /\tx"});
+        assert_eq!(tool_detail(&evil).as_deref(), Some("echo ok\u{FFFD}[2J\u{FFFD}txt.exe\nrm -rf / x"));
+        let long = tool_detail(&json!({"command": "a".repeat(10_000)})).unwrap();
+        assert_eq!(long.chars().count(), DETAIL_MAX + 1);
+        assert!(long.ends_with('…'));
+        // Glob/Grep: Muster mit Ordner; unbekannte Werkzeuge (MCP): kompaktes JSON; leer: nichts
+        assert_eq!(tool_detail(&json!({"pattern": "TODO", "path": "src"})).as_deref(), Some("TODO · src"));
+        let mcp = tool_detail(&json!({"session": 4, "keys": "ctrl+c"})).unwrap();
+        assert_eq!(serde_json::from_str::<Value>(&mcp).unwrap(), json!({"session": 4, "keys": "ctrl+c"}));
+        assert!(!mcp.contains('\n'), "kompakt");
+        assert_eq!(tool_detail(&json!({})), None);
+        assert_eq!(tool_detail(&json!("text")), None);
+        let raw = json!({"token": "t", "session": 1, "payload": {"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_detail": "a\u{7}b"}}).to_string();
+        assert_eq!(parse_message(&raw, "t").unwrap().tool_detail.as_deref(), Some("a\u{FFFD}b"));
+    }
+
+    fn tool_msg(event: &str, tool: &str, id: Option<&str>, detail: Option<&str>) -> HookMsg {
+        HookMsg { event: event.into(), tool_name: Some(tool.into()), tool_use_id: id.map(str::to_string), tool_detail: detail.map(str::to_string), ..HookMsg::default() }
+    }
+
+    /// Was eine Freigabe-Frage verlangt: der neueste offene Aufruf des genannten Werkzeugs; weitere werden genannt,
+    /// beendete fallen weg, eine neue Runde räumt auf.
+    #[test]
+    fn the_tool_log_finds_what_a_permission_request_is_for() {
+        let mut log = ToolLog::default();
+        log.note(&tool_msg("PreToolUse", "Read", Some("r1"), Some("src/main.rs")));
+        log.note(&tool_msg("PreToolUse", "Bash", Some("b1"), Some("npm run dev")));
+        log.note(&tool_msg("PreToolUse", "Bash", Some("b2"), Some("rm -rf build")));
+        let r = log.request_for("Bash").unwrap();
+        assert_eq!((r.tool.as_str(), r.detail.as_str(), r.others.clone()), ("Bash", "rm -rf build", vec!["npm run dev".to_string()]));
+        // dieselbe Meldung doppelt zugestellt zählt einmal
+        log.note(&tool_msg("PreToolUse", "Bash", Some("b2"), Some("rm -rf build")));
+        assert_eq!(log.request_for("Bash").unwrap().others.len(), 1);
+        // Ende über die Kennung (auch wenn ein anderer Aufruf desselben Werkzeugs offen bleibt)
+        log.note(&tool_msg("PostToolUse", "Bash", Some("b1"), None));
+        assert_eq!(log.request_for("Bash").unwrap(), ToolRequest { tool: "Bash".into(), detail: "rm -rf build".into(), others: vec![] });
+        // ohne Kennung (ältere Versionen): der älteste offene Aufruf des Werkzeugs
+        log.note(&tool_msg("PostToolUse", "Read", None, None));
+        assert_eq!(log.request_for("Read"), None);
+        assert_eq!(log.request_for("Edit"), None, "ein anderes Werkzeug");
+        // unbekanntes Werkzeug: nur bei genau einem offenen Aufruf
+        assert_eq!(log.request_for("").map(|r| r.detail), Some("rm -rf build".into()));
+        log.note(&tool_msg("PreToolUse", "Edit", Some("e1"), Some("a.rs")));
+        assert_eq!(log.request_for(""), None);
+        log.forget_newest("Edit");
+        assert_eq!(log.request_for("Edit"), None);
+        for ev in ["UserPromptSubmit", "Stop", "SessionStart", "SessionEnd"] {
+            log.note(&tool_msg("PreToolUse", "Bash", None, Some("x")));
+            log.note(&HookMsg { event: ev.into(), ..HookMsg::default() });
+            assert_eq!(log.request_for("Bash"), None, "{ev}");
+        }
+        // begrenzt
+        for i in 0..40 {
+            log.note(&tool_msg("PreToolUse", "Bash", Some(&format!("i{i}")), Some(&format!("c{i}"))));
+        }
+        let r = log.request_for("Bash").unwrap();
+        assert_eq!((r.detail.as_str(), r.others.len()), ("c39", TOOL_LOG_MAX - 1));
     }
 
     /// Jedes Ereignis, für das sich Paneldeck einträgt, kennt Claude Code mindestens so lange wie SessionEnd – ein

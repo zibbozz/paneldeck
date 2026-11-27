@@ -50,6 +50,7 @@ mod editor_services;
 mod editor_search_ui;
 pub(crate) mod folder_picker;
 mod fresh_start;
+mod inbox_ui;
 mod closing;
 mod conv_pick;
 #[cfg(test)]
@@ -1998,7 +1999,7 @@ impl App {
             entry.meta.queue_paused = false;
         }
         entry.track = Default::default();
-        entry.status_msg.clear();
+        entry.clear_status_msg();
         entry.perm_since = None;
         let Some(mut shell) = self.session_shell(&entry.meta.shell_id, entry.meta.profile) else {
             entry.error = Some(state::t("Keine Shell gefunden", "No shell found").into());
@@ -3789,10 +3790,13 @@ impl App {
                         if yes {
                             e.assume_working();
                         } else {
-                            // Abgelehnt: Claude bricht die Runde ab und wartet (dafür gibt es keinen Stop-Hook).
+                            // Abgelehnt: Claude bricht die Runde ab und wartet (dafür gibt es keinen Stop-Hook). Der
+                            // abgelehnte Aufruf meldet kein PostToolUse mehr (#390).
+                            let tool = e.track.perm_tool.clone();
+                            e.track.tools.forget_newest(&tool);
                             e.apply_fallback(ClaudeStatus::Idle);
                         }
-                        e.status_msg.clear();
+                        e.clear_status_msg();
                         e.perm_since = None;
                         e.attention = false;
                     }

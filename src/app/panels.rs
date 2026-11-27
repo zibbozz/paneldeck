@@ -345,49 +345,6 @@ impl App {
         }
     }
 
-    /// Karten für Sitzungen, die auf eine Freigabe warten (Seitenleiste).
-    pub(super) fn inbox_ui(&mut self, ui: &mut Ui, actions: &mut Vec<Action>) {
-        let lang = self.settings.language;
-        let waiting: Vec<(u64, String, String, bool)> = self
-            .entries
-            .iter()
-            .filter(|(_, e)| e.needs_you() && e.is_claude())
-            .map(|(id, e)| (*id, e.display_name(), e.status_msg.clone(), e.status == ClaudeStatus::Permission))
-            .collect();
-        if waiting.is_empty() {
-            return;
-        }
-        egui::Frame::new()
-            .fill(style::brand().gamma_multiply(0.12))
-            .stroke(Stroke::new(1.0_f32, style::brand().gamma_multiply(0.5)))
-            .corner_radius(CornerRadius::same(8))
-            .inner_margin(Margin::same(8))
-            .show(ui, |ui| {
-                ui.label(RichText::new(format!("{} ({})", lang.t("Wartet auf dich", "Waiting for you"), waiting.len())).strong().small());
-                for (id, name, msg, permission) in waiting {
-                    ui.add_space(S1);
-                    ui.label(RichText::new(name).strong());
-                    if !msg.is_empty() {
-                        ui.add(egui::Label::new(RichText::new(msg).small().color(style::dim(ui))).wrap());
-                    }
-                    ui.horizontal(|ui| {
-                        if permission {
-                            if ui.add(egui::Button::new(RichText::new(lang.t("Ja", "Yes")).strong()).fill(Color32::from_rgb(0x2f, 0x7d, 0x4a))).on_hover_text(lang.t("Sendet Enter (Standardauswahl „Ja“)", "Sends Enter (default choice “Yes”)")).clicked() {
-                                actions.push(Action::Approve(id, true));
-                            }
-                            if ui.button(lang.t("Nein", "No")).on_hover_text(lang.t("Sendet Esc", "Sends Esc")).clicked() {
-                                actions.push(Action::Approve(id, false));
-                            }
-                        }
-                        if ui.button(lang.t("Öffnen", "Open")).clicked() {
-                            actions.push(Action::Activate(id));
-                        }
-                    });
-                }
-            });
-        ui.add_space(S2);
-    }
-
     pub(super) fn diff_ui(&mut self, ctx: &egui::Context) {
         let lang = self.settings.language;
         if !self.diff_open {

@@ -231,19 +231,17 @@ impl App {
     }
 
     /// Claude-Status der Beispielsitzungen (jedes Bild neu: ohne echten Claude fiele er sonst zurück).
+    /// Die wartende Sitzung zeigt in der Karte „Wartet auf dich“, was sie verlangt (#390) – wie von Claude gemeldet
+    /// (die Meldung ist immer Englisch).
     fn shot_status(&mut self) {
-        let lang = self.settings.language;
         let ids = self.shot_sessions();
-        let states = [
-            (ClaudeStatus::Permission, lang.t("Bash: cargo test --release", "Bash: cargo test --release")),
-            (ClaudeStatus::Working, ""),
-            (ClaudeStatus::Idle, ""),
-        ];
+        let states = [(ClaudeStatus::Permission, "Claude needs your permission to use Bash"), (ClaudeStatus::Working, ""), (ClaudeStatus::Idle, "")];
         for (id, (st, msg)) in ids.iter().zip(states) {
             if let Some(e) = self.entries.get_mut(id) {
                 e.launched_claude = true;
                 e.status = st;
                 e.status_msg = msg.to_string();
+                e.track.request = (st == ClaudeStatus::Permission).then(|| crate::hooks::ToolRequest { tool: "Bash".into(), detail: "cargo test --release".into(), others: Vec::new() });
             }
         }
     }

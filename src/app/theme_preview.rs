@@ -352,14 +352,23 @@ fn chat(ui: &mut Ui, u: &UiColors, lang: Lang, m: &mut Marks) {
         ui.set_width(ui.available_width());
         ui.label(RichText::new(lang.t("run_command wartet auf Freigabe", "run_command needs approval")).color(u.warning));
         ui.label(RichText::new("cargo test --release").monospace());
+        // Freigabe-Knöpfe ohne eigene Farbe wie im Chat (#390).
         ui.horizontal(|ui| {
-            let r = ui.add(egui::Button::new(RichText::new(lang.t("Erlauben", "Allow")).strong()).fill(u.chat_send));
-            mark(m, r.rect, "chat_send");
-            let r = ui.button(lang.t("Ablehnen", "Deny"));
-            mark(m, r.rect, "widget_bg");
+            for label in [lang.t("Erlauben", "Allow"), lang.t("Ablehnen", "Deny")] {
+                let r = ui.button(label);
+                mark(m, r.rect, "widget_bg");
+            }
         });
     });
     mark(m, r.response.rect, "chat_approval_bg");
+    ui.add_space(4.0);
+    ui.horizontal(|ui| {
+        ui.label(RichText::new(lang.t("Nachricht …", "Message …")).color(u.text_dim));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let r = ui.add(egui::Button::new(RichText::new(lang.t("Senden", "Send")).strong()).fill(u.chat_send));
+            mark(m, r.rect, "chat_send");
+        });
+    });
 }
 
 fn terminal(ui: &mut Ui, t: &Theme, m: &mut Marks) {
