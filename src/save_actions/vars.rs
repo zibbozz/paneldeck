@@ -22,6 +22,7 @@ use super::relative;
 use crate::procs::Flavor;
 use crate::quote::{self, Kind};
 use crate::state::t;
+use crate::targetpath::PathKind;
 use std::path::{Path, PathBuf};
 
 /// Die Namen der Variablen (ohne `env:`).
@@ -117,10 +118,10 @@ pub struct Target {
     pub flavor: Flavor,
     /// Quoting (Git Bash/bash/zsh/fish nach der Shell; WSL läuft über `bash -lc`).
     pub quote: Kind,
-    /// Kennung der Shell (`gitbash`, `wsl:<Distro>` … – für die Umrechnung der Pfade).
-    pub shell_id: String,
     /// WSL: die Distribution der Shell (`None` = Standard bzw. keine WSL-Shell).
     pub distro: Option<String>,
+    /// Pfadart der Shell (#392, `targetpath::PathKind::of`): Git Bash/MSYS/Cygwin samt Installationsordner usw.
+    pub kind: PathKind,
 }
 
 impl Target {
@@ -133,7 +134,12 @@ impl Target {
             Flavor::Bash => crate::shells::quote_kind(shell),
         };
         let distro = (flavor == Flavor::Wsl).then(|| crate::shells::wsl_distro(&shell.args).or_else(|| shell.id.strip_prefix("wsl:").map(str::to_string))).flatten();
-        Target { flavor, quote, shell_id: shell.id.clone(), distro }
+        Target { flavor, quote, distro, kind: PathKind::of(shell) }
+    }
+
+    /// Ohne bekannte Shell: PowerShell (wie `procs::resolve_shell` ohne Angabe).
+    pub fn pwsh() -> Target {
+        Target { flavor: Flavor::Pwsh, quote: Kind::Pwsh, distro: None, kind: PathKind::Windows { cmd: false } }
     }
 
     #[cfg(test)]
@@ -144,11 +150,20 @@ impl Target {
             Flavor::Bash => (Kind::Bash, "gitbash"),
             Flavor::Wsl => (Kind::Posix, "wsl:Ubuntu"),
         };
-        Target { flavor, quote, shell_id: id.into(), distro: (flavor == Flavor::Wsl).then(|| "Ubuntu".to_string()) }
+        Target { flavor, quote, distro: (flavor == Flavor::Wsl).then(|| "Ubuntu".to_string()), kind: PathKind::of_id(id) }
     }
 
     fn posix(&self) -> bool {
         matches!(self.flavor, Flavor::Bash | Flavor::Wsl)
+    }
+
+    /// Pfadart für die Umrechnung: WSL immer mit der Distribution der Regel-Shell (`distro`, `None` = Standard), sonst
+    /// die erkannte Pfadart.
+    pub fn path_kind(&self) -> PathKind {
+        match self.flavor {
+            Flavor::Wsl => PathKind::Wsl { distro: self.distro.clone() },
+            _ => self.kind.clone(),
+        }
     }
 }
 
@@ -312,12 +327,19 @@ pub fn check_command(template: &str, quote: Kind) -> Result<(), String> {
 /// Werte für die Anzeige: geheime Werte (eigene Umgebungsvariablen der Regel) erscheinen als `•••`.
 pub const HIDDEN: &str = "•••";
 
-/// Pfad für die Shell `t` (Git Bash/WSL umrechnen, `\\wsl$\<Distro>\…` in der passenden Distribution als Linux-Pfad).
-fn shell_path(t: &Target, v: &str) -> Result<String, String> {
+/// Pfad der Variable `name` für die Shell `t` (#392, `targetpath`): Git Bash `C:\x` → `/c/x`, UNC →
+/// `//wsl.localhost/…`; WSL `C:\x` → `/mnt/c/x` (Einhängepunkt der Distribution), `\\wsl.localhost\<D>\x` → `/x` nur in
+/// derselben Distribution. Eine andere Distribution, eine unbekannte eigene Distribution (Standard-Distribution noch
+/// nicht bekannt) oder ein Ergebnis mit Steuerzeichen ist ein Fehler der Regel – nie ein Lauf mit falschem Pfad.
+fn shell_path(t: &Target, name: &str, v: &str) -> Result<String, String> {
+    shell_path_with(t, name, v, &crate::targetpath::Cached)
+}
+
+fn shell_path_with(t: &Target, name: &str, v: &str, lk: &dyn crate::targetpath::Lookup) -> Result<String, String> {
     if !t.posix() {
         return Ok(v.to_string());
     }
-    crate::pathfmt::to_shell_path(&t.shell_id, t.distro.as_deref(), v)
+    crate::targetpath::for_insert_unquoted_with(&t.path_kind(), v, lk).map_err(|e| format!("${{{name}}}: {}", e.message(crate::state::lang())))
 }
 
 /// Befehl für die Shell `t` aus der Vorlage bauen. `cmd_lookup`: nur cmd – `%NAME%` der Vorlage vorher ersetzen (aus
@@ -341,7 +363,7 @@ pub fn expand_command(template: &str, ctx: &Ctx, t: &Target, cmd_lookup: Option<
             Piece::Var(n) => {
                 let mut v = ctx.value(n).unwrap_or_default();
                 if t.posix() {
-                    v = if is_path(n) { shell_path(t, &v)? } else if n == "relativeFile" { v.replace('\\', "/") } else { v };
+                    v = if is_path(n) { shell_path(t, n, &v)? } else if n == "relativeFile" { v.replace('\\', "/") } else { v };
                 }
                 out.push_str(&quote_for(t, &v));
             }
@@ -535,8 +557,47 @@ mod tests {
             let mut other = Target::test(Flavor::Wsl);
             other.distro = Some("Debian".into());
             assert!(expand_command("cat ${file}", &w, &other, None, &none, &no, false).is_err());
+            // Git Bash: eine WSL-Datei als `//wsl.localhost/…` (#392)
+            assert_eq!(run("cat ${file}", &w, Flavor::Bash).unwrap(), "cat '//wsl.localhost/Ubuntu/home/me/a.ts'");
         }
         assert_eq!(run("echo ${HOME} ${foo", &c, Flavor::Bash).unwrap(), "echo ${HOME} ${foo");
+    }
+
+    /// #392: Pfade über `targetpath` – andere Distribution, unbekannte eigene Distribution und Steuerzeichen sind Fehler
+    /// der Regel (mit dem Namen der Variable), nie ein Lauf mit falschem Pfad.
+    #[test]
+    fn path_errors_are_rule_errors() {
+        struct Lk(Option<&'static str>);
+        impl crate::targetpath::Lookup for Lk {
+            fn wsl_home(&self, _d: &str) -> Option<String> {
+                Some("/home/me".into())
+            }
+            fn wsl_mount(&self, _d: &str) -> Option<String> {
+                None
+            }
+            fn default_distro(&self) -> Option<String> {
+                self.0.map(str::to_string)
+            }
+            fn win_home(&self) -> String {
+                r"C:\Users\me".into()
+            }
+        }
+        let unc = r"\\wsl.localhost\Ubuntu\home\me\a.ts";
+        let mut wsl = Target::test(Flavor::Wsl);
+        assert_eq!(shell_path_with(&wsl, "file", unc, &Lk(None)).as_deref(), Ok("/home/me/a.ts"));
+        wsl.distro = Some("Debian".into());
+        let e = shell_path_with(&wsl, "file", unc, &Lk(None)).unwrap_err();
+        assert!(e.starts_with("${file}:") && e.contains("Ubuntu") && e.contains("Debian"), "{e}");
+        // `wsl.exe` ohne `-d`: Standard-Distribution unbekannt → Fehler; bekannt und gleich → Linux-Pfad
+        wsl.distro = None;
+        assert!(shell_path_with(&wsl, "file", unc, &Lk(None)).is_err());
+        assert_eq!(shell_path_with(&wsl, "file", unc, &Lk(Some("Ubuntu"))).as_deref(), Ok("/home/me/a.ts"));
+        assert!(shell_path_with(&wsl, "file", unc, &Lk(Some("Debian"))).is_err());
+        // 9P-Zeichen werden in WSL zu Steuerzeichen: nie in einen Befehl
+        let ctl = "\\\\wsl.localhost\\Ubuntu\\home\\me\\a\u{F001}b.ts";
+        assert!(shell_path_with(&Target::test(Flavor::Wsl), "file", ctl, &Lk(None)).is_err());
+        // Windows-Shells bekommen den Pfad unverändert
+        assert_eq!(shell_path_with(&Target::test(Flavor::Pwsh), "file", unc, &Lk(None)).as_deref(), Ok(unc));
     }
 
     #[test]

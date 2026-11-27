@@ -39,6 +39,20 @@ pub(crate) struct SavedDoc {
     pub hint: Option<String>,
     /// Je eingebauter Aktion der Regeln: `Ok(None)`, `Ok(Some(hinweis))` (nichts geändert) oder `Err(fehler)`.
     pub builtins: Vec<(crate::save_actions::Builtin, Result<Option<String>, String>)>,
+    /// WSL-Datei (#392): das Schreiben läuft noch im Hilfsthread. Das Ergebnis kommt über
+    /// [`EditorUi::poll_disk_jobs`]; scheitert es, nimmt [`EditorUi::rollback_pending_save`] die Text-Aktionen zurück.
+    pub pending: bool,
+}
+
+/// Was beim Scheitern eines Speicherns im Hintergrund (WSL, #392) zurückzunehmen ist.
+#[derive(Clone)]
+pub(crate) struct PendingSave {
+    /// Stand nach Formatieren und Text-Aktionen (nur dann wird zurückgenommen – hat der Nutzer weitergetippt, nicht).
+    after: u64,
+    /// Formatieren/Text-Aktionen haben den Text geändert (ein Rückgängig-Schritt).
+    changed: bool,
+    /// Zeilenenden und Kodierung vor dem Speichern.
+    format: (crate::editor::FileFormat, bool),
 }
 
 /// Ein laufender Lauf des Nutzers.
@@ -411,7 +425,7 @@ impl EditorUi {
         let Some(d) = self.docs.get(&id) else { return Ok(SavedDoc::default()) };
         let Some(before) = d.doc.as_ref().map(|x| (x.state_id(), x.format_state())) else { return Ok(SavedDoc::default()) };
         let fos = if format { self.format_on_save(id, path.as_deref(), prefs, lang) } else { SaveFormat::default() };
-        let mut out = SavedDoc { hint: fos.hint, builtins: Vec::new() };
+        let mut out = SavedDoc { hint: fos.hint, builtins: Vec::new(), pending: false };
         if !builtins.is_empty() {
             // *Formatieren* nur einmal (Formatieren beim Speichern und eine Regel).
             let (dup, list): (Vec<Builtin>, Vec<Builtin>) = builtins.iter().cloned().partition(|b| *b == Builtin::Format && fos.ran.is_some());
@@ -429,8 +443,17 @@ impl EditorUi {
         if changed && let Some(x) = d.doc.as_mut() {
             x.join_undo_since(before.0);
         }
+        let after = d.doc.as_ref().map(|x| x.state_id()).unwrap_or(before.0);
+        let wsl = path.as_deref().or(d.path.as_deref()).is_some_and(super::doc::is_wsl_path);
         match d.save(path, lang) {
-            Ok(()) => Ok(out),
+            Ok(()) => {
+                // WSL (#392): `Ok` heißt „gestartet“ – das Zurücknehmen bei einem Fehler folgt mit dem Ergebnis.
+                if wsl && d.disk_busy() {
+                    out.pending = true;
+                    self.pending_saves.insert(id, PendingSave { after, changed, format: before.1 });
+                }
+                Ok(out)
+            }
             Err(e) => {
                 if changed {
                     self.undo_format(id);
@@ -441,6 +464,24 @@ impl EditorUi {
                 Err(e)
             }
         }
+    }
+
+    /// Speichern im Hintergrund (WSL, #392) ist gescheitert: Formatieren und Text-Aktionen zurücknehmen wie beim
+    /// Speichern im UI-Thread – aber nur, solange der Text noch der gespeicherte Stand ist (hat der Nutzer
+    /// weitergetippt, bleibt alles, wie es ist). `true` = zurückgenommen (oder nichts zu tun).
+    pub(crate) fn rollback_pending_save(&mut self, id: u64) -> bool {
+        let Some(p) = self.pending_saves.remove(&id) else { return true };
+        let Some(now) = self.docs.get(&id).and_then(|d| d.doc.as_ref()).map(|x| x.state_id()) else { return true };
+        if now != p.after {
+            return false;
+        }
+        if p.changed {
+            self.undo_format(id);
+        }
+        if let Some(x) = self.docs.get_mut(&id).and_then(|d| d.doc.as_mut()) {
+            x.restore_format_state(p.format);
+        }
+        true
     }
 
     /// Speichern nur mit dem Formatieren beim Speichern (Tests des Formatierens).

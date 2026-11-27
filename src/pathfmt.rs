@@ -24,7 +24,21 @@ pub fn is_remote_unc(p: &str) -> bool {
     if !s.starts_with(r"\\") {
         return false;
     }
-    !(s.starts_with(r"\\wsl$\") || s.starts_with(r"\\wsl.localhost\"))
+    // `\\wsl$`/`\\wsl.localhost` sind nur mit installiertem WSL lokal (#392) – sonst wäre es ein Rechner im Netz.
+    !((s.starts_with(r"\\wsl$\") || s.starts_with(r"\\wsl.localhost\")) && wsl_installed())
+}
+
+/// Ist WSL installiert (`%SystemRoot%\System32\wsl.exe`; einmal geprüft, lokal)? Außerhalb von Windows: `true`
+/// (dort gibt es keine UNC-Freigaben).
+pub fn wsl_installed() -> bool {
+    static C: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *C.get_or_init(|| {
+        if !cfg!(windows) {
+            return true;
+        }
+        let root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
+        std::path::Path::new(&root).join("System32").join("wsl.exe").is_file()
+    })
 }
 
 /// Netzwerkpfad im weiteren Sinn: [`is_remote_unc`] oder ein Pfad auf einem verbundenen Netzlaufwerk (`Z:\…`,
@@ -64,61 +78,50 @@ pub fn dir_exists_quick(path: &str, wait: std::time::Duration) -> Option<bool> {
     rx.recv_timeout(wait).ok()
 }
 
-/// Pfad für eine Shell umrechnen, die Linux-Pfade erwartet (Git Bash, WSL), mit WSL-Freigaben: Ein Pfad
-/// `\\wsl$\<Distro>\…` bzw. `\\wsl.localhost\<Distro>\…` wird in einer WSL-Shell derselben Distribution (`distro`, ohne
-/// Groß/Klein; `None` = unbekannt, gilt als passend) zum Linux-Pfad (`/home/…`); in einer anderen Distribution ist das
-/// ein Fehler (Text für Menschen); Git Bash bekommt `//wsl.localhost/…`. Alles andere wie [`convert`]. Wiederverwendbar
-/// für alle Stellen, die Windows-Pfade an WSL geben (#383).
-pub fn to_shell_path(shell_id: &str, distro: Option<&str>, path: &str) -> Result<String, String> {
-    if let Some((d, linux)) = crate::wsl::unc_to_linux(path) {
-        if shell_id.starts_with("wsl") {
-            return match distro {
-                Some(own) if !own.eq_ignore_ascii_case(&d) => Err(format!(
-                    "{} {d} {} {own}",
-                    crate::state::t("Die Datei liegt in der WSL-Distribution", "The file is in the WSL distribution"),
-                    crate::state::t("– die Shell der Regel startet", "– the rule's shell starts")
-                )),
-                _ => Ok(linux),
-            };
-        }
-        if shell_id == "gitbash" {
-            return Ok(path.replace('\\', "/"));
-        }
-        return Ok(path.to_string());
-    }
-    Ok(convert(shell_id, path))
-}
-
-/// Pfad für die Shell umrechnen (ohne Quoting).
+/// Pfad für die Shell umrechnen (ohne Quoting), nach der Kennung der Shell (`wsl:<D>`, `gitbash`; andere bleiben).
+/// Umrechnung über `targetpath` (#392): `C:\x` → `/mnt/c/x` bzw. `/c/x`, `\\wsl.localhost\<D>\x` → `/x`. Lässt sich ein
+/// Pfad nicht umrechnen (andere Distribution, Netzwerkfreigabe), bleibt er beim Linux-Teil bzw. mit `/` statt `\`.
 pub fn convert(shell_id: &str, path: &str) -> String {
-    if shell_id.starts_with("wsl") {
-        match drive_split(path) {
-            Some((d, rest)) => format!("/mnt/{}{}", d.to_ascii_lowercase(), rest.replace('\\', "/")),
-            None => path.replace('\\', "/"),
-        }
+    use crate::targetpath::PathKind;
+    let kind = if let Some(d) = shell_id.strip_prefix("wsl:") {
+        PathKind::Wsl { distro: Some(d.to_string()).filter(|d| crate::wsl::valid_distro(d)) }
+    } else if shell_id.starts_with("wsl") {
+        PathKind::Wsl { distro: None }
     } else if shell_id == "gitbash" {
-        match drive_split(path) {
-            Some((d, rest)) => format!("/{}{}", d.to_ascii_lowercase(), rest.replace('\\', "/")),
-            None => path.replace('\\', "/"),
-        }
+        PathKind::Msys { root: None }
     } else {
-        path.to_string()
+        return path.to_string();
+    };
+    match kind.to_target(path) {
+        Ok(p) => p,
+        Err(_) => match crate::wsl::unc_to_linux(path) {
+            Some((_, l)) if matches!(kind, PathKind::Wsl { .. }) => l,
+            _ => match drive_split(path) {
+                Some((d, rest)) if matches!(kind, PathKind::Wsl { .. }) => format!("/mnt/{}{}", d.to_ascii_lowercase(), rest.replace('\\', "/")),
+                _ => path.replace('\\', "/"),
+            },
+        },
     }
 }
 
 /// Pfad so formatieren, dass er in der Shell der Sitzung direkt eingefügt werden kann. Gequotet wird nach der Shell, die
-/// dort wirklich läuft (`shells::quote_kind`: fish maskiert in `'…'` anders als bash, #57).
+/// dort wirklich läuft (`shells::quote_kind`: fish maskiert in `'…'` anders als bash, #57). Umgerechnet nach der Pfadart
+/// der Shell (`targetpath`, auch eigene Profile); ein Pfad, der sich nicht umrechnen lässt (andere WSL-Distribution),
+/// bleibt unverändert – Aufrufer, die das melden wollen, nehmen `targetpath::for_insert`.
 pub fn for_shell(shell: &crate::shells::ShellSpec, path: &str) -> String {
-    crate::quote::quote_if_needed(crate::shells::quote_kind(shell), &convert(&shell.id, path))
+    crate::targetpath::for_insert(shell, path).unwrap_or_else(|_| crate::quote::quote_if_needed(crate::shells::quote_kind(shell), path))
 }
 
-/// Linux-Pfad aus einer WSL-Distribution als Windows-UNC-Pfad (`\\wsl$\<Distro>\…`).
-/// Andere Pfade bleiben unverändert.
+/// Pfad, den eine Shell meldet (OSC 7/9;9, Hooks), als Windows-Pfad: Linux-Pfad einer WSL-Distribution →
+/// `\\wsl.localhost\<Distro>\…` (mit 9P-Zeichen; leere Distribution = die bekannte Standard-Distribution),
+/// `/mnt/c/x` → `C:\x`, Git Bash `/c/x` → `C:\x`. Andere Pfade (und solche, die sich nicht umrechnen lassen) bleiben.
 pub fn from_wsl(shell_id: &str, path: &str) -> String {
-    match shell_id.strip_prefix("wsl:") {
-        Some(distro) if path.starts_with('/') => format!(r"\\wsl$\{distro}{}", path.replace('/', "\\")),
-        _ => path.to_string(),
+    use crate::targetpath::PathKind;
+    let kind = PathKind::of_id(shell_id);
+    if !kind.is_posix() || matches!(kind, PathKind::Native) || !path.starts_with('/') {
+        return path.to_string();
     }
+    kind.to_windows(path).unwrap_or_else(|_| path.to_string())
 }
 
 #[cfg(test)]
@@ -188,8 +191,17 @@ mod tests {
         assert_eq!(for_shell(&sp("wsl:Ubuntu", "wsl.exe"), r"C:\Users\Max\a.png"), "/mnt/c/Users/Max/a.png");
         assert_eq!(for_shell(&sp("gitbash", r"C:\Program Files\Git\bin\bash.exe"), r"D:\Dev\my app\f.rs"), "'/d/Dev/my app/f.rs'");
         assert_eq!(for_shell(&sp("sh", "/bin/sh"), "/home/u/a b"), "'/home/u/a b'");
-        assert_eq!(from_wsl("wsl:Ubuntu", "/home/max/.claude/x.jsonl"), r"\\wsl$\Ubuntu\home\max\.claude\x.jsonl");
+        // #392: wsl.localhost statt wsl$, /mnt/c als Laufwerk, 9P-Zeichen, UNC beim Einfügen als Linux-Pfad
+        assert_eq!(from_wsl("wsl:Ubuntu", "/home/max/.claude/x.jsonl"), r"\\wsl.localhost\Ubuntu\home\max\.claude\x.jsonl");
+        assert_eq!(from_wsl("wsl:Ubuntu", "/mnt/c/Users/x"), r"C:\Users\x");
+        assert_eq!(from_wsl("wsl:Ubuntu", "/a:b"), "\\\\wsl.localhost\\Ubuntu\\a\u{F03A}b");
+        assert_eq!(from_wsl("gitbash", "/c/x"), r"C:\x");
         assert_eq!(from_wsl("powershell", "/home/x"), "/home/x");
+        assert_eq!(from_wsl("wsl:Ubuntu", "relative"), "relative");
+        assert_eq!(convert("wsl:Ubuntu", r"\\wsl.localhost\Ubuntu\home\u\a"), "/home/u/a");
+        assert_eq!(convert("wsl", r"\\wsl$\Ubuntu\srv"), "/srv", "Distribution unbekannt: Linux-Teil");
+        assert_eq!(convert("gitbash", r"\\wsl.localhost\Ubuntu\home"), "//wsl.localhost/Ubuntu/home");
+        assert_eq!(for_shell(&sp("wsl:Ubuntu", "wsl.exe"), r"\\wsl.localhost\Ubuntu\home\u\my file"), "'/home/u/my file'");
         assert!(is_remote_unc(r"\\evil\share\x.txt"));
         assert!(is_remote_unc("//evil/share/x.txt"));
         assert!(is_remote_unc(r"\\wsl.attacker.com\s\x.txt"));

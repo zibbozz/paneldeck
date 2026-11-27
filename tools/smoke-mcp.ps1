@@ -449,6 +449,23 @@ try {
   Check 'unbekannte Shell' ((Code (Tool 'create_session' @{ shell = 'gibtsnicht' })) -eq 'bad_args')
   Check 'ungueltiger Ordner' ((Code (Tool 'create_session' @{ cwd = "$work\gibtsnicht" })) -eq 'bad_args')
 
+  Write-Host "== Pfadarten: ~ und Git Bash (#392)" -ForegroundColor Cyan
+  $tl = Tool 'create_session' @{ shell = 'powershell'; cwd = '~'; name = 'smoke-tilde' }
+  Check 'PowerShell: cwd ~ = Benutzerordner (#392)' (-not $tl.err -and $tl.data.cwd -eq $env:USERPROFILE) $tl.text
+  if (-not $tl.err) { [void](Tool 'close_session' @{ session = $tl.data.id }) }
+  Check 'PowerShell: Linux-Pfad weiter abgelehnt (#392)' ((Code (Tool 'create_session' @{ shell = 'powershell'; cwd = '/home/x' })) -eq 'bad_args')
+  if ($shells -contains 'gitbash') {
+    $gw = Tool 'create_session' @{ shell = 'gitbash'; cwd = '/c/Windows'; name = 'smoke-gb-cwd' }
+    Check 'Git Bash: cwd /c/Windows = C:\Windows (#392)' (-not $gw.err -and $gw.data.cwd -eq 'C:\Windows') $gw.text
+    if (-not $gw.err) { [void](Tool 'close_session' @{ session = $gw.data.id }) }
+    $gh = Tool 'create_session' @{ shell = 'gitbash'; cwd = '~'; name = 'smoke-gb-home' }
+    Check 'Git Bash: cwd ~ = Benutzerordner (#392)' (-not $gh.err -and $gh.data.cwd -eq $env:USERPROFILE) $gh.text
+    if (-not $gh.err) { [void](Tool 'close_session' @{ session = $gh.data.id }) }
+    Check 'Git Bash: fehlender Ordner /c/... -> bad_args (#392)' ((Code (Tool 'create_session' @{ shell = 'gitbash'; cwd = '/c/paneldeck-gibt-es-nicht' })) -eq 'bad_args')
+  } else {
+    Skip 'Git Bash: cwd /c/... und ~' 'kein Git Bash'
+  }
+
   Write-Host "== WSL: Linux-Startordner (#172)" -ForegroundColor Cyan
   # Erkannte WSL-Shells aus der Fehlermeldung zu einer unbekannten Shell; Vorlagen/System-Distributionen auslassen.
   $avail = (Tool 'create_session' @{ shell = 'gibtsnicht' }).text
@@ -460,7 +477,11 @@ try {
     $inj = Tool 'create_session' @{ shell = $wslSh; cwd = '/tmp/x" echo INJECTED-$((6*7)); #'; name = 'smoke-wsl-inj' }
     Check "WSL: cwd mit Anfuehrungszeichen abgelehnt ($wslSh)" ((Code $inj) -eq 'bad_args') $inj.text
     Check 'WSL: cwd mit Backslash abgelehnt' ((Code (Tool 'create_session' @{ shell = $wslSh; cwd = '/tmp/a\b' })) -eq 'bad_args')
-    Check 'WSL: ~/x abgelehnt (nur ~ allein)' ((Code (Tool 'create_session' @{ shell = $wslSh; cwd = '~/x' })) -eq 'bad_args')
+    # #392: ~/x geht (geprueft wird der mit dem Linux-Home aufgeloeste Ordner); ein fehlender -> bad_args
+    $tx = Tool 'create_session' @{ shell = $wslSh; cwd = '~/paneldeck-smoke-gibt-es-nicht'; name = 'smoke-wsl-tilde' } 60000
+    Check 'WSL: ~/fehlt -> bad_args (oder WSL antwortete nicht)' ((Code $tx) -eq 'bad_args' -or $tx.data.cwd_checked -eq $false) $tx.text
+    if (-not $tx.err) { [void](Tool 'close_session' @{ session = $tx.data.id }) }
+    Check 'WSL: ~/x mit Anfuehrungszeichen abgelehnt' ((Code (Tool 'create_session' @{ shell = $wslSh; cwd = '~/x" echo pwned' })) -eq 'bad_args')
     Check 'Linux-cwd fuer Windows-Shell abgelehnt' ((Code (Tool 'create_session' @{ shell = 'powershell'; cwd = '/tmp' })) -eq 'bad_args')
     # Fehlender Ordner: Pruefung in WSL im Hintergrund -> bad_args (antwortet WSL nicht, wird angelegt mit cwd_checked=false)
     $miss = Tool 'create_session' @{ shell = $wslSh; cwd = '/paneldeck-smoke-gibt-es-nicht'; name = 'smoke-wsl-miss' } 60000

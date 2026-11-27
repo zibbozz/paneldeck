@@ -18,6 +18,13 @@ use std::time::{Duration, Instant, SystemTime};
 
 /// Abstand zwischen zwei Abfragen.
 pub const POLL_INTERVAL: Duration = Duration::from_millis(1000);
+/// Abstand für Dateien in WSL (#392): seltener, damit die WSL-VM ruhen kann.
+pub const WSL_POLL_INTERVAL: Duration = Duration::from_secs(10);
+
+/// Liegt die Datei in WSL (`\\wsl.localhost\…`)?
+fn is_wsl(p: &Path) -> bool {
+    crate::wsl::is_wsl_unc(&p.to_string_lossy())
+}
 
 /// Was über eine Datei bekannt ist.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -76,6 +83,11 @@ impl Tracker {
         self.files.insert(path.to_path_buf(), Track { known: Some(stamp), pending: None });
     }
 
+    /// Stand vergessen: die nächste Messung gilt wieder als Ausgangsstand (ohne Meldung).
+    pub fn forget(&mut self, path: &Path) {
+        self.files.remove(path);
+    }
+
     /// Pfade, die nicht mehr offen sind, vergessen.
     pub fn retain(&mut self, open: &[PathBuf]) {
         self.files.retain(|p, _| open.iter().any(|o| o == p));
@@ -124,6 +136,8 @@ pub struct DiskWatch {
     tx: Option<Sender<Vec<PathBuf>>>,
     rx: Option<Receiver<Vec<(PathBuf, Stamp)>>>,
     last: Option<Instant>,
+    /// Letzte Abfrage der WSL-Dateien (seltener, [`WSL_POLL_INTERVAL`]).
+    last_wsl: Option<Instant>,
     in_flight: bool,
 }
 
@@ -136,11 +150,16 @@ impl Default for DiskWatch {
 impl DiskWatch {
     /// Der Thread startet erst bei der ersten Abfrage mit offenen Dateien.
     pub fn new() -> DiskWatch {
-        DiskWatch { tracker: Tracker::default(), tx: None, rx: None, last: None, in_flight: false }
+        DiskWatch { tracker: Tracker::default(), tx: None, rx: None, last: None, last_wsl: None, in_flight: false }
     }
 
-    /// Nach dem eigenen Laden oder Speichern aufrufen (misst sofort; die Datei ist lokal gerade geschrieben).
+    /// Nach dem eigenen Laden oder Speichern aufrufen (misst sofort; die Datei ist lokal gerade geschrieben). WSL-Dateien
+    /// misst nie der UI-Thread (#392): Die nächste Abfrage im Hintergrund gilt als Ausgangsstand.
     pub fn baseline(&mut self, path: &Path) {
+        if is_wsl(path) {
+            self.tracker.forget(path);
+            return;
+        }
         self.tracker.baseline(path, Stamp::of(path));
     }
 
@@ -183,8 +202,18 @@ impl DiskWatch {
         if self.tx.is_none() {
             self.spawn(Box::new(wake));
         }
+        // WSL-Dateien nur alle WSL_POLL_INTERVAL (#392), die übrigen wie bisher.
+        let wsl_due = self.last_wsl.is_none_or(|l| now.duration_since(l) >= WSL_POLL_INTERVAL);
+        let list: Vec<PathBuf> = open.iter().filter(|p| wsl_due || !is_wsl(p)).cloned().collect();
+        if wsl_due && open.iter().any(|p| is_wsl(p)) {
+            self.last_wsl = Some(now);
+        }
+        if list.is_empty() {
+            self.last = Some(now);
+            return events;
+        }
         if let Some(tx) = &self.tx
-            && tx.send(open.to_vec()).is_ok()
+            && tx.send(list).is_ok()
         {
             self.in_flight = true;
             self.last = Some(now);
@@ -211,6 +240,31 @@ mod tests {
 
     fn st(len: u64) -> Stamp {
         Stamp::Present { len, modified: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(len)) }
+    }
+
+    /// #392: WSL-Dateien misst nie der UI-Thread (Ausgangsstand = nächste Messung) und seltener.
+    #[test]
+    fn wsl_files_are_polled_less_often_and_never_measured_inline() {
+        let w = p(r"\\wsl.localhost\U\home\u\a.txt");
+        let mut dw = DiskWatch::new();
+        dw.tracker.baseline(&w, st(1));
+        dw.baseline(&w);
+        assert_eq!(dw.tracker.known(&w), None, "vergessen statt gemessen");
+        // Erste Messung danach gilt als Ausgangsstand, ohne Meldung
+        assert!(dw.tracker.observe(&[(w.clone(), st(5))]).is_empty());
+        assert_eq!(dw.tracker.known(&w), Some(st(5)));
+        // Abfragen: die lokale Datei jedes Mal, die WSL-Datei erst nach WSL_POLL_INTERVAL
+        let local = std::env::temp_dir().join(format!("pd-watch-{}.txt", std::process::id()));
+        let t0 = Instant::now();
+        let open = vec![local.clone(), w.clone()];
+        let _ = dw.tick(t0, &open, || {});
+        assert_eq!(dw.last_wsl, Some(t0), "erste Abfrage mit WSL");
+        dw.in_flight = false;
+        let _ = dw.tick(t0 + POLL_INTERVAL, &open, || {});
+        assert_eq!(dw.last_wsl, Some(t0), "nach 1 s ohne WSL");
+        dw.in_flight = false;
+        let _ = dw.tick(t0 + WSL_POLL_INTERVAL, &open, || {});
+        assert_eq!(dw.last_wsl, Some(t0 + WSL_POLL_INTERVAL));
     }
 
     #[test]

@@ -115,6 +115,10 @@ fn file_path(rest: &str) -> Option<String> {
                 Some(i) => (&r[..i], &r[i..]),
                 None => (r, ""),
             };
+            // Datei in einer WSL-Distribution (#392, aus `for_kind`): `file://wsl.localhost/<D>/…`.
+            if host.eq_ignore_ascii_case("wsl.localhost") || host.eq_ignore_ascii_case("wsl$") {
+                return wsl_file(p);
+            }
             if !host.is_empty() && !host.eq_ignore_ascii_case("localhost") {
                 return None;
             }
@@ -139,6 +143,72 @@ fn file_path(rest: &str) -> Option<String> {
         return None;
     }
     Some(p)
+}
+
+/// `/<D>/…` hinter `file://wsl.localhost` → `\\wsl.localhost\<D>\…` (keine Datenströme, keine leeren Abschnitte).
+fn wsl_file(p: &str) -> Option<String> {
+    let q = percent_decode(p);
+    if q.chars().any(hidden) || q.contains(':') {
+        return None;
+    }
+    let q = q.strip_prefix('/').unwrap_or(&q).replace('/', "\\");
+    // Keine leeren, `.`- oder `..`-Abschnitte (kein Hinausführen, keine leere Distribution).
+    if q.is_empty() || q.split('\\').any(|s| s.is_empty() || s == "." || s == "..") {
+        return None;
+    }
+    let unc = format!(r"\\wsl.localhost\{q}");
+    crate::wsl::is_wsl_unc(&unc).then_some(unc)
+}
+
+/// Prozent-Kodierung für einen Pfad in einer `file:`-Adresse (nur was die Zerlegung stören würde).
+fn percent_encode_path(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '%' => out.push_str("%25"),
+            ' ' => out.push_str("%20"),
+            '#' => out.push_str("%23"),
+            '?' => out.push_str("%3F"),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// OSC-8-Ziel aus einer Sitzung für Windows umschreiben (#392): `file://<rechner>/home/u/x` aus WSL wird
+/// `file://wsl.localhost/<D>/home/u/x`, `/mnt/c/x` bzw. Git Bash `/c/x` wird `file:///C:/x`. Als Rechner zählt nur
+/// der eigene (leer, `localhost`, Name dieses Computers). Andere Adressen bleiben, wie sie sind.
+pub fn for_kind(uri: &str, kind: &crate::targetpath::PathKind) -> String {
+    use crate::targetpath::PathKind;
+    if !matches!(kind, PathKind::Wsl { .. } | PathKind::Msys { .. }) || scheme(uri).as_deref() != Some("file") {
+        return uri.to_string();
+    }
+    let rest = &uri[5..];
+    let (host, path) = match rest.strip_prefix("//") {
+        Some(r) => match r.find('/') {
+            Some(i) => (&r[..i], &r[i..]),
+            None => return uri.to_string(),
+        },
+        None => ("", rest),
+    };
+    let own = host.is_empty() || host.eq_ignore_ascii_case("localhost") || std::env::var("COMPUTERNAME").is_ok_and(|c| !c.is_empty() && c.eq_ignore_ascii_case(host));
+    let decoded = percent_decode(path);
+    let b = decoded.as_bytes();
+    let drive = b.len() > 2 && b[0] == b'/' && b[2] == b':';
+    if !own || drive || !decoded.starts_with('/') || decoded.chars().any(hidden) {
+        return uri.to_string();
+    }
+    match kind.to_windows(&decoded) {
+        Ok(w) if w.starts_with("\\\\") => match crate::wsl::unc_to_linux(&w) {
+            Some((d, _)) => {
+                let tail = w.splitn(5, '\\').nth(4).unwrap_or("").replace('\\', "/");
+                format!("file://wsl.localhost/{d}/{}", percent_encode_path(&tail))
+            }
+            None => uri.to_string(),
+        },
+        Ok(w) => format!("file:///{}", percent_encode_path(&w.replace('\\', "/"))),
+        Err(_) => uri.to_string(),
+    }
 }
 
 fn percent_decode(s: &str) -> String {
@@ -203,6 +273,32 @@ pub fn take_request(ctx: &eframe::egui::Context) -> Option<(eframe::egui::Viewpo
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #392: OSC-8-Dateien aus WSL/Git Bash werden Windows-Pfade (eigener Rechner; fremde bleiben gesperrt).
+    #[test]
+    fn file_links_from_wsl_and_git_bash() {
+        use crate::targetpath::PathKind;
+        let ub = PathKind::Wsl { distro: Some("Osc8-Distro".into()) };
+        let u = for_kind("file:///home/u/my%20file.txt", &ub);
+        assert_eq!(u, "file://wsl.localhost/Osc8-Distro/home/u/my%20file.txt");
+        assert_eq!(classify(&u), LinkKind::Ask { file: Some(r"\\wsl.localhost\Osc8-Distro\home\u\my file.txt".into()) });
+        assert_eq!(for_kind("file://localhost/mnt/c/x/a.txt", &ub), "file:///C:/x/a.txt");
+        assert_eq!(classify(&for_kind("file:///mnt/c/x/a.txt", &ub)), LinkKind::Ask { file: Some(r"C:\x\a.txt".into()) });
+        assert_eq!(for_kind("file:///c/x/a.txt", &PathKind::Msys { root: None }), "file:///C:/x/a.txt");
+        // fremder Rechner, Windows-Sitzung, andere Schemata: unverändert
+        assert_eq!(for_kind("file://evil.example/home/u/x", &ub), "file://evil.example/home/u/x");
+        assert_eq!(for_kind("file:///home/u/x", &PathKind::Windows { cmd: false }), "file:///home/u/x");
+        assert_eq!(for_kind("https://x/home", &ub), "https://x/home");
+        assert_eq!(classify("file:///home/u/x"), LinkKind::Denied(DenyReason::NotLocal));
+        // wsl.localhost-Adressen: keine Datenströme, kein UNC-Schmuggel
+        assert_eq!(classify("file://wsl.localhost/U/a.txt:evil"), LinkKind::Denied(DenyReason::NotLocal));
+        assert_eq!(classify("file://wsl.localhost//evil/s"), LinkKind::Denied(DenyReason::NotLocal));
+        assert_eq!(classify("file://wsl.localhost/"), LinkKind::Denied(DenyReason::NotLocal));
+        for bad in ["file://wsl.localhost/U/../x", "file://wsl.localhost/U/./x", "file://wsl.localhost/../U/x", "file://wsl.localhost//U/x", "file://wsl.localhost/U/a%2F..%2Fb"] {
+            assert_eq!(classify(bad), LinkKind::Denied(DenyReason::NotLocal), "{bad}");
+        }
+        assert!(matches!(classify("file://wsl.localhost/U/a.txt"), LinkKind::Ask { file: Some(_) }));
+    }
 
     #[test]
     fn schemes() {

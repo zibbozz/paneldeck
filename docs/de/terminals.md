@@ -70,6 +70,14 @@ Eine WSL-Sitzung kann in einem Ordner **innerhalb von WSL** starten:
 - *In Paneldeck öffnen* im Explorer auf einem `\\wsl.localhost\<Distro>\…`-Ordner öffnet eine WSL-Sitzung dieser Distribution im passenden Linux-Pfad.
 - Eine WSL-Sitzung ohne Startordner startet im Linux-Home (`~`). Eine wiederhergestellte WSL-Sitzung, deren gespeicherter Ordner nicht verwendbar ist, startet mit Hinweis in `~`. Ordner mit `"` oder `\` werden abgelehnt.
 
+### Pfadarten: Windows, WSL und Git Bash
+Wo du einen Pfad eingibst, wählst, ablegst, einfügst oder anklickst, nimmt Paneldeck die Pfadart der Ziel-Shell und rechnet in beide Richtungen um:
+- **Ordnerfelder** – *Neue Sitzung*, Sitzungseinstellungen, Terminal-Vorlagen, *Startordner* der Profile, der Ordner eines Prozesses, Standardordner von Baumordnern und Projekten und der Arbeitsordner eines Planungsprojekts (nach der Standard-Shell) – sind überall dasselbe Feld: für eine WSL-Shell mit dem Umschalter *Windows-Pfad / WSL-Pfad*, Vervollständigung, Prüfung und zuletzt benutzten Ordnern; für Git Bash auch `/c/x` und `~`; für jede Shell `~` und `~/x` (der Home-Ordner des Ziels – das Linux-Home der Distribution, sonst dein Windows-Benutzerordner). Wofür ein eingegebener Pfad steht, steht klein darunter. Gespeichert wird, was du eingibst; nur ein `\wsl.localhost\<Distro>\…`-Pfad der eigenen Distribution der Sitzung wird zum Linux-Pfad.
+- **Drag & Drop und *Pfad einfügen*** (Dateibaum, Doppelklick) rechnen für das Terminal um: in WSL wird `C:\x` zu `/mnt/c/x` (bzw. dem in `/etc/wsl.conf` eingestellten Einhängepunkt) und `\wsl.localhost\<Distro>\x` zu `/x`; in Git Bash wird `C:\x` zu `/c/x`. Eine Datei einer anderen WSL-Distribution wird nicht eingefügt – ein Hinweis sagt, warum.
+- ***Neue Sitzung hier*** im Dateibaum auf einem WSL-Ordner startet eine WSL-Sitzung dieser Distribution, wie *In Paneldeck öffnen* im Explorer.
+- **Strg+Klick** auf einen Linux-Pfad in der Terminalausgabe (`/home/ich/x.rs:12`, `~/notizen.md`, `/mnt/c/…`, Git Bash `/c/…`) öffnet Textdateien im Editor von Paneldeck an dieser Zeile und Ordner im Explorer. Links, die Programme setzen (OSC 8, `file:///home/…`), zeigen aus einer WSL-Sitzung auf die Datei in dieser Distribution.
+- **cmd.exe** kann nicht in einem Netzwerk- oder WSL-Ordner starten; so eine Sitzung startet mit Hinweis im Benutzerordner.
+
 ## Organisation
 - **Projekte** mit eigenem Layout, dazu **Ordner**, Gruppen, Farben, Tags, Filter (`Filtern: Name oder #Tag`) und Notizen. Die Seitenleiste zeigt die Sitzungen als Liste oder Ordnerbaum; Drag & Drop verschiebt Sitzungen und Ordner.
 - Ordner können einen Arbeitsordner und **Vorgaben für neue Sitzungen** (Profil) haben; *Als Vorlage speichern …* legt eine Gruppe von Sitzungen als **Sitzungs-Vorlage** ab.

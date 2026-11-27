@@ -433,18 +433,21 @@ impl App {
         let mut warn_env = Vec::new();
         let res: Result<(Session, procs::Flavor), String> = (|| {
             let shell = procs::resolve_shell(&def.shell, &self.shells).ok_or_else(|| format!("{} {}", lang.t("Shell nicht gefunden:", "Shell not found:"), lang.q(&def.shell)))?;
-            let cwd = def.cwd.trim();
+            let flavor = procs::flavor_of(shell);
+            let (mut spec, mut env) = procs::launch_spec(shell, &def.command);
+            // Ordner nach der Pfadart der Shell (#392): WSL nimmt Linux-Pfade (und `\\wsl.localhost\<D>\…` derselben
+            // Distribution) über `wsl.exe --cd`, ohne Prüfung im UI-Thread; Git Bash `/c/x` und `~` werden Windows-Ordner.
+            let (cwd_owned, linux_cd) = proc_cwd(shell, &mut spec, def.cwd.trim(), lang)?;
+            let cwd = cwd_owned.as_str();
             // Ohne den UI-Thread an einer hängenden Netzwerkfreigabe zu blockieren (#216); lässt sich der Ordner nicht
             // bestätigen, startet der Prozess nicht (statt still im Standardordner der Shell).
-            if !cwd.is_empty() && !crate::wsl::is_wsl_unc(cwd) {
+            if !linux_cd && !cwd.is_empty() && !crate::wsl::is_wsl_unc(cwd) {
                 match crate::pathfmt::dir_exists_quick(cwd, Duration::from_millis(400)) {
                     Some(true) => {}
                     Some(false) => return Err(format!("{} {}", lang.t("Ordner nicht gefunden:", "Folder not found:"), lang.q(cwd))),
                     None => return Err(format!("{} {}", lang.t("Ordner antwortet nicht (Netzwerk?), bitte erneut versuchen:", "Folder does not respond (network?), please try again:"), lang.q(cwd))),
                 }
             }
-            let flavor = procs::flavor_of(shell);
-            let (spec, mut env) = procs::launch_spec(shell, &def.command);
             let (vals, bad) = procs::env_values(&def);
             // WSL (#384): die Variablen der Prozessliste kommen nur über WSLENV in die Linux-Umgebung.
             if flavor == procs::Flavor::Wsl && !vals.is_empty() {
@@ -464,7 +467,7 @@ impl App {
                 ctx,
                 SpawnOptions {
                     shell: &spec,
-                    cwd: (!cwd.is_empty()).then_some(cwd),
+                    cwd: (!cwd.is_empty() && !linux_cd).then_some(cwd),
                     restore_text: None,
                     initial_input: None,
                     scrollback_lines: procs::OUTPUT_LINES,
@@ -933,6 +936,11 @@ impl App {
         let shells: Vec<(String, String)> = self.shells.iter().map(|s| (s.id.clone(), shells::display_label(s, lang))).collect();
         let projects: Vec<(u64, String)> = self.projects.iter().map(|p| (p.id, p.name.clone())).collect();
         let groups = procs::groups(&self.procs.defs);
+        // Ordnerfeld nach der Shell des Prozesses (#392): Linux-Pfade für WSL, Git Bash `/c/x`, `~`.
+        let cwd_target = super::folder_picker::Target::for_shell(procs::resolve_shell(&ed.shell, &self.shells), false);
+        let wsl_recent = self.settings.wsl_recent.clone();
+        // Ordnerfeld lässt den Wert nicht übernehmen (#392) → Speichern gesperrt.
+        let mut cwd_block: Option<String> = None;
         let esc = ctx.input(|i| i.key_pressed(Key::Escape));
         style::movable(ctx, Id::new("proc_editor"), egui::Window::new(title)).collapsible(false).resizable(false).show(ctx, |ui| {
             ui.set_max_width(560.0);
@@ -944,14 +952,7 @@ impl App {
                 ui.add(egui::TextEdit::singleline(&mut ed.command).hint_text("npm run dev").font(egui::TextStyle::Monospace).desired_width(380.0));
                 ui.end_row();
                 ui.label(lang.t("Ordner", "Folder"));
-                ui.horizontal(|ui| {
-                    ui.add(egui::TextEdit::singleline(&mut ed.cwd).hint_text(lang.t("Standardordner der Shell", "the shell's default folder")).desired_width(340.0));
-                    if ui.button("…").on_hover_text(lang.t("Ordner wählen", "Choose a folder")).clicked() {
-                        if let Some(p) = crate::platform::notify::pick_folder(&ed.cwd) {
-                            ed.cwd = p;
-                        }
-                    }
-                });
+                cwd_block = super::folder_picker::field(ui, ("proc_cwd", ed.id), &mut ed.cwd, cwd_target.clone(), false, lang, &wsl_recent).blocking;
                 ui.end_row();
                 ui.label(lang.t("Shell", "Shell"));
                 let current = if ed.shell.is_empty() { lang.t("PowerShell (Standard)", "PowerShell (default)").to_string() } else { shells.iter().find(|(id, _)| *id == ed.shell).map(|(_, l)| l.clone()).unwrap_or_else(|| ed.shell.clone()) };
@@ -1036,7 +1037,11 @@ impl App {
             }
             ui.add_space(S2);
             ui.horizontal(|ui| {
-                save = ui.button(RichText::new(lang.t("Speichern", "Save")).strong()).clicked();
+                let sb = ui.add_enabled(cwd_block.is_none(), egui::Button::new(RichText::new(lang.t("Speichern", "Save")).strong()));
+                save = sb.clicked();
+                if let Some(why) = &cwd_block {
+                    sb.on_disabled_hover_text(why.as_str());
+                }
                 cancel = ui.button(lang.t("Abbrechen", "Cancel")).clicked();
                 if ed.id.is_some() {
                     ui.add_space(S3);
@@ -1325,9 +1330,124 @@ fn proc_wslenv(base: Option<&str>, vals: &[(String, String)]) -> String {
     vals.iter().fold(base.unwrap_or_default().to_string(), |w, (k, _)| super::wslenv_with(&w, k, ""))
 }
 
+/// Startordner eines Prozesses nach der Pfadart der Shell (#392); liefert (Windows-Startordner, ob der Ordner über
+/// `wsl.exe --cd` geht). WSL: ein Linux-Pfad (`~/x` mit bekanntem Home aufgelöst) oder ein
+/// `\\wsl.localhost\<D>\…`-Pfad derselben Distribution geht über `--cd` (geprüft gegen Einschleusung,
+/// `wsl::apply_cd`); ein Ordner einer anderen Distribution oder ein ungültiger Pfad ist ein Fehler. Git Bash: `/c/x`
+/// und `~`, Windows-Shells: `~` als Windows-Ordner. Sonst unverändert.
+pub(super) fn proc_cwd(shell: &ShellSpec, spec: &mut ShellSpec, cwd: &str, lang: Lang) -> Result<(String, bool), String> {
+    proc_cwd_with(shell, spec, cwd, lang, &crate::targetpath::Cached)
+}
+
+fn proc_cwd_with(shell: &ShellSpec, spec: &mut ShellSpec, cwd: &str, lang: Lang, lk: &dyn crate::targetpath::Lookup) -> Result<(String, bool), String> {
+    use crate::targetpath::PathKind;
+    if cwd.is_empty() {
+        return Ok((String::new(), false));
+    }
+    let kind = PathKind::of(shell);
+    match &kind {
+        PathKind::Wsl { .. } if !crate::shells::is_system_bash(&spec.program) => {
+            let distro = kind.distro_with(lk);
+            let home = distro.as_deref().and_then(|d| lk.wsl_home(d));
+            let c = if cwd.starts_with("~/") { crate::wsl::normalize(cwd, home.as_deref()) } else { cwd.to_string() };
+            if let Some(rest) = c.strip_prefix("~/") {
+                // Home noch nicht bekannt (erster Start, es wird im Hintergrund geholt): im Home starten und den
+                // Unterordner in der Shell wechseln – `~/'…'` (Tilde ungequotet, der Rest in '…'); Namen mit `'` oder
+                // ungültigen Zeichen nicht (#392).
+                if rest.contains('\'') || crate::wsl::validate_linux_path(&format!("/{rest}")).is_err() {
+                    return Err(format!("{} {}", crate::targetpath::PathErr::HomeUnknown.message(lang), lang.q(cwd)));
+                }
+                if crate::wsl::apply_cd(&mut spec.args, "~", distro.as_deref()) != crate::wsl::Cd::Linux {
+                    return Err(format!("{} {}", crate::targetpath::PathErr::HomeUnknown.message(lang), lang.q(cwd)));
+                }
+                if let Some(cmd) = spec.args.last_mut() {
+                    *cmd = format!("cd -- ~/'{rest}' || exit 1; {cmd}");
+                }
+                return Ok((String::new(), true));
+            }
+            match crate::wsl::apply_cd(&mut spec.args, &c, distro.as_deref()) {
+                crate::wsl::Cd::Linux => Ok((String::new(), true)),
+                crate::wsl::Cd::Windows => Ok((c, false)),
+                crate::wsl::Cd::OtherDistro(d) => Err(crate::targetpath::PathErr::OtherDistro { path: d, target: distro.unwrap_or_default() }.message(lang)),
+                crate::wsl::Cd::Invalid(e) => Err(format!("{} {}", e.message(lang == Lang::De), lang.q(cwd))),
+            }
+        }
+        PathKind::Msys { .. } | PathKind::Windows { .. } if cwd.starts_with('/') || cwd.starts_with('~') => {
+            kind.to_windows_with(cwd, lk).map(|w| (w, false)).map_err(|e| format!("{} {}", e.message(lang), lang.q(cwd)))
+        }
+        _ => Ok((cwd.to_string(), false)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #392: Ordner nach der Pfadart der Shell – WSL über `--cd` (auch für Linux-Ordner), Git Bash `/c/x` und `~`.
+    #[test]
+    fn process_folders_follow_the_shells_path_kind() {
+        struct Lk;
+        impl crate::targetpath::Lookup for Lk {
+            fn wsl_home(&self, _d: &str) -> Option<String> {
+                Some("/home/u".into())
+            }
+            fn wsl_mount(&self, _d: &str) -> Option<String> {
+                None
+            }
+            fn default_distro(&self) -> Option<String> {
+                None
+            }
+            fn win_home(&self) -> String {
+                r"C:\Users\u".into()
+            }
+        }
+        let wsl = ShellSpec { id: "wsl:Ubuntu".into(), label: "U".into(), program: "wsl.exe".into(), args: vec!["-d".into(), "Ubuntu".into()] };
+        let (mut spec, _) = procs::launch_spec(&wsl, "npm start");
+        assert_eq!(proc_cwd_with(&wsl, &mut spec, "/home/u/app", Lang::En, &Lk), Ok((String::new(), true)), "Linux-Ordner geht für WSL");
+        assert_eq!(&spec.args[..2], ["--cd", "/home/u/app"]);
+        let (mut spec, _) = procs::launch_spec(&wsl, "npm start");
+        assert_eq!(proc_cwd_with(&wsl, &mut spec, "~/app", Lang::En, &Lk), Ok((String::new(), true)));
+        assert_eq!(&spec.args[..2], ["--cd", "/home/u/app"]);
+        // Home noch unbekannt (erster Start): im Home starten, Unterordner in der Shell wechseln
+        struct NoHome;
+        impl crate::targetpath::Lookup for NoHome {
+            fn wsl_home(&self, _d: &str) -> Option<String> {
+                None
+            }
+            fn wsl_mount(&self, _d: &str) -> Option<String> {
+                None
+            }
+            fn default_distro(&self) -> Option<String> {
+                None
+            }
+            fn win_home(&self) -> String {
+                String::new()
+            }
+        }
+        let (mut spec, _) = procs::launch_spec(&wsl, "npm start");
+        assert_eq!(proc_cwd_with(&wsl, &mut spec, "~/my app", Lang::En, &NoHome), Ok((String::new(), true)));
+        assert_eq!(&spec.args[..2], ["--cd", "~"]);
+        assert_eq!(spec.args.last().map(String::as_str), Some("cd -- ~/'my app' || exit 1; npm start"));
+        let (mut spec, _) = procs::launch_spec(&wsl, "x");
+        assert!(proc_cwd_with(&wsl, &mut spec, "~/a'b", Lang::En, &NoHome).is_err(), "kein ' im Namen");
+        assert!(proc_cwd_with(&wsl, &mut spec, "~/a\"b", Lang::En, &NoHome).is_err());
+        let (mut spec, _) = procs::launch_spec(&wsl, "x");
+        assert_eq!(proc_cwd_with(&wsl, &mut spec, r"\\wsl.localhost\Ubuntu\srv", Lang::En, &Lk), Ok((String::new(), true)));
+        assert_eq!(&spec.args[..2], ["--cd", "/srv"]);
+        let (mut spec, _) = procs::launch_spec(&wsl, "x");
+        assert!(proc_cwd_with(&wsl, &mut spec, r"\\wsl.localhost\Debian\srv", Lang::En, &Lk).unwrap_err().contains("Debian"));
+        let (mut spec, _) = procs::launch_spec(&wsl, "x");
+        assert!(proc_cwd_with(&wsl, &mut spec, "/tmp/x\" echo pwned; #", Lang::En, &Lk).is_err(), "Einschleusung über --cd");
+        assert!(!spec.args.iter().any(|a| a == "--cd"));
+        let (mut spec, _) = procs::launch_spec(&wsl, "x");
+        assert_eq!(proc_cwd_with(&wsl, &mut spec, r"C:\work", Lang::En, &Lk), Ok((r"C:\work".to_string(), false)), "Windows-Ordner wie bisher");
+        // Git Bash und Windows
+        let gb = ShellSpec { id: "gitbash".into(), label: "Git Bash".into(), program: r"C:\Program Files\Git\bin\bash.exe".into(), args: vec![] };
+        let mut spec = gb.clone();
+        assert_eq!(proc_cwd_with(&gb, &mut spec, "/c/work", Lang::En, &Lk), Ok((r"C:\work".to_string(), false)));
+        assert_eq!(proc_cwd_with(&gb, &mut spec, "~/app", Lang::En, &Lk), Ok((r"C:\Users\u\app".to_string(), false)));
+        assert_eq!(proc_cwd_with(&gb, &mut spec, "", Lang::En, &Lk), Ok((String::new(), false)));
+    }
 
     #[test]
     fn process_variables_reach_wsl_via_wslenv() {

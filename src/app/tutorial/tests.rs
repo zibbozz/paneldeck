@@ -336,6 +336,13 @@ fn whats_new_lists_the_steps_since_a_version() {
     // Vergleich und Änderungsmarken (#385) kamen mit 3.2.0.
     let diff = ids("3.1.0", "3.2.0");
     assert!(diff.contains(&"editor.diff") && diff.contains(&"editor.markers"), "{diff:?}");
+    // Pfadarten des Ziels (#392) kamen mit 3.2.0, im Kapitel Werkzeuge hinter dem Dateibaum.
+    assert!(fmt.contains(&"tools.paths") && !fmt.contains(&"tools.files"), "{fmt:?}");
+    let tools = steps::tour("tools").map(|t| t.steps.iter().map(|s| s.id).collect::<Vec<_>>()).unwrap_or_default();
+    let at = |id: &str| tools.iter().position(|s| *s == id);
+    assert_eq!(at("tools.paths"), at("tools.files").map(|i| i + 1), "{tools:?}");
+    let step = steps::tour("tools").and_then(|t| t.steps.iter().find(|s| s.id == "tools.paths")).expect("tools.paths");
+    assert_eq!(step.spot, Some(Spot::SidebarFiles));
 }
 
 /// Die Schritte im Editor arbeiten in einer eigenen Beispieldatei der Tour im Temp-Ordner, nie in einer des Nutzers.

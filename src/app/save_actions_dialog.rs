@@ -29,6 +29,9 @@ pub(super) struct RuleEditor {
     /// Gezogene Aktion (Index).
     drag: Option<usize>,
     pub confirm_delete: bool,
+    /// Das Ordnerfeld lässt den Wert nicht übernehmen (#392: ungültiger/fehlender Linux-Ordner, andere Distribution,
+    /// Linux-Pfad für eine Windows-Shell) – Speichern gesperrt.
+    pub cwd_block: Option<String>,
 }
 
 impl RuleEditor {
@@ -41,6 +44,7 @@ impl RuleEditor {
             error: None,
             drag: None,
             confirm_delete: false,
+            cwd_block: None,
         }
     }
 
@@ -233,6 +237,10 @@ pub(super) struct DialogCx<'a> {
     /// Quoting der gewählten Shell (Prüfung der Befehle) und ob es cmd ist.
     pub quote: crate::quote::Kind,
     pub cmd: bool,
+    /// Ziel des Ordnerfelds (#392): nach der Shell der Regel (WSL: Linux-Pfade, Git Bash `/c/x`, `~`).
+    pub cwd_target: super::folder_picker::Target,
+    /// Zuletzt benutzte WSL-Ordner (Vorschläge des Ordnerfelds).
+    pub wsl_recent: &'a std::collections::BTreeMap<String, Vec<String>>,
 }
 
 /// Knöpfe des Regel-Dialogs.
@@ -458,12 +466,11 @@ pub(super) fn rule_editor_body(ui: &mut Ui, ed: &mut RuleEditor, cx: &DialogCx) 
                 });
                 ui.end_row();
                 ui.label(lang.t("Arbeitsordner", "Working folder"));
-                ui.horizontal(|ui| {
-                    ui.add(egui::TextEdit::singleline(&mut ed.rule.cwd).hint_text(lang.t("Regelordner (Datei-Regel: Ordner der Datei)", "rule folder (file rule: the file's folder)")).desired_width(290.0));
-                    if ui.button("…").clicked()
-                        && let Some(p) = crate::platform::notify::pick_folder(&ed.rule.cwd)
-                    {
-                        ed.rule.cwd = p;
+                ui.vertical(|ui| {
+                    // Gemeinsames Ordnerfeld (#392, wie Vorlagen und Prozessliste): nach der Shell der Regel.
+                    ed.cwd_block = super::folder_picker::field(ui, "sa_rule_cwd", &mut ed.rule.cwd, cx.cwd_target.clone(), false, lang, cx.wsl_recent).blocking;
+                    if ed.rule.cwd.trim().is_empty() {
+                        ui.label(RichText::new(lang.t("Leer = Regelordner (Datei-Regel: Ordner der Datei)", "Empty = rule folder (file rule: the file's folder)")).small().color(style::dim(ui)));
                     }
                 });
                 ui.end_row();
@@ -504,7 +511,12 @@ pub(super) fn rule_editor_body(ui: &mut Ui, ed: &mut RuleEditor, cx: &DialogCx) 
         }
         ui.add_space(S2);
         ui.horizontal(|ui| {
-            let sb = ui.button(RichText::new(lang.t("Speichern", "Save")).strong());
+            let blocked = ed.cwd_block.clone();
+            let sb = ui.add_enabled(blocked.is_none(), egui::Button::new(RichText::new(lang.t("Speichern", "Save")).strong()));
+            let sb = match &blocked {
+                Some(why) => sb.on_disabled_hover_text(why.as_str()),
+                None => sb,
+            };
             out.save = sb.clicked();
             #[cfg(test)]
             ui.data_mut(|d| d.insert_temp(Id::new("sa_test_save_btn"), sb.rect));
@@ -872,7 +884,9 @@ impl App {
         let target = procs::resolve_shell(&ed.rule.shell, &self.shells).map(vars::Target::of);
         let quote = target.as_ref().map(|t| t.quote).unwrap_or(crate::quote::Kind::Pwsh);
         let cmd = target.as_ref().is_some_and(|t| t.flavor == procs::Flavor::Cmd);
-        let cx = DialogCx { lang, shells: &shells, sessions: &sessions, processes: &processes, groups: &groups, can_run: active_file.is_some() && !ed.is_new, quote, cmd };
+        let cwd_target = super::folder_picker::Target::for_shell(procs::resolve_shell(&ed.rule.shell, &self.shells), false);
+        let wsl_recent = self.settings.wsl_recent.clone();
+        let cx = DialogCx { lang, shells: &shells, sessions: &sessions, processes: &processes, groups: &groups, can_run: active_file.is_some() && !ed.is_new, quote, cmd, cwd_target, wsl_recent: &wsl_recent };
         let mut out = DialogOut::default();
         win.show(ctx, |ui| out = rule_editor_body(ui, &mut ed, &cx));
         let DialogOut { save, cancel, test, run_now, delete } = out;
@@ -1223,7 +1237,8 @@ mod tests {
             let sessions = vec![(3u64, "Build".to_string())];
             let processes = vec![(2u64, "web".to_string())];
             let groups = vec!["Backend".to_string()];
-            let cx = DialogCx { lang, shells: &shells, sessions: &sessions, processes: &processes, groups: &groups, can_run: true, quote: crate::quote::Kind::Pwsh, cmd: false };
+            let recent = std::collections::BTreeMap::new();
+            let cx = DialogCx { lang, shells: &shells, sessions: &sessions, processes: &processes, groups: &groups, can_run: true, quote: crate::quote::Kind::Pwsh, cmd: false, cwd_target: crate::app::folder_picker::Target::Windows, wsl_recent: &recent };
             let ctx = egui::Context::default();
             let mut t = 0.0;
             for _ in 0..3 {

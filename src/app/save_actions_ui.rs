@@ -172,6 +172,16 @@ pub(super) struct SaState {
     pub ui: super::save_actions_dialog::SaUi,
     /// Rückfrage beim Beenden.
     pub quit: procs_ui::QuitState,
+    /// Speichern im Hintergrund (WSL-Dateien, #392): was nach dem Schreiben noch kommt, je Dokument.
+    pub pending_writes: HashMap<u64, AfterWrite>,
+}
+
+/// Der Teil von [`App::editor_save_with`] nach dem Schreiben (bei WSL-Dateien erst, wenn der Hilfsthread fertig ist).
+pub(super) struct AfterWrite {
+    plan: Plan,
+    builtins: Vec<(Builtin, Result<Option<String>, String>)>,
+    target: Option<PathBuf>,
+    origin: SaveOrigin,
 }
 
 impl SaState {
@@ -291,7 +301,10 @@ pub(super) struct Prepared {
     pub flavor: procs::Flavor,
     pub spec: ShellSpec,
     pub env: Vec<(String, String)>,
+    /// Startordner: Windows-Ordner, bei `linux_cd` der Linux-Pfad (nur zur Anzeige, er steht als `--cd` in `spec`).
     pub cwd: String,
+    /// WSL startet über `wsl.exe --cd` im Linux-Ordner (#392).
+    pub linux_cd: bool,
     /// Befehlszeile für die Anzeige (geheime Werte als •••).
     pub display: String,
     /// Hinweise (nicht entschlüsselbare Variablen, Variablen in Anführungszeichen).
@@ -698,7 +711,12 @@ impl App {
             spec.args.insert(1, "/v:off".into());
         }
         env.extend(extra);
-        let cwd = if rule.cwd.trim().is_empty() { rule.folder().to_string_lossy().to_string() } else { rule.cwd.trim().to_string() };
+        let raw_cwd = if rule.cwd.trim().is_empty() { rule.folder().to_string_lossy().to_string() } else { rule.cwd.trim().to_string() };
+        // Ordner nach der Pfadart der Shell (#392, wie die Prozessliste): WSL nimmt Linux-Pfade und
+        // `\\wsl.localhost\<D>\…` derselben Distribution über `wsl.exe --cd`, Git Bash `/c/x` und `~` werden
+        // Windows-Ordner; ein Ordner einer anderen Distribution oder ein ungültiger Pfad ist ein Fehler der Regel.
+        let (cwd, linux_cd) = super::procs_ui::proc_cwd(&shell, &mut spec, &raw_cwd, lang)?;
+        let cwd = if linux_cd { raw_cwd } else { cwd };
         let mut notes = Vec::new();
         if !bad.is_empty() {
             notes.push(format!("{} {}", lang.t("Nicht entschlüsselbar (Wert neu eingeben):", "Could not be decrypted (enter the value again):"), bad.join(", ")));
@@ -709,14 +727,15 @@ impl App {
                 notes.push(format!("{} {}", lang.t("cmd setzt diese Variablen ungequotet ein – als \"%NAME%\" schreiben:", "cmd inserts these variables unquoted – write them as \"%NAME%\":"), bare.join(", ")));
             }
         }
-        Ok(Prepared { flavor: target.flavor, shell, spec, env, cwd, display, notes })
+        Ok(Prepared { flavor: target.flavor, shell, spec, env, cwd, linux_cd, display, notes })
     }
 
     /// Befehl starten (verborgen oder sichtbar).
     fn sa_spawn(&mut self, ctx: &egui::Context, rule: &Rule, p: &Prepared) -> Result<Spawned, String> {
         let lang = self.settings.language;
         let cwd = p.cwd.trim();
-        if !crate::wsl::is_wsl_unc(cwd) {
+        // WSL über `--cd` (#392): kein Windows-Startordner, keine Prüfung im UI-Thread (das prüft WSL beim Start).
+        if !p.linux_cd && !crate::wsl::is_wsl_unc(cwd) {
             match crate::pathfmt::dir_exists_quick(cwd, Duration::from_millis(400)) {
                 Some(true) => {}
                 Some(false) => return Err(format!("{} {}", lang.t("Ordner nicht gefunden:", "Folder not found:"), lang.q(cwd))),
@@ -725,7 +744,7 @@ impl App {
         }
         let s = Session::spawn(
             ctx,
-            SpawnOptions { shell: &p.spec, cwd: Some(cwd), restore_text: None, initial_input: None, scrollback_lines: sa::OUTPUT_LINES + 200, env: p.env.clone(), user_env: Vec::new(), view: None, inherit_env: self.settings.inherit_env },
+            SpawnOptions { shell: &p.spec, cwd: (!p.linux_cd).then_some(cwd), restore_text: None, initial_input: None, scrollback_lines: sa::OUTPUT_LINES + 200, env: p.env.clone(), user_env: Vec::new(), view: None, inherit_env: self.settings.inherit_env },
         )
         .map_err(|e| format!("{} {e}", lang.t("Start fehlgeschlagen:", "Failed to start:")))?;
         s.kill_on_close();
@@ -768,7 +787,7 @@ impl App {
             return Err(lang.t("Die Sitzung wartet nicht an ihrem Prompt (oder ohne Shell-Integration) – nichts gesendet", "The session is not waiting at its prompt (or has no shell integration) – nothing sent").into());
         }
         let shell = self.shell_by_id(&e.eff_shell().to_string());
-        let target = shell.as_ref().map(vars::Target::of).unwrap_or(vars::Target { flavor: procs::Flavor::Pwsh, quote: crate::quote::Kind::Pwsh, shell_id: String::new(), distro: None });
+        let target = shell.as_ref().map(vars::Target::of).unwrap_or_else(vars::Target::pwsh);
         let (vals, _) = rule_env(rule);
         let lookup = crate::terminal::child_env_lookup(self.settings.inherit_env, &vals);
         let names = rule.env_names();
@@ -820,14 +839,59 @@ impl App {
         if !self.ed.docs.contains_key(&id) {
             return Err(lang.t("Kein solches Dokument", "No such document").to_string());
         }
+        // Agenten speichern nur lokale Windows-Dateien (#392; `editor_save` prüft das schon, hier die zweite Linie).
+        if origin == SaveOrigin::Agent && target.as_deref().is_some_and(|p| crate::wsl::is_wsl_unc(&p.to_string_lossy())) {
+            return Err(lang.t("Agenten speichern nur lokale Dateien, keine Dateien in WSL.", "Agents only save local files, not files in WSL.").to_string());
+        }
         // Vor dem Schreiben: Formatieren beim Speichern und Text-Aktionen (ein rückgängig machbarer Schritt), dann schreiben.
         let list: Vec<Builtin> = plan.builtins.iter().map(|(b, ..)| b.clone()).collect();
         let saved = self.ed.save_doc(id, path, origin.explicit(), &list, &prefs, lang, &keep_lines)?;
+        let after = AfterWrite { plan, builtins: saved.builtins, target, origin };
+        if saved.pending {
+            // WSL (#392): Das Schreiben läuft im Hilfsthread. Verlauf, Bericht, Aktionen nach dem Schreiben und neue
+            // Marken folgen erst mit dem Ergebnis (`sa_disk_job_done`); scheitert es, wird zurückgenommen und nichts
+            // weiter getan – wie beim Speichern im UI-Thread.
+            self.save_actions.pending_writes.insert(id, after);
+            return Ok(saved.hint);
+        }
+        self.sa_after_write(after);
+        Ok(saved.hint)
+    }
+
+    /// Ergebnis eines Speicherns im Hintergrund (WSL, #392) für Dokument `id`: geschrieben → weiter wie nach dem
+    /// Schreiben ([`App::sa_after_write`]); gescheitert → Formatieren und Text-Aktionen zurücknehmen (solange
+    /// unverändert weitergetippt), keine Aktionen nach dem Schreiben. Liefert bei einem Fehler einen Zusatz für die
+    /// Meldung.
+    pub(super) fn sa_disk_job_done(&mut self, id: u64, saved: bool) -> Option<String> {
+        let lang = self.settings.language;
+        if saved {
+            self.ed.pending_saves.remove(&id);
+            match self.save_actions.pending_writes.remove(&id) {
+                Some(w) => self.sa_after_write(w),
+                // Ohne Regeln-Stand (z. B. alter Lauf): wenigstens Vergleiche und Marken neu lesen.
+                None => self.ed.generation += 1,
+            }
+            return None;
+        }
+        let had = self.save_actions.pending_writes.remove(&id).is_some();
+        let rolled = self.ed.rollback_pending_save(id);
+        match (had, rolled) {
+            (_, false) => Some(lang.t("Formatieren und Text-Aktionen bleiben im Dokument (es wurde weiter bearbeitet); Aktionen nach dem Schreiben liefen nicht.", "Formatting and text actions stay in the document (it was edited further); actions after writing did not run.").to_string()),
+            (true, true) => Some(lang.t("Aktionen beim Speichern zurückgenommen bzw. nicht ausgeführt.", "Actions on save were undone or not run.").to_string()),
+            (false, true) => None,
+        }
+    }
+
+    /// Nach dem Schreiben (alle Speicherwege, auch das Ende eines Speicherns im Hintergrund): Vergleiche und Marken neu
+    /// lesen, Verlauf, Bericht für `editor_save` und die übrigen Aktionen in die Warteschlange.
+    fn sa_after_write(&mut self, w: AfterWrite) {
+        let lang = self.settings.language;
+        let AfterWrite { plan, builtins, target, origin } = w;
         // Vergleiche und Änderungsmarken lesen den gespeicherten Stand neu (#385).
         self.ed.generation += 1;
         let mut failed_rules: Vec<(u64, String)> = Vec::new();
         let mut pre_notes: Vec<(u64, Builtin, String, bool)> = Vec::new();
-        for (b, res) in saved.builtins {
+        for (b, res) in builtins {
             let Some((_, rule, _)) = plan.builtins.iter().find(|(x, ..)| *x == b) else { continue };
             match res {
                 Ok(Some(note)) => pre_notes.push((*rule, b.clone(), note, false)),
@@ -870,7 +934,6 @@ impl App {
         } else if !plan.builtins.is_empty() {
             self.save_actions.file_failed.insert(key, !failed_rules.is_empty());
         }
-        Ok(saved.hint)
     }
 
     /// *Jetzt ausführen* bzw. *Für Datei testen → Ausführen*: die Aktionen nach dem Schreiben der passenden Regeln (oder

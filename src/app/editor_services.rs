@@ -111,9 +111,62 @@ impl App {
             return;
         }
         for path in std::mem::take(&mut self.editor_svc.open_queue) {
-            if let Err(e) = self.editor_bridge_open(ctx, &path) {
+            // Linux-Pfad beim Programmstart (`--edit /home/u/x`): in der WSL-Standard-Distribution (#392).
+            let path = match self.cli_path(&path.to_string_lossy(), None) {
+                Ok(p) => PathBuf::from(p),
+                Err(e) => {
+                    self.notify_text(format!("{} {}: {}", state::t("Datei ließ sich nicht im Editor öffnen:", "Could not open the file in the editor:"), path.display(), e.message(self.settings.language)));
+                    continue;
+                }
+            };
+            // WSL-Dateien laden im Hintergrund (#392), lokale wie bisher.
+            let r = if crate::wsl::is_wsl_unc(&path.to_string_lossy()) { self.editor_open_user(&path, None).map(|_| ()) } else { self.editor_bridge_open(ctx, &path) };
+            if let Err(e) = r {
                 self.notify_text(format!("{} {}: {e}", state::t("Datei ließ sich nicht im Editor öffnen:", "Could not open the file in the editor:"), path.display()));
             }
+        }
+        // Strg+Klick auf einen Pfad im Terminal (#392): Textdatei im Editor an der Zeile.
+        for (path, line) in crate::links::take_editor_requests() {
+            if let Err(e) = self.editor_open_user(Path::new(&path), line) {
+                self.notify_text(format!("{} {path}: {e}", state::t("Datei ließ sich nicht im Editor öffnen:", "Could not open the file in the editor:")));
+            }
+        }
+        self.ed.apply_pending_goto();
+        if self.ed.pending_goto.is_some() {
+            ctx.request_repaint_after(Duration::from_millis(50));
+        }
+        // Speichern/Neu laden von WSL-Dateien im Hintergrund (#392).
+        let lang = self.settings.language;
+        let (done, busy) = self.ed.poll_disk_jobs(lang);
+        for (id, title, r) in done {
+            use super::editor_ui::DiskJobDone;
+            match r {
+                DiskJobDone::Saved => {
+                    self.ed.set_hint(format!("{title}: {}", lang.t("gespeichert", "saved")));
+                    // Aktionen beim Speichern (#383), Vergleiche und Marken (#385) erst jetzt – die Datei ist geschrieben.
+                    self.sa_disk_job_done(id, true);
+                    // „Speichern“ in der Rückfrage beim Schließen: jetzt weiter schließen.
+                    if self.ed.close_ask.as_ref().and_then(|a| a.tabs.first()).is_some_and(|(_, d)| *d == id) && self.ed.docs.get(&id).is_some_and(|d| !d.dirty()) {
+                        let dir = self.dir.clone();
+                        self.editor_close_step(&dir);
+                    }
+                }
+                DiskJobDone::Reloaded(s) => {
+                    self.ed.set_hint(format!("{title}: {}{}", lang.t("von der Platte neu geladen", "reloaded from disk"), if s.is_empty() { String::new() } else { format!(" ({s})") }));
+                    self.ed.generation += 1;
+                }
+                DiskJobDone::Failed(e) => {
+                    let extra = self.sa_disk_job_done(id, false);
+                    self.notify_text(match extra {
+                        Some(x) => format!("{title}: {e} {x}"),
+                        None => format!("{title}: {e}"),
+                    });
+                }
+                DiskJobDone::Conflict | DiskJobDone::Deleted | DiskJobDone::Unchanged => {}
+            }
+        }
+        if busy {
+            ctx.request_repaint_after(Duration::from_millis(100));
         }
         let open = self.editor_bridge_paths();
         let c = ctx.clone();

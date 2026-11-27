@@ -203,7 +203,11 @@ impl RevPicker {
         let s = self.free.trim();
         git_base::check_ref(s)?;
         let root = self.data.as_ref().and_then(|d| d.repo.as_ref()).map(|r| r.root.clone()).ok_or_else(|| crate::state::t("Die Datei liegt in keinem git-Repository.", "The file is not in a git repository.").to_string())?;
-        git_base::verify_ref(&root, s)?;
+        // Repository in WSL (#392): kein git-Aufruf im UI-Thread über `\\wsl.localhost` – eine unbekannte Revision meldet
+        // dann der Vergleich selbst (er liest im Hintergrund).
+        if !crate::wsl::is_wsl_unc(&root.to_string_lossy()) {
+            git_base::verify_ref(&root, s)?;
+        }
         Ok(Rev::Commit(s.to_string()))
     }
 

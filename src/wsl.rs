@@ -204,9 +204,21 @@ pub fn linux_to_unc(distro: &str, linux: &str) -> String {
 /// Windows-Pfad → Linux-Pfad in WSL: `C:\x` (auch `\\?\C:\x`) → `/mnt/c/x` (Standard-Einhängepunkt, siehe oben),
 /// `\\wsl.localhost\D\x` → `/x`. Laufwerksrelative (`C:x`), relative Pfade und Netzwerkfreigaben: `None`.
 pub fn windows_to_linux(p: &str) -> Option<String> {
+    windows_to_linux_at(p, DEFAULT_MOUNT)
+}
+
+/// Wie [`windows_to_linux`] mit eigenem Einhängepunkt `mount` (mit `/` am Ende, z. B. `/mnt/` oder `/`, #392).
+pub fn windows_to_linux_at(p: &str, mount: &str) -> Option<String> {
     if let Some((_, l)) = unc_to_linux(p) {
         return Some(l);
     }
+    let (d, parts) = drive_parts(p)?;
+    let m = if mount.ends_with('/') { mount.to_string() } else { format!("{mount}/") };
+    Some(if parts.is_empty() { format!("{m}{d}") } else { format!("{m}{d}/{}", parts.join("/")) })
+}
+
+/// Laufwerkspfad (`C:\x`, `C:/x`, `C:`, `\\?\C:\x`) → (Laufwerk klein, Abschnitte). Laufwerksrelativ (`C:x`): `None`.
+pub fn drive_parts(p: &str) -> Option<(char, Vec<&str>)> {
     let p = p.strip_prefix(r"\\?\").or_else(|| p.strip_prefix("//?/")).unwrap_or(p);
     let b = p.as_bytes();
     if b.len() >= 2 && b[1] == b':' && b[0].is_ascii_alphabetic() {
@@ -214,8 +226,7 @@ pub fn windows_to_linux(p: &str) -> Option<String> {
             return None;
         }
         let parts: Vec<&str> = p[2..].split(['\\', '/']).filter(|c| !c.is_empty()).collect();
-        let d = (b[0] as char).to_ascii_lowercase();
-        return Some(if parts.is_empty() { format!("/mnt/{d}") } else { format!("/mnt/{d}/{}", parts.join("/")) });
+        return Some(((b[0] as char).to_ascii_lowercase(), parts));
     }
     None
 }
@@ -223,18 +234,36 @@ pub fn windows_to_linux(p: &str) -> Option<String> {
 /// Linux-Pfad → Windows-Pfad: `/mnt/c/x` → `C:\x`, sonst `\\wsl.localhost\<Distro>\…`. `~` und relative Pfade,
 /// ohne Distribution auch alles außerhalb von `/mnt/<lw>`: `None`.
 pub fn linux_to_windows(distro: &str, p: &str) -> Option<String> {
+    linux_to_windows_at(distro, p, DEFAULT_MOUNT)
+}
+
+/// Wie [`linux_to_windows`] mit eigenem Einhängepunkt `mount` (#392).
+pub fn linux_to_windows_at(distro: &str, p: &str, mount: &str) -> Option<String> {
     if !p.starts_with('/') {
         return None;
     }
-    let parts: Vec<&str> = p.split('/').filter(|c| !c.is_empty()).collect();
-    if parts.len() >= 2 && parts[0] == "mnt" && parts[1].len() == 1 && parts[1].as_bytes()[0].is_ascii_alphabetic() {
-        let d = parts[1].to_ascii_uppercase();
-        return Some(format!(r"{d}:\{}", parts[2..].join("\\")));
+    if let Some((d, rest)) = mounted_drive(p, mount) {
+        return Some(format!(r"{}:\{}", d.to_ascii_uppercase(), rest.join("\\")));
     }
     if distro.is_empty() {
         return None;
     }
     Some(linux_to_unc(distro, p))
+}
+
+/// `<mount><lw>/…` → (Laufwerk klein, Abschnitte), z. B. `/mnt/c/x` mit `/mnt/` oder `/c/x` mit `/`.
+pub fn mounted_drive<'a>(p: &'a str, mount: &str) -> Option<(char, Vec<&'a str>)> {
+    let m = mount.trim_end_matches('/');
+    let rest = if m.is_empty() { p } else { p.strip_prefix(m)? };
+    if !rest.starts_with('/') {
+        return None;
+    }
+    let parts: Vec<&str> = rest.split('/').filter(|c| !c.is_empty()).collect();
+    let first = parts.first()?;
+    if first.len() == 1 && first.as_bytes()[0].is_ascii_alphabetic() {
+        return Some(((first.as_bytes()[0] as char).to_ascii_lowercase(), parts[1..].to_vec()));
+    }
+    None
 }
 
 /// `~` / `~/x` mit dem Home-Verzeichnis auflösen; absolute Pfade bleiben, sonst `None`.
@@ -372,9 +401,18 @@ pub fn apply_cd(args: &mut Vec<String>, cwd: &str, distro: Option<&str>) -> Cd {
         return Cd::Windows;
     }
     let cwd = cwd.trim();
-    let target = if cwd.is_empty() || cwd.starts_with("~/") {
-        // Ohne Home-Auflösung kennt `--cd` nur `~` allein.
+    let target = if cwd.is_empty() {
         "~".to_string()
+    } else if cwd.starts_with("~/") {
+        // `--cd` kennt nur `~` allein (#392): `~/x` mit dem bekannten Home der Distribution auflösen; ist es (noch)
+        // nicht bekannt, im Home starten und es im Hintergrund holen.
+        match distro.and_then(cached_home).and_then(|h| expand_home(cwd, Some(&h))) {
+            Some(full) => full,
+            None => {
+                prefetch(distro);
+                "~".to_string()
+            }
+        }
     } else if let Some((d, linux)) = unc_to_linux(cwd) {
         match distro {
             Some(x) if x.eq_ignore_ascii_case(&d) => linux,
@@ -465,17 +503,97 @@ pub trait Backend: Send + Sync {
     fn list(&self, distro: &str, dir: &str) -> Option<Vec<u8>>;
     /// Existiert der Ordner?
     fn is_dir(&self, distro: &str, path: &str) -> DirCheck;
+    /// Einhängepunkt der Windows-Laufwerke (`[automount] root` in `/etc/wsl.conf`, mit `/` am Ende, z. B. `/mnt/`);
+    /// `None` = unbekannt (dann gilt [`DEFAULT_MOUNT`]).
+    fn mount_root(&self, _distro: &str) -> Option<String> {
+        None
+    }
+}
+
+/// Standard-Einhängepunkt der Windows-Laufwerke in WSL (`C:\` = `/mnt/c`).
+pub const DEFAULT_MOUNT: &str = "/mnt/";
+
+/// `[automount] root = …` aus dem Text von `/etc/wsl.conf` (#392): Abschnitt und Schlüssel ohne Rücksicht auf
+/// Groß-/Kleinschreibung, Wert ohne Anführungszeichen, mit `/` am Ende. Fehlt er oder ist er kein gültiger absoluter
+/// Linux-Pfad: `None` (dann gilt [`DEFAULT_MOUNT`]).
+pub fn parse_automount_root(conf: &str) -> Option<String> {
+    let mut in_automount = false;
+    let mut found = None;
+    for line in conf.lines() {
+        let l = line.trim();
+        if l.starts_with('#') || l.starts_with(';') || l.is_empty() {
+            continue;
+        }
+        if l.starts_with('[') {
+            in_automount = l.trim_start_matches('[').trim_end_matches(']').trim().eq_ignore_ascii_case("automount");
+            continue;
+        }
+        if !in_automount {
+            continue;
+        }
+        let Some((k, v)) = l.split_once('=') else { continue };
+        if !k.trim().eq_ignore_ascii_case("root") {
+            continue;
+        }
+        let v = v.split(" #").next().unwrap_or("").trim().trim_matches(['"', '\'']).trim();
+        found = Some(v.to_string());
+    }
+    let v = found?;
+    // Nur schlichte Pfade (#392): `[A-Za-z0-9._/-]`, absolut, keine `.`/`..`-Abschnitte – der Wert landet in
+    // umgerechneten Pfaden, die eingefügt oder geprüft werden.
+    let plain = v.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '/' | '-'));
+    if !v.starts_with('/') || !plain || v.split('/').any(|s| s == "." || s == "..") || validate_linux_path(&v).is_err() {
+        return None;
+    }
+    Some(if v.ends_with('/') { v } else { format!("{v}/") })
+}
+
+/// `wsl.exe`-Argumente: `/etc/wsl.conf` lesen (ohne Shell, feste Argumente).
+pub fn mount_args(distro: &str) -> Vec<String> {
+    ["-d", distro, "-e", "cat", "/etc/wsl.conf"].iter().map(|s| s.to_string()).collect()
 }
 
 /// Echte Abfragen über `wsl.exe`; erfolgreiche Distributionslisten und Home-Verzeichnisse werden zwischengespeichert.
 pub struct WslExe;
 
+/// Kein WSL (Tests): keine Distributionen, nichts bekannt, nichts prüfbar.
+#[cfg_attr(not(test), allow(dead_code))]
+pub struct NoWsl;
+
+impl Backend for NoWsl {
+    fn distros(&self) -> Vec<String> {
+        Vec::new()
+    }
+    fn default_distro(&self) -> Option<String> {
+        None
+    }
+    fn home(&self, _distro: &str) -> Option<String> {
+        None
+    }
+    fn list(&self, _distro: &str, _dir: &str) -> Option<Vec<u8>> {
+        None
+    }
+    fn is_dir(&self, _distro: &str, _path: &str) -> DirCheck {
+        DirCheck::Unknown
+    }
+}
+
 /// Zwischengespeichert: (sichtbare Distributionen, echte Standard-Distribution).
 type DistroInfo = (Vec<String>, Option<String>);
 
-fn distro_cache() -> &'static Mutex<Option<DistroInfo>> {
-    static C: OnceLock<Mutex<Option<DistroInfo>>> = OnceLock::new();
+/// So lange gelten zwischengespeicherte Angaben (Distributionen, Standard-Distribution, Home, Einhängepunkt); danach
+/// wird neu gefragt (#392: die Standard-Distribution kann sich ändern).
+pub const CACHE_TTL: Duration = Duration::from_secs(600);
+/// Nach einer gescheiterten Hintergrund-Abfrage frühestens so lange warten (verdoppelt sich je Fehlschlag, höchstens 32×).
+const RETRY_AFTER: Duration = Duration::from_secs(30);
+
+fn distro_cache() -> &'static Mutex<Option<(DistroInfo, std::time::Instant)>> {
+    static C: OnceLock<Mutex<Option<(DistroInfo, std::time::Instant)>>> = OnceLock::new();
     C.get_or_init(|| Mutex::new(None))
+}
+
+fn fresh(at: std::time::Instant) -> bool {
+    at.elapsed() < CACHE_TTL
 }
 
 /// Namen aller Distributionen (`wsl.exe -l -q`, ungefiltert) mit Zeitlimit – für die Shell-Erkennung beim Start
@@ -487,22 +605,140 @@ pub fn list_distros(timeout: Duration) -> Option<Vec<String>> {
 
 /// Distributionen und Standard ermitteln; nur ein Erfolg wird zwischengespeichert (sonst beim nächsten Mal erneut).
 fn distro_info() -> Option<DistroInfo> {
-    if let Some(v) = distro_cache().lock().ok().and_then(|c| c.clone()) {
-        return Some(v);
+    let old = distro_cache().lock().ok().and_then(|c| c.clone());
+    if let Some((v, at)) = &old {
+        if fresh(*at) {
+            return Some(v.clone());
+        }
     }
-    let out = run(&["-l".into(), "-q".into()], SLOW_TIMEOUT).filter(|o| o.code == Some(0) && !o.truncated)?;
+    // Abgelaufen: neu fragen; scheitert das, gilt vorerst der alte Stand.
+    let Some(out) = run(&["-l".into(), "-q".into()], SLOW_TIMEOUT).filter(|o| o.code == Some(0) && !o.truncated) else { return old.map(|o| o.0) };
     let names = parse_distro_list(&out.stdout);
     let default = run(&["-l".into(), "-v".into()], SLOW_TIMEOUT).and_then(|o| parse_default_distro(&o.stdout, &names));
     let info = (visible_distros(names, default.as_deref()), default);
     if let Ok(mut c) = distro_cache().lock() {
-        *c = Some(info.clone());
+        *c = Some((info.clone(), std::time::Instant::now()));
     }
     Some(info)
 }
 
-fn home_cache() -> &'static Mutex<BTreeMap<String, String>> {
-    static C: OnceLock<Mutex<BTreeMap<String, String>>> = OnceLock::new();
+type StampedMap = Mutex<BTreeMap<String, (String, std::time::Instant)>>;
+
+fn home_cache() -> &'static StampedMap {
+    static C: OnceLock<StampedMap> = OnceLock::new();
     C.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+fn mount_cache() -> &'static StampedMap {
+    static C: OnceLock<StampedMap> = OnceLock::new();
+    C.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+/// Eintrag der Distribution (Groß-/Kleinschreibung egal) mit seinem Zeitpunkt.
+fn stamped_in(c: &StampedMap, distro: &str) -> Option<(String, std::time::Instant)> {
+    c.lock().ok().and_then(|m| m.iter().find(|(k, _)| k.eq_ignore_ascii_case(distro)).map(|(_, v)| v.clone()))
+}
+
+fn cached_in(c: &StampedMap, distro: &str) -> Option<String> {
+    stamped_in(c, distro).map(|v| v.0)
+}
+
+fn store_in(c: &StampedMap, distro: &str, v: &str) {
+    if let Ok(mut m) = c.lock() {
+        m.retain(|k, _| !k.eq_ignore_ascii_case(distro));
+        m.insert(distro.to_string(), (v.to_string(), std::time::Instant::now()));
+    }
+}
+
+/// Schon bekanntes Home-Verzeichnis der Distribution (aus einer früheren Abfrage; fragt nie selbst, blockiert nie).
+pub fn cached_home(distro: &str) -> Option<String> {
+    cached_in(home_cache(), distro)
+}
+
+/// Schon bekannter Einhängepunkt der Laufwerke (siehe [`Backend::mount_root`]; fragt nie selbst).
+pub fn cached_mount(distro: &str) -> Option<String> {
+    cached_in(mount_cache(), distro)
+}
+
+/// Bekannte echte Standard-Distribution, nur solange die Angabe frisch ist ([`CACHE_TTL`]; fragt nie selbst). Wer damit
+/// einen Ordner in einer Distribution öffnet (`--cd`), rät so nie mit einem veralteten Stand.
+pub fn cached_default() -> Option<String> {
+    distro_cache().lock().ok().and_then(|c| c.as_ref().filter(|(_, at)| fresh(*at)).and_then(|(i, _)| i.1.clone()))
+}
+
+/// Stand einer Hintergrund-Abfrage je Distribution (für [`prefetch`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Asked {
+    at: std::time::Instant,
+    /// Läuft noch.
+    running: bool,
+    /// Fehlschläge in Folge (0 = zuletzt erfolgreich).
+    failures: u32,
+}
+
+/// Darf eine neue Hintergrund-Abfrage starten? Nicht, solange eine läuft; nach Erfolg erst nach [`CACHE_TTL`], nach
+/// Fehlschlägen nach [`RETRY_AFTER`] × 2^(n−1) (höchstens 32×).
+fn may_ask(a: Option<&Asked>, now: std::time::Instant) -> bool {
+    match a {
+        None => true,
+        Some(a) if a.running => false,
+        Some(a) if a.failures == 0 => now.duration_since(a.at) >= CACHE_TTL,
+        Some(a) => now.duration_since(a.at) >= RETRY_AFTER * (1u32 << (a.failures - 1).min(5)),
+    }
+}
+
+fn asked() -> &'static Mutex<BTreeMap<String, Asked>> {
+    static C: OnceLock<Mutex<BTreeMap<String, Asked>>> = OnceLock::new();
+    C.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+/// Home und Einhängepunkt einer Distribution im Hintergrund holen bzw. auffrischen (`None` = die Standard-Distribution,
+/// erst ermitteln). Erfolg zählt erst nach der Antwort; nach Fehlschlägen mit wachsendem Abstand erneut. Danach liefern
+/// [`cached_home`]/[`cached_mount`]/[`cached_default`] sie. In Tests nie (kein echtes `wsl.exe`).
+pub fn prefetch(distro: Option<&str>) {
+    if cfg!(test) || !cfg!(windows) {
+        return;
+    }
+    let key = distro.unwrap_or("").to_ascii_lowercase();
+    if distro.is_some_and(|d| !valid_distro(d)) {
+        return;
+    }
+    {
+        let Ok(mut a) = asked().lock() else { return };
+        let now = std::time::Instant::now();
+        if !may_ask(a.get(&key), now) || (a.len() > 64 && !a.contains_key(&key)) {
+            return;
+        }
+        let failures = a.get(&key).map(|x| x.failures).unwrap_or(0);
+        a.insert(key.clone(), Asked { at: now, running: true, failures });
+    }
+    let d = distro.map(str::to_string);
+    let spawned = std::thread::Builder::new().name("wsl-prefetch".into()).spawn(move || {
+        let ok = match d.or_else(|| WslExe.default_distro()) {
+            Some(d) => WslExe.home(&d).is_some() & WslExe.mount_root(&d).is_some(),
+            None => false,
+        };
+        if let Ok(mut a) = asked().lock() {
+            let failures = if ok { 0 } else { a.get(&key).map(|x| x.failures + 1).unwrap_or(1) };
+            a.insert(key, Asked { at: std::time::Instant::now(), running: false, failures });
+        }
+    });
+    if spawned.is_err() {
+        if let Ok(mut a) = asked().lock() {
+            a.remove(&distro.unwrap_or("").to_ascii_lowercase());
+        }
+    }
+}
+
+/// Nur Tests: Zwischenspeicher füllen (Home, Einhängepunkt) wie nach einer Abfrage.
+#[cfg(test)]
+pub fn set_cached(distro: &str, home: Option<&str>, mount: Option<&str>) {
+    if let Some(h) = home {
+        store_in(home_cache(), distro, h);
+    }
+    if let Some(m) = mount {
+        store_in(mount_cache(), distro, m);
+    }
 }
 
 impl Backend for WslExe {
@@ -518,17 +754,18 @@ impl Backend for WslExe {
         if !valid_distro(distro) {
             return None;
         }
-        if let Some(h) = home_cache().lock().ok().and_then(|c| c.get(distro).cloned()) {
-            return Some(h);
+        let old = stamped_in(home_cache(), distro);
+        if let Some((h, at)) = &old {
+            if fresh(*at) {
+                return Some(h.clone());
+            }
         }
-        let out = run(&home_args(distro), SLOW_TIMEOUT).filter(|o| o.code == Some(0) && !o.truncated)?;
+        let Some(out) = run(&home_args(distro), SLOW_TIMEOUT).filter(|o| o.code == Some(0) && !o.truncated) else { return old.map(|o| o.0) };
         let h = String::from_utf8_lossy(&out.stdout).trim().to_string();
         if validate_linux_path(&h).is_err() || h == "~" {
             return None;
         }
-        if let Ok(mut c) = home_cache().lock() {
-            c.insert(distro.to_string(), h.clone());
-        }
+        store_in(home_cache(), distro, &h);
         Some(h)
     }
 
@@ -537,6 +774,27 @@ impl Backend for WslExe {
             return None;
         }
         run(&list_args(distro, dir), FAST_TIMEOUT).filter(|o| o.code == Some(0) && !o.truncated).map(|o| o.stdout)
+    }
+
+    fn mount_root(&self, distro: &str) -> Option<String> {
+        if !valid_distro(distro) {
+            return None;
+        }
+        let old = stamped_in(mount_cache(), distro);
+        if let Some((m, at)) = &old {
+            if fresh(*at) {
+                return Some(m.clone());
+            }
+        }
+        let Some(out) = run(&mount_args(distro), SLOW_TIMEOUT).filter(|o| !o.truncated) else { return old.map(|o| o.0) };
+        // `cat` liefert 1, wenn es die Datei nicht gibt: dann gilt der Standard. Andere Codes stammen von wsl.exe.
+        let m = match out.code {
+            Some(0) => parse_automount_root(&String::from_utf8_lossy(&out.stdout)).unwrap_or_else(|| DEFAULT_MOUNT.to_string()),
+            Some(1) => DEFAULT_MOUNT.to_string(),
+            _ => return old.map(|o| o.0),
+        };
+        store_in(mount_cache(), distro, &m);
+        Some(m)
     }
 
     fn is_dir(&self, distro: &str, path: &str) -> DirCheck {
@@ -886,6 +1144,16 @@ mod tests {
         assert_eq!(apply_cd(&mut a, "\\\\wsl$\\Ubuntu\\x\u{F022} echo pwned", Some("Ubuntu")), Cd::Invalid(PathError::Quote));
         assert_eq!(apply_cd(&mut a, "/a\nb", Some("Ubuntu")), Cd::Invalid(PathError::Control));
         assert_eq!(a.len(), 2);
+        // #392: ~/x mit bekanntem Home aufgelöst (und geprüft)
+        set_cached("Cd-Home-Distro", Some("/home/ch"), None);
+        let mut a = vec![];
+        assert_eq!(apply_cd(&mut a, "~/my proj", Some("Cd-Home-Distro")), Cd::Linux);
+        assert_eq!(a, vec!["--cd", "/home/ch/my proj"]);
+        let mut a = vec![];
+        assert_eq!(apply_cd(&mut a, "~/x\" echo pwned", Some("Cd-Home-Distro")), Cd::Invalid(PathError::Quote));
+        let mut a = vec![];
+        assert_eq!(apply_cd(&mut a, "~/x", Some("Cd-Unknown-Distro")), Cd::Linux, "Home unbekannt: im Home");
+        assert_eq!(a, vec!["--cd", "~"]);
         let mut own = vec!["--cd".to_string(), "/srv".to_string()];
         assert_eq!(apply_cd(&mut own, "/home", None), Cd::Windows);
         assert_eq!(own, vec!["--cd", "/srv"]);
@@ -920,5 +1188,50 @@ mod tests {
         sanitize_recent(&mut bad);
         assert_eq!(bad.len(), 1, "{bad:?}");
         assert_eq!(bad["Ubuntu"], vec!["/ok".to_string(), "/two".to_string()]);
+    }
+
+    #[test]
+    fn automount_root_from_wsl_conf() {
+        assert_eq!(parse_automount_root("[automount]\nroot = /\n").as_deref(), Some("/"));
+        assert_eq!(parse_automount_root("[boot]\nsystemd=true\n\n[Automount]\n  Root=\"/win\"\noptions = metadata\n").as_deref(), Some("/win/"));
+        assert_eq!(parse_automount_root("# kommentar\n[automount]\nenabled = true\nroot = /drives/ # eigene\n").as_deref(), Some("/drives/"));
+        // Nur im Abschnitt [automount]; ungültige Werte zählen nicht
+        assert_eq!(parse_automount_root("[network]\nroot = /x\n"), None);
+        assert_eq!(parse_automount_root("[automount]\nroot = relative\n"), None);
+        assert_eq!(parse_automount_root("[automount]\nroot = /a\"b\n"), None);
+        for bad in ["/a b", "/a;b", "/a/../etc", "/./x", "/a$(id)", "/ä"] {
+            assert_eq!(parse_automount_root(&format!("[automount]\nroot = {bad}\n")), None, "{bad}");
+        }
+        assert_eq!(parse_automount_root("[automount]\nroot = /my-drives_1.x/\n").as_deref(), Some("/my-drives_1.x/"));
+        // Hintergrund-Abfragen: nicht doppelt, nach Erfolg erst nach der Gültigkeit, nach Fehlschlägen mit Abstand
+        let t = std::time::Instant::now();
+        let later = |s: u64| t + Duration::from_secs(s);
+        assert!(may_ask(None, t));
+        assert!(!may_ask(Some(&Asked { at: t, running: true, failures: 0 }), later(9999)));
+        assert!(!may_ask(Some(&Asked { at: t, running: false, failures: 0 }), later(60)));
+        assert!(may_ask(Some(&Asked { at: t, running: false, failures: 0 }), later(601)));
+        assert!(!may_ask(Some(&Asked { at: t, running: false, failures: 1 }), later(10)));
+        assert!(may_ask(Some(&Asked { at: t, running: false, failures: 1 }), later(31)));
+        assert!(!may_ask(Some(&Asked { at: t, running: false, failures: 3 }), later(100)), "Abstand wächst");
+        assert!(may_ask(Some(&Asked { at: t, running: false, failures: 3 }), later(121)));
+        assert!(!may_ask(Some(&Asked { at: t, running: false, failures: 20 }), later(900)), "höchstens 32×");
+        assert!(may_ask(Some(&Asked { at: t, running: false, failures: 20 }), later(961)));
+        assert_eq!(parse_automount_root(""), None);
+        assert_eq!(mount_args("Ubuntu"), vec!["-d", "Ubuntu", "-e", "cat", "/etc/wsl.conf"]);
+        // Umrechnung mit eigenem Einhängepunkt
+        assert_eq!(windows_to_linux_at(r"C:\x\y", "/").as_deref(), Some("/c/x/y"));
+        assert_eq!(windows_to_linux_at(r"D:\", "/win/").as_deref(), Some("/win/d"));
+        assert_eq!(linux_to_windows_at("U", "/c/x", "/").as_deref(), Some(r"C:\x"));
+        assert_eq!(linux_to_windows_at("U", "/home/u", "/").as_deref(), Some(r"\\wsl.localhost\U\home\u"));
+        assert_eq!(linux_to_windows_at("U", "/mnt/c/x", "/win/").as_deref(), Some(r"\\wsl.localhost\U\mnt\c\x"));
+        assert_eq!(mounted_drive("/mnt/c", "/mnt/").map(|(d, r)| (d, r.len())), Some(('c', 0)));
+        assert_eq!(mounted_drive("/mntx/c", "/mnt/"), None);
+        assert_eq!(drive_parts("C:foo"), None);
+        assert_eq!(drive_parts(r"\\?\E:\a\b"), Some(('e', vec!["a", "b"])));
+        // Zwischenspeicher: ohne Rücksicht auf Groß-/Kleinschreibung, fragt nie selbst
+        set_cached("Cache-Test-Distro", Some("/home/ct"), Some("/"));
+        assert_eq!(cached_home("cache-test-distro").as_deref(), Some("/home/ct"));
+        assert_eq!(cached_mount("CACHE-TEST-DISTRO").as_deref(), Some("/"));
+        assert_eq!(cached_home("Nie-Gefragt"), None);
     }
 }

@@ -70,6 +70,14 @@ A WSL session can start in a folder **inside WSL**:
 - *Open in Paneldeck* in Explorer on a `\\wsl.localhost\<distro>\…` folder opens a WSL session of that distribution in the matching Linux path.
 - A WSL session without a start folder starts in the Linux home (`~`). A restored WSL session whose saved folder cannot be used starts in `~` with a note. Folders containing `"` or `\` are rejected.
 
+### Path kinds: Windows, WSL and Git Bash
+Wherever you enter, pick, drop, insert or click a path, Paneldeck uses the path kind of the target shell and converts in both directions:
+- **Folder fields** – *New session*, session settings, terminal templates, *Start folder* of profiles, the folder of a process, default folders of tree folders and projects and the working folder of a planning project (following the default shell) – are the same field everywhere: for a WSL shell with the *Windows path / WSL path* switch, completion, check and recently used folders; for Git Bash also `/c/x` and `~`; for every shell `~` and `~/x` (the home folder of the target – the Linux home of the distribution, otherwise your Windows user folder). What a typed path stands for is shown small underneath. Folders are stored as you entered them; only a `\wsl.localhost\<distro>\…` path of the session's own distribution becomes the Linux path.
+- **Drag & drop and *Insert path*** (file tree, double-click) convert for the terminal: in WSL `C:\x` becomes `/mnt/c/x` (or the mount point set in `/etc/wsl.conf`) and `\wsl.localhost\<distro>\x` becomes `/x`; in Git Bash `C:\x` becomes `/c/x`. A file of another WSL distribution is not inserted – a note says why.
+- ***New session here*** in the file tree on a WSL folder starts a WSL session of that distribution, like *Open in Paneldeck* in Explorer.
+- **Ctrl+click** on a Linux path in the terminal output (`/home/me/x.rs:12`, `~/notes.md`, `/mnt/c/…`, Git Bash `/c/…`) opens text files in the Paneldeck editor at that line and folders in Explorer. Links set by programs (OSC 8, `file:///home/…`) from a WSL session point to the file in that distribution.
+- **cmd.exe** cannot start in a network or WSL folder; such a session starts in your user folder with a note.
+
 ## Organization
 - **Projects** with their own layout, plus **folders**, groups, colors, tags, filters (`Filter: name or #tag`) and notes. The sidebar shows the sessions as a list or a folder tree; drag & drop moves sessions and folders.
 - Folders can have a working folder and **defaults for new sessions** (profile); *Save as template …* stores a group of sessions as a **session template**.

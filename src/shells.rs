@@ -247,11 +247,36 @@ pub fn is_wsl_program(program: &str) -> bool {
     stem == "wsl" || (stem == "bash" && is_system_bash(&prog))
 }
 
-/// Der WSL-Starter `bash.exe` (kennt kein `--cd`, startet im Windows-Ordner).
+/// Der WSL-Starter `bash.exe` (kennt kein `--cd`, startet im Windows-Ordner). Ein bloßes `bash`/`bash.exe` (eigenes
+/// Profil) wird über PATH aufgelöst (#392): liegt es in System32, ist es der WSL-Starter, sonst z. B. Git Bash.
 pub fn is_system_bash(program: &str) -> bool {
-    let prog = program.replace('/', "\\").to_ascii_lowercase();
+    let resolved = resolve_program(program);
+    let prog = resolved.replace('/', "\\").to_ascii_lowercase();
     let file = prog.rsplit('\\').next().unwrap_or("");
     file.strip_suffix(".exe").unwrap_or(file) == "bash" && (prog.contains("\\system32\\") || prog.contains("\\sysnative\\") || prog.contains("\\windowsapps\\"))
+}
+
+/// Programm ohne Ordner (`bash.exe`, `bash`) unter Windows über PATH auflösen (wie `CreateProcess` es fände; mit
+/// Zwischenspeicher, damit die Erkennung je Bild nicht die Platte fragt). Mit Ordner, außerhalb von Windows oder nicht
+/// gefunden: unverändert.
+pub fn resolve_program(program: &str) -> String {
+    let p = program.trim();
+    if !cfg!(windows) || p.is_empty() || p.contains(['\\', '/', ':']) {
+        return p.to_string();
+    }
+    static CACHE: std::sync::Mutex<Vec<(String, String)>> = std::sync::Mutex::new(Vec::new());
+    let key = p.to_ascii_lowercase();
+    if let Some((_, r)) = CACHE.lock().ok().and_then(|c| c.iter().find(|(k, _)| *k == key).cloned()) {
+        return r;
+    }
+    let name = if key.ends_with(".exe") { p.to_string() } else { format!("{p}.exe") };
+    let r = which(&name).map(|f| f.to_string_lossy().to_string()).unwrap_or_else(|| p.to_string());
+    if let Ok(mut c) = CACHE.lock() {
+        if c.len() < 64 {
+            c.push((key, r.clone()));
+        }
+    }
+    r
 }
 
 /// Distribution aus `-d <Name>` / `--distribution <Name>` in den Argumenten.

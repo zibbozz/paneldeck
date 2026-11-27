@@ -546,6 +546,9 @@ impl App {
                             });
                             ui.separator();
                             let sel = self.profile_sel.min(self.settings.profiles.len() - 1);
+                            // Ordnerfeld nach der Shell des Profils (#392): WSL-Pfade, Git Bash `/c/x`, `~`.
+                            let cwd_target = self.folder_target(self.settings.profiles[sel].id);
+                            let wsl_recent = self.settings.wsl_recent.clone();
                             let p = &mut self.settings.profiles[sel];
                             row(ui, lang.t("Name", "Name"), "", |ui| {
                                 ui.add(egui::TextEdit::singleline(&mut p.name).desired_width(240.0));
@@ -603,7 +606,8 @@ impl App {
                                 ui.add(egui::TextEdit::singleline(&mut p.args).desired_width(240.0));
                             });
                             row(ui, lang.t("Startordner", "Start folder"), "", |ui| {
-                                ui.add(egui::TextEdit::singleline(&mut p.cwd).desired_width(240.0));
+                                let pid = p.id;
+                                super::folder_picker::field(ui, ("prof_cwd", pid), &mut p.cwd, cwd_target.clone(), false, lang, &wsl_recent);
                             });
                             row(ui, lang.t("Startbefehl", "Startup command"), lang.t("Wird nach dem Start eingegeben (vor `claude`)", "Typed after start (before `claude`)"), |ui| {
                                 ui.add(egui::TextEdit::singleline(&mut p.startup).desired_width(240.0));

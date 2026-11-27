@@ -1577,9 +1577,14 @@ impl App {
         let cmds: Vec<IpcCmd> = self.hook_server.as_ref().map(|h| h.cmd_rx.try_iter().collect()).unwrap_or_default();
         for c in cmds {
             self.from_tray(ctx);
-            if let IpcCmd::Edit { path } = c {
-                // `paneldeck --edit <datei>` (#54): im Editor-Reiter öffnen (keine Sitzung, keine Agenten-Kette).
-                self.editor_open_from_ipc(path);
+            if let IpcCmd::Edit { path, origin } = c {
+                // `paneldeck --edit <datei>` (#54): im Editor-Reiter öffnen (keine Sitzung, keine Agenten-Kette). Ein
+                // Linux-Pfad gilt in der Sitzung, aus der der Aufruf kam (sonst in der WSL-Standard-Distribution, #392).
+                let (from, _) = self.open_origin(origin.as_ref());
+                match self.cli_path(&path, from) {
+                    Ok(p) => self.editor_open_from_ipc(p),
+                    Err(e) => self.notify_text(format!("{} {path}: {}", state::t("Datei ließ sich nicht im Editor öffnen:", "Could not open the file in the editor:"), e.message(self.settings.language))),
+                }
                 continue;
             }
             if let IpcCmd::Open { path, claude, origin } = c {
@@ -1592,6 +1597,9 @@ impl App {
                     self.notify_text(taint::orphan_error().1);
                     continue;
                 }
+                // Linux-Pfad (#392): in der Sitzung des Aufrufs (sonst WSL-Standard) – als `\\wsl.localhost\<D>\…` bzw.
+                // `C:\…`; `open_folder` wählt dann die passende Shell.
+                let path = self.cli_path(&path, origin).unwrap_or(path);
                 let id = self.open_folder(ctx, &path, claude, origin);
                 if origin.is_some() && taint::on_create(&mut self.entries, origin, id) {
                     self.save_state();
@@ -2078,7 +2086,10 @@ impl App {
         // Ein gespeicherter `\\wsl$\<distro>\…`-Ordner derselben Distribution geht ebenfalls über `--cd`; Pfade mit `"`/`\`
         // erreichen die Kommandozeile nie (wsl.exe zerlegt sie selbst – Befehlseinschleusung).
         let cwd = if wsl {
-            let distro = wsl_distro_of(&shell);
+            // Ohne `-d`: die bekannte Standard-Distribution (ein `\\wsl.localhost\<D>\…`-Ordner derselben geht dann über `--cd`).
+            let distro = wsl_distro_of(&shell).or_else(crate::wsl::cached_default);
+            // Home und Einhängepunkt für spätere Umrechnungen (Links, Einfügen, `~`) im Hintergrund holen (#392).
+            crate::wsl::prefetch(distro.as_deref());
             let de = self.settings.language == Lang::De;
             // Der WSL-Starter `bash.exe` kennt kein `--cd`: er startet im Windows-Ordner (#261).
             let cd = if shells::is_system_bash(&shell.program) { crate::wsl::Cd::Windows } else { crate::wsl::apply_cd(&mut shell.args, &entry.meta.cwd, distro.as_deref()) };
@@ -2116,12 +2127,25 @@ impl App {
             }
         } else if entry.meta.cwd.is_empty() {
             home_dir()
-        } else if cfg!(windows) && crate::wsl::looks_linux(&entry.meta.cwd) {
+        } else if cfg!(windows) && (entry.meta.cwd.starts_with('/') || entry.meta.cwd.starts_with('~')) {
             // (Linux/macOS, #149: Unix-Pfade sind dort die normalen Pfade.)
-            // Nie einen Linux-Pfad an eine Windows-Shell geben: `/mnt/c/x` → `C:\x`, sonst das Windows-Home.
-            crate::wsl::linux_to_windows("", &entry.meta.cwd).unwrap_or_else(home_dir)
+            // Nie einen Linux-Pfad an eine Windows-Shell geben (#392): Git Bash `/c/x`, `/mnt/c/x` → `C:\x`, `~`/`~/x` =
+            // Windows-Benutzerordner; was Windows nicht kennt, startet im Windows-Home.
+            crate::targetpath::PathKind::of(&shell).to_windows(&entry.meta.cwd).unwrap_or_else(|_| home_dir())
         } else {
             entry.meta.cwd.clone()
+        };
+        // cmd.exe kennt keinen UNC-Arbeitsordner (startet sonst in C:\Windows, #392): im Benutzerordner starten und sagen, warum.
+        let cwd = if !wsl && matches!(crate::targetpath::PathKind::of(&shell), crate::targetpath::PathKind::Windows { cmd: true }) && (cwd.starts_with("\\\\") || cwd.starts_with("//")) {
+            let de = self.settings.language == Lang::De;
+            self.spawn_notes.borrow_mut().push(if de {
+                format!("cmd.exe kann nicht in einem Netzwerk- oder WSL-Ordner starten ({}) – die Sitzung startet im Benutzerordner.", crate::mcp::short(&cwd, 80))
+            } else {
+                format!("cmd.exe cannot start in a network or WSL folder ({}) – the session starts in the home folder.", crate::mcp::short(&cwd, 80))
+            });
+            home_dir()
+        } else {
+            cwd
         };
         // Erst nach dem Startordner: ein unbrauchbarer gespeicherter Ordner setzt die Konversation zurück (#245).
         let claude_cmd = if entry.launched_claude {
@@ -2430,7 +2454,10 @@ impl App {
             Some(cm) => {
                 // Liegt unter dieser Id noch ein fremder Verlauf, wird er beiseitegelegt, nie geladen oder überschrieben.
                 let _ = chatmod::store::set_aside(&chatmod::store::path(&self.dir, id));
-                let meta = SessionMeta { kind: SessionKind::Chat, chat: Some(cm), shell_id: String::new(), ..meta };
+                // Ein Linux-Ordner (aus einer WSL-Sitzung, Ordnervorgabe, Projekt) wird zum Windows-Pfad
+                // `\\wsl.localhost\<D>\…` – die Datei-Werkzeuge des Chats arbeiten über den Windows-Zugriff (#392).
+                let cwd = self.chat_root(&meta.cwd, meta.project);
+                let meta = SessionMeta { kind: SessionKind::Chat, chat: Some(cm), shell_id: String::new(), cwd, ..meta };
                 let mut chat = ChatState::new(chatmod::ChatFile::default(), None);
                 chat.focus_input = true;
                 Entry::new_chat(meta, chat)
@@ -3333,6 +3360,34 @@ impl App {
         }
     }
 
+    /// Arbeitsordner eines Chats als Windows-Pfad (#392): Ein Linux-Pfad (`/home/u/p`, `~`) gilt in der Pfadart der Shell
+    /// des Projekts (WSL-Distribution, Git Bash), sonst in der WSL-Standard-Distribution; geht das nicht, bleibt er.
+    pub(super) fn chat_root(&self, cwd: &str, project: u64) -> String {
+        let c = cwd.trim();
+        if !crate::wsl::looks_linux(c) || !cfg!(windows) {
+            return cwd.to_string();
+        }
+        let shell = self.shell_by_id(&self.effective_shell_id(None, project));
+        cli_path_kind(shell.as_ref(), c).to_windows(c).unwrap_or_else(|_| cwd.to_string())
+    }
+
+    /// Pfad aus `--open`/`--edit` (#392): Ein Linux-Pfad (`/…`, `~`) gilt in der Sitzung `origin`, aus der der Aufruf kam
+    /// (ihre Pfadart: WSL-Distribution, Git Bash), sonst in der WSL-Standard-Distribution; Ergebnis ein Windows-Pfad.
+    /// Andere Pfade bleiben.
+    pub(super) fn cli_path(&self, path: &str, origin: Option<u64>) -> Result<String, crate::targetpath::PathErr> {
+        if !crate::wsl::looks_linux(path.trim()) {
+            return Ok(path.to_string());
+        }
+        cli_path_kind(origin.and_then(|id| self.entries.get(&id)).and_then(|e| e.live.as_ref().map(|s| &s.spec)), path).to_windows(path)
+    }
+
+    /// Hinweis: Pfad nicht eingefügt (#392: Ordner einer anderen WSL-Distribution, nicht umrechenbar).
+    pub(super) fn path_refused_toast(&mut self, err: &crate::targetpath::PathErr) {
+        let lang = self.settings.language;
+        let text = format!("{} {}", lang.t("Pfad nicht eingefügt:", "Path not inserted:"), err.message(lang));
+        self.push_toast(text, toasts::ToastKind::Warning, None);
+    }
+
     fn notify_text(&mut self, text: String) {
         self.notice = Some((text, Instant::now()));
     }
@@ -4012,18 +4067,32 @@ impl App {
                 }
             }
             Action::InsertPath(p) => {
+                let mut refused = None;
                 if let Some(e) = self.entries.get_mut(&self.focused) {
-                    // Chat: Pfad unverändert ins Eingabefeld; Terminal: passend zur Shell gequotet.
+                    // Chat: Pfad unverändert ins Eingabefeld; Terminal: für die Shell umgerechnet und gequotet (#392:
+                    // `\\wsl.localhost\<D>\x` → `/x`, `C:\x` → `/mnt/c/x`); ein Pfad einer anderen Distribution nicht.
                     let text = match &e.live {
-                        Some(s) => format!("{} ", pathfmt::for_shell(&s.spec, &p)),
-                        None => p.clone(),
+                        Some(s) => match crate::targetpath::for_insert(&s.spec, &p) {
+                            Ok(t) => Some(format!("{t} ")),
+                            Err(err) => {
+                                refused = Some(err);
+                                None
+                            }
+                        },
+                        None => Some(p.clone()),
                     };
-                    e.insert_text(&text, false);
+                    if let Some(text) = text {
+                        e.insert_text(&text, false);
+                    }
+                }
+                if let Some(err) = refused {
+                    self.path_refused_toast(&err);
                 }
                 self.want_focus = Some(self.focused);
             }
             Action::NewSessionAt(dir) => {
-                self.new_session(ctx, NewOpts { cwd: Some(dir), ..NewOpts::default() });
+                // Wie „Hier öffnen“ (#392): ein WSL-Ordner bekommt die WSL-Shell seiner Distribution.
+                self.open_folder(ctx, &dir, false, None);
             }
             Action::OpenPalette => self.palette = Some(Palette { query: String::new(), sel: 0 }),
             Action::EditorFormat(op) => self.editor_format_active(ctx, op),
@@ -4676,6 +4745,8 @@ impl eframe::App for App {
         self.editor_tick(ctx);
         self.poll_procs(ctx);
         self.poll_save_actions(ctx);
+        // Ordnerfelder ohne eigene Shell (Arbeitsordner der Planung) folgen der Standard-Shell (#392).
+        folder_picker::set_default_target(folder_picker::Target::for_shell(self.shell_by_id(&self.effective_shell_id(None, self.active_project)).as_ref(), false));
         self.poll_editor_services(ctx);
         self.poll_retired(ctx);
         // Linux/macOS: Master-Passwort für API-Schlüssel, wenn ein Zugriff darauf wartet (#149).
@@ -5621,6 +5692,49 @@ fn wslenv_with(wslenv: &str, name: &str, flag: &str) -> String {
     let add = format!("{name}{flag}");
     parts.push(&add);
     parts.join(":")
+}
+
+/// Pfadart für einen Linux-Pfad `path` aus `--open`/`--edit` bzw. einen Chat-Ordner: die der Ursprungssitzung, wenn sie
+/// POSIX-Pfade kennt (WSL, Git Bash); sonst ist `~`/`~/x` der Windows-Benutzerordner (#392, Entscheidung 9) und ein
+/// absoluter Linux-Pfad gilt in der WSL-Standard-Distribution.
+fn cli_path_kind(origin: Option<&ShellSpec>, path: &str) -> crate::targetpath::PathKind {
+    use crate::targetpath::PathKind;
+    let p = path.trim();
+    let home_form = p == "~" || p.starts_with("~/") || p.starts_with("~\\");
+    match origin.map(PathKind::of) {
+        Some(k @ (PathKind::Wsl { .. } | PathKind::Msys { .. })) => k,
+        Some(PathKind::Native) => PathKind::Native,
+        _ if home_form => PathKind::Windows { cmd: false },
+        _ => PathKind::Wsl { distro: None },
+    }
+}
+
+#[cfg(test)]
+mod cli_path_tests {
+    use super::*;
+    use crate::targetpath::PathKind;
+
+    /// #392: Linux-Pfade aus `--open`/`--edit` und Chat-Ordner gelten in der Pfadart der Ursprungssitzung, sonst WSL.
+    #[test]
+    fn linux_paths_follow_the_origin_session() {
+        let s = |id: &str, prog: &str, args: &[&str]| ShellSpec { id: id.into(), label: id.into(), program: prog.into(), args: args.iter().map(|a| a.to_string()).collect() };
+        let deb = s("wsl:Debian", "wsl.exe", &["-d", "Debian"]);
+        assert_eq!(cli_path_kind(Some(&deb), "/srv"), PathKind::Wsl { distro: Some("Debian".into()) });
+        assert_eq!(cli_path_kind(Some(&deb), "~/x"), PathKind::Wsl { distro: Some("Debian".into()) }, "~ aus WSL = Linux-Home");
+        assert_eq!(cli_path_kind(Some(&s("gitbash", r"C:\Program Files\Git\bin\bash.exe", &[])), "/c/x"), PathKind::Msys { root: Some(r"C:\Program Files\Git".into()) });
+        assert_eq!(cli_path_kind(None, "/etc/hostname"), PathKind::Wsl { distro: None });
+        assert_eq!(cli_path_kind(None, "~"), PathKind::Windows { cmd: false }, "~ ohne Ursprung = Windows-Home");
+        if cfg!(windows) {
+            let ps = s("powershell", "powershell.exe", &[]);
+            assert_eq!(cli_path_kind(Some(&ps), "/srv"), PathKind::Wsl { distro: None }, "Windows-Shell: Standard-Distribution");
+            assert_eq!(cli_path_kind(Some(&ps), "~/x"), PathKind::Windows { cmd: false }, "Windows-Shell: ~ = Windows-Home");
+            let home = std::env::var("USERPROFILE").unwrap_or_default();
+            assert_eq!(cli_path_kind(Some(&ps), "~/x").to_windows("~/x"), Ok(format!("{home}\\x")));
+            // Ergebnis für die Sitzung: UNC der Distribution bzw. Laufwerk
+            assert_eq!(cli_path_kind(Some(&deb), "/srv/a.txt").to_windows("/srv/a.txt").as_deref(), Ok(r"\\wsl.localhost\Debian\srv\a.txt"));
+            assert_eq!(cli_path_kind(Some(&s("wsl:Debian", "wsl.exe", &[])), "/mnt/c/x").to_windows("/mnt/c/x").as_deref(), Ok(r"C:\x"));
+        }
+    }
 }
 
 fn wsl_distro_of(shell: &ShellSpec) -> Option<String> {

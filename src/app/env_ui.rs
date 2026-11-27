@@ -463,6 +463,20 @@ pub(super) struct EnvLive {
     pub(super) later: Vec<(String, LiveIssue)>,
     /// Schritte, die der Befehl setzt (danach Stand der Shell, `Entry::env_live`).
     pub(super) applied: Vec<senv::Op>,
+    /// Hinweise (#392): „Pfad umrechnen“ ging nicht – der Wert wird unverändert gesetzt.
+    pub(super) notes: Vec<String>,
+}
+
+/// „Pfad umrechnen“ (WSL, `wsl_path`) für das Setzen im laufenden Terminal (#392): ein Pfad bzw. eine Liste mit `;`
+/// (wird eine Liste mit `:`) über `targetpath` in die Pfadart der Sitzung. `Err`: ein Eintrag ließ sich nicht umrechnen
+/// (andere Distribution, unbekannte Distribution …) – dann bleibt der ganze Wert, wie er ist.
+pub(super) fn live_path_value(kind: &crate::targetpath::PathKind, v: &str, lang: Lang) -> Result<String, String> {
+    let parts: Vec<&str> = if v.contains(';') { v.split(';').filter(|p| !p.trim().is_empty()).collect() } else { vec![v] };
+    let mut out = Vec::with_capacity(parts.len());
+    for p in parts {
+        out.push(kind.to_target(p).map_err(|e| e.message(lang))?);
+    }
+    Ok(out.join(":"))
 }
 
 /// Kann jetzt gesetzt werden? Bekannte Shell (Shell-Integration), wartet am Prompt (nichts getippt, nichts läuft, kein
@@ -485,10 +499,19 @@ pub(super) fn live_ready(e: &Entry, lang: Lang) -> Result<(senv::LiveShell, bool
 pub(super) fn live_plan(e: &Entry, old: &[EnvVar], new: &[EnvVar], lang: Lang) -> EnvLive {
     let (ops, mut later) = senv::live_changes(old, new);
     match live_ready(e, lang) {
-        Err(why) => EnvLive { command: None, why: Some(why), later, applied: Vec::new() },
+        Err(why) => EnvLive { command: None, why: Some(why), later, applied: Vec::new(), notes: Vec::new() },
         Ok((shell, wsl)) => {
             let mut applied = Vec::new();
-            for o in ops {
+            let mut notes = Vec::new();
+            // WSL: „Pfad umrechnen“ gilt auch beim Setzen im laufenden Terminal (beim Start rechnet WSLENV `/p` um).
+            let kind = e.live.as_ref().filter(|_| wsl).map(|s| crate::targetpath::PathKind::of(&s.spec));
+            for mut o in ops {
+                if let (Some(k), true, senv::OpKind::Set(v)) = (&kind, o.wsl_path, o.kind.clone()) {
+                    match live_path_value(k, &v, lang) {
+                        Ok(c) => o.kind = senv::OpKind::Set(c),
+                        Err(err) => notes.push(format!("{}: {} – {err}", o.name, lang.t("Pfad nicht umgerechnet, Wert unverändert", "path not converted, value unchanged"))),
+                    }
+                }
                 match senv::live_issue(shell, wsl, &o) {
                     Some(i) => later.push((o.name.clone(), i)),
                     None => applied.push(o),
@@ -496,7 +519,7 @@ pub(super) fn live_plan(e: &Entry, old: &[EnvVar], new: &[EnvVar], lang: Lang) -
             }
             let command = senv::live_command(shell, wsl, &applied);
             let why = command.is_none().then(|| lang.t("Nichts davon lässt sich im laufenden Terminal setzen.", "None of it can be set in the running terminal.").to_string());
-            EnvLive { command, why, later, applied }
+            EnvLive { command, why, later, applied, notes }
         }
     }
 }
@@ -536,6 +559,9 @@ pub(super) fn env_ask_ui(ctx: &egui::Context, name: &str, live: &EnvLive, lang: 
             ui.add_space(S1);
             let names: Vec<String> = live.later.iter().map(|(n, i)| format!("{n} ({})", i.text(lang))).collect();
             ui.label(RichText::new(format!("{} {}", lang.t("Nur nach einem Neustart:", "Only after a restart:"), names.join(", "))).small().color(style::dim(ui)));
+        }
+        for n in &live.notes {
+            ui.label(RichText::new(format!("⚠ {n}")).small().color(style::ui().warning));
         }
         ui.add_space(S2);
         ui.horizontal(|ui| {
@@ -866,12 +892,12 @@ mod tests {
             out
         };
         let click_at = |p: Pos2| vec![Event::PointerMoved(p), Event::PointerButton { pos: p, button: PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE }, Event::PointerButton { pos: p, button: PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE }];
-        let ok = EnvLive { command: Some(" export A='1'".into()), why: None, later: vec![("TOKEN".into(), LiveIssue::Secret)], applied: vec![] };
+        let ok = EnvLive { command: Some(" export A='1'".into()), why: None, later: vec![("TOKEN".into(), LiveIssue::Secret)], applied: vec![], notes: vec![] };
         frame(&ok, vec![]);
         frame(&ok, vec![]);
         let set = rect(&ctx, "ask_set", 0).unwrap();
         assert_eq!(frame(&ok, click_at(set.center())), LiveOut::SetNow);
-        let no = EnvLive { command: None, why: Some("busy".into()), later: vec![], applied: vec![] };
+        let no = EnvLive { command: None, why: Some("busy".into()), later: vec![], applied: vec![], notes: vec![] };
         frame(&no, vec![]);
         frame(&no, vec![]);
         let set = rect(&ctx, "ask_set", 0).unwrap();
@@ -881,6 +907,18 @@ mod tests {
         frame(&no, vec![]);
         let esc = Event::Key { key: Key::Escape, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE };
         assert_eq!(frame(&no, vec![esc]), LiveOut::Later);
+    }
+
+    /// #392: „Pfad umrechnen“ beim Setzen im laufenden WSL-Terminal über `targetpath`; geht es nicht, bleibt der Wert.
+    #[test]
+    fn live_wsl_paths_are_converted_or_kept() {
+        use crate::targetpath::PathKind;
+        let k = PathKind::Wsl { distro: Some("Ubuntu".into()) };
+        assert_eq!(live_path_value(&k, r"C:\work\app", Lang::En).as_deref(), Ok("/mnt/c/work/app"));
+        assert_eq!(live_path_value(&k, r"\\wsl.localhost\Ubuntu\home\me", Lang::En).as_deref(), Ok("/home/me"));
+        assert_eq!(live_path_value(&k, r"C:\a;C:\b", Lang::En).as_deref(), Ok("/mnt/c/a:/mnt/c/b"));
+        assert!(live_path_value(&k, r"\\wsl.localhost\Debian\home\me", Lang::En).is_err(), "andere Distribution");
+        assert!(live_path_value(&k, r"C:\a;\\wsl.localhost\Debian\x", Lang::En).is_err(), "ein Eintrag geht nicht: ganze Liste bleibt");
     }
 
     #[test]

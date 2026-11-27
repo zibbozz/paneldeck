@@ -33,8 +33,9 @@ pub(super) struct ShellPick {
 impl App {
     /// Projektordner und Einstellungen der Agenten-Werkzeuge für den Chat `chat`.
     pub(in crate::app) fn agent_env(&self, chat: u64) -> AgentEnv {
-        let root = self.entries.get(&chat).map(|e| e.meta.cwd.trim().to_string()).filter(|c| !c.is_empty()).map(std::path::PathBuf::from);
-        AgentEnv { root, data_dir: Some(self.dir.clone()), settings: self.settings.agent_tools.clone(), max_bytes: 0, images: None, background: self.mcp.bg.any(chat) }
+        // Ein (älterer) Linux-Arbeitsordner wird zum `\\wsl.localhost\<D>\…`-Pfad (#392), sonst hätte der Chat keine Datei-Werkzeuge.
+        let root = self.entries.get(&chat).map(|e| self.chat_root(e.meta.cwd.trim(), e.meta.project)).filter(|c| !c.is_empty()).map(std::path::PathBuf::from);
+        AgentEnv { root, data_dir: Some(self.dir.clone()), backup_dir: Some(self.backup_dir_path()), settings: self.settings.agent_tools.clone(), max_bytes: 0, images: None, background: self.mcp.bg.any(chat) }
     }
 
     /// Agenten-Werkzeug des Chats `chat` ausführen (nach Prüfung und Freigabe in `ChatState::tool_step`). `max_bytes` =

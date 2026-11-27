@@ -20,6 +20,7 @@
 mod diff_menu;
 mod diff_tab;
 mod doc;
+pub(crate) use doc::DiskJobDone;
 mod find;
 pub(crate) mod format;
 mod hscroll;
@@ -203,6 +204,11 @@ pub(crate) struct EditorUi {
     /// git und auf der Platte neu.
     pub(super) generation: u64,
     pub(super) was_active: bool,
+    /// Zu dieser Zeile springen, sobald das (im Hintergrund geladene) Dokument da ist (#392: Strg+Klick auf
+    /// `datei:12` aus WSL).
+    pub(super) pending_goto: Option<(u64, usize)>,
+    /// Speichern im Hintergrund (WSL, #392), dessen Formatieren/Text-Aktionen bei einem Fehler zurückzunehmen sind.
+    pub(super) pending_saves: HashMap<u64, format::PendingSave>,
 }
 
 impl EditorUi {
@@ -216,7 +222,9 @@ impl EditorUi {
     }
 
     fn apply_saved(&mut self, s: persist::Saved, dir: &Path) {
-        self.root = s.root.map(PathBuf::from).filter(|p| p.is_dir());
+        // WSL-Ordner und -Dateien (#392) beim Start nie prüfen (das könnte die WSL-VM starten und den Start blockieren);
+        // ein Fehler zeigt sich erst beim Lesen im Hintergrund.
+        self.root = s.root.map(PathBuf::from).filter(|p| doc::is_wsl_path(p) || p.is_dir());
         self.tree.expanded = s.expanded.into_iter().map(PathBuf::from).collect();
         self.recent_folders = s.recent_folders;
         self.recent_files = s.recent_files;
@@ -234,7 +242,7 @@ impl EditorUi {
             let path = d.path.map(PathBuf::from);
             // Datei weg und nichts Ungespeichertes: Reiter nicht wiederherstellen.
             let hot = d.hot.and_then(|k| entries.iter().find(|e| e.id == k).cloned()).map(|e| (store.clone(), e));
-            if path.as_ref().is_some_and(|p| !p.is_file()) && hot.is_none() {
+            if path.as_ref().is_some_and(|p| !doc::is_wsl_path(p) && !p.is_file()) && hot.is_none() {
                 continue;
             }
             if path.is_none() && hot.is_none() {
@@ -384,6 +392,40 @@ impl EditorUi {
         id
     }
 
+    /// Fertige Hintergrund-Läufe (Speichern/Neu laden von WSL-Dateien, #392) übernehmen: (Titel, Ergebnis). `busy`: es
+    /// läuft noch einer.
+    pub(super) fn poll_disk_jobs(&mut self, lang: crate::state::Lang) -> (Vec<(u64, String, doc::DiskJobDone)>, bool) {
+        let mut out = Vec::new();
+        let mut busy = false;
+        for (id, d) in self.docs.iter_mut() {
+            if let Some(r) = d.poll_disk_job(lang) {
+                out.push((*id, d.title(lang), r));
+            }
+            busy |= d.disk_busy();
+        }
+        // Geschlossene Dokumente: nichts mehr zurückzunehmen.
+        let docs = &self.docs;
+        self.pending_saves.retain(|id, _| docs.contains_key(id));
+        (out, busy)
+    }
+
+    /// Wartenden Sprung zur Zeile ausführen, sobald das Dokument geladen ist und sein Reiter vorn steht.
+    pub(super) fn apply_pending_goto(&mut self) {
+        let Some((id, line)) = self.pending_goto else { return };
+        match self.docs.get(&id) {
+            None => self.pending_goto = None,
+            Some(d) if d.doc.is_some() => {
+                let active = self.panes.groups.get(&self.panes.focused).and_then(|g| g.active_tab()).map(|t| t.doc);
+                if active == Some(id) {
+                    self.goto_line(line, 0);
+                }
+                self.pending_goto = None;
+            }
+            Some(d) if d.load_error.is_some() => self.pending_goto = None,
+            Some(_) => {}
+        }
+    }
+
     /// Ordner als Wurzel des Baums öffnen.
     pub(super) fn set_root(&mut self, dir: &Path) {
         self.root = Some(dir.to_path_buf());
@@ -482,7 +524,8 @@ impl EditorUi {
                 Side::Text(Box::new(StaticSide::clipboard(&t)))
             }
             Target::File(p) => {
-                if !p.is_file() {
+                // WSL-Dateien (#392) ungeprüft: sie laden im Hintergrund, ein Fehler erscheint im Vergleich.
+                if !doc::is_wsl_path(&p) && !p.is_file() {
                     return Err(format!("{}: {}", lang.t("Datei nicht gefunden", "File not found"), p.display()));
                 }
                 let id = self.doc_for_file(&p);
@@ -500,7 +543,8 @@ impl EditorUi {
 
     /// Zwei Dateien vergleichen (Ordnerbaum): `a` links, `b` rechts.
     pub(super) fn compare_paths(&mut self, a: &Path, b: &Path, prefs: &EditorPrefs) -> Option<u64> {
-        if !a.is_file() || !b.is_file() {
+        let file = |p: &Path| doc::is_wsl_path(p) || p.is_file();
+        if !file(a) || !file(b) {
             return None;
         }
         let (x, y) = (self.doc_for_file(a), self.doc_for_file(b));
@@ -808,7 +852,8 @@ impl super::App {
         for id in due {
             let ok = self.editor_save_with(id, None, crate::save_actions::SaveOrigin::Autosave).is_ok();
             if let Some(d) = self.ed.docs.get_mut(&id) {
-                if ok {
+                // WSL (#392): Speichern läuft noch im Hintergrund – die Hot-Exit-Kopie bleibt, bis es geschrieben ist.
+                if ok && !d.disk_busy() {
                     d.drop_hot(&dir);
                 }
                 d.edited_at = None;
@@ -863,6 +908,31 @@ impl super::App {
     /// wird als „von einem Agenten geöffnet“ markiert und bekommt **nicht** die Tastatur (nur Aktionen des Nutzers
     /// fokussieren das Textfeld, [`EditorUi::end_agent`]). Liefert die Dokument-Id; Fehler, wenn der Pfad keine lesbare
     /// Datei ist (Text für Menschen in der eingestellten Sprache).
+    /// Datei für den Nutzer öffnen (#392: Strg+Klick auf einen Pfad, `--edit`), optional an Zeile `line` (ab 1).
+    /// WSL-Dateien (`\\wsl.localhost\…`) werden nie im UI-Thread geprüft oder gelesen (das könnte die WSL-VM
+    /// starten): Sie laden im Hintergrund, der Sprung zur Zeile folgt dann.
+    pub(crate) fn editor_open_user(&mut self, path: &Path, line: Option<usize>) -> Result<u64, String> {
+        let lang = self.settings.language;
+        let wsl = crate::wsl::is_wsl_unc(&path.to_string_lossy());
+        if !wsl && !path.is_file() {
+            return Err(lang.t("Datei nicht gefunden", "File not found").to_string());
+        }
+        let id = self.ed.open_path(path, false);
+        let prefs = self.editor_prefs();
+        if let Some(d) = self.ed.docs.get_mut(&id) {
+            d.ensure_loaded(&prefs);
+            if let Some(e) = &d.load_error {
+                return Err(e.clone());
+            }
+        }
+        self.set_mode(super::titlebar::Mode::Editor);
+        if let Some(l) = line.filter(|l| *l > 0) {
+            self.ed.pending_goto = Some((id, l - 1));
+            self.ed.apply_pending_goto();
+        }
+        Ok(id)
+    }
+
     pub(crate) fn editor_open(&mut self, path: &Path, show: bool, by_agent: bool) -> Result<u64, String> {
         if by_agent {
             let mark = self.ed.begin_agent();
@@ -925,7 +995,12 @@ impl super::App {
     pub(crate) fn editor_text(&mut self, id: u64) -> Option<String> {
         let prefs = self.editor_prefs();
         let d = self.ed.docs.get_mut(&id)?;
-        d.ensure_loaded_now(&prefs);
+        // WSL-Dateien (#392) nie im UI-Thread abwarten: noch nicht geladen = `None` (später erneut).
+        if d.path.as_deref().is_some_and(doc::is_wsl_path) {
+            d.ensure_loaded(&prefs);
+        } else {
+            d.ensure_loaded_now(&prefs);
+        }
         d.text()
     }
 

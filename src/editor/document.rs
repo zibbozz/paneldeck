@@ -405,6 +405,14 @@ impl Document {
         self.history.break_group();
     }
 
+    /// The text state `state` (from [`Document::state_id`]) matches the file – after a save that ran in the background
+    /// while the user may have kept typing (then the document stays dirty).
+    pub(crate) fn mark_saved_state(&mut self, state: u64) {
+        self.saved_state = Some(state);
+        self.format_dirty = false;
+        self.history.break_group();
+    }
+
     /// Mark as unsaved (restored from hot exit).
     pub(crate) fn mark_unsaved(&mut self) {
         self.saved_state = None;

@@ -166,6 +166,9 @@ pub struct AgentEnv {
     pub root: Option<PathBuf>,
     /// Datenordner von Paneldeck (gesperrt).
     pub data_dir: Option<PathBuf>,
+    /// Ordner der Datenbank-Sicherungen (gesperrt wie der Datenordner, auch wenn er woanders liegt – die Sicherungen
+    /// enthalten Todo-Liste, Tickets, Kalender und Zeit-Reiter samt privater Einträge, #386/#164).
+    pub backup_dir: Option<PathBuf>,
     pub settings: AgentToolSettings,
     /// Platz für das Ergebnis in Bytes (0 = nur die Grenze des Werkzeugs).
     pub max_bytes: usize,
