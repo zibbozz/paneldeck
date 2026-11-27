@@ -44,7 +44,11 @@ impl App {
         });
         ui.horizontal(|ui| {
             dirty_settings |= style::toggle(ui, &mut self.settings.agent_delete).changed();
-            ui.label(RichText::new(lang.t("Agenten dürfen Tickets und eigene Kommentare löschen (in den Papierkorb)", "Agents may delete tickets and their own comments (to the trash)")).small());
+            ui.label(RichText::new(lang.t("Agenten dürfen Tickets/Kommentare löschen (in den Papierkorb; nur Kommentare von Agenten)", "Agents may delete tickets/comments (to the trash; only comments written by agents)")).small());
+        });
+        ui.horizontal(|ui| {
+            dirty_settings |= style::toggle(ui, &mut self.settings.todo_new_private).changed();
+            ui.label(RichText::new(lang.t("Neue Karten privat (nie für Agenten sichtbar)", "New cards private (never visible to agents)")).small());
         });
         ui.add_space(S2);
         let top = ui.cursor().min.y;

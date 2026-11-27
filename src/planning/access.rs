@@ -368,6 +368,34 @@ mod tests {
     }
 
     #[test]
+    fn redo_and_backups_keep_privacy_and_origin() {
+        use crate::undo::Op;
+        let f = Fx::new();
+        let (t, op) = crate::planning::tickets::create_ticket(&f.c, &crate::planning::tickets::NewTicket::new(f.project, f.task, "Agent"), &Source::agent("Builder")).unwrap();
+        // Rückgängig (entfernt das Ticket) und Wiederholen (legt es aus dem Abbild wieder an): Herkunft bleibt
+        op.inverse().apply(&f.c).unwrap();
+        assert!(get_ticket(&f.c, t.id).is_err());
+        op.apply(&f.c).unwrap();
+        let back = get_ticket(&f.c, t.id).unwrap();
+        assert_eq!((back.origin, back.origin_detail.as_deref()), (Origin::Agent, Some("Builder")));
+        // Projektsicherung: privat und Herkunft von Tickets und Kommentaren
+        set_ticket_private(&f.c, t.id, true, &Source::ui()).unwrap();
+        add_comment(&f.c, t.id, "vom Agenten", &Source::agent("Builder")).unwrap();
+        let doc = crate::planning::backup_doc::export_project(&f.c, f.project).unwrap();
+        let text = serde_json::to_string(&doc).unwrap();
+        let d = crate::db::open_memory();
+        let res = crate::planning::backup_doc::import_project(&d, &serde_json::from_str(&text).unwrap(), None).unwrap();
+        assert_eq!(project_access(&d, res.project_id).unwrap().0, AgentAccess::LOCKED, "importierte Projekte beginnen gesperrt");
+        let id: i64 = d.query_row("SELECT id FROM tickets WHERE project_id = ?1 AND title = 'Agent'", [res.project_id], |r| r.get(0)).unwrap();
+        let it = get_ticket(&d, id).unwrap();
+        assert!(it.private);
+        assert_eq!((it.origin, it.origin_detail.as_deref()), (Origin::Agent, Some("Builder")));
+        assert_eq!(comments_of(&d, id).unwrap()[0].origin, Origin::Agent);
+        // Dateien ohne die neuen Felder (ältere Fassungen) laden weiter: Nutzer, nicht privat
+        assert!(!text.contains("\"private\":false"), "nur gesetzte Felder werden geschrieben");
+    }
+
+    #[test]
     fn private_switch_is_logged() {
         let f = Fx::new();
         let t = f.mk(f.task, "Geheim");

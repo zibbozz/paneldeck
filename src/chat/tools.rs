@@ -65,6 +65,8 @@ pub struct ToolPolicy {
     /// Obergrenze für die Paneldeck-Werkzeuge (#386): die Stufe des Projekts, in dem der Chat liegt („wie global“ = wie das
     /// Modell). Die eigenen Agenten-Werkzeuge des Chats (Dateien, Befehle) gelten unabhängig davon weiter.
     pub project_cap: McpLevel,
+    /// Schalter „Projekte anlegen“/„Löschen“ (#386, `access::AGENT_SWITCHES`), beim Anlegen gelesen.
+    pub access_switches: u8,
 }
 
 impl ToolPolicy {
@@ -75,13 +77,19 @@ impl ToolPolicy {
             cfg.level = McpLevel::Off;
         }
         let editor_switches = crate::editor_svc::settings::AGENT_SWITCHES.load(std::sync::atomic::Ordering::Relaxed);
-        ToolPolicy { cfg, tools_supported, expert, origin_sessions: Vec::new(), agent: AgentEnv::default(), editor_switches, project_cap: McpLevel::Control }
+        ToolPolicy { cfg, tools_supported, expert, origin_sessions: Vec::new(), agent: AgentEnv::default(), editor_switches, project_cap: McpLevel::Control, access_switches: crate::access::AGENT_SWITCHES.load(std::sync::atomic::Ordering::Relaxed) }
     }
 
     /// Dieselbe Momentaufnahme mit anderen Editor-Schaltern (Tests, ohne die globalen Schalter anzufassen).
     #[cfg(test)]
     pub fn with_editor_switches(mut self, bits: u8) -> Self {
         self.editor_switches = bits;
+        self
+    }
+
+    /// Dieselbe Momentaufnahme mit anderen Schaltern „Projekte anlegen“/„Löschen“ (#386).
+    pub fn with_access_switches(mut self, bits: u8) -> Self {
+        self.access_switches = bits;
         self
     }
 
@@ -135,6 +143,8 @@ impl ToolPolicy {
             && !self.cfg.disabled_tools.iter().any(|t| t == def.name)
             // Editor (#54): schreibende Werkzeuge nur, wenn ihr Schalter an ist (geprüft wird beim Ausführen ohnehin).
             && crate::editor_svc::tools::offered_to_chats(def.name, self.editor_switches)
+            // #386: Projekte anlegen, Papierkorb, Kommentare ändern nur mit ihrem Schalter der Einstellungen.
+            && crate::access::offered_to_chats(def.name, self.access_switches)
             // Reiter „Zeit“ (#164): nur für externe Agenten – die Kurzfassung des Chat-Prompts hätte sonst bei Steuern im
             // Expertenmodus keinen Platz mehr in 8192 Tokens.
             && !crate::time::agent::TOOLS.contains(&def.name)
@@ -168,6 +178,9 @@ impl ToolPolicy {
         let Some(def) = mcp::tools().into_iter().find(|d| d.name == call.name) else {
             return Err((ToolStatus::Error, error_json("unknown_tool", &self.unknown_tool_message(&call.name))));
         };
+        if !crate::access::offered_to_chats(def.name, self.access_switches) {
+            return Err((ToolStatus::Denied, error_json("forbidden", "The user has not allowed this (Settings -> Agents: \"Agents may create projects\" / \"Agents may delete tickets/comments\").")));
+        }
         // Das Projekt des Chats begrenzt die Paneldeck-Werkzeuge (#386): gesperrt = `project_locked`, sonst `forbidden`.
         if self.enabled() && def.level <= self.cfg.level && def.level > self.project_cap && !self.cfg.disabled_tools.iter().any(|t| t == def.name) {
             let (code, msg) = if self.project_cap == McpLevel::Off {

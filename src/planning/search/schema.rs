@@ -360,12 +360,20 @@ pub fn schema_for(conn: &Connection, scope: Scope, lang: Lang) -> SRes<Schema> {
 
 /// Das vollständige Schema samt Bindungen (für `compile`).
 pub fn search_schema(conn: &Connection, scope: Scope, lang: Lang) -> SRes<SearchSchema> {
+    search_schema_only(conn, scope, lang, None)
+}
+
+/// [`search_schema`] nur mit den Projekten `only` (Sicht eines Agenten, #386): Typen, Status, Felder, Werte und Projekt-
+/// namen gesperrter Projekte kommen weder im Schema noch in Fehlermeldungen vor.
+pub fn search_schema_only(conn: &Connection, scope: Scope, lang: Lang, only: Option<&[i64]>) -> SRes<SearchSchema> {
     let sid = scope_id(scope);
+    let keep = |pid: i64| only.is_none_or(|o| o.contains(&pid));
     // ---- Projekte
     let projects: Vec<ProjectRow> = {
         let mut st = conn.prepare("SELECT id, key, name, use_sprints FROM projects WHERE system = 0 AND (?1 IS NULL OR id = ?1) ORDER BY position, id")?;
         let rows = st.query_map(params![sid], |r| Ok(ProjectRow { id: r.get(0)?, key: r.get(1)?, name: r.get(2)?, use_sprints: r.get::<_, i64>(3)? != 0 }))?;
-        rows.collect::<Result<_, _>>()?
+        let v: Vec<ProjectRow> = rows.collect::<Result<_, _>>()?;
+        v.into_iter().filter(|p| keep(p.id)).collect()
     };
     if let Scope::Project(p) = scope {
         if projects.is_empty() {
@@ -381,13 +389,15 @@ pub fn search_schema(conn: &Connection, scope: Scope, lang: Lang) -> SRes<Search
     let mut types: Vec<TypeRow> = {
         let mut st = conn.prepare("SELECT id, project_id, key, name FROM ticket_types WHERE system = 0 AND (?1 IS NULL OR project_id = ?1) ORDER BY position, id")?;
         let rows = st.query_map(params![sid], |r| Ok(TypeRow { id: r.get(0)?, project_id: r.get(1)?, key: r.get(2)?, name: r.get(3)? }))?;
-        rows.collect::<Result<_, _>>()?
+        let v: Vec<TypeRow> = rows.collect::<Result<_, _>>()?;
+        v.into_iter().filter(|t| keep(t.project_id)).collect()
     };
     types.sort_by_key(|t| order_of(t.project_id, &projects)); // stabil: je Projekt bleibt die Reihenfolge der Typen
     let mut statuses: Vec<StatusRow> = {
         let mut st = conn.prepare("SELECT id, project_id, key, name FROM statuses WHERE project_id IN (SELECT id FROM projects WHERE system = 0 AND (?1 IS NULL OR id = ?1)) ORDER BY position, id")?;
         let rows = st.query_map(params![sid], |r| Ok(StatusRow { id: r.get(0)?, project_id: r.get(1)?, key: r.get(2)?, name: r.get(3)? }))?;
-        rows.collect::<Result<_, _>>()?
+        let v: Vec<StatusRow> = rows.collect::<Result<_, _>>()?;
+        v.into_iter().filter(|s| keep(s.project_id)).collect()
     };
     statuses.sort_by_key(|s| order_of(s.project_id, &projects));
     let all_fields: Vec<Field> = {
@@ -396,7 +406,8 @@ pub fn search_schema(conn: &Connection, scope: Scope, lang: Lang) -> SRes<Search
             fields::COLS
         ))?;
         let rows = st.query_map(params![sid], fields::from_row)?;
-        rows.collect::<Result<_, _>>()?
+        let v: Vec<Field> = rows.collect::<Result<_, _>>()?;
+        v.into_iter().filter(|f| types.iter().any(|t| t.id == f.type_id)).collect()
     };
     // Felder in der Reihenfolge Projekt, Typ, Feld
     let mut fields_in_order: Vec<&Field> = Vec::new();

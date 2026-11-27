@@ -750,6 +750,7 @@ impl App {
     /// Pro Frame: Stufe veröffentlichen, wartende Aufrufe prüfen, neue Anfragen abarbeiten.
     pub(super) fn poll_mcp(&mut self, ctx: &egui::Context) {
         mcp::LEVEL.store(self.settings.mcp_level.as_u8(), std::sync::atomic::Ordering::Relaxed);
+        crate::access::AGENT_SWITCHES.store(crate::access::switch_bits(self.settings.agent_create_projects, self.settings.agent_delete), std::sync::atomic::Ordering::Relaxed);
         // Höchste erreichbare Stufe für `tools/list` (#386; höchstens alle 2 s neu).
         self.publish_reach();
         // Modus (Expertenmodus des Todo-Reiters) veröffentlichen; auch wenn der Reiter noch nie offen war, steht er in der Datenbank.

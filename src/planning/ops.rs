@@ -116,8 +116,9 @@ impl TicketOp {
 
 fn insert_ticket(conn: &Connection, t: &Ticket) -> TRes<()> {
     conn.execute(
-        "INSERT INTO tickets (id, project_id, number, type_id, title, status_id, parent_id, rank, flagged, starred, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
-        params![t.id, t.project_id, t.number, t.type_id, t.title, t.status_id, t.parent_id, t.rank, t.flagged as i64, t.starred as i64, t.created_at, t.updated_at],
+        "INSERT INTO tickets (id, project_id, number, type_id, title, status_id, parent_id, rank, flagged, starred, created_at, updated_at, private, origin, origin_detail) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+        // Privat und Herkunft (#386) bleiben beim Wiederholen erhalten.
+        params![t.id, t.project_id, t.number, t.type_id, t.title, t.status_id, t.parent_id, t.rank, t.flagged as i64, t.starred as i64, t.created_at, t.updated_at, t.private as i64, t.origin.as_str(), t.origin_detail],
     )?;
     Ok(())
 }

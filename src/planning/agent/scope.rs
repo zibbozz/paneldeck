@@ -54,6 +54,17 @@ fn id_visible(ctx: &Ctx, s: Option<&str>) -> bool {
     }
 }
 
+/// Ticket über den Schlüssel sichtbar? Gibt es das Ticket nicht mehr, entscheidet das Projekt des Schlüssels.
+fn key_visible(ctx: &Ctx, key: &str) -> bool {
+    match ticket_by_key(ctx.conn, key) {
+        Ok(t) => ctx.ticket_visible(&t),
+        Err(_) => match key.rsplit_once('-').and_then(|(p, _)| project_by_key(ctx.conn, p).ok()) {
+            Some(p) => ctx.project_visible(p.id),
+            None => true,
+        },
+    }
+}
+
 /// Verlaufseintrag sichtbar? Einträge, die ein unsichtbares Ticket nennen (Verknüpfung, Eltern, Ticket-Feld), fehlen.
 pub(super) fn history_visible(ctx: &Ctx, e: &super::super::history::HistoryEntry) -> bool {
     use super::super::history::HistoryField as H;
@@ -61,9 +72,17 @@ pub(super) fn history_visible(ctx: &Ctx, e: &super::super::history::HistoryEntry
         return true;
     }
     match &e.field {
+        // Verknüpfungen nennen das Ziel mit seinem Schlüssel (`PAN-3`), bei gelöschten Zielen die Kennung.
         H::Link => [&e.old, &e.new].iter().all(|v| {
             let Some(j) = v.as_deref().and_then(|s| serde_json::from_str::<Value>(s).ok()) else { return true };
-            j["kind"] != "ticket" || id_visible(ctx, j["target"].as_str().map(str::to_string).or_else(|| j["target"].as_i64().map(|i| i.to_string())).as_deref())
+            if j["kind"] != "ticket" {
+                return true;
+            }
+            match j["target"].as_str() {
+                Some(k) if k.contains('-') => key_visible(ctx, k),
+                Some(k) => id_visible(ctx, Some(k)),
+                None => id_visible(ctx, j["target"].as_i64().map(|i| i.to_string()).as_deref()),
+            }
         }),
         H::Parent => id_visible(ctx, e.old.as_deref()) && id_visible(ctx, e.new.as_deref()),
         H::Custom(fid) => match super::super::fields::get_field(ctx.conn, *fid) {
@@ -303,6 +322,28 @@ mod tests {
         assert!(!d.result.to_string().contains(&s.key()), "nirgends genannt (auch nicht im Verlauf)");
         assert_eq!(call(&ctx, "link_ticket", &json!({"ticket": a.key(), "to_ticket": s.key()}), true).unwrap_err().code, crate::access::LOCKED_CODE);
         assert_eq!(call(&ctx, "link_ticket", &json!({"ticket": a.key(), "to_ticket": p.key()}), true).unwrap_err().code, "not_found");
+    }
+
+    #[test]
+    fn queries_never_name_fields_values_or_projects_of_locked_projects() {
+        let (f, sec) = setup();
+        let ty = crate::planning::types::list_types(&f.c, sec).unwrap().into_iter().find(|t| !t.system).unwrap();
+        crate::planning::fields::create_field(&f.c, &crate::planning::fields::NewField::new(ty.id, "Geheimfeld", FieldKind::Text)).unwrap();
+        let view = map(&f, sec, AreaLevel::Control).view(Caller::Home(1), false, false);
+        let ctx = with(&f, &view);
+        for q in ["Geheimfel = x", "Geheimfeld = x", "project = Nope", "type = Nope", "status = Nope"] {
+            let e = call(&ctx, "search_tickets", &json!({"query": q}), true).unwrap_err();
+            let all = format!("{} {}", e.message, e.details.map(|d| d.to_string()).unwrap_or_default());
+            for secret in ["Secret", "SEC"] {
+                assert!(!all.contains(secret), "{q}: {all}");
+            }
+            if q != "Geheimfeld = x" {
+                assert!(!all.contains("Geheimfeld"), "{q}: {all}");
+            }
+        }
+        // ohne Sicht (Oberfläche) kennt die Abfrage das Feld
+        let plain = Ctx { conn: &f.c, lang: Lang::En, source: Source::ui(), now: now(), view: None, need: Default::default() };
+        assert!(call(&plain, "search_tickets", &json!({"query": "Geheimfeld = x"}), true).is_ok());
     }
 
     #[test]

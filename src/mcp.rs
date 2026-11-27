@@ -260,7 +260,7 @@ pub fn tools() -> Vec<ToolDef> {
                     "prompt": {"type": "string", "description": "First prompt for Claude (only with claude=true)"},
                     "group": {"type": "string", "description": "Folder in the session tree"},
                     "template": {"type": "string", "description": "Name of a terminal template from the user's template library (sidebar -> Templates; case-insensitive). The session gets the template's settings; the other parameters of this call override them. Unknown names and group templates return bad_args with the available terminal templates. Not with kind=\"chat\". \"Continue the last conversation in the folder\" from a template is ignored for agents; the result lists left-out template options in template_ignored"},
-                    "project": {"type": ["string", "integer"], "description": "Sidebar project (name or id from whoami.access.projects) the session is created in; you need Control there. Default: your own session's project; for an agent outside Paneldeck the project shown in the main window, also only with Control (else project_locked/forbidden)"},
+                    "project": {"type": "string", "description": "Project name or id (Control)"},
                     "placement": placement("Default: the session is created without being shown.")
                 }),
                 &[],

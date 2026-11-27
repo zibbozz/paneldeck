@@ -547,6 +547,16 @@ impl PlanUi {
                 let star_r = Rect::from_center_size(Pos2::new(x + 14.0, rect.center().y), Vec2::splat(22.0));
                 let flag_r = Rect::from_center_size(Pos2::new(x + 40.0, rect.center().y), Vec2::splat(22.0));
                 let mut hit_mark = false;
+                // Systemnotiz und privat (#386): kleines Kennzeichen vor Stern und Markierung.
+                let badge = match (t.origin.is_system(), t.private) {
+                    (true, true) => Some(format!("{} · {}", t.origin.label(lang), lang.t("privat", "private"))),
+                    (true, false) => Some(t.origin.label(lang).to_string()),
+                    (false, true) => Some(lang.t("privat", "private").to_string()),
+                    (false, false) => None,
+                };
+                if let Some(b) = badge {
+                    p.text(Pos2::new(star_r.left() - 2.0, rect.center().y), egui::Align2::RIGHT_CENTER, b, egui::FontId::proportional(10.5), style::dim(ui));
+                }
                 for (r, is_star, on, col) in [(star_r, true, t.starred, GOLD()), (flag_r, false, t.flagged, FLAG_RED())] {
                     let rs = ui.interact(r, egui::Id::new(("rowmark", t.id, is_star)), Sense::click());
                     let c = if on { col } else if rs.hovered() { col.gamma_multiply(0.7) } else { style::dim(ui).gamma_multiply(0.45) };

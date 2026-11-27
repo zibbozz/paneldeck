@@ -168,7 +168,8 @@ pub fn prepare(conn: &Connection, ctx: &Ctx, scope: Scope, jql: &str) -> SRes<(S
     if len > MAX_QUERY_CHARS {
         return Err(SearchError::TooLong { len, max: MAX_QUERY_CHARS });
     }
-    let schema = search_schema(conn, scope, ctx.lang)?;
+    // Sicht eines Agenten (#386): nur Schema-Teile erreichbarer Projekte.
+    let schema = schema::search_schema_only(conn, scope, ctx.lang, ctx.agent_projects.as_deref())?;
     let query = parse(jql).map_err(|errors| SearchError::Parse { input: jql.to_string(), errors })?;
     let issues = validate(&query, &schema.schema);
     if !issues.is_empty() {

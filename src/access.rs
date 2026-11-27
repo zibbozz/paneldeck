@@ -323,6 +323,26 @@ pub fn too_low_error() -> (String, String) {
     )
 }
 
+/// Schalter der Einstellungen (#386) für die Chats, je Bild vom UI-Thread veröffentlicht (wie die Editor-Schalter):
+/// Bit [`SW_CREATE`] = „Agenten dürfen Projekte anlegen“, Bit [`SW_DELETE`] = „… Tickets/Kommentare löschen“.
+pub static AGENT_SWITCHES: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+pub const SW_CREATE: u8 = 1;
+pub const SW_DELETE: u8 = 2;
+
+pub fn switch_bits(create_projects: bool, delete: bool) -> u8 {
+    (if create_projects { SW_CREATE } else { 0 }) | if delete { SW_DELETE } else { 0 }
+}
+
+/// Bekommt ein Chat dieses Werkzeug angeboten? Die Werkzeuge der Erweiterung nur mit ihrem Schalter (spart sonst Platz im
+/// Chat-Prompt); `update_comment` gehört zum Schalter „Löschen“ (Kommentare verwalten).
+pub fn offered_to_chats(name: &str, bits: u8) -> bool {
+    match name {
+        "create_project" => bits & SW_CREATE != 0,
+        "delete_ticket" | "delete_comment" | "update_comment" => bits & SW_DELETE != 0,
+        _ => true,
+    }
+}
+
 /// Wohin ein MCP-Werkzeug greift, soweit der Hub es ohne Datenbank bestimmen kann.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ToolScope {
@@ -498,6 +518,18 @@ mod tests {
         for l in AreaLevel::ALL {
             assert_eq!(AreaLevel::parse(l.as_str()), l);
         }
+    }
+
+    #[test]
+    fn chats_get_the_extension_tools_only_with_their_switch() {
+        for t in ["create_project", "delete_ticket", "update_comment", "delete_comment"] {
+            assert!(!offered_to_chats(t, 0), "{t}");
+            assert!(offered_to_chats(t, SW_CREATE | SW_DELETE), "{t}");
+        }
+        assert!(offered_to_chats("create_project", SW_CREATE) && !offered_to_chats("delete_ticket", SW_CREATE));
+        assert!(offered_to_chats("delete_ticket", SW_DELETE) && !offered_to_chats("create_project", SW_DELETE));
+        assert!(offered_to_chats("list_sessions", 0));
+        assert_eq!(switch_bits(true, true), 3);
     }
 
     #[test]

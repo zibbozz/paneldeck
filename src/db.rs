@@ -361,8 +361,9 @@ mod tests {
             np.with_defaults = true;
             let pid = create_project(&db.conn, &np).unwrap();
             let ty = crate::planning::types::list_types(&db.conn, pid).unwrap()[0].id;
-            let (t, _) = create_ticket(&db.conn, &NewTicket::new(pid, ty, "Alt"), &crate::planning::history::Source::ui()).unwrap();
-            (pid, t.id)
+            // Direkt in SQL: die Ticket-Funktionen dieser Version lesen schon die Spalten späterer Migrationen (#386).
+            db.conn.execute("INSERT INTO tickets (project_id, number, type_id, title, created_at, updated_at) VALUES (?1, 1, ?2, 'Alt', 'x', 'x')", rusqlite::params![pid, ty]).unwrap();
+            (pid, db.conn.last_insert_rowid())
         };
         let db = open(&d, &bdir).unwrap();
         assert_eq!(user_version(&db.conn), latest_version());
