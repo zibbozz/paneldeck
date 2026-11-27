@@ -1341,6 +1341,22 @@ pub(super) fn proc_cwd(shell: &ShellSpec, spec: &mut ShellSpec, cwd: &str, lang:
 
 fn proc_cwd_with(shell: &ShellSpec, spec: &mut ShellSpec, cwd: &str, lang: Lang, lk: &dyn crate::targetpath::Lookup) -> Result<(String, bool), String> {
     use crate::targetpath::PathKind;
+    let r = proc_cwd_kind(shell, spec, cwd, lang, lk)?;
+    // cmd.exe kennt keinen UNC-Arbeitsordner: Es meldet „UNC-Pfade werden nicht unterstützt“ und arbeitet in C:\Windows
+    // weiter – ein relatives `del`/`copy` träfe dann dort. Lieber gar nicht starten (Sitzungen weichen in den
+    // Benutzerordner aus, `app::spawn`).
+    if matches!(PathKind::of(shell), PathKind::Windows { cmd: true }) && !r.1 && (r.0.starts_with("\\\\") || r.0.starts_with("//")) {
+        return Err(format!(
+            "{} {}",
+            lang.t("cmd.exe kann nicht in einem Netzwerk- oder WSL-Ordner (UNC-Pfad) arbeiten – einen lokalen Ordner angeben oder PowerShell bzw. die WSL-Shell wählen:", "cmd.exe cannot work in a network or WSL folder (UNC path) – use a local folder or choose PowerShell or the WSL shell:"),
+            lang.q(&r.0)
+        ));
+    }
+    Ok(r)
+}
+
+fn proc_cwd_kind(shell: &ShellSpec, spec: &mut ShellSpec, cwd: &str, lang: Lang, lk: &dyn crate::targetpath::Lookup) -> Result<(String, bool), String> {
+    use crate::targetpath::PathKind;
     if cwd.is_empty() {
         return Ok((String::new(), false));
     }
@@ -1447,6 +1463,25 @@ mod tests {
         assert_eq!(proc_cwd_with(&gb, &mut spec, "/c/work", Lang::En, &Lk), Ok((r"C:\work".to_string(), false)));
         assert_eq!(proc_cwd_with(&gb, &mut spec, "~/app", Lang::En, &Lk), Ok((r"C:\Users\u\app".to_string(), false)));
         assert_eq!(proc_cwd_with(&gb, &mut spec, "", Lang::En, &Lk), Ok((String::new(), false)));
+        // cmd mit UNC-Ordner: Fehler statt Lauf in C:\Windows (Prozessliste und Aktionen beim Speichern)
+        if cfg!(windows) {
+            let cmd = ShellSpec { id: "cmd".into(), label: "cmd".into(), program: "cmd.exe".into(), args: vec![] };
+            let mut spec = cmd.clone();
+            for unc in [r"\\wsl.localhost\Ubuntu\home\u", r"\\server\share\app", r"\\?\UNC\server\share"] {
+                let e = proc_cwd_with(&cmd, &mut spec, unc, Lang::En, &Lk).unwrap_err();
+                assert!(e.contains("UNC") && e.contains(unc), "{e}");
+            }
+            assert!(proc_cwd_with(&cmd, &mut spec, "//server/share", Lang::En, &Lk).is_err());
+            assert!(proc_cwd_with(&cmd, &mut spec, r"\\server\share", Lang::De, &Lk).unwrap_err().contains("Netzwerk"));
+            assert_eq!(proc_cwd_with(&cmd, &mut spec, r"C:\work", Lang::En, &Lk), Ok((r"C:\work".to_string(), false)));
+            assert_eq!(proc_cwd_with(&cmd, &mut spec, "", Lang::En, &Lk), Ok((String::new(), false)));
+            // PowerShell und Git Bash können UNC-Ordner
+            let ps = ShellSpec { id: "powershell".into(), label: "PowerShell".into(), program: "powershell.exe".into(), args: vec![] };
+            let mut spec = ps.clone();
+            assert_eq!(proc_cwd_with(&ps, &mut spec, r"\\server\share", Lang::En, &Lk), Ok((r"\\server\share".to_string(), false)));
+            let mut spec = gb.clone();
+            assert!(proc_cwd_with(&gb, &mut spec, r"\\server\share", Lang::En, &Lk).is_ok());
+        }
     }
 
     #[test]

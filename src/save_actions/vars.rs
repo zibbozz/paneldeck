@@ -16,7 +16,9 @@
 //! cmd: Die Befehlszeile geht über eine Umgebungsvariable an `cmd /c` (siehe `procs::launch_spec`), deren Inhalt cmd
 //! nicht noch einmal ersetzt. Deshalb ersetzt der Aufrufer `%NAME%` der Vorlage **vor** dem Einsetzen der Werte
 //! ([`expand_command`] mit `cmd_lookup`) – ein `%` in einem Dateinamen bleibt so wörtlich. `PANELDECK_*` und die
-//! geheimen Variablen der Regel bleiben dabei stehen (cmd ersetzt sie zur Laufzeit aus der Umgebung).
+//! geheimen Variablen der Regel dürfen dort nicht hinein (geheime Werte nie in eine Befehlszeile); kommen sie als
+//! `%NAME%` vor ([`cmd_needs_batch`]), läuft der Befehl über eine Batch-Datei ([`cmd_batch_line`], `super::batch`),
+//! in der cmd sie beim Ausführen aus der Umgebung ersetzt.
 
 use super::relative;
 use crate::procs::Flavor;
@@ -427,6 +429,77 @@ pub fn cmd_unquoted_env(template: &str) -> Vec<String> {
     out
 }
 
+/// `%NAME%`-Kandidaten einer cmd-Vorlage so durchgehen wie [`crate::procs::expand_cmd_vars`]: `keep` entscheidet, ob
+/// ein Name ersetzt wird (sonst bleibt `%NAME` wörtlich und die Suche geht am schließenden `%` weiter). `f` bekommt je
+/// Stück `Some(name)` für eine ersetzte Variable bzw. `(Text, None)` für wörtlichen Text.
+fn cmd_scan(template: &str, keep: &dyn Fn(&str) -> bool, mut f: impl FnMut(&str, Option<&str>)) {
+    let mut rest = template;
+    while let Some(i) = rest.find('%') {
+        f(&rest[..i], None);
+        let after = &rest[i + 1..];
+        let Some(j) = after.find('%') else {
+            f("%", None);
+            rest = after;
+            continue;
+        };
+        let name = &after[..j];
+        if !name.is_empty() && !name.contains(':') && !name.chars().any(|c| c.is_control()) && keep(name) {
+            f("", Some(name));
+            rest = &after[j + 1..];
+        } else {
+            f("%", None);
+            f(name, None);
+            rest = &after[j..];
+        }
+    }
+    f(rest, None);
+}
+
+/// cmd: Steht in der Vorlage `%PANELDECK_…%` oder eine geheime Variable der Regel als `%NAME%`? Die ersetzt cmd erst
+/// zur Laufzeit aus der Umgebung – dafür läuft der Befehl über eine Batch-Datei ([`cmd_batch_line`]), denn den Inhalt
+/// der Variable, über die eine Befehlszeile an `cmd /c` geht, ersetzt cmd kein zweites Mal.
+/// `defined`: Variable ist in der Umgebung des Laufs gesetzt (wie bei [`cmd_batch_line`]).
+pub fn cmd_needs_batch(template: &str, defined: &dyn Fn(&str) -> bool, secret: &dyn Fn(&str) -> bool) -> bool {
+    let runtime = |n: &str| n.to_ascii_uppercase().starts_with("PANELDECK_") || secret(n);
+    let mut found = false;
+    cmd_scan(template, &|n| runtime(n) || defined(n), |_, n| {
+        if let Some(n) = n {
+            found |= runtime(n);
+        }
+    });
+    found
+}
+
+/// cmd über eine Batch-Datei: Zeile für die Datei. Sie verhält sich wie die getippte Befehlszeile (#383):
+/// * `%NAME%` einer gesetzten Variable (`defined`), `%PANELDECK_…%` und geheime Variablen bleiben stehen – cmd ersetzt
+///   sie beim Ausführen aus der Umgebung des Laufs, **einmal** (ein `%` oder `&` im Wert wird nicht noch einmal
+///   ausgewertet; geheime Werte stehen so nie in der Datei oder in der Befehlszeile).
+/// * jedes andere `%` (unbekannte Variable, einzelnes `%`, `for %f`, `%1`) wird zu `%%`, also wörtlich wie auf der
+///   Befehlszeile – ebenso jedes `%` in eingesetzten Werten (`${file}` mit `%` im Namen).
+/// * `${env:NAME}` einer geheimen Variable wird `"%NAME%"` (Wert erst zur Laufzeit), andere wie bei [`expand_command`].
+pub fn cmd_batch_line(template: &str, ctx: &Ctx, t: &Target, defined: &dyn Fn(&str) -> bool, env_lookup: &dyn Fn(&str) -> Option<String>, secret: &dyn Fn(&str) -> bool) -> Result<String, String> {
+    let mut pre = String::with_capacity(template.len() + 16);
+    let keep = |n: &str| n.to_ascii_uppercase().starts_with("PANELDECK_") || secret(n) || defined(n);
+    cmd_scan(template, &keep, |text, name| match name {
+        Some(n) => {
+            pre.push('%');
+            pre.push_str(n);
+            pre.push('%');
+        }
+        None => pre.push_str(&text.replace('%', "%%")),
+    });
+    let mut out = String::with_capacity(pre.len() + 32);
+    for p in shell_pieces(&pre, t.quote)? {
+        match p {
+            Piece::Text(s) => out.push_str(s),
+            Piece::Var(n) => out.push_str(&quote_for(t, &ctx.value(n).unwrap_or_default()).replace('%', "%%")),
+            Piece::Env(n) if secret(n) => out.push_str(&format!("\"%{n}%\"")),
+            Piece::Env(n) => out.push_str(&quote_for(t, &env_lookup(n).unwrap_or_default()).replace('%', "%%")),
+        }
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -542,6 +615,33 @@ mod tests {
         assert_eq!(line, "type %PANELDECK_FILE% %TOKEN% o");
         assert_eq!(cmd_unquoted_env("type %PANELDECK_FILE% \"%PANELDECK_RULE_FOLDER%\" %OTHER%"), ["PANELDECK_FILE"]);
         assert!(cmd_unquoted_env("type \"%PANELDECK_FILE%\"").is_empty());
+    }
+
+    /// cmd mit `%PANELDECK_…%`/geheimen `%NAME%` läuft über eine Batch-Datei: Diese Namen und gesetzte Variablen bleiben
+    /// als `%NAME%` (cmd ersetzt sie zur Laufzeit einmal), jedes andere `%` – auch in eingesetzten Dateinamen – wird
+    /// `%%` (wörtlich wie auf der Befehlszeile); geheime Werte stehen nie in der Zeile.
+    #[test]
+    fn cmd_batch_line_keeps_runtime_variables_and_escapes_every_other_percent() {
+        let c = ctx("100% & %OS%.txt");
+        let defined = |n: &str| ["OTHER", "PANELDECK_FILE", "TOKEN"].iter().any(|x| x.eq_ignore_ascii_case(n));
+        let secret = |n: &str| n.eq_ignore_ascii_case("TOKEN");
+        let env = |n: &str| match n {
+            "TOKEN" => Some("geheim".to_string()),
+            "PLAIN" => Some("p%q".to_string()),
+            _ => None,
+        };
+        let t = Target::test(Flavor::Cmd);
+        assert!(cmd_needs_batch("type \"%PANELDECK_FILE%\"", &defined, &secret));
+        assert!(cmd_needs_batch("curl -H \"%token%\"", &defined, &secret), "geheim, ohne Groß-/Kleinschreibung");
+        assert!(!cmd_needs_batch("echo %OTHER% 100% ${file}", &defined, &secret), "sonst wie bisher über die Befehlszeile");
+        assert!(!cmd_needs_batch("echo %OTHER:~0,1%PANELDECK_FILE", &defined, &secret));
+        let line = cmd_batch_line("type \"%PANELDECK_FILE%\" && echo %OTHER% %NOPE% 50% %% for %f in (*) do @echo %f ${fileBasename} \"%TOKEN%\" ${env:TOKEN} ${env:PLAIN}", &c, &t, &defined, &env, &secret).unwrap();
+        assert_eq!(line, "type \"%PANELDECK_FILE%\" && echo %OTHER% %%NOPE%% 50%% %%%% for %%f in (*) do @echo %%f \"100%% & %%OS%%.txt\" \"%TOKEN%\" \"%TOKEN%\" \"p%%q\"");
+        assert!(!line.contains("geheim"));
+        // Wie `expand_cmd_vars`: eine unbekannte Variable gibt ihr schließendes `%` an die nächste weiter
+        assert_eq!(cmd_batch_line("echo %NOPE%OTHER% %PANELDECK_FILE%", &c, &t, &defined, &none, &secret).unwrap(), "echo %%NOPE%OTHER% %PANELDECK_FILE%");
+        // Variable in Anführungszeichen bleibt ein Fehler der Regel
+        assert!(cmd_batch_line("echo \"x${file}\" %PANELDECK_FILE%", &c, &t, &defined, &none, &secret).is_err());
     }
 
     #[test]

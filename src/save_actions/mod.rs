@@ -15,6 +15,7 @@
 //! Sicherheit: Regeln legt nur der Nutzer an (Agenten lesen sie höchstens über `list_save_actions`, ohne Befehle und
 //! Werte). Paneldeck selbst greift dabei nie aufs Netz zu – Uploads nur über eigene Befehle des Nutzers.
 
+pub mod batch;
 pub mod builtin;
 pub mod copy;
 pub mod exchange;

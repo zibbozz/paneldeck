@@ -83,9 +83,10 @@ pub(super) struct RunRecord {
 /// Laufender Schritt einer Aktion.
 enum Step {
     /// Befehl in einer Pseudokonsole ohne Fenster.
-    Hidden { session: Session, life: CmdLife, flavor: procs::Flavor, record: u64, exit_seen: Option<Instant> },
+    /// `batch`: Batch-Datei des Laufs (cmd mit Laufzeit-Variablen), gelöscht, sobald der Schritt verworfen wird.
+    Hidden { session: Session, life: CmdLife, flavor: procs::Flavor, record: u64, exit_seen: Option<Instant>, batch: Option<sa::batch::TempBatch> },
     /// Befehl in einem sichtbaren Terminal der Seitenleiste.
-    Visible { entry: u64, life: CmdLife, flavor: procs::Flavor, record: u64, exit_seen: Option<Instant> },
+    Visible { entry: u64, life: CmdLife, flavor: procs::Flavor, record: u64, exit_seen: Option<Instant>, batch: Option<sa::batch::TempBatch> },
     /// Kopieren im Hilfsthread.
     Copy { rx: Receiver<Result<u64, String>>, record: u64 },
 }
@@ -307,6 +308,9 @@ pub(super) struct Prepared {
     pub linux_cd: bool,
     /// Befehlszeile für die Anzeige (geheime Werte als •••).
     pub display: String,
+    /// cmd mit `%PANELDECK_…%` oder geheimen `%NAME%`: Zeile für eine Batch-Datei (`sa::batch`), die cmd beim Ausführen
+    /// aus der Umgebung ersetzt. Angelegt wird die Datei erst beim Start ([`App::sa_spawn`]).
+    pub batch: Option<String>,
     /// Hinweise (nicht entschlüsselbare Variablen, Variablen in Anführungszeichen).
     pub notes: Vec<String>,
 }
@@ -412,7 +416,7 @@ impl App {
                     false
                 }
             },
-            Step::Hidden { session, mut life, flavor, record, mut exit_seen } => {
+            Step::Hidden { session, mut life, flavor, record, mut exit_seen, batch } => {
                 if self.save_actions.active[i].cancelled {
                     let fx = life.cancel(now);
                     sa_effects(&session, fx);
@@ -436,12 +440,12 @@ impl App {
                     self.sa_command_done(i, record, outcome, code, lines);
                     false
                 } else {
-                    self.save_actions.active[i].step = Some(Step::Hidden { session, life, flavor, record, exit_seen });
+                    self.save_actions.active[i].step = Some(Step::Hidden { session, life, flavor, record, exit_seen, batch });
                     let _ = ctx;
                     true
                 }
             }
-            Step::Visible { entry, mut life, flavor, record, mut exit_seen } => {
+            Step::Visible { entry, mut life, flavor, record, mut exit_seen, batch } => {
                 let Some(s) = self.entries.get(&entry).and_then(|e| e.live.as_ref()) else {
                     // Terminal geschlossen: gilt als abgebrochen.
                     let outcome = life.outcome(flavor, None);
@@ -469,7 +473,7 @@ impl App {
                     self.sa_command_done(i, record, outcome, code, lines);
                     false
                 } else {
-                    self.save_actions.active[i].step = Some(Step::Visible { entry, life, flavor, record, exit_seen });
+                    self.save_actions.active[i].step = Some(Step::Visible { entry, life, flavor, record, exit_seen, batch });
                     true
                 }
             }
@@ -597,8 +601,8 @@ impl App {
                         match self.sa_spawn(ctx, &def, &p) {
                             Ok(step) => {
                                 let step = match step {
-                                    Spawned::Hidden(session) => Step::Hidden { session, life: CmdLife::started(Instant::now(), def.timeout()), flavor: p.flavor, record: id, exit_seen: None },
-                                    Spawned::Visible(entry) => Step::Visible { entry, life: CmdLife::started(Instant::now(), def.timeout()), flavor: p.flavor, record: id, exit_seen: None },
+                                    Spawned::Hidden(session, batch) => Step::Hidden { session, life: CmdLife::started(Instant::now(), def.timeout()), flavor: p.flavor, record: id, exit_seen: None, batch },
+                                    Spawned::Visible(entry, batch) => Step::Visible { entry, life: CmdLife::started(Instant::now(), def.timeout()), flavor: p.flavor, record: id, exit_seen: None, batch },
                                 };
                                 self.save_actions.active[i].step = Some(step);
                             }
@@ -705,6 +709,14 @@ impl App {
         if line.contains('\n') || line.contains('\r') {
             return Err(lang.t("Der Befehl muss eine Zeile sein", "The command must be one line").into());
         }
+        // cmd ersetzt `%PANELDECK_FILE%` und geheime `%NAME%` nur aus einer Batch-Datei zur Laufzeit (über die
+        // Befehlszeile ersetzt es den übergebenen Text kein zweites Mal; geheime Werte gehören nie hinein).
+        let defined = |n: &str| lookup(n).is_some();
+        let batch = if target.flavor == procs::Flavor::Cmd && vars::cmd_needs_batch(template, &defined, &secret) {
+            Some(vars::cmd_batch_line(template, vctx, &target, &defined, &lookup, &secret)?)
+        } else {
+            None
+        };
         let (mut spec, extra) = procs::launch_spec(&shell, &line);
         if target.flavor == procs::Flavor::Cmd && spec.args.first().is_some_and(|a| a == "/d") {
             // `!` in Werten bleibt wörtlich (verzögerte Erweiterung aus).
@@ -727,7 +739,7 @@ impl App {
                 notes.push(format!("{} {}", lang.t("cmd setzt diese Variablen ungequotet ein – als \"%NAME%\" schreiben:", "cmd inserts these variables unquoted – write them as \"%NAME%\":"), bare.join(", ")));
             }
         }
-        Ok(Prepared { flavor: target.flavor, shell, spec, env, cwd, linux_cd, display, notes })
+        Ok(Prepared { flavor: target.flavor, shell, spec, env, cwd, linux_cd, display, notes, batch })
     }
 
     /// Befehl starten (verborgen oder sichtbar).
@@ -742,14 +754,27 @@ impl App {
                 None => return Err(format!("{} {}", lang.t("Ordner antwortet nicht (Netzwerk?):", "Folder does not respond (network?):"), lang.q(cwd))),
             }
         }
+        // cmd über eine Batch-Datei (`sa::batch`): Die Umgebungsvariable des Befehls nennt dann nur die Datei.
+        let mut env = p.env.clone();
+        let batch = match &p.batch {
+            Some(line) => {
+                let b = sa::batch::TempBatch::create(&sa::batch::content(line)).map_err(|e| format!("{} {e}", lang.t("Batch-Datei für cmd ließ sich nicht anlegen:", "Could not create the batch file for cmd:")))?;
+                match env.iter_mut().find(|(k, _)| k == procs::ENV_COMMAND) {
+                    Some(e) => e.1 = b.command(),
+                    None => return Err(lang.t("Batch-Datei für cmd: unerwarteter Start der Shell", "Batch file for cmd: unexpected shell start").into()),
+                }
+                Some(b)
+            }
+            None => None,
+        };
         let s = Session::spawn(
             ctx,
-            SpawnOptions { shell: &p.spec, cwd: (!p.linux_cd).then_some(cwd), restore_text: None, initial_input: None, scrollback_lines: sa::OUTPUT_LINES + 200, env: p.env.clone(), user_env: Vec::new(), view: None, inherit_env: self.settings.inherit_env },
+            SpawnOptions { shell: &p.spec, cwd: (!p.linux_cd).then_some(cwd), restore_text: None, initial_input: None, scrollback_lines: sa::OUTPUT_LINES + 200, env, user_env: Vec::new(), view: None, inherit_env: self.settings.inherit_env },
         )
         .map_err(|e| format!("{} {e}", lang.t("Start fehlgeschlagen:", "Failed to start:")))?;
         s.kill_on_close();
         if !rule.terminal {
-            return Ok(Spawned::Hidden(s));
+            return Ok(Spawned::Hidden(s, batch));
         }
         // Sichtbar: eigene Sitzung in der Seitenleiste (Kind des aktiven Projekts), die genau diesen Befehl ausführt.
         let id = self.next_id;
@@ -760,7 +785,7 @@ impl App {
         let mut e = Entry::new(meta);
         e.live = Some(s);
         self.entries.insert(id, e);
-        Ok(Spawned::Visible(id))
+        Ok(Spawned::Visible(id, batch))
     }
 
     /// Text an eine Sitzung senden – nur, wenn sie an ihrem Prompt wartet (Shell-Integration), nie bei offener
@@ -1099,8 +1124,8 @@ impl App {
 
 /// Ergebnis von [`App::sa_spawn`].
 enum Spawned {
-    Hidden(Session),
-    Visible(u64),
+    Hidden(Session, Option<sa::batch::TempBatch>),
+    Visible(u64, Option<sa::batch::TempBatch>),
 }
 
 /// Ein Ergebnis je Regel eines fertigen Laufs (nur Regeln mit Aktionen nach dem Schreiben): das schlechteste ihrer
