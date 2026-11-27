@@ -551,6 +551,7 @@ pub struct Preview {
 
 /// Vorschau für die Freigabe-Zeile: Diff bei `edit_file`/`write_file` (gegen die Datei auf der Platte); bei
 /// `read_file`/`move_file` nur, wenn eine sensible Datei betroffen ist (Hinweis, kein „Immer“). `None` sonst.
+#[cfg(test)]
 pub fn preview(name: &str, args: &Value, env: &AgentEnv) -> Option<Preview> {
     let call = super::ToolCall { id: String::new(), name: name.to_string(), arguments: args.clone() };
     preview_with(name, args, env, super::sensitive_call(&call, env))

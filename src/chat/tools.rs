@@ -412,6 +412,7 @@ impl ToolPolicy {
     /// Chats (passen nur bei gleichem Werkzeug und gleicher Ziel-Sitzung).
     /// Aufrufe, die eine sensible Datei berühren (#338: lesen, ändern, verschieben), fragen immer – auch wenn „Vor
     /// Schreib-Aktionen nachfragen“ aus ist und trotz „Immer für diesen Chat“.
+    #[cfg(test)]
     pub fn needs_approval(&self, ask: bool, call: &ToolCall, always: &[AllowRule]) -> bool {
         self.needs_approval_with(ask, call, always, None)
     }
