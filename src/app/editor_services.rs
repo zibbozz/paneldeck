@@ -111,9 +111,29 @@ impl App {
             return;
         }
         for path in std::mem::take(&mut self.editor_svc.open_queue) {
-            if let Err(e) = self.editor_bridge_open(ctx, &path) {
+            // Linux-Pfad beim Programmstart (`--edit /home/u/x`): in der WSL-Standard-Distribution (#392).
+            let path = match self.cli_path(&path.to_string_lossy(), None) {
+                Ok(p) => PathBuf::from(p),
+                Err(e) => {
+                    self.notify_text(format!("{} {}: {}", state::t("Datei ließ sich nicht im Editor öffnen:", "Could not open the file in the editor:"), path.display(), e.message(self.settings.language)));
+                    continue;
+                }
+            };
+            // WSL-Dateien laden im Hintergrund (#392), lokale wie bisher.
+            let r = if crate::wsl::is_wsl_unc(&path.to_string_lossy()) { self.editor_open_user(&path, None).map(|_| ()) } else { self.editor_bridge_open(ctx, &path) };
+            if let Err(e) = r {
                 self.notify_text(format!("{} {}: {e}", state::t("Datei ließ sich nicht im Editor öffnen:", "Could not open the file in the editor:"), path.display()));
             }
+        }
+        // Strg+Klick auf einen Pfad im Terminal (#392): Textdatei im Editor an der Zeile.
+        for (path, line) in crate::links::take_editor_requests() {
+            if let Err(e) = self.editor_open_user(Path::new(&path), line) {
+                self.notify_text(format!("{} {path}: {e}", state::t("Datei ließ sich nicht im Editor öffnen:", "Could not open the file in the editor:")));
+            }
+        }
+        self.ed.apply_pending_goto();
+        if self.ed.pending_goto.is_some() {
+            ctx.request_repaint_after(Duration::from_millis(50));
         }
         let open = self.editor_bridge_paths();
         let c = ctx.clone();

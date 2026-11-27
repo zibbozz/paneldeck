@@ -489,18 +489,11 @@ impl SessionForm {
     }
 }
 
-/// Feld „Arbeitsordner“: Text und Auswahl-Knopf. Eigene Funktion, damit hier die WSL-fähige Ordnerauswahl (#172)
-/// eingesetzt werden kann; `shell_id` = gewählte Shell (bestimmt, welche Pfade gelten). `locked` = Ordner eines
-/// Git-Worktrees (nicht änderbar).
-pub(super) fn folder_field(ui: &mut Ui, cwd: &mut String, _shell_id: &str, locked: bool, lang: Lang) {
-    ui.horizontal(|ui| {
-        ui.add_enabled(!locked, egui::TextEdit::singleline(cwd).desired_width(290.0).hint_text(lang.t("leer = Benutzerordner", "empty = home folder")));
-        if ui.add_enabled(!locked, egui::Button::new("…")).on_hover_text(lang.t("Ordner wählen", "Choose folder")).clicked() {
-            if let Some(p) = notify::pick_folder(cwd) {
-                *cwd = p;
-            }
-        }
-    });
+/// Feld „Arbeitsordner“ (#392): dünne Hülle um das WSL-fähige Ordnerfeld (`folder_picker::field`) mit dem Ziel der
+/// gewählten Shell – Windows, Git Bash (`/c/x`, `~`) oder WSL (Umschalter, Vervollständigung, Prüfung, zuletzt
+/// benutzt). `locked` = Ordner eines Git-Worktrees (nicht änderbar).
+pub(super) fn folder_field(ui: &mut Ui, id_salt: impl std::hash::Hash, cwd: &mut String, target: &folder_picker::Target, locked: bool, lang: Lang, recent: &std::collections::BTreeMap<String, Vec<String>>) -> folder_picker::PickerResponse {
+    folder_picker::field(ui, id_salt, cwd, target.clone(), locked, lang, recent)
 }
 
 /// Gibt es den Arbeitsordner (`wsl` = die Shell startet in WSL)? Nie blockierend im UI-Thread (#216): Ein Linux-Pfad
@@ -673,8 +666,8 @@ pub(super) fn session_form_ui(ctx: &egui::Context, f: &mut SessionForm, shells: 
                     ui.end_row();
                     ui.label(lang.t("Arbeitsordner", "Working folder"));
                     if f.worktree.is_some() {
-                        let shell = f.v.shell_id.clone();
-                        folder_field(ui, &mut f.v.cwd, &shell, true, lang);
+                        let target = f.target.clone();
+                        folder_field(ui, ("sset_wt", f.id), &mut f.v.cwd, &target, true, lang, &f.wsl_recent);
                     } else {
                         // Wie im Dialog „Neue Sitzung“: bei einer WSL-Shell Linux-Pfade, Prüfung und Auswahl in WSL (#216).
                         let target = f.target.clone();

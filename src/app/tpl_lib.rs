@@ -328,7 +328,11 @@ pub(super) fn tpl_form_ui(ctx: &egui::Context, f: &mut TplForm, shells: &[ShellS
             let target = match shells.iter().find(|s| s.id == eff_shell) {
                 Some(s) => super::folder_picker::Target::for_shell(Some(s), false),
                 None if eff_shell.starts_with("wsl") => super::folder_picker::Target::Wsl { distro: eff_shell.strip_prefix("wsl:").filter(|d| !d.is_empty()).map(str::to_string), choose_distro: false },
-                None => super::folder_picker::Target::Windows,
+                // Eigenes Profil (z. B. Git Bash an anderem Ort): nach seinem Programm.
+                None => match custom_prof {
+                    Some(p) => super::folder_picker::Target::for_shell(Some(&ShellSpec { id: eff_shell.clone(), label: p.name.clone(), program: p.program.clone(), args: Vec::new() }), false),
+                    None => super::folder_picker::Target::Windows,
+                },
             };
             let claude_on = f.item.claude;
             // Wie die Standards: kein bypassPermissions in einer Vorlage (Datei kann weitergegeben werden).
@@ -341,7 +345,7 @@ pub(super) fn tpl_form_ui(ctx: &egui::Context, f: &mut TplForm, shells: &[ShellS
             invalid = tabs::invalid_hint(lang, &infos);
             tabs::body(ui, SALT, tab, body_h, |ui| {
                 if tab == Tab::General {
-                    tpl_general(ui, f, shells, profiles, folders, claude_mode, &eff_shell, custom_prof.is_some(), lang);
+                    tpl_general(ui, f, shells, profiles, folders, claude_mode, &eff_shell, &target, custom_prof.is_some(), lang);
                     return;
                 }
                 let TplForm { opts, conv, legacy_rest, item, .. } = &mut *f;
@@ -427,7 +431,8 @@ pub(super) fn tpl_form_ui(ctx: &egui::Context, f: &mut TplForm, shells: &[ShellS
 /// Reiter *Allgemein* einer Terminal-Vorlage: Sitzungsname, Claude starten, Profil, Shell, Startordner, Ordner im Baum,
 /// Farbe, Tags, Notizen.
 #[allow(clippy::too_many_arguments)]
-fn tpl_general(ui: &mut Ui, f: &mut TplForm, shells: &[ShellSpec], profiles: &[Profile], folders: &[String], claude_mode: bool, eff_shell: &str, custom: bool, lang: Lang) {
+#[allow(clippy::too_many_arguments)]
+fn tpl_general(ui: &mut Ui, f: &mut TplForm, shells: &[ShellSpec], profiles: &[Profile], folders: &[String], claude_mode: bool, eff_shell: &str, target: &super::folder_picker::Target, custom: bool, lang: Lang) {
     egui::Grid::new("tpl_editor_grid").num_columns(2).spacing([8.0, 8.0]).min_col_width(140.0).show(ui, |ui| {
         ui.label(lang.t("Sitzungsname", "Session name"));
         ui.add(egui::TextEdit::singleline(&mut f.item.name).desired_width(dialogs::FIELD_W).hint_text(lang.t("leer = Name der Vorlage", "empty = template name")));
@@ -472,7 +477,8 @@ fn tpl_general(ui: &mut Ui, f: &mut TplForm, shells: &[ShellSpec], profiles: &[P
         }
         ui.end_row();
         ui.label(lang.t("Startordner", "Start folder"));
-        session_settings::folder_field(ui, &mut f.item.cwd, eff_shell, false, lang);
+        // Ordnerfeld nach der Shell der Vorlage (#392): WSL-Pfade, Git Bash `/c/x`, `~`.
+        session_settings::folder_field(ui, "tpl_cwd", &mut f.item.cwd, target, false, lang, &Default::default());
         ui.end_row();
         if eff_shell.starts_with("wsl") {
             #[cfg(test)]

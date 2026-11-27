@@ -11,6 +11,7 @@ The **Editor** tab is a plain text editor inside Paneldeck, independent of the t
 - **Open file …**, **New file** and **Recent** (*Recent files* / *Recent folders*, *Clear list*).
 - **Explorer:** with the switch *Open in Paneldeck editor* in *Settings → Window* a right-click on any file opens it here ([Windows integration](windows-integration.md#open-in-paneldeck-editor)); from the command line: [`paneldeck.exe --edit <file>`](command-line.md#--edit-file).
 - Paneldeck remembers the open folder, the tabs (with cursor and scroll position), the split layout and the recent lists (`editor-state.json` in the data folder).
+- **Files in WSL:** you can open and save files in a WSL distribution (`\\wsl.localhost\<distro>\…`, e.g. via *Open file …* or Ctrl+click on a Linux path in a terminal); they are loaded in the background. For such files the context menus also offer *Copy as Linux path*. `paneldeck.exe --edit /home/me/x` from a WSL session opens the file of that distribution. Agents stay limited to local Windows files (see [Agents](#agents)).
 
 ## Tabs and splits
 - Every split has **its own tab bar**; tabs can be dragged between splits. *Close*, *Close others*, *Close all* are in the tab's context menu.

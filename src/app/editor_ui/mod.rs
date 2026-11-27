@@ -164,6 +164,9 @@ pub(crate) struct EditorUi {
     pub(super) fmt: format::FmtState,
     /// Menüleiste je Teilung im letzten Bild: Fläche und ob sie zusammengeklappt ist (Tests, Tutorial).
     pub(super) menu_rects: HashMap<u64, (eframe::egui::Rect, bool)>,
+    /// Zu dieser Zeile springen, sobald das (im Hintergrund geladene) Dokument da ist (#392: Strg+Klick auf
+    /// `datei:12` aus WSL).
+    pub(super) pending_goto: Option<(u64, usize)>,
 }
 
 impl EditorUi {
@@ -328,6 +331,23 @@ impl EditorUi {
         self.docs.insert(id, DocEntry::untitled(n, text));
         self.show_doc(id, false);
         id
+    }
+
+    /// Wartenden Sprung zur Zeile ausführen, sobald das Dokument geladen ist und sein Reiter vorn steht.
+    pub(super) fn apply_pending_goto(&mut self) {
+        let Some((id, line)) = self.pending_goto else { return };
+        match self.docs.get(&id) {
+            None => self.pending_goto = None,
+            Some(d) if d.doc.is_some() => {
+                let active = self.panes.groups.get(&self.panes.focused).and_then(|g| g.active_tab()).map(|t| t.doc);
+                if active == Some(id) {
+                    self.goto_line(line, 0);
+                }
+                self.pending_goto = None;
+            }
+            Some(d) if d.load_error.is_some() => self.pending_goto = None,
+            Some(_) => {}
+        }
     }
 
     /// Ordner als Wurzel des Baums öffnen.
@@ -554,6 +574,31 @@ impl super::App {
     /// wird als „von einem Agenten geöffnet“ markiert und bekommt **nicht** die Tastatur (nur Aktionen des Nutzers
     /// fokussieren das Textfeld, [`EditorUi::end_agent`]). Liefert die Dokument-Id; Fehler, wenn der Pfad keine lesbare
     /// Datei ist (Text für Menschen in der eingestellten Sprache).
+    /// Datei für den Nutzer öffnen (#392: Strg+Klick auf einen Pfad, `--edit`), optional an Zeile `line` (ab 1).
+    /// WSL-Dateien (`\\wsl.localhost\…`) werden nie im UI-Thread geprüft oder gelesen (das könnte die WSL-VM
+    /// starten): Sie laden im Hintergrund, der Sprung zur Zeile folgt dann.
+    pub(crate) fn editor_open_user(&mut self, path: &Path, line: Option<usize>) -> Result<u64, String> {
+        let lang = self.settings.language;
+        let wsl = crate::wsl::is_wsl_unc(&path.to_string_lossy());
+        if !wsl && !path.is_file() {
+            return Err(lang.t("Datei nicht gefunden", "File not found").to_string());
+        }
+        let id = self.ed.open_path(path, false);
+        let prefs = self.editor_prefs();
+        if let Some(d) = self.ed.docs.get_mut(&id) {
+            d.ensure_loaded(&prefs);
+            if let Some(e) = &d.load_error {
+                return Err(e.clone());
+            }
+        }
+        self.set_mode(super::titlebar::Mode::Editor);
+        if let Some(l) = line.filter(|l| *l > 0) {
+            self.ed.pending_goto = Some((id, l - 1));
+            self.ed.apply_pending_goto();
+        }
+        Ok(id)
+    }
+
     pub(crate) fn editor_open(&mut self, path: &Path, show: bool, by_agent: bool) -> Result<u64, String> {
         if by_agent {
             let mark = self.ed.begin_agent();

@@ -16,6 +16,8 @@ pub enum TreeOut {
     /// In einer neuen Teilung rechts öffnen.
     OpenSide(PathBuf),
     CopyPath(PathBuf),
+    /// Linux-Pfad einer WSL-Datei kopieren (#392).
+    CopyLinuxPath(PathBuf),
     /// Ordner als neue Wurzel.
     SetRoot(PathBuf),
 }
@@ -139,6 +141,10 @@ impl Tree {
             }
             if ui.button(lang.t("Pfad kopieren", "Copy path")).clicked() {
                 out.push(TreeOut::CopyPath(path.clone()));
+                ui.close();
+            }
+            if crate::wsl::is_wsl_unc(&path.to_string_lossy()) && ui.button(lang.t("Als Linux-Pfad kopieren", "Copy as Linux path")).clicked() {
+                out.push(TreeOut::CopyLinuxPath(path.clone()));
                 ui.close();
             }
             if crate::platform::open::FILE_MANAGER && ui.button(if cfg!(windows) { lang.t("Im Explorer anzeigen", "Show in Explorer") } else { lang.t("Im Dateimanager anzeigen", "Show in file manager") }).clicked() {

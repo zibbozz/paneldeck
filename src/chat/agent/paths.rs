@@ -259,6 +259,10 @@ pub fn blocked(real: &Path, comps: &[String], access: Access, env: &AgentEnv) ->
             return Some(format!("~/{b} holds the user's secrets or settings"));
         }
     }
+    // Projektordner in WSL (#392): dieselben Geheimnis-Ordner im Linux-Home (`/home/<u>/.ssh`, `/root/.aws` …).
+    if let Some(why) = wsl_blocked(real) {
+        return Some(why);
+    }
     let all: Vec<String> = real.components().filter_map(|c| if let Component::Normal(n) = c { Some(n.to_string_lossy().to_lowercase()) } else { None }).collect();
     if let Some(b) = all.iter().find(|c| BLOCKED_NAMES.contains(&c.as_str())) {
         return Some(format!("{b} folders hold keys"));
@@ -267,6 +271,21 @@ pub fn blocked(real: &Path, comps: &[String], access: Access, env: &AgentEnv) ->
         return Some("writing inside .git is not allowed (git operations go through run_command with the user's approval)".into());
     }
     None
+}
+
+/// Gesperrt, weil der Pfad in einer WSL-Distribution unter einem Linux-Home in [`BLOCKED_HOME`] liegt (`/root/…`,
+/// `/home/<u>/…`)?
+fn wsl_blocked(real: &Path) -> Option<String> {
+    let s = real.to_string_lossy();
+    let (_, linux) = crate::wsl::unc_to_linux(&s)?;
+    let parts: Vec<&str> = linux.split('/').filter(|c| !c.is_empty()).collect();
+    let rest: &[&str] = match parts.as_slice() {
+        ["root", rest @ ..] => rest,
+        ["home", _, rest @ ..] => rest,
+        _ => return None,
+    };
+    let rel = rest.join("/");
+    BLOCKED_HOME.iter().find(|b| rel == **b || rel.starts_with(&format!("{b}/"))).map(|b| format!("~/{b} holds the user's secrets or settings (in WSL)"))
 }
 
 /// `starts_with` ohne Rücksicht auf Groß-/Kleinschreibung unter Windows und macOS.
@@ -491,6 +510,17 @@ pub(crate) mod tests {
     }
 
     #[cfg(windows)]
+    #[test]
+    fn wsl_secret_folders_are_blocked() {
+        // #392: Projektordner über \\wsl.localhost – die Geheimnis-Ordner im Linux-Home bleiben gesperrt.
+        assert!(wsl_blocked(Path::new(r"\\?\UNC\wsl.localhost\Ubuntu\home\u\.ssh\id_rsa")).is_some());
+        assert!(wsl_blocked(Path::new(r"\\wsl.localhost\Ubuntu\root\.aws")).is_some());
+        assert!(wsl_blocked(Path::new(r"\\wsl$\Ubuntu\home\u\.config\gh\hosts.yml")).is_some());
+        assert!(wsl_blocked(Path::new(r"\\wsl.localhost\Ubuntu\home\u\proj\src")).is_none());
+        assert!(wsl_blocked(Path::new(r"\\wsl.localhost\Ubuntu\home\u\.sshx")).is_none());
+        assert!(wsl_blocked(Path::new(r"C:\Users\u\proj")).is_none());
+    }
+
     #[test]
     fn windows_device_unc_and_stream_paths_are_refused() {
         for bad in [r"\\server\share\x", r"\\?\C:\Windows", r"\\.\PhysicalDrive0", "//server/share", "file.txt:stream", "src/a.rs::$DATA", "C:relative.txt", r"\rooted.txt", "CON", "src/nul.txt", "COM1", "lpt9.log", "trailing.", "space ", "dir./x"] {

@@ -23,6 +23,7 @@
 
 use crate::shells::ShellSpec;
 use crate::state::Lang;
+use crate::targetpath::PathKind;
 use crate::wsl::{self, Backend, PathError};
 use eframe::egui::{self, Rect, RichText};
 use std::collections::{BTreeMap, BTreeSet};
@@ -36,24 +37,100 @@ const SHOW_MAX: usize = 8;
 /// Wofür der Ordner gewählt wird.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Target {
-    /// Windows-Shell: Windows-Pfad.
+    /// Windows-Shell: Windows-Pfad (auch `~`, `~\x` = Windows-Benutzerordner, #392).
     Windows,
+    /// Git Bash / MSYS (#392): Windows-Pfad, dazu `/c/x` und `~` (= Windows-Benutzerordner); gespeichert wie eingegeben.
+    Msys,
     /// WSL-Shell. `distro` = None: Standard-Distribution. `choose_distro`: Auswahl der Distribution anzeigen
     /// (sonst ist sie durch die Shell festgelegt).
     Wsl { distro: Option<String>, choose_distro: bool },
 }
 
 impl Target {
-    /// Ziel für eine Shell: WSL (`wsl:<Distro>` oder `wsl.exe -d <Distro>`) oder Windows.
+    /// Ziel für eine Shell (eine Erkennung für alles: `targetpath::PathKind::of`): WSL (`wsl:<Distro>` oder
+    /// `wsl.exe -d <Distro>`), Git Bash/MSYS (auch eigene Profile) oder Windows.
     pub fn for_shell(shell: Option<&ShellSpec>, choose_distro: bool) -> Target {
         match shell {
             Some(s) if crate::shells::is_wsl(s) => {
                 let distro = s.id.strip_prefix("wsl:").filter(|d| !d.is_empty()).map(str::to_string).or_else(|| crate::shells::wsl_distro(&s.args));
                 Target::Wsl { distro, choose_distro }
             }
+            Some(s) if matches!(PathKind::of(s), PathKind::Msys { .. }) => Target::Msys,
             _ => Target::Windows,
         }
     }
+
+    /// Pfadart des Ziels (für Umrechnung und Hinweise).
+    pub fn kind(&self) -> PathKind {
+        match self {
+            Target::Windows => PathKind::Windows { cmd: false },
+            Target::Msys => PathKind::Msys { root: None },
+            Target::Wsl { distro, .. } => PathKind::Wsl { distro: distro.clone() },
+        }
+    }
+}
+
+/// Ziel der Standard-Shell (für Ordnerfelder ohne eigene Shell, z. B. den Arbeitsordner eines Planungsprojekts); die
+/// App setzt es je Bild.
+static DEFAULT_TARGET: std::sync::Mutex<Option<Target>> = std::sync::Mutex::new(None);
+
+pub fn set_default_target(t: Target) {
+    if let Ok(mut g) = DEFAULT_TARGET.lock() {
+        if g.as_ref() != Some(&t) {
+            *g = Some(t);
+        }
+    }
+}
+
+pub fn default_target() -> Target {
+    DEFAULT_TARGET.lock().ok().and_then(|g| g.clone()).unwrap_or(Target::Windows)
+}
+
+/// Zustand von [`field`] zwischen den Bildern (egui-Speicher).
+struct FieldState {
+    picker: FolderPicker,
+    /// (angezeigter Wert, Wert des Felds) beim Anlegen bzw. nach einer Änderung von außen.
+    base: (String, String),
+    /// Wert nach dem letzten Bild (ändert er sich von außen, übernimmt das Feld ihn).
+    last: String,
+}
+
+type FieldSlot = Arc<std::sync::Mutex<FieldState>>;
+
+/// Ordnerfeld für einfache Formulare (#392: Terminal-Vorlagen, Startordner der Profile, Prozessliste, Arbeitsordner
+/// der Planung): dünne Hülle um [`FolderPicker`] mit dem Ziel der Shell, der Zustand liegt im egui-Speicher unter
+/// `id_salt`. `value` ist der gespeicherte Wert: Er ändert sich erst, wenn sich die Anzeige ändert (Eingabe, Modus,
+/// andere Shell) – eine bloß umgerechnete Anzeige (`C:\x` als `/mnt/c/x`) lässt ihn, wie er ist. Ändert ihn der
+/// Aufrufer (z. B. ein Profil gewählt), übernimmt das Feld ihn. `locked`: nur anzeigen.
+pub fn field(ui: &mut egui::Ui, id_salt: impl std::hash::Hash, value: &mut String, target: Target, locked: bool, lang: Lang, recent: &BTreeMap<String, Vec<String>>) -> PickerResponse {
+    if locked {
+        ui.add_enabled(false, egui::TextEdit::singleline(value).desired_width(290.0));
+        return PickerResponse::default();
+    }
+    let id = egui::Id::new(("folder_field", id_salt));
+    let slot: FieldSlot = match ui.data_mut(|d| d.get_temp::<FieldSlot>(id)) {
+        Some(s) => s,
+        None => {
+            let picker = FolderPicker::new(id, value, target.clone());
+            let base = (picker.value(), value.clone());
+            let s: FieldSlot = Arc::new(std::sync::Mutex::new(FieldState { picker, base, last: value.clone() }));
+            ui.data_mut(|d| d.insert_temp(id, s.clone()));
+            s
+        }
+    };
+    let mut g = slot.lock().unwrap_or_else(|e| e.into_inner());
+    let st = &mut *g;
+    st.picker.set_target(target);
+    if *value != st.last {
+        st.picker.set_text(value);
+        st.base = (st.picker.value(), value.clone());
+    }
+    let mut r = st.picker.show(ui, lang, recent);
+    let shown = st.picker.value();
+    *value = if shown != st.base.0 { shown } else { st.base.1.clone() };
+    st.last = value.clone();
+    r.blocking = st.picker.blocking_error(lang);
+    r
 }
 
 /// Ergebnis der Ordnerprüfung (nur WSL).
@@ -78,6 +155,8 @@ pub struct PickerResponse {
     /// Der Nutzer hat eine andere Distribution gewählt (nur mit `choose_distro`, oder über einen
     /// `\\wsl.localhost\<andere>\…`-Pfad).
     pub distro_changed: Option<String>,
+    /// Nur von [`field`]: Grund, warum der Wert nicht übernommen werden sollte ([`FolderPicker::blocking_error`]).
+    pub blocking: Option<String>,
 }
 
 enum Msg {
@@ -85,6 +164,8 @@ enum Msg {
     /// Echte Standard-Distribution (für `wsl.exe` ohne `-d`).
     Default(Option<String>),
     Home(String, Option<String>),
+    /// Einhängepunkt der Laufwerke (#392).
+    Mount(String, Option<String>),
     Listing { seq: u64, exists: wsl::DirCheck, items: Vec<String> },
 }
 
@@ -103,6 +184,8 @@ pub struct FolderPicker {
     default_unknown: bool,
     homes: BTreeMap<String, Option<String>>,
     homes_requested: BTreeSet<String>,
+    /// Einhängepunkte der Laufwerke je Distribution (`None` = unbekannt, dann `/mnt/`).
+    mounts: BTreeMap<String, Option<String>>,
     check: Check,
     suggestions: Vec<String>,
     edited_at: Option<f64>,
@@ -133,7 +216,12 @@ impl Default for Rects {
 impl FolderPicker {
     /// Neues Feld mit Startwert (Windows- oder Linux-Pfad). Abfragen laufen über `wsl.exe`.
     pub fn new(id_salt: impl std::hash::Hash, initial: &str, target: Target) -> Self {
-        Self::with_backend(id_salt, initial, target, Arc::new(wsl::WslExe))
+        // In Tests nie das echte wsl.exe (Oberflächen-Tests legen Felder für WSL-Ziele an).
+        #[cfg(test)]
+        let backend: Arc<dyn Backend> = Arc::new(wsl::NoWsl);
+        #[cfg(not(test))]
+        let backend: Arc<dyn Backend> = Arc::new(wsl::WslExe);
+        Self::with_backend(id_salt, initial, target, backend)
     }
 
     /// Wie `new`, mit eigenem Zugriff auf WSL (Tests).
@@ -156,6 +244,7 @@ impl FolderPicker {
             default_unknown: false,
             homes: BTreeMap::new(),
             homes_requested: BTreeSet::new(),
+            mounts: BTreeMap::new(),
             check: Check::Idle,
             suggestions: Vec::new(),
             edited_at: None,
@@ -178,7 +267,7 @@ impl FolderPicker {
             return;
         }
         match &t {
-            Target::Windows => {
+            Target::Windows | Target::Msys => {
                 if self.wsl_mode {
                     self.leave_wsl();
                 }
@@ -232,7 +321,11 @@ impl FolderPicker {
     /// ([`Check::Unknown`]), gilt der Wert als übernehmbar.
     pub fn blocking_error(&self, lang: Lang) -> Option<String> {
         if !self.wsl_mode {
-            return None;
+            // Windows/Git Bash (#392): `~` und `/c/x` gehen, ein Linux-Pfad, den Windows nicht kennt, nicht.
+            return match crate::targetpath::field_hint(&self.target.kind(), &self.text, &crate::targetpath::Cached) {
+                Some(Err(e)) => Some(e.message(lang)),
+                _ => None,
+            };
         }
         if let Some(n) = &self.note {
             return Some(n.clone());
@@ -308,7 +401,7 @@ impl FolderPicker {
             }
             let te_id = self.id.with("text");
             ui.horizontal(|ui| {
-                let hint = if self.wsl_mode { lang.t("/home/… oder ~", "/home/… or ~") } else { "" };
+                let hint = if self.wsl_mode { lang.t("/home/… oder ~", "/home/… or ~") } else { lang.t("leer = Benutzerordner", "empty = home folder") };
                 let te = ui.add(egui::TextEdit::singleline(&mut self.text).id(te_id).hint_text(hint).desired_width(260.0));
                 self.rects.text = te.rect;
                 if te.changed() {
@@ -386,6 +479,18 @@ impl FolderPicker {
                     }
                 }
             }
+            if !self.wsl_mode {
+                // #392: wohin `~`, `/c/x` oder `/mnt/c/x` führen (klein darunter), bzw. warum es nicht geht.
+                match crate::targetpath::field_hint(&self.target.kind(), &self.text, &crate::targetpath::Cached) {
+                    Some(Ok(w)) => {
+                        ui.label(RichText::new(format!("→ {w}")).small().color(crate::style::dim(ui)));
+                    }
+                    Some(Err(e)) => {
+                        ui.label(RichText::new(e.message(lang)).small().color(ui.visuals().warn_fg_color));
+                    }
+                    None => {}
+                }
+            }
             if let Some(n) = &self.note {
                 ui.label(RichText::new(n).small().color(ui.visuals().warn_fg_color));
             }
@@ -398,6 +503,11 @@ impl FolderPicker {
 
     fn home(&self) -> Option<&str> {
         self.distro.as_ref().and_then(|d| self.homes.get(d)).and_then(|h| h.as_deref())
+    }
+
+    /// Einhängepunkt der Laufwerke der Distribution (`[automount] root`; unbekannt: `/mnt/`).
+    fn mount(&self) -> String {
+        self.distro.as_ref().and_then(|d| self.mounts.get(d)).and_then(|m| m.clone()).unwrap_or_else(|| wsl::DEFAULT_MOUNT.to_string())
     }
 
     fn missing_text(&self, lang: Lang) -> String {
@@ -441,7 +551,8 @@ impl FolderPicker {
         let t = self.text.trim().to_string();
         let d = self.distro.clone().unwrap_or_default();
         let full = wsl::expand_home(&t, self.home());
-        self.text = match full.as_deref().and_then(|f| wsl::linux_to_windows(&d, f)) {
+        let mount = self.mount();
+        self.text = match full.as_deref().and_then(|f| wsl::linux_to_windows_at(&d, f, &mount)) {
             _ if t == "~" => self.win_home.clone(),
             Some(w) => w,
             None if t.starts_with('~') => self.win_home.clone(),
@@ -470,7 +581,7 @@ impl FolderPicker {
             self.text = l;
             return self.switch_distro(&d);
         }
-        if let Some(l) = wsl::windows_to_linux(&t) {
+        if let Some(l) = wsl::windows_to_linux_at(&t, &self.mount()) {
             self.text = l;
         }
         None
@@ -521,7 +632,11 @@ impl FolderPicker {
     /// Ungeprüft: schon das Prüfen eines wsl.localhost-Pfads kann die WSL-VM starten und die Oberfläche blockieren.
     fn dialog_start(&self) -> Option<String> {
         if !self.wsl_mode {
-            return Some(self.text.clone());
+            // `~` bzw. `/c/x` (#392): der Ordner, für den sie stehen.
+            return Some(match crate::targetpath::field_hint(&self.target.kind(), &self.text, &crate::targetpath::Cached) {
+                Some(Ok(w)) => w,
+                _ => self.text.clone(),
+            });
         }
         let d = self.distro.clone()?;
         let linux = wsl::expand_home(self.text.trim(), self.home())
@@ -589,6 +704,10 @@ impl FolderPicker {
                         self.check = Check::Idle;
                     }
                 }
+                Msg::Mount(d, m) => {
+                    // Einen schon umgerechneten Pfad nicht nachträglich ändern; gilt für die nächste Umrechnung.
+                    self.mounts.insert(d, m);
+                }
                 Msg::Home(d, h) => {
                     self.homes.insert(d, h);
                     // Eine wegen des Homes wartende Prüfung neu starten.
@@ -636,7 +755,9 @@ impl FolderPicker {
                 let (b, tx, ctx) = (self.backend.clone(), self.tx.clone(), ctx.clone());
                 std::thread::spawn(move || {
                     let h = b.home(&d);
-                    let _ = tx.send(Msg::Home(d, h));
+                    let _ = tx.send(Msg::Home(d.clone(), h));
+                    let m = b.mount_root(&d);
+                    let _ = tx.send(Msg::Mount(d, m));
                     ctx.request_repaint();
                 });
             }
@@ -725,6 +846,13 @@ mod tests {
         calls: Mutex<Vec<String>>,
         /// Echte Standard-Distribution (auch ausgeblendete).
         default: Option<String>,
+    }
+
+    impl FolderPicker {
+        /// Keine Hintergrund-Abfragen gestartet (Windows/Git Bash ohne Zeichnen).
+        fn calls_none(&self) -> bool {
+            !self.distros_requested && self.homes_requested.is_empty()
+        }
     }
 
     impl Backend for Fake {
@@ -1045,6 +1173,79 @@ mod tests {
         p.remember(&mut m);
         assert_eq!(m.len(), 1);
         assert_eq!(m["ubuntu-24.04"], vec!["/home/u/q".to_string(), "/srv".to_string()]);
+    }
+
+    /// #392: Ziel je Shell (auch Git Bash, eigene Profile), Hinweise für `~`/`/c/x`, nicht umrechenbare Linux-Pfade.
+    #[test]
+    fn git_bash_and_home_paths_in_windows_fields() {
+        let s = |id: &str, prog: &str| ShellSpec { id: id.into(), label: id.into(), program: prog.into(), args: vec![] };
+        assert_eq!(Target::for_shell(Some(&s("gitbash", r"C:\Program Files\Git\bin\bash.exe")), false), Target::Msys);
+        if cfg!(windows) {
+            assert_eq!(Target::for_shell(Some(&s("custom:4", r"D:\Git\usr\bin\bash.exe")), false), Target::Msys, "eigenes Git-Bash-Profil");
+            assert_eq!(Target::for_shell(Some(&s("custom:5", r"C:\Windows\System32\bash.exe")), false), Target::Wsl { distro: None, choose_distro: false });
+        }
+        assert_eq!(Target::Msys.kind(), PathKind::Msys { root: None });
+        // Git Bash: /c/x und ~ gehen, ein reiner Linux-Pfad nicht
+        let mut p = FolderPicker::with_backend("m", "/c/work", Target::Msys, Arc::new(Fake::default()));
+        assert!(!p.is_wsl());
+        assert_eq!(p.value(), "/c/work", "gespeichert wie eingegeben");
+        assert!(p.blocking_error(Lang::En).is_none());
+        p.set_text("~/x");
+        assert!(p.blocking_error(Lang::En).is_none());
+        p.set_text("/home/u");
+        assert!(p.blocking_error(Lang::En).is_some_and(|e| e.contains("cannot be converted")));
+        // Windows-Ziel: ~ geht
+        let p = FolderPicker::with_backend("w", "~", Target::Windows, Arc::new(Fake::default()));
+        assert!(p.blocking_error(Lang::De).is_none());
+        // Wechsel Git Bash -> WSL rechnet um, zurück wieder Windows-Pfad
+        let mut p = FolderPicker::with_backend("mw", r"C:\a", Target::Msys, Arc::new(Fake::default()));
+        p.set_target(ubuntu());
+        assert_eq!(p.value(), "/mnt/c/a");
+        p.set_target(Target::Msys);
+        assert_eq!(p.value(), r"C:\a");
+        assert!(p.calls_none());
+    }
+
+    /// `field` (#392): Der gespeicherte Wert bleibt, bis die Anzeige sich ändert; Änderungen von außen übernimmt es.
+    #[test]
+    fn plain_field_keeps_the_stored_value_and_follows_outside_changes() {
+        let ctx = egui::Context::default();
+        let recent = BTreeMap::new();
+        let mut v = r"C:\x".to_string();
+        let run = |v: &mut String, t: Target| {
+            let mut r = PickerResponse::default();
+            let _ = ctx.run(RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(700.0, 400.0))), ..Default::default() }, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    r = field(ui, "t", v, t.clone(), false, Lang::En, &recent);
+                });
+            });
+            r
+        };
+        run(&mut v, Target::Windows);
+        assert_eq!(v, r"C:\x");
+        // Andere Shell (WSL): Anzeige /mnt/c/x – der Wert folgt der neuen Anzeige
+        run(&mut v, Target::Wsl { distro: Some("FieldTest".into()), choose_distro: false });
+        assert_eq!(v, "/mnt/c/x");
+        // Von außen gesetzt
+        v = "/srv/app".into();
+        run(&mut v, Target::Wsl { distro: Some("FieldTest".into()), choose_distro: false });
+        assert_eq!(v, "/srv/app");
+        // Linux-Pfad für eine Windows-Shell: sperrt mit Hinweis
+        let mut w = "/home/u".to_string();
+        let mut r = PickerResponse::default();
+        let _ = ctx.run(RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                r = field(ui, "t2", &mut w, Target::Windows, false, Lang::En, &recent);
+            });
+        });
+        assert!(r.blocking.is_some());
+        // Gesperrt (Worktree): nur anzeigen
+        let _ = ctx.run(RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                r = field(ui, "t3", &mut w, Target::Windows, true, Lang::En, &recent);
+            });
+        });
+        assert_eq!(r, PickerResponse::default());
     }
 
     #[test]

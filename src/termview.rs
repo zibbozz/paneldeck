@@ -802,10 +802,12 @@ fn handle_links(ui: &Ui, response: &Response, session: &mut Session, inner: Rect
     };
     if let Some(h) = osc8 {
         use crate::hyperlink::LinkKind;
-        let kind = crate::hyperlink::classify(h.uri());
+        // Dateien aus WSL/Git Bash (`file:///home/…`) als Windows-Ziel (#392).
+        let uri = crate::hyperlink::for_kind(h.uri(), &crate::targetpath::PathKind::of(&session.spec));
+        let kind = crate::hyperlink::classify(&uri);
         let (resting, idle) = ui.input(|i| (i.pointer.time_since_last_movement(), !i.pointer.any_down()));
         if idle && (ctrl || resting >= TOOLTIP_DELAY) {
-            link_tooltip(ui, response, h.uri(), &kind);
+            link_tooltip(ui, response, &uri, &kind);
         } else if idle {
             ui.ctx().request_repaint_after(std::time::Duration::from_secs_f32(TOOLTIP_DELAY - resting + 0.02));
         }
@@ -817,8 +819,8 @@ fn handle_links(ui: &Ui, response: &Response, session: &mut Session, inner: Rect
         }
         if response.clicked_by(egui::PointerButton::Primary) {
             match kind {
-                LinkKind::Web => crate::hyperlink::open(h.uri()),
-                LinkKind::Ask { .. } => crate::hyperlink::request_confirm(ui.ctx(), h.uri()),
+                LinkKind::Web => crate::hyperlink::open(&uri),
+                LinkKind::Ask { .. } => crate::hyperlink::request_confirm(ui.ctx(), &uri),
                 LinkKind::Denied(_) => {}
             }
             return (true, Some(h));
@@ -829,7 +831,7 @@ fn handle_links(ui: &Ui, response: &Response, session: &mut Session, inner: Rect
         return (false, None);
     }
     let chars = session.row_chars(row as usize);
-    let Some(link) = crate::links::find(&chars, col as usize, cwd, &session.shell_id) else {
+    let Some(link) = crate::links::find_kind(&chars, col as usize, cwd, &crate::targetpath::PathKind::of(&session.spec)) else {
         // Pfad auf einem Netzlaufwerk/`\\wsl$` wird gerade im Hilfsthread geprüft (#251): gleich noch einmal schauen.
         if crate::links::checks_pending() {
             ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
@@ -839,7 +841,8 @@ fn handle_links(ui: &Ui, response: &Response, session: &mut Session, inner: Rect
     ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     session.hover_link = Some((row as usize, link.start, link.end, link.target.clone()));
     if response.clicked_by(egui::PointerButton::Primary) {
-        crate::links::open(&link.target);
+        // Linux-Pfade (#392): Textdatei im Editor an der Zeile, Ordner im Explorer.
+        crate::links::activate(&link);
         return (true, None);
     }
     (false, None)

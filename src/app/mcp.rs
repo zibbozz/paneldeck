@@ -1596,12 +1596,15 @@ impl App {
             },
             None => self.effective_shell_id(shell.as_deref(), project),
         };
-        let wsl = match super::folder_picker::Target::for_shell(self.shell_by_id(&eff_shell).as_ref(), false) {
+        let eff_spec = self.shell_by_id(&eff_shell);
+        let wsl = match super::folder_picker::Target::for_shell(eff_spec.as_ref(), false) {
             super::folder_picker::Target::Wsl { distro, .. } => Some(distro),
-            super::folder_picker::Target::Windows => None,
+            _ => None,
         };
+        // Git Bash: `/c/x` und `~`, Windows-Shells: `~` (#392) – als Windows-Ordner.
+        let kind = eff_spec.as_ref().map(crate::targetpath::PathKind::of).unwrap_or_else(|| crate::targetpath::PathKind::of_id(&eff_shell));
         let cwd = match s("cwd").or_else(|| item.map(|it| it.cwd.trim().to_string()).filter(|c| !c.is_empty())) {
-            Some(c) => Some(check_create_cwd(&c, wsl.as_ref().map(|d| d.as_deref()), de(), |p| std::path::Path::new(p).is_dir())?),
+            Some(c) => Some(check_create_cwd(&windows_side_cwd(&c, &kind, &crate::targetpath::Cached), wsl.as_ref().map(|d| d.as_deref()), de(), |p| std::path::Path::new(p).is_dir())?),
             None => None,
         };
         // Linux-Ordner in WSL prüfen (im Hintergrund, siehe `mcp_create_start`).
@@ -1703,6 +1706,18 @@ impl App {
         })
     }
 
+    /// `cwd` eines neuen Chats (#392): Linux-Pfad → Windows-Pfad nach der Sitzung des Aufrufers bzw. dem Projekt.
+    fn mcp_chat_cwd(&self, c: &str, caller: Option<u64>) -> String {
+        if !crate::wsl::looks_linux(c) {
+            return c.to_string();
+        }
+        let from = caller.and_then(|id| self.entries.get(&id)).and_then(|e| e.live.as_ref().map(|s| crate::targetpath::PathKind::of(&s.spec)));
+        match from {
+            Some(k) if matches!(k, crate::targetpath::PathKind::Wsl { .. } | crate::targetpath::PathKind::Msys { .. }) => k.to_windows(c).unwrap_or_else(|_| c.to_string()),
+            _ => self.chat_root(c, caller.and_then(|id| self.entries.get(&id)).map(|e| e.meta.project).unwrap_or(self.active_project)),
+        }
+    }
+
     /// `create_session` mit `kind = chat`: Chat mit einem eingerichteten Modell, im Fenster/Projekt des Aufrufers.
     fn mcp_create_chat(&mut self, ctx: &egui::Context, args: &Value, caller: Option<u64>) -> R {
         let s = |k: &str| args.get(k).and_then(|v| v.as_str()).map(|x| x.trim().to_string()).filter(|x| !x.is_empty());
@@ -1711,7 +1726,9 @@ impl App {
             return Err(er("bad_args", tr("Ein Chat hat keine Shell und kein Claude: shell, claude, prompt, effort, permission_mode, agent und claude_flags gibt es nur für Terminals.", "A chat has no shell and no Claude: shell, claude, prompt, effort, permission_mode, agent and claude_flags only apply to terminals.")));
         }
         crate::claude_opts::user_only_param(args).map_err(|(d, e)| er("bad_args", if de() { d } else { e }))?;
-        let cwd = s("cwd");
+        // Linux-Ordner (#392): in der Pfadart der Sitzung des Aufrufers (z. B. seiner WSL-Distribution), sonst wie beim
+        // Projekt; der Chat arbeitet dann über `\\wsl.localhost\<D>\…`.
+        let cwd = s("cwd").map(|c| self.mcp_chat_cwd(&c, caller));
         if let Some(c) = &cwd {
             // Netzwerkpfade nie prüfen (schon das Prüfen baute eine SMB-Verbindung auf).
             if crate::pathfmt::is_remote_unc(c) {
@@ -2459,6 +2476,19 @@ fn dir_check_result(c: crate::wsl::DirCheck, cwd: &str, de: bool) -> Result<bool
     }
 }
 
+/// `cwd` einer Windows-Shell (#392): für Git Bash `/c/x`, `/cygdrive/c/x` und `~`/`~/x`, für andere Windows-Shells
+/// `~`/`~/x` als Windows-Ordner (Benutzerordner); alles andere unverändert (prüft danach [`check_create_cwd`]).
+fn windows_side_cwd(c: &str, kind: &crate::targetpath::PathKind, lk: &dyn crate::targetpath::Lookup) -> String {
+    use crate::targetpath::PathKind;
+    let c = c.trim();
+    let convert = match kind {
+        PathKind::Msys { .. } => c.starts_with('/') || c.starts_with('~'),
+        PathKind::Windows { .. } => c == "~" || c.starts_with("~/") || c.starts_with("~\\"),
+        _ => false,
+    };
+    if convert { kind.to_windows_with(c, lk).unwrap_or_else(|_| c.to_string()) } else { c.to_string() }
+}
+
 /// Startordner für `create_session` prüfen (rein, testbar). `wsl` = `Some(Distribution)`, wenn die Sitzung in WSL
 /// startet: dann ist auch ein Linux-Pfad erlaubt (absolut oder `~`, ohne Steuerzeichen, höchstens 4096 Bytes; ob er
 /// existiert, zeigt erst der Start – eine Prüfung über wsl.exe würde die Oberfläche blockieren), und ein
@@ -2573,6 +2603,37 @@ mod tests {
             frame_with(&ctx, &mut t, evs, &mut |ui| level_selector(ui, &mut level, Lang::En));
         }
         assert_eq!(level, McpLevel::Read);
+    }
+
+    /// #392: `cwd` für Git Bash (`/c/x`, `~`) und Windows-Shells (`~`) wird zum Windows-Ordner; WSL bleibt Linux.
+    #[test]
+    fn create_session_cwd_for_git_bash_and_home() {
+        use crate::targetpath::{Lookup, PathKind};
+        struct Lk;
+        impl Lookup for Lk {
+            fn wsl_home(&self, _d: &str) -> Option<String> {
+                None
+            }
+            fn wsl_mount(&self, _d: &str) -> Option<String> {
+                None
+            }
+            fn default_distro(&self) -> Option<String> {
+                None
+            }
+            fn win_home(&self) -> String {
+                r"C:\Users\u".into()
+            }
+        }
+        let gb = PathKind::Msys { root: None };
+        let ps = PathKind::Windows { cmd: false };
+        assert_eq!(windows_side_cwd("/c/work", &gb, &Lk), r"C:\work");
+        assert_eq!(windows_side_cwd("/cygdrive/d/x", &gb, &Lk), r"D:\x");
+        assert_eq!(windows_side_cwd("~", &gb, &Lk), r"C:\Users\u");
+        assert_eq!(windows_side_cwd("~/repo", &ps, &Lk), r"C:\Users\u\repo");
+        assert_eq!(windows_side_cwd("/home/x", &ps, &Lk), "/home/x", "bleibt – check_create_cwd lehnt ihn ab");
+        assert_eq!(windows_side_cwd("/usr/bin", &gb, &Lk), "/usr/bin", "ohne bekannten Git-Ordner unverändert");
+        assert_eq!(windows_side_cwd("/home/u", &PathKind::Wsl { distro: Some("U".into()) }, &Lk), "/home/u");
+        assert_eq!(windows_side_cwd(r"C:\x", &gb, &Lk), r"C:\x");
     }
 
     /// Linux/macOS (#149): Unix-Pfade sind normale Startordner.

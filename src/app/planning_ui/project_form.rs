@@ -174,14 +174,8 @@ fn form_ui(ui: &mut Ui, f: &mut Form, lang: Lang, new: bool) -> bool {
     ui.add_space(S2);
     // Arbeitsordner
     ui.label(RichText::new(lang.t("Arbeitsordner (Repo-Pfad)", "Working directory (repo path)")).strong());
-    ui.horizontal(|ui| {
-        ui.add(egui::TextEdit::singleline(&mut f.work_dir).desired_width((w - 120.0).max(120.0)).hint_text(lang.t("optional", "optional")).margin(egui::Margin::symmetric(8, 5)));
-        if ui.button(lang.t("Wählen …", "Browse …")).clicked() {
-            if let Some(d) = crate::platform::notify::pick_folder(&f.work_dir) {
-                f.work_dir = d;
-            }
-        }
-    });
+    // Ordnerfeld nach der Standard-Shell (#392): WSL-Pfade, Git Bash `/c/x`, `~`.
+    crate::app::folder_picker::field(ui, "plan_work_dir", &mut f.work_dir, crate::app::folder_picker::default_target(), false, lang, &Default::default());
     hint(ui, lang.t("Terminals zu Tickets dieses Projekts starten später hier.", "Terminals for tickets of this project will start here later."));
     ui.add_space(S2);
     // Schalter

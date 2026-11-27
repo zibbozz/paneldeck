@@ -16,6 +16,7 @@ mod clip;
 mod conhost_wrap;
 mod emoji;
 mod pathfmt;
+mod targetpath;
 mod quote;
 mod gitinfo;
 mod glyphs;
@@ -234,7 +235,7 @@ fn main() -> eframe::Result<()> {
     // siehe `app::update::install::remove_old_exe`.
     let cmd = match (&cli.open, &cli.edit) {
         (Some(p), _) => hooks::IpcCmd::Open { path: p.clone(), claude: cli.claude, origin: None },
-        (None, Some(f)) => hooks::IpcCmd::Edit { path: f.clone() },
+        (None, Some(f)) => hooks::IpcCmd::Edit { path: f.clone(), origin: None },
         (None, None) => hooks::IpcCmd::Show,
     };
     // `--reset-settings` nur, wenn keine Instanz mit diesem Datenordner läuft (sie würde die Datei wieder schreiben).

@@ -11,6 +11,7 @@ Der Reiter **Editor** ist ein einfacher Texteditor in Paneldeck, unabhängig von
 - **Datei öffnen …**, **Neue Datei** und **Zuletzt geöffnet** (*Zuletzt geöffnete Dateien* / *Zuletzt geöffnete Ordner*, *Liste leeren*).
 - **Explorer:** Mit dem Schalter *In Paneldeck-Editor öffnen* unter *Einstellungen → Fenster* öffnet ein Rechtsklick auf jede Datei sie hier ([Windows-Integration](windows-integration.md#in-paneldeck-editor-öffnen)); von der Kommandozeile: [`paneldeck.exe --edit <datei>`](command-line.md#--edit-datei).
 - Paneldeck merkt sich den offenen Ordner, die Tabs (mit Cursor und Scrollposition), die Teilungen und die Listen „zuletzt geöffnet“ (`editor-state.json` im Datenordner).
+- **Dateien in WSL:** Du kannst Dateien in einer WSL-Distribution öffnen und speichern (`\\wsl.localhost\<Distro>\…`, z. B. über *Datei öffnen …* oder Strg+Klick auf einen Linux-Pfad im Terminal); sie werden im Hintergrund geladen. Für solche Dateien bieten die Kontextmenüs auch *Als Linux-Pfad kopieren*. `paneldeck.exe --edit /home/ich/x` aus einer WSL-Sitzung öffnet die Datei dieser Distribution. Agenten bleiben auf lokale Windows-Dateien beschränkt (siehe [Agenten](#agenten)).
 
 ## Tabs und Teilungen
 - Jede Teilung hat **eine eigene Tableiste**; Tabs lassen sich zwischen Teilungen ziehen. *Schließen*, *Andere schließen*, *Alle schließen* stehen im Kontextmenü des Tabs.

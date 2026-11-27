@@ -49,6 +49,8 @@ pub(super) enum Cmd {
     DismissAgent(u64),
     Drop(TabDrag, PaneDrop),
     CopyPath(PathBuf),
+    /// Linux-Pfad einer WSL-Datei kopieren (#392).
+    CopyLinuxPath(PathBuf),
     SetEncoding(u64, &'static str),
     SetEol(u64, bool),
     ForgetRecent,
@@ -253,7 +255,8 @@ impl super::super::App {
         let dir = self.dir.clone();
         match c {
             Cmd::OpenPath(p, side) => {
-                if p.is_file() {
+                // WSL-Dateien ungeprüft (#392; sie laden im Hintergrund, ein Fehler erscheint im Reiter).
+                if crate::wsl::is_wsl_unc(&p.to_string_lossy()) || p.is_file() {
                     self.ed.open_path(&p, side);
                 } else {
                     self.ed.set_hint(format!("{}: {}", lang.t("Datei nicht gefunden", "File not found"), p.display()));
@@ -382,6 +385,11 @@ impl super::super::App {
                 self.ed.want_focus = true;
             }
             Cmd::CopyPath(p) => ctx.copy_text(p.to_string_lossy().to_string()),
+            Cmd::CopyLinuxPath(p) => {
+                if let Some((_, l)) = crate::wsl::unc_to_linux(&p.to_string_lossy()) {
+                    ctx.copy_text(l);
+                }
+            }
             Cmd::SetEncoding(id, enc) => {
                 if let Some(d) = self.ed.docs.get_mut(&id)
                     && let Err(e) = d.set_encoding(enc, lang)
@@ -1238,6 +1246,10 @@ fn tab_bar(ui: &mut Ui, g: u64, bar: Rect, ed: &mut EditorUi, lang: Lang, cmds: 
                     cmds.push(Cmd::CopyPath(p.clone()));
                     ui.close();
                 }
+                if crate::wsl::is_wsl_unc(&p.to_string_lossy()) && ui.button(lang.t("Als Linux-Pfad kopieren", "Copy as Linux path")).clicked() {
+                    cmds.push(Cmd::CopyLinuxPath(p.clone()));
+                    ui.close();
+                }
                 if crate::platform::open::FILE_MANAGER && ui.button(if cfg!(windows) { lang.t("Im Explorer anzeigen", "Show in Explorer") } else { lang.t("Im Dateimanager anzeigen", "Show in file manager") }).clicked() {
                     crate::platform::open::show_in_file_manager(&p.to_string_lossy(), false);
                     ui.close();
@@ -1386,6 +1398,7 @@ fn tree_panel(ui: &mut Ui, ed: &mut EditorUi, lang: Lang, cmds: &mut Vec<Cmd>) {
                         TreeOut::Open(p) => Cmd::OpenPath(p, false),
                         TreeOut::OpenSide(p) => Cmd::OpenPath(p, true),
                         TreeOut::CopyPath(p) => Cmd::CopyPath(p),
+                        TreeOut::CopyLinuxPath(p) => Cmd::CopyLinuxPath(p),
                         TreeOut::SetRoot(p) => Cmd::SetRoot(p),
                     });
                 }

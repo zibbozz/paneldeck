@@ -531,7 +531,8 @@ pub enum IpcCmd {
     /// Liegt eine Sitzung darin, erbt die neue Sitzung deren Agenten-Kette.
     Open { path: String, claude: bool, origin: Option<crate::platform::process::PeerChain> },
     /// `--edit <datei>` (#54): Datei im Editor-Reiter öffnen (schreibt in keine Sitzung, keine Agenten-Kette).
-    Edit { path: String },
+    /// `origin`: Absender (nur bei einem Linux-Pfad ermittelt, #392 – er wird nach dessen Sitzung aufgelöst).
+    Edit { path: String, origin: Option<crate::platform::process::PeerChain> },
 }
 
 pub struct HookServer {
@@ -642,6 +643,12 @@ fn handle_connection(mut s: TcpStream, token: &str, ipc_token: &str, tx: &std::s
         }
     }
     if let Some(mut cmd) = parse_cmd(&buf, ipc_token) {
+        if let IpcCmd::Edit { path, origin } = &mut cmd {
+            // Linux-Pfad (`paneldeck --edit /home/u/x` aus WSL): Absender bestimmen, um die Distribution zu kennen.
+            if crate::wsl::looks_linux(path.trim()) {
+                *origin = peer_chain(&s);
+            }
+        }
         if let IpcCmd::Open { origin, .. } = &mut cmd {
             // Absender sofort bestimmen; ist er nicht zu ermitteln (schon beendet …), wird nichts geöffnet (#152).
             match peer_chain(&s) {
@@ -674,7 +681,7 @@ fn parse_cmd(raw: &str, token: &str) -> Option<IpcCmd> {
     match v.get("cmd")?.as_str()? {
         "show" => Some(IpcCmd::Show),
         "open" => Some(IpcCmd::Open { path: v.get("path")?.as_str()?.to_string(), claude: v.get("claude").and_then(|c| c.as_bool()).unwrap_or(false), origin: None }),
-        "edit" => Some(IpcCmd::Edit { path: v.get("path")?.as_str()?.to_string() }),
+        "edit" => Some(IpcCmd::Edit { path: v.get("path")?.as_str()?.to_string(), origin: None }),
         _ => None,
     }
 }
@@ -695,7 +702,7 @@ pub fn forward_to_running(dir: &Path, cmd: &IpcCmd) -> bool {
     let body = match cmd {
         IpcCmd::Show => json!({"token": token, "cmd": "show"}),
         IpcCmd::Open { path, claude, .. } => json!({"token": token, "cmd": "open", "path": path, "claude": claude}),
-        IpcCmd::Edit { path } => json!({"token": token, "cmd": "edit", "path": path}),
+        IpcCmd::Edit { path, .. } => json!({"token": token, "cmd": "edit", "path": path}),
     };
     if stream.write_all(body.to_string().as_bytes()).is_err() {
         return false;
@@ -1723,9 +1730,15 @@ mod tests {
             other => panic!("{other:?}"),
         }
         // `--edit` (#54) kommt als eigener Befehl an.
-        assert!(forward_to_running(&dir, &IpcCmd::Edit { path: "C:\\x\\a.txt".into() }));
-        assert_eq!(srv.cmd_rx.recv_timeout(Duration::from_secs(2)).unwrap(), IpcCmd::Edit { path: "C:\\x\\a.txt".into() });
-        assert_eq!(parse_cmd(r#"{"token":"t","cmd":"edit","path":"C:\\y"}"#, "t"), Some(IpcCmd::Edit { path: "C:\\y".into() }));
+        assert!(forward_to_running(&dir, &IpcCmd::Edit { path: "C:\\x\\a.txt".into(), origin: None }));
+        assert_eq!(srv.cmd_rx.recv_timeout(Duration::from_secs(2)).unwrap(), IpcCmd::Edit { path: "C:\\x\\a.txt".into(), origin: None });
+        assert_eq!(parse_cmd(r#"{"token":"t","cmd":"edit","path":"C:\\y"}"#, "t"), Some(IpcCmd::Edit { path: "C:\\y".into(), origin: None }));
+        // #392: ein Linux-Pfad bekommt den Absender (für die Distribution seiner Sitzung)
+        assert!(forward_to_running(&dir, &IpcCmd::Edit { path: "/home/u/a.txt".into(), origin: None }));
+        match srv.cmd_rx.recv_timeout(Duration::from_secs(2)).unwrap() {
+            IpcCmd::Edit { path, origin } => assert!(path == "/home/u/a.txt" && origin.is_some()),
+            other => panic!("{other:?}"),
+        }
         assert_eq!(parse_cmd(r#"{"token":"t","cmd":"edit"}"#, "t"), None, "ohne Pfad");
         assert_eq!(parse_cmd(r#"{"token":"u","cmd":"edit","path":"C:\\y"}"#, "t"), None, "falscher Token");
         // veraltete Datei (falscher Port) → keine Bestätigung

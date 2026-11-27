@@ -35,7 +35,7 @@ Optionen mit Wert lassen sich auch als `--option=wert` schreiben (`--profile=arb
 ## Optionen im Einzelnen
 
 ### --open \<ordner\>
-Öffnet im laufenden Paneldeck (oder nach dem Start) eine neue Terminal-Sitzung in `<ordner>`. Ist `<ordner>` eine Datei, gilt ihr Ordner. Das Explorer-Kontextmenü nutzt das; Laufwerkswurzeln wie `"C:\"` funktionieren auch. Ein relativer Pfad gilt ab dem aktuellen Ordner des Aufrufers; Linux-Pfade (`/…`, `~`) werden für WSL unverändert weitergegeben.
+Öffnet im laufenden Paneldeck (oder nach dem Start) eine neue Terminal-Sitzung in `<ordner>`. Ist `<ordner>` eine Datei, gilt ihr Ordner. Das Explorer-Kontextmenü nutzt das; Laufwerkswurzeln wie `"C:\"` funktionieren auch. Ein relativer Pfad gilt ab dem aktuellen Ordner des Aufrufers; Linux-Pfade (`/…`, `~`) gelten in der Sitzung, in der der Befehl getippt wurde (ihre WSL-Distribution bzw. Git Bash), sonst in der WSL-Standard-Distribution; ein WSL-Ordner bekommt eine WSL-Sitzung dieser Distribution.
 
     paneldeck.exe --open "C:\Dev\meine-app"
 
@@ -47,7 +47,7 @@ Zusammen mit `--open`: Die neue Sitzung startet Claude Code (Claude-Modus nötig
 Die Sitzung nutzt deine Standard-[Claude-Startoptionen](claude-code.md#startoptionen). In einem Paneldeck-Terminal eingegeben, wendet `--open … --claude` deine Standards für zusätzliche Ordner, erlaubte Werkzeuge, eine MCP-Konfiguration oder `--safe-mode` nie an, und die neue Sitzung wird nur mit einer [Agenten-Kette](agent-interface.md#sicherheit) markiert, wenn dieses Terminal eine hat.
 
 ### --edit \<datei\>
-*(Seit 3.0.0.)* Öffnet `<datei>` im laufenden Paneldeck (oder nach dem Start) in einem neuen Tab des [Editor-Reiters](editor.md); eine schon offene Datei wird stattdessen nach vorn geholt, nicht doppelt geöffnet. Ein relativer Pfad gilt ab dem aktuellen Ordner des Aufrufers. `--edit` geht nicht zusammen mit `--open`, `--claude` oder einem Ordner ohne Option (Exit-Code 2), nur mit den Instanz-Optionen (`--profile`, `--data-dir`, `--lang` …). Der Explorer-Eintrag *In Paneldeck-Editor öffnen* nutzt das (standardmäßig aus, siehe [Windows-Integration](windows-integration.md#in-paneldeck-editor-öffnen)). Eine so geöffnete Datei zählt nie als Aktion eines Agenten, auch wenn der Befehl in einem Paneldeck-Terminal getippt wird.
+*(Seit 3.0.0.)* Öffnet `<datei>` im laufenden Paneldeck (oder nach dem Start) in einem neuen Tab des [Editor-Reiters](editor.md); eine schon offene Datei wird stattdessen nach vorn geholt, nicht doppelt geöffnet. Ein relativer Pfad gilt ab dem aktuellen Ordner des Aufrufers; ein Linux-Pfad (`/home/ich/x`) aus einer WSL-Sitzung öffnet die Datei dieser Distribution (sonst die der Standard-Distribution). `--edit` geht nicht zusammen mit `--open`, `--claude` oder einem Ordner ohne Option (Exit-Code 2), nur mit den Instanz-Optionen (`--profile`, `--data-dir`, `--lang` …). Der Explorer-Eintrag *In Paneldeck-Editor öffnen* nutzt das (standardmäßig aus, siehe [Windows-Integration](windows-integration.md#in-paneldeck-editor-öffnen)). Eine so geöffnete Datei zählt nie als Aktion eines Agenten, auch wenn der Befehl in einem Paneldeck-Terminal getippt wird.
 
     paneldeck.exe --edit "C:\Dev\meine-app\README.md"
 

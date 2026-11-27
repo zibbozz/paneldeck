@@ -75,6 +75,8 @@ An agent always has only the options of the mode that is currently set (switch *
 
 **WSL start folders:** when `create_session` starts a WSL session, `cwd` can also be a Linux path – absolute (e.g. `/home/me/project`) or `~`, without `"` and `\`; a `\\wsl.localhost\<distro>\…` path of the same distribution is converted. The folder is checked in WSL first: a missing folder gives `bad_args`; the result field `cwd_checked` is `true`, or `false` when WSL did not answer in time (the session is created anyway and starts in `/` if the folder does not exist). Linux paths for Windows shells, `\\wsl$` paths of another distribution and network paths (for terminals and chats) are refused without being accessed. Without `cwd` and without a project default folder a WSL session starts in `~`.
 
+**Git Bash and `~`:** for a Git Bash session `cwd` can also be a Git Bash path (`/c/work`, `/cygdrive/c/work`) or `~`/`~/x` (the Windows user folder); for other Windows shells `~`/`~/x` works as well. They are converted to the Windows folder and checked like one. A chat created from a WSL session with a Linux `cwd` works in `\\wsl.localhost\<distro>\…` (its file tools use the Windows access; secret folders in the Linux home stay blocked).
+
 **`close_session`** never asks. Background programs that the session started and that outlive it (detached programs, programs with a window) keep running; they are listed in the optional result field `remaining_processes` (`pid`, `name`, `window` = has a visible window, `title`; untrusted data). See [Closing sessions and background programs](terminals.md#closing-sessions-and-background-programs).
 
 ### Placement and visibility

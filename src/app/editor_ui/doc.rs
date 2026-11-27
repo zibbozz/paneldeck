@@ -230,6 +230,17 @@ impl DocEntry {
             self.touched = self.path.is_some();
             return;
         }
+        // WSL-Dateien (#392) immer im Hilfsthread (schon das Prüfen kann die WSL-VM starten und blockieren); eine noch
+        // nicht vorhandene Datei wird dort ein neues, leeres Dokument.
+        if let Some(p) = self.path.clone().filter(|p| crate::wsl::is_wsl_unc(&p.to_string_lossy())) {
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let r = if p.is_file() { Document::open(&p, &opts).map(|(d, _)| d).map_err(|e| e.to_string()) } else { Ok(Document::new_file(Some(&p), &opts)) };
+                let _ = tx.send(r);
+            });
+            self.loading = Some(rx);
+            return self.load(prefs, wait);
+        }
         if let Some(p) = self.path.clone().filter(|p| std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.len() >= BACKGROUND_BYTES)) {
             let (tx, rx) = std::sync::mpsc::channel();
             std::thread::spawn(move || {

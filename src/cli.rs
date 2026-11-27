@@ -262,8 +262,9 @@ pub fn parse(args: &[String], abs: &dyn Fn(&str) -> PathBuf, kind: &dyn Fn(&std:
                         if c.edit.is_some() {
                             return Err(CliError::Unexpected(raw));
                         }
-                        // Wie --open relativ zum Ordner dieses Aufrufs (die laufende Instanz hat einen anderen).
-                        c.edit = Some(abs(&v).display().to_string());
+                        // Wie --open relativ zum Ordner dieses Aufrufs (die laufende Instanz hat einen anderen). Linux-Pfade
+                        // (WSL, `~`) bleiben; der Hub löst sie nach der Sitzung auf, aus der der Aufruf kam (#392).
+                        c.edit = Some(if crate::wsl::looks_linux(v.trim()) { v } else { abs(&v).display().to_string() });
                     }
                     "--open" => {
                         if positional {
@@ -468,6 +469,10 @@ mod tests {
         assert_eq!(p(&["--open", "C:\\Dev\\app"]).unwrap().open.as_deref(), Some("C:\\Dev\\app"));
         assert_eq!(p(&["--open", r"\\wsl.localhost\Ubuntu\home"]).unwrap().open.as_deref(), Some(r"\\wsl.localhost\Ubuntu\home"));
         assert_eq!(p(&["--open", "/home/u"]).unwrap().open.as_deref(), Some("/home/u"));
+        // #392: auch --edit gibt Linux-Pfade unverändert weiter (der Hub löst sie nach der Sitzung des Aufrufs auf)
+        assert_eq!(p(&["--edit", "/home/u/a.rs"]).unwrap().edit.as_deref(), Some("/home/u/a.rs"));
+        assert_eq!(p(&["--edit", "~/a.rs"]).unwrap().edit.as_deref(), Some("~/a.rs"));
+        assert_eq!(p(&["--edit", "rel.txt"]).unwrap().edit.as_deref(), Some("C:\\cwd\\rel.txt"));
         // echte Umgebung: relativ zum aktuellen Ordner dieses Prozesses
         let a: Vec<String> = ["x.exe", "--open", "rel"].iter().map(|s| s.to_string()).collect();
         let c = parse(&a, &|s| abs_from_cwd(s), &|_| None).unwrap();
