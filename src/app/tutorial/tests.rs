@@ -259,6 +259,18 @@ fn step(id: &str) -> &'static Step {
     all_steps().find(|(_, s)| s.id == id).map(|(_, s)| s).unwrap_or_else(|| panic!("Schritt {id}"))
 }
 
+/// #393: Der Schritt zur Stufe eines Modells erklärt die Werkzeugliste mit genau dem Kennzeichen, das die Liste in
+/// *Einstellungen → Modelle* neben standardmäßig ausgeschalteten Werkzeugen zeigt.
+#[test]
+fn the_model_level_step_names_the_off_by_default_mark() {
+    let s = step("chat.levels");
+    assert_eq!(s.spot, Some(Spot::ModelsServers));
+    for (lang, text) in [(Lang::De, s.body.de), (Lang::En, s.body.en)] {
+        let mark = crate::app::models_ui::default_off_mark(lang);
+        assert!(text.contains(mark), "{lang:?}: {text}");
+    }
+}
+
 #[test]
 fn actions_are_recognised_from_the_state() {
     let base = Probe::default();

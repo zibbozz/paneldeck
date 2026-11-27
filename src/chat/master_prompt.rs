@@ -610,11 +610,7 @@ pub fn offered_defs(policy: &ToolPolicy) -> Vec<ToolDef> {
         let d = if agent::is_agent_tool(&s.name) {
             agent_defs.iter_mut().find(|d| d.as_ref().is_some_and(|d| d.name == s.name)).and_then(Option::take).map(agent::as_tool_def)
         } else {
-            // In der Fassung der Chats (`create_session` ohne `project`, #386).
-            mcp_defs.iter_mut().find(|d| d.as_ref().is_some_and(|d| d.name == s.name)).and_then(Option::take).map(|mut d| {
-                d.schema = super::tools::chat_schema(d.name, d.schema);
-                d
-            })
+            mcp_defs.iter_mut().find(|d| d.as_ref().is_some_and(|d| d.name == s.name)).and_then(Option::take)
         };
         out.extend(d);
     }
@@ -1087,7 +1083,7 @@ const ABOUT: &str = concat!(
     "- **Expert mode** (expert mode on): a small Jira. **Projects** have a key (e.g. PAN; tickets are PAN-1, PAN-2 …), a work folder and their own configuration: **ticket types** with fields, **statuses** and a **workflow** per type (allowed transitions, required fields, conditions), link types and kinds of work. **Tickets** have the built-in fields title, description (Markdown), due date and labels plus the fields of their type, a parent and children, comments, links (to tickets, terminals, URLs, git branches), time entries and a history that records agents as the source. Kanban boards, a JQL-like query language, dashboards and a maintenance page belong to it. The simple to-do list stays visible as the read-only system project TODO.\n",
     "- **Sprints** (optional per project): planned, active or completed, with goal, dates, tickets and a report.\n",
     "- **Versions and milestones** (optional per project): with due date, released / reached flag and progress of the tickets pointing to them.\n",
-    "- You never delete tickets, to-do cards or projects and never change ticket types or workflows.\n",
+    "- Agents (and you) never delete to-do cards or projects and never change ticket types or workflows; tickets and agent comments go only to the **trash** (user's switch).\n",
     "\n",
     "### Access per project\n",
     "- Your level: the lower of the model's level and the level of this chat's project; others only if \"For all\". Locked: `project_locked`.\n",
@@ -1100,6 +1096,7 @@ const ABOUT: &str = concat!(
     "- **Off**: no tools – chat only.\n",
     "- **Read**: read sessions, terminal content, chats, the Claude history and costs, the to-do list or tickets, the process list and themes. Nothing is changed.\n",
     "- **Control**: additionally type text, send keys, run commands, send messages to other chats, create, rename, show and close sessions, change the to-do list or tickets, and start, stop and restart process-list entries. By default every write action waits for the user's approval in the chat.\n",
+    "This level is independent of the MCP level under *Settings → Agents*, which applies only to external agents (programs that connect to Paneldeck through its MCP interface).\n",
     "\n",
     "### Simple and expert mode for tools\n",
     "The to-do tools follow the Expert mode switch: in simple mode you get list_todos, add_todo and set_todo_done; in expert mode you get the project and ticket tools, and list_todos is read-only. A tool of the other mode returns `wrong_mode`.\n",
@@ -1117,7 +1114,7 @@ const ABOUT: &str = concat!(
 pub const ERRORS: &[(&str, &str)] = &[
     ("bad_args", "The arguments are wrong: a required field is missing, a field has the wrong type, an unknown field, a value out of range, broken JSON or a forbidden combination. The message names the field and the expected type, lists the tool's fields and shows a correct example. Fix exactly that and call again with the corrected arguments."),
     ("unknown_tool", "There is no tool with that name. Use only the tool names listed under \"Tools\"."),
-    ("forbidden", "Not allowed: the tool is not enabled for this model or project, or a safety rule applies (your own session, a session of your agent chain, a session you did not create, a session with a git worktree). Do not retry; tell the user what you could not do."),
+    ("forbidden", "Not allowed: the tool is not enabled for this model, the project's level is too low, or a safety rule applies (your own session, a session of your agent chain, a session you did not create, a session with a git worktree). Do not retry; tell the user what you could not do."),
     ("project_locked", "Project locked for agents; tell the user."),
     ("wrong_mode","The tool belongs to the other to-do mode (simple or expert). Use the tools of the current mode; only the user can switch the Expert mode."),
     ("not_found", "Unknown session, ticket, project, sprint, process, theme or tool. Look the id or name up with the matching list tool instead of guessing."),
@@ -1650,6 +1647,13 @@ mod tests {
         ToolPolicy::new(LlmModel { level, level_chosen: true, ..LlmModel::named("m") }, None, expert)
     }
 
+    /// Alle Standard-aus-Werkzeuge angehakt (#393) und alle Schalter an, die sie brauchen (Editor mit offenem Dokument,
+    /// „Projekte anlegen“, „Löschen“) – das größte Werkzeug-Set, das ein Nutzer einstellen kann.
+    fn all_checked(mut p: ToolPolicy) -> ToolPolicy {
+        p.cfg.enabled_tools = crate::chat::tools::CHAT_DEFAULT_OFF.iter().map(|s| s.to_string()).collect();
+        p.with_access_switches(crate::access::SW_CREATE | crate::access::SW_DELETE).with_editor_switches(crate::editor_svc::settings::DOCS_OPEN | 7 | crate::editor_svc::settings::FORMAT)
+    }
+
     #[test]
     fn every_tool_has_exactly_one_table_entry_and_no_entry_is_unknown() {
         let names: Vec<&str> = mcp::tools().iter().map(|d| d.name).collect();
@@ -1674,24 +1678,27 @@ mod tests {
 
     /// #386: Die neuen Werkzeuge (Projekte anlegen, Papierkorb, Kommentare von Agenten) ändern etwas – im Plan-Modus
     /// gesperrt, im Chat freigabepflichtig – und der Prompt erklärt Zugriff je Projekt, private Einträge und Papierkorb.
-    /// Chats bekommen die vier vorerst nicht (kein Platz im Chat-Prompt, bis #393), auch nicht mit beiden Schaltern.
+    /// Für Chats sind die vier standardmäßig aus (#393): erst angehakt (*Einstellungen → Modelle*) und mit ihrem Schalter
+    /// stehen sie in der Liste und im Prompt.
     #[test]
     fn project_access_tools_are_writes_and_the_rules_are_explained() {
         let pol = policy(McpLevel::Control, true).with_access_switches(crate::access::SW_CREATE | crate::access::SW_DELETE);
+        let checked = all_checked(policy(McpLevel::Control, true));
         for n in ["create_project", "delete_ticket", "update_comment", "delete_comment"] {
             assert_eq!(mcp::tool_level(n), Some(McpLevel::Control), "{n}");
             assert!(!super::super::plan::is_read_only(n), "{n}: im Plan-Modus gesperrt");
             assert!(!approval_free(n, &serde_json::json!({})), "{n}: braucht die Freigabe");
-            assert!(!pol.specs().iter().any(|s| s.name == n), "{n}: vorerst nicht im Chat");
+            assert!(!pol.specs().iter().any(|s| s.name == n), "{n}: standardmäßig aus");
             let call = super::super::store::ToolCall { id: "c".into(), name: n.into(), arguments: serde_json::json!({}) };
             assert!(matches!(pol.check(&call), Err((super::super::store::ToolStatus::Denied, _))), "{n}: auch beim Erraten des Namens gesperrt");
+            assert!(checked.specs().iter().any(|s| s.name == n), "{n}: angehakt + Schalter");
         }
         let p = render(&pol, "m");
-        for needle in ["### Access per project", "`project_locked`", "lower of the model's level and the level of this chat's project", "\"For all\"", "You never delete tickets"] {
+        for needle in ["### Access per project", "`project_locked`", "lower of the model's level and the level of this chat's project", "\"For all\"", "**trash**", "Agents (and you) never delete to-do cards or projects"] {
             assert!(p.contains(needle), "fehlt: {needle}");
         }
-        // Den Papierkorb nennt der Chat-Prompt nicht: Chats haben die Werkzeuge vorerst nicht (#393).
-        assert!(!p.contains("**trash**") && !p.contains("### delete_ticket"));
+        assert!(!p.contains("### delete_ticket"), "standardmäßig aus: keine Dokumentation");
+        assert!(render(&checked, "m").contains("### delete_ticket"), "angehakt: dokumentiert wie jedes Werkzeug");
         // Die Kurzfassung lässt `project_locked` aus (Platz bei 8192, die Meldung erklärt sich selbst).
         assert!(!render_compact(&pol, "m").contains("`project_locked`"));
     }
@@ -2117,9 +2124,10 @@ mod tests {
                 assert_eq!(choose(auto, full), Variant::Full, "{level:?} {expert}: automatischer Kontext {auto}");
                 assert_eq!(choose(8192, full), Variant::Compact, "{level:?} {expert}");
                 assert_eq!(choose(1 << 20, full), Variant::Full);
-                // bei 32768 voll, außer Steuern (mit Zeit und Kalender, #164) bzw. Lesen im Expertenmodus mit Agenten-Werkzeugen
-                // (brauchen 65536)
-                let big = level == McpLevel::Control || (expert && agent);
+                // bei 32768 voll, außer Steuern im Expertenmodus bzw. Steuern mit Agenten-Werkzeugen (brauchen 65536). Gemessen
+                // wird der Standard (#393: Zeit, Kalender und die übrigen Standard-aus-Werkzeuge nicht angehakt – dieselbe
+                // Werkzeugmenge wie vor #393); angehakt siehe `all_default_off_tools_checked_still_give_a_working_prompt`.
+                let big = level == McpLevel::Control && (expert || agent);
                 assert_eq!(choose(32768, full), if big { Variant::Compact } else { Variant::Full }, "{level:?} {expert} agent={agent}: {full}");
                 assert_eq!(choose(65536, full), Variant::Full);
             }
@@ -2128,27 +2136,78 @@ mod tests {
     }
 
     #[test]
-    fn the_project_and_trash_tools_stay_out_of_chats_and_the_prompt_still_fits() {
-        // #386: Chats bekommen die vier Werkzeuge vorerst nie (kein Platz in der Kurzfassung bei 8192, bis #393) – auch
-        // nicht mit beiden Schaltern; die Schalter ändern den Chat-Prompt also nicht.
+    fn the_project_and_trash_tools_come_only_when_checked_and_switched_on_and_still_fit() {
+        // #386 mit #393: Standard – keins der vier Werkzeuge, auch nicht mit beiden Schaltern (für Chats standardmäßig
+        // aus); angehakt und mit beiden Schaltern alle vier. Die Schalter allein ändern den Chat-Prompt nicht.
+        let both = crate::access::SW_CREATE | crate::access::SW_DELETE;
         let off = policy(McpLevel::Control, true).with_access_switches(0);
-        let on = policy(McpLevel::Control, true).with_access_switches(crate::access::SW_CREATE | crate::access::SW_DELETE);
-        let four = crate::access::CHAT_EXCLUDED;
+        let on = policy(McpLevel::Control, true).with_access_switches(both);
+        let mut checked = policy(McpLevel::Control, true).with_access_switches(both);
+        let four = ["create_project", "delete_ticket", "update_comment", "delete_comment"];
+        checked.cfg.enabled_tools = four.iter().map(|s| s.to_string()).collect();
         assert!(off.tool_names().iter().all(|n| !four.contains(&n.as_str())));
         assert!(on.tool_names().iter().all(|n| !four.contains(&n.as_str())));
         assert_eq!(off.tool_names(), on.tool_names());
+        assert!(four.iter().all(|t| checked.tool_names().iter().any(|n| n == t)));
         for model in ["qwen3:8b", "llama3.1:8b", "m"] {
-            // volle Fassung: passt in den automatischen Kontext (höchstens 65536, wie Steuern im Expertenmodus ohnehin)
-            let full = request_tokens(&on, model, Variant::Full);
+            assert_eq!(request_tokens(&on, model, Variant::Compact), request_tokens(&off, model, Variant::Compact), "{model}: Schalter allein ändern den Chat-Prompt nicht");
+            // angehakt: volle Fassung passt in den automatischen Kontext (höchstens 65536, wie Steuern im Expertenmodus)
+            let full = request_tokens(&checked, model, Variant::Full);
             let auto = crate::llm::config::auto_context(full, None);
-            eprintln!("FULL+SWITCHES {model}: {full} tokens, auto context {auto}");
+            eprintln!("FULL+CHECKED+SWITCHES {model}: {full} tokens, auto context {auto}");
             assert!(auto <= 65536, "{model}: {auto}");
             assert_eq!(choose(auto, full), Variant::Full, "{model}");
+            // Kurzfassung: die vier kommen über `more_tools` und kosten in der Anfrage nichts
             let budget = 8192 * 3 / 4;
-            let n = request_tokens(&on, model, Variant::Compact);
-            eprintln!("COMPACT+SWITCHES {model}: {n} tokens of {budget}");
-            assert!(n <= budget, "{model}: {n} von {budget}");
-            assert_eq!(n, request_tokens(&off, model, Variant::Compact), "{model}: Schalter ändern den Chat-Prompt nicht");
+            let n = request_tokens(&checked, model, Variant::Compact);
+            eprintln!("COMPACT+CHECKED+SWITCHES {model}: {n} tokens of {budget}");
+            assert!(n <= budget / 2, "{model}: {n} von {budget}");
+        }
+    }
+
+    /// #393: Alle Standard-aus-Werkzeuge angehakt (mit allen Schaltern, Projektordner, Suchdienst, Hintergrund-Befehlen)
+    /// gibt bei jeder Stufe und jedem Modus einen funktionierenden Prompt: Ein kleiner Kontext (8192) bekommt die
+    /// Kurzfassung mit `more_tools`, die die angehakten Werkzeuge nennt; der automatische Kontext reicht für die volle
+    /// Fassung (sonst stünde der Hinweis „Kontext zu klein“ – `llm::config::context_too_small`). Nichts wird dafür gekürzt.
+    #[test]
+    fn all_default_off_tools_checked_still_give_a_working_prompt() {
+        use crate::chat::more_tools;
+        let budget = 8192 * 3 / 4;
+        let mut bg = agent_env();
+        bg.background = true;
+        for (level, expert) in COMBOS {
+            for model in ["qwen3:8b", "llama3.1:8b", "m"] {
+                let p = all_checked(policy(level, expert).with_agent(bg.clone()));
+                let default = policy(level, expert).with_agent(bg.clone());
+                let full = request_tokens(&p, model, Variant::Full);
+                let auto = crate::llm::config::auto_context(full, None);
+                let compact = request_tokens(&p, model, Variant::Compact);
+                let default_compact = request_tokens(&default, model, Variant::Compact);
+                eprintln!(
+                    "ALL CHECKED {level:?} expert={expert} {model}: full {full} (default {}), auto context {auto}; compact {compact} (default {default_compact}) of {budget}",
+                    request_tokens(&default, model, Variant::Full)
+                );
+                // großer Kontext: die volle Fassung passt in den automatischen Kontext – oder, wo sie selbst in den größten
+                // automatischen Kontext nicht passt, bekommt der Chat dort die Kurzfassung mit `more_tools` (ohne Hinweis)
+                if choose(auto, full) == Variant::Full {
+                    assert!(!crate::llm::config::context_too_small(auto, full), "{level:?} {expert} {model}: {full} in {auto}");
+                } else {
+                    eprintln!("ALL CHECKED {level:?} expert={expert} {model}: full {full} does not fit {auto}, compact version with more_tools");
+                    assert_eq!(auto, crate::llm::config::MAX_AUTO_CONTEXT, "{level:?} {expert} {model}");
+                    assert!(!crate::llm::config::context_too_small(auto, compact), "{level:?} {expert} {model}: Kurzfassung {compact} in {auto}");
+                }
+                // kleiner Kontext: Kurzfassung – die angehakten Werkzeuge kosten dort nichts (nur `more_tools` nennt sie)
+                assert_eq!(choose(8192, full), Variant::Compact, "{level:?} {expert} {model}");
+                assert!(compact <= default_compact + 40, "{level:?} {expert} {model}: {default_compact} → {compact}");
+                assert!(compact <= budget / 2, "{level:?} {expert} {model}: {compact} von {budget}");
+                // `more_tools` nennt jedes angehakte Werkzeug, das Stufe und Modus erlauben
+                let listed = more_tools::run(&p, &json!({})).unwrap();
+                let text = listed["tools"].to_string();
+                for t in crate::chat::tools::CHAT_DEFAULT_OFF {
+                    let allowed = p.specs().iter().any(|s| s.name == *t);
+                    assert_eq!(text.contains(&format!("\"{t}: ")), allowed, "{level:?} {expert}: {t}");
+                }
+            }
         }
     }
 

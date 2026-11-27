@@ -17,6 +17,13 @@ fn policy(level: McpLevel, expert: bool) -> ToolPolicy {
     ToolPolicy::new(LlmModel { level, level_chosen: true, ..LlmModel::named("m") }, None, expert).with_agent(env()).with_editor_switches(0)
 }
 
+/// Wie [`policy`], mit allen Standard-aus-Werkzeugen angehakt (`tools::CHAT_DEFAULT_OFF`).
+fn checked(level: McpLevel, expert: bool) -> ToolPolicy {
+    let mut p = policy(level, expert);
+    p.cfg.enabled_tools = crate::chat::tools::CHAT_DEFAULT_OFF.iter().map(|s| s.to_string()).collect();
+    p
+}
+
 fn call(name: &str, args: Value) -> ToolCall {
     ToolCall { id: "c".into(), name: name.into(), arguments: args }
 }
@@ -62,12 +69,17 @@ fn the_list_names_only_tools_the_level_mode_switches_and_selection_allow() {
     let read = list(&policy(McpLevel::Read, false));
     assert!(read.contains(&"screenshot".to_string()) && read.contains(&"search_history".to_string()), "{read:?}");
     assert!(!read.iter().any(|n| crate::chat::tools::NOT_FOR_CHATS.contains(&n.as_str())), "nie: {read:?}");
-    // Zeit und Kalender (#164): lesende ab Stufe Lesen, schreibende erst bei Steuern
-    for t in ["list_alarms", "list_calendar_events"] {
-        assert!(read.contains(&t.to_string()), "Lesen: {t}");
+    // Zeit und Kalender (#164): standardmäßig aus (#393) – erst angehakt lesende ab Stufe Lesen, schreibende bei Steuern
+    for t in crate::chat::tools::CHAT_DEFAULT_OFF {
+        assert!(!read.contains(&t.to_string()) && !list(&policy(McpLevel::Control, true)).contains(&t.to_string()), "standardmäßig aus: {t}");
+    }
+    let read_checked = list(&checked(McpLevel::Read, false));
+    for t in ["list_alarms", "list_calendar_events", "list_save_actions"] {
+        assert!(read_checked.contains(&t.to_string()), "Lesen, angehakt: {t}");
     }
     for t in ["create_alarm", "create_calendar_event"] {
-        assert!(!read.contains(&t.to_string()), "Lesen: kein {t}");
+        assert!(!read_checked.contains(&t.to_string()), "Lesen: kein {t}");
+        assert!(list(&checked(McpLevel::Control, false)).contains(&t.to_string()), "Steuern, angehakt: {t}");
     }
     for w in ["rename_session", "close_session", "move_file", "add_todo", "send_text"] {
         assert!(!read.contains(&w.to_string()), "Lesen: kein {w}");
@@ -238,13 +250,16 @@ fn loaded_tools_come_from_successful_fetches_newest_first() {
 #[test]
 fn the_full_prompt_and_its_tools_stay_as_they_were() {
     for (level, expert) in [(McpLevel::Read, false), (McpLevel::Control, true)] {
-        let p = policy(level, expert);
+        // Standard: die Standard-aus-Werkzeuge (#393) fehlen auch in der vollen Fassung
+        let d = master_prompt::render(&policy(level, expert), "qwen3:8b");
+        assert!(d.contains("\n### screenshot\n") && !d.contains("\n### list_alarms\n"), "{level:?}: Zeit/Kalender standardmäßig aus");
+        let p = checked(level, expert);
         assert_eq!(master_prompt::request_specs(&p, Variant::Full), p.specs(), "voll: jedes erlaubte Werkzeug direkt");
         let full = master_prompt::render(&p, "qwen3:8b");
         assert!(!full.contains(NAME), "{level:?}: kein more_tools in der vollen Fassung");
         assert!(full.contains(&format!("You have {} tools", p.specs().len())));
         // jedes erlaubte Werkzeug hat seinen Abschnitt
-        assert!(full.contains("\n### screenshot\n") && full.contains("\n### list_alarms\n"), "Zeit/Kalender direkt in der vollen Fassung");
+        assert!(full.contains("\n### screenshot\n") && full.contains("\n### list_alarms\n"), "angehakt: Zeit/Kalender direkt in der vollen Fassung");
         // die Kurzfassung nennt more_tools mit einer klaren Anleitung
         let compact = master_prompt::render_compact(&p, "qwen3:8b");
         assert!(compact.contains("more tools are not listed: call `more_tools` for their names, then `more_tools` with `name` for one tool's fields, then call that tool by its name."), "{compact}");

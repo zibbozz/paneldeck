@@ -1071,8 +1071,8 @@ const CHAT: &[Step] = &[
         spot: Some(Spot::ModelsServers),
         title: tx("Was ein Modell darf", "What a model may do"),
         body: tx(
-            "Jedes Modell hat eine eigene Stufe: Aus (nur chatten), Nur lesen (sieht Sitzungen und To-dos) oder Steuern (darf tippen und ändern). Schreibende Werkzeuge fragen immer erst nach: Erlauben, Immer für diesen Chat oder Ablehnen.",
-            "Each model has its own level: Off (just chatting), Read only (sees sessions and to-dos) or Control (may type and change things). Writing tools always ask first: Allow, Always for this chat or Deny.",
+            "Jedes Modell hat eine eigene Stufe: Aus (nur chatten), Nur lesen (sieht Sitzungen und To-dos) oder Steuern (darf tippen und ändern). Schreibende Werkzeuge fragen immer erst nach: Erlauben, Immer für diesen Chat oder Ablehnen. In der Werkzeugliste darunter wählst du einzelne Werkzeuge ab; Werkzeuge mit „(standardmäßig aus)“ bekommt ein Modell erst, wenn du sie anhakst.",
+            "Each model has its own level: Off (just chatting), Read only (sees sessions and to-dos) or Control (may type and change things). Writing tools always ask first: Allow, Always for this chat or Deny. In the tool list below you can uncheck single tools; tools marked “(off by default)” only reach a model once you check them.",
         ),
         prep: &[Prep::Terminals, Prep::Settings(S_MODELS)],
         done: None,

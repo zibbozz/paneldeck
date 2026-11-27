@@ -340,27 +340,21 @@ pub fn switch_bits(create_projects: bool, delete: bool) -> u8 {
     (if create_projects { SW_CREATE } else { 0 }) | if delete { SW_DELETE } else { 0 }
 }
 
-/// Die Werkzeuge der Erweiterung (#386), die Chats vorerst gar nicht bekommen – weder angeboten noch erlaubt, gleich
-/// welche Schalter an sind (Ausschlussliste wie `time::agent::TOOLS`, geprüft in `chat::tools`): Die Kurzfassung des
-/// Chat-Prompts hat bei 8192 Tokens nach #381/#383/#384/#164 keinen Platz mehr für sie (noch etwa 6 Tokens). Externe
-/// Agenten haben sie mit ihren Schaltern; das Nachladen von Werkzeugen (#393) nimmt sie hier heraus, dann gelten
-/// [`offered_to_chats`] und [`allowed_for_chats`] wieder allein.
-pub const CHAT_EXCLUDED: [&str; 4] = ["create_project", "delete_ticket", "update_comment", "delete_comment"];
-
 /// Darf ein Chat dieses Werkzeug aufrufen? Wie bei externen Agenten: `create_project` und die Papierkorb-Werkzeuge nur mit
-/// ihrem Schalter, `update_comment` mit Steuern allein. Vorerst zusätzlich [`CHAT_EXCLUDED`].
+/// ihrem Schalter, `update_comment` mit Steuern allein. Für Chats sind alle vier außerdem standardmäßig aus und je Modell
+/// einzuschalten (`chat::tools::CHAT_DEFAULT_OFF`, #393).
 pub fn allowed_for_chats(name: &str, bits: u8) -> bool {
     name == "update_comment" || offered_to_chats(name, bits)
 }
 
-/// Bekommt ein Chat dieses Werkzeug angeboten? Die Werkzeuge der Erweiterung nur mit ihrem Schalter (spart sonst Platz im
-/// Chat-Prompt, der bei 8192 Tokens keinen mehr hat); `update_comment` wird mit dem Schalter „Löschen“ angeboten, ist aber
-/// auch ohne ihn erlaubt ([`allowed_for_chats`]; mit dem Nachladen von Werkzeugen, #393, immer angeboten). Vorerst
-/// zusätzlich [`CHAT_EXCLUDED`].
+/// Bekommt ein Chat dieses Werkzeug angeboten? Die Werkzeuge der Erweiterung nur mit ihrem Schalter (ohne ihn lieferten
+/// sie immer `forbidden`); `update_comment` ist auch ohne Schalter erlaubt ([`allowed_for_chats`]) und wird darum immer
+/// angeboten (seit dem Nachladen von Werkzeugen, #393). Das Häkchen beim Modell (`chat::tools::CHAT_DEFAULT_OFF`) gilt
+/// zusätzlich.
 pub fn offered_to_chats(name: &str, bits: u8) -> bool {
     match name {
         "create_project" => bits & SW_CREATE != 0,
-        "delete_ticket" | "delete_comment" | "update_comment" => bits & SW_DELETE != 0,
+        "delete_ticket" | "delete_comment" => bits & SW_DELETE != 0,
         _ => true,
     }
 }
@@ -556,11 +550,15 @@ mod tests {
 
     #[test]
     fn chats_get_the_extension_tools_only_with_their_switch() {
-        for t in ["create_project", "delete_ticket", "update_comment", "delete_comment"] {
+        for t in ["create_project", "delete_ticket", "delete_comment"] {
             assert!(!offered_to_chats(t, 0), "{t}");
             assert!(offered_to_chats(t, SW_CREATE | SW_DELETE), "{t}");
-            // Vorerst gar nicht im Chat (kein Platz im Chat-Prompt, bis #393; geprüft in `chat::tools`).
-            assert!(CHAT_EXCLUDED.contains(&t), "{t}");
+        }
+        // `update_comment` braucht keinen Schalter und wird darum immer angeboten (#393); für alle vier gilt im Chat
+        // zusätzlich das Häkchen beim Modell (`chat::tools::CHAT_DEFAULT_OFF`).
+        assert!(offered_to_chats("update_comment", 0) && allowed_for_chats("update_comment", 0));
+        for t in ["create_project", "delete_ticket", "update_comment", "delete_comment"] {
+            assert!(crate::chat::tools::default_off(t), "{t}");
         }
         assert!(offered_to_chats("create_project", SW_CREATE) && !offered_to_chats("delete_ticket", SW_CREATE));
         assert!(offered_to_chats("delete_ticket", SW_DELETE) && !offered_to_chats("create_project", SW_DELETE));

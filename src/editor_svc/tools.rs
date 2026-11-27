@@ -393,8 +393,8 @@ fn schema(props: Value, required: &[&str]) -> Value {
 /// ([`super::settings::DOCS_OPEN`]). Externe Agenten sehen sie immer (mit einer Meldung, die den Schalter nennt).
 ///
 /// Werkzeuge nachladen (#393): Platz im Chat-Prompt ist kein Grund mehr, ein Werkzeug hier zu sperren – die Kurzfassung
-/// listet nur den Kern, alles Erlaubte erreicht ein kleiner Kontext über `more_tools`. Zweige wie `"editor_diff" => false`
-/// (#385) oder `"list_save_actions" => false` (#383) fallen beim Zusammenführen weg (siehe `chat::more_tools`).
+/// listet nur den Kern, alles Erlaubte erreicht ein kleiner Kontext über `more_tools`. `editor_diff` (#385) und
+/// `list_save_actions` (#383) sind für Chats standardmäßig aus und je Modell einzuschalten (`chat::tools::CHAT_DEFAULT_OFF`).
 pub fn offered_to_chats(name: &str, bits: u8) -> bool {
     let docs = bits & super::settings::DOCS_OPEN != 0;
     match name {
@@ -406,12 +406,8 @@ pub fn offered_to_chats(name: &str, bits: u8) -> bool {
         // 8192 Tokens (Tests `the_compact_prompt_fits_into_8192_with_room_left`, `plan_instructions_fit_into_small_contexts`).
         // Externe Agenten bekommen `validate` immer ab der Stufe Lesen.
         "format_file" => docs && bits & super::settings::FORMAT != 0,
-        // Aktionen beim Speichern (#383): nur für externe Agenten (spart Kontext der kleinen Chat-Modelle).
-        "list_save_actions" => false,
-        // Vergleich (#385): für externe Agenten wie `editor_read` (Stufe Lesen, kein Schalter). Chats bekommen ihn nicht:
-        // die Kurzfassung des Chat-Prompts hat dafür keinen Platz mehr (Tests `the_compact_prompt_fits_into_8192…`,
-        // `plan_instructions_fit_into_small_contexts`).
-        "editor_diff" => false,
+        // Vergleich (#385): wie `editor_read` (Stufe Lesen, kein Schalter) – nur, solange ein Dokument offen ist.
+        "editor_diff" => docs,
         _ => true,
     }
 }
@@ -1304,7 +1300,10 @@ mod tests {
         for n in ["editor_list", "editor_read", "list_sessions"] {
             assert!(offered_to_chats(n, DOCS_OPEN), "{n}");
         }
-        assert!(!offered_to_chats("editor_diff", DOCS_OPEN | 7), "Vergleichen nur für externe Agenten (#385)");
+        // Vergleich (#385) wie Lesen: mit offenem Dokument, ohne Schalter; die Aktionen beim Speichern (#383) immer – beide
+        // sind für Chats zusätzlich standardmäßig aus (`chat::tools::CHAT_DEFAULT_OFF`, #393).
+        assert!(offered_to_chats("editor_diff", DOCS_OPEN) && !offered_to_chats("editor_diff", 7));
+        assert!(offered_to_chats("list_save_actions", 0));
         assert!(offered_to_chats("list_sessions", 0));
         assert!(!offered_to_chats("editor_list", 0) && !offered_to_chats("editor_read", 0), "ohne offene Dokumente nichts zu lesen");
         assert!(!offered_to_chats("editor_open", DOCS_OPEN) && !offered_to_chats("editor_edit", DOCS_OPEN) && !offered_to_chats("editor_save", DOCS_OPEN));

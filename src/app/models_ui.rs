@@ -662,6 +662,20 @@ fn parse_digits(s: &str) -> Option<f64> {
     d.parse::<u64>().ok().map(|n| n as f64)
 }
 
+/// Kennzeichen eines Werkzeugs, das für Chats standardmäßig aus ist (`chat::tools::CHAT_DEFAULT_OFF`, #393), in der Liste
+/// der Werkzeuge je Modell. Der Tutorial-Schritt `chat.levels` nennt denselben Text.
+pub(crate) fn default_off_mark(lang: Lang) -> &'static str {
+    lang.t("(standardmäßig aus)", "(off by default)")
+}
+
+/// Tooltip-Zusatz zu [`default_off_mark`].
+fn default_off_hint(lang: Lang) -> &'static str {
+    lang.t(
+        "Neu in 3.2.0 und für Chats standardmäßig aus: Erst mit Häkchen bekommt dieses Modell das Werkzeug – nach Stufe, Schaltern und Freigabe wie jedes andere.",
+        "New in 3.2.0 and off by default for chats: this model only gets the tool once it is checked – by level, switches and approval like any other tool.",
+    )
+}
+
 /// Anzeige neben dem gesperrten Regler, solange der Server-Standard gilt.
 fn context_default_label(detected: Option<u32>, lang: Lang) -> String {
     let (head, n) = match detected {
@@ -789,14 +803,19 @@ fn model_row(ui: &mut Ui, lang: Lang, s: &mut LlmServer, name: &str, expert: boo
                 }
                 egui::Grid::new((salt, s.id.as_str(), name)).num_columns(2).spacing([16.0, 2.0]).show(ui, |ui| {
                     for (k, (tool, desc)) in list.iter().enumerate() {
-                        let mut on = !cfg.disabled_tools.iter().any(|d| d == tool);
-                        if ui.checkbox(&mut on, RichText::new(*tool).monospace().size(12.0)).on_hover_text(desc.as_str()).changed() {
-                            if on {
-                                cfg.disabled_tools.retain(|d| d != tool);
-                            } else {
-                                cfg.disabled_tools.push(tool.to_string());
+                        // Neue Werkzeuge von 3.2.0 sind für Chats standardmäßig aus (#393): sie stehen ohne Häkchen da und
+                        // sind als solche gekennzeichnet; anhaken schaltet sie für dieses Modell ein.
+                        let mut on = crate::chat::tools::tool_checked(&cfg, tool);
+                        let off_default = crate::chat::tools::default_off(tool);
+                        ui.horizontal(|ui| {
+                            let hover = if off_default { format!("{desc}\n\n{}", default_off_hint(lang)) } else { desc.clone() };
+                            if ui.checkbox(&mut on, RichText::new(*tool).monospace().size(12.0)).on_hover_text(hover).changed() {
+                                crate::chat::tools::set_tool_checked(&mut cfg, tool, on);
                             }
-                        }
+                            if off_default {
+                                ui.label(RichText::new(default_off_mark(lang)).small().color(style::dim(ui)));
+                            }
+                        });
                         if !k.is_multiple_of(2) {
                             ui.end_row();
                         }
@@ -1220,6 +1239,16 @@ mod tests {
             let o = h.click("list_sessions", |ui| models_tab(ui, lang, &mut servers, &mut st, &conn, false), merge_models);
             assert!(o.changed);
             assert_eq!(servers[0].model_cfg("llama3").disabled_tools, vec!["list_sessions".to_string()]);
+            // Standard-aus-Werkzeug (#393): ohne Häkchen, gekennzeichnet; anhaken schaltet es ein, abhaken wieder aus.
+            assert!(h.has("list_alarms") && h.has(default_off_mark(lang)), "{:?}", h.texts);
+            assert!(!crate::chat::tools::tool_checked(&servers[0].model_cfg("llama3"), "list_alarms"));
+            let o = h.click("list_alarms", |ui| models_tab(ui, lang, &mut servers, &mut st, &conn, false), merge_models);
+            assert!(o.changed);
+            assert_eq!(servers[0].model_cfg("llama3").enabled_tools, vec!["list_alarms".to_string()]);
+            assert!(crate::chat::tools::tool_checked(&servers[0].model_cfg("llama3"), "list_alarms"));
+            h.click("list_alarms", |ui| models_tab(ui, lang, &mut servers, &mut st, &conn, false), merge_models);
+            assert!(servers[0].model_cfg("llama3").enabled_tools.is_empty() && !crate::chat::tools::tool_checked(&servers[0].model_cfg("llama3"), "list_alarms"));
+            assert!(!default_off_mark(lang).is_empty() && default_off_mark(Lang::De) != default_off_mark(Lang::En));
             // Nachfragen ausschalten, Werkzeugaufrufe „Aus“
             h.click(lang.t("Vor Schreib-Aktionen nachfragen", "Ask before write actions"), |ui| models_tab(ui, lang, &mut servers, &mut st, &conn, false), merge_models);
             assert!(!servers[0].model_cfg("llama3").ask_write);

@@ -15,17 +15,12 @@
 //! Server (z. B. llama.cpp mit Grammatik) lassen nur Aufrufe gelisteter Werkzeuge zu. Der Aufruf eines erlaubten, nicht
 //! gelisteten Werkzeugs gilt trotzdem (geprüft gegen sein echtes Schema).
 //!
-//! **Zurückgehaltene Werkzeuge (für spätere Merges):** Werkzeuge, die Chats bisher aus Platzgründen gar nicht bekamen,
-//! brauchen das nicht mehr – sie erscheinen über `more_tools`, sobald `ToolPolicy::specs` sie erlaubt. Beim Zusammenführen
-//! mit Zweigen, die solche Werkzeuge noch hart ausschließen, fällt dieser Ausschluss einfach weg:
-//! * `editor_diff` (#385) und `list_save_actions` (#383): die Zweige `"editor_diff" => false` bzw.
-//!   `"list_save_actions" => false` in `editor_svc::tools::offered_to_chats` streichen;
-//! * `create_project`, `delete_ticket`, `update_comment`, `delete_comment` (#386): die Schalter in
-//!   `access::offered_to_chats` bleiben; `update_comment` (ohne Schalter erlaubt) dort immer anbieten;
-//!
-//! Was Chats trotz allem nie bekommen sollen, steht an genau einer Stelle: `tools::NOT_FOR_CHATS` (derzeit leer;
-//! Reiter „Zeit“ und Kalender, #164, gehören seit der Freigabe durch den Nutzer dazu: Stufe Lesen bzw. Steuern wie bei
-//! externen Agenten).
+//! **Kein Werkzeug fehlt aus Platzgründen** (Entscheidung des Nutzers: nichts kürzen, nichts ausschließen). Die neuen
+//! Werkzeuge von 3.2.0 – Reiter „Zeit“ und Kalender (#164), `editor_diff` (#385), `list_save_actions` (#383),
+//! `create_project`, `delete_ticket`, `update_comment`, `delete_comment` (#386) – sind für Chats **standardmäßig aus** und
+//! je Modell anzuhaken (`tools::CHAT_DEFAULT_OFF`, `LlmModel::enabled_tools`); angehakt erscheinen sie hier wie jedes
+//! andere Werkzeug (Stufe, Schalter, Freigabe, Plan-Modus unverändert). Was Chats nie bekommen sollen, steht an genau
+//! einer Stelle: `tools::NOT_FOR_CHATS` (derzeit leer).
 
 use super::agent;
 use super::master_prompt;
