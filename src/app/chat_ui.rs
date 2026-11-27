@@ -704,6 +704,10 @@ fn tool_line(ui: &mut Ui, id: Id, name: &str, call: Option<(&str, &serde_json::V
     // Ein Aufruf ohne erkennbaren Namen (als Text geschrieben) heißt „?“.
     let name = if name.trim().is_empty() { "?" } else { name };
     job.append(name, 0.0, egui::TextFormat { font_id: FontId::monospace(12.5), color: ui.visuals().text_color(), ..Default::default() });
+    // `more_tools` (#393): was nachgeschlagen wird, dezent dahinter.
+    if let Some(what) = (name == crate::chat::more_tools::NAME).then(|| more_tools_label(args, lang)).flatten() {
+        job.append(&what, 6.0, egui::TextFormat { font_id: FontId::proportional(12.0), color: style::dim(ui), ..Default::default() });
+    }
     if let Some((mark, col)) = mark {
         job.append(mark, 6.0, egui::TextFormat { font_id: FontId::proportional(12.5), color: col, ..Default::default() });
     }
@@ -731,6 +735,14 @@ fn tool_line(ui: &mut Ui, id: Id, name: &str, call: Option<(&str, &serde_json::V
     if let (Some(CallState::Approval), Some((call_id, args))) = (state, call) {
         approval(ui, id, call_id, name, args, target, preview, lang, out);
     }
+}
+
+/// Zusatz zur Zeile eines `more_tools`-Aufrufs (#393): „weitere Werkzeuge auflisten“ bzw. „lädt <Werkzeug>“.
+fn more_tools_label(args: Option<&serde_json::Value>, lang: Lang) -> Option<String> {
+    Some(match args.and_then(crate::chat::more_tools::wanted) {
+        Some(tool) => format!("{} {}", lang.t("· lädt", "· loads"), crate::mcp::short(&tool, 60)),
+        None => lang.t("· weitere Werkzeuge auflisten", "· list more tools").to_string(),
+    })
 }
 
 /// Zeilen der Diff-Vorschau, die ohne Scrollen sichtbar sind.

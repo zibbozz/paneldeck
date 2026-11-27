@@ -346,6 +346,10 @@ fn schema(props: Value, required: &[&str]) -> Value {
 /// (`bits` = [`super::settings::AGENT_SWITCHES`]) – sonst wären sie nur Platz im Kontext kleiner Modelle und lieferten
 /// immer `forbidden`. Lesen, Bearbeiten und Speichern außerdem nur, solange im Editor ein Dokument offen ist
 /// ([`super::settings::DOCS_OPEN`]). Externe Agenten sehen sie immer (mit einer Meldung, die den Schalter nennt).
+///
+/// Werkzeuge nachladen (#393): Platz im Chat-Prompt ist kein Grund mehr, ein Werkzeug hier zu sperren – die Kurzfassung
+/// listet nur den Kern, alles Erlaubte erreicht ein kleiner Kontext über `more_tools`. Zweige wie `"editor_diff" => false`
+/// (#385) oder `"list_save_actions" => false` (#383) fallen beim Zusammenführen weg (siehe `chat::more_tools`).
 pub fn offered_to_chats(name: &str, bits: u8) -> bool {
     let docs = bits & super::settings::DOCS_OPEN != 0;
     match name {
