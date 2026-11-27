@@ -318,6 +318,7 @@ pub fn get_event(conn: &Connection, id: i64) -> SRes<Event> {
 }
 
 /// Gibt es einen Termin mit dieser `UID`?
+#[cfg(test)]
 pub fn uid_exists(conn: &Connection, uid: &str) -> SRes<bool> {
     Ok(conn.query_row("SELECT 1 FROM cal_events WHERE uid = ?1", [uid], |_| Ok(())).optional()?.is_some())
 }

@@ -1138,7 +1138,9 @@ pub fn decode(bytes: &[u8]) -> Result<String, FileError> {
     String::from_utf8(b.to_vec()).map_err(|_| FileError::NotUtf8)
 }
 
-/// Importiert eine lokale Datei in die Datenbank (eine Transaktion).
+/// Importiert eine lokale Datei in die Datenbank (eine Transaktion). Die Oberfläche liest im Hilfsthread
+/// ([`read_and_parse`], dann [`insert_parsed`]).
+#[cfg(test)]
 pub fn import_file(conn: &Connection, path: &std::path::Path, zone: &dyn Zone) -> Result<ImportReport, FileError> {
     let (items, rep) = read_and_parse(path, &|u| store::uid_exists(conn, u).unwrap_or(false), zone)?;
     insert_parsed(conn, items, rep)
@@ -1157,6 +1159,7 @@ pub fn read_and_parse(path: &std::path::Path, exists: &dyn Fn(&str) -> bool, zon
 }
 
 /// Importiert iCal-Text in die Datenbank.
+#[cfg(test)]
 pub fn import_text(conn: &Connection, text: &str, zone: &dyn Zone) -> Result<ImportReport, FileError> {
     let (items, rep) = parse(text, &|u| store::uid_exists(conn, u).unwrap_or(false), zone);
     insert_parsed(conn, items, rep)
