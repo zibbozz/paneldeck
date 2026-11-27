@@ -2759,6 +2759,7 @@ c.close()
 
     foreach ($tour in $cat) {
       $tid = $tour.id; $steps = @($tour.steps)
+      $sessions0 = [int](Tut-Status).sessions_total
       Tut-Cmd "start $tid"
       $s = Tut-Wait { param($x) $x.running -and $x.run.tour -eq $tid -and $x.run.index -eq 1 -and $x.run.ready }
       Check "Tutorial ${tid}: startet bei Schritt 1/$($steps.Count)" ($s -and $s.run.total -eq $steps.Count -and $s.project.exists -and $s.project.active) ($s.run | ConvertTo-Json -Compress)
@@ -2772,14 +2773,20 @@ c.close()
         }
         $auto = $null
         switch ($r.step) {
-          'basics.new_terminal' { $auto = { [void](Tool 'create_session' @{ name = 'Smoke-Tutorial' }) } }
+          'basics.new_terminal' {
+            # Seit 3.2.0 (#386) ist das Projekt "Tutorial" fuer Agenten gesperrt (neue Projekte beginnen "Aus"): Ein externer
+            # Agent darf dort keine Sitzung anlegen. Das pruefen, dann die Sitzung wie der Nutzer anlegen ("Neues Terminal").
+            Check 'Tutorial basics: Projekt "Tutorial" fuer Agenten gesperrt (access off)' ($s.project.access -eq 'off') "$($s.project.access)"
+            Check 'Tutorial basics: create_session im Projekt "Tutorial" -> project_locked' ((Code (Tool 'create_session' @{ name = 'Smoke-Tutorial' })) -eq 'project_locked')
+            $auto = { Tut-Cmd 'new_terminal' }
+          }
           'basics.todo_add' { $auto = { [void](Tool 'add_todo' @{ title = 'Smoke-Tutorial-Todo' }) } }
           'todo.list' { $auto = { [void](Tool 'add_todo' @{ title = 'Smoke-Tutorial-Todo-2' }) } }
         }
         if ($auto) {
           & $auto
           $n = Tut-Wait { param($x) -not $x.running -or $x.run.index -gt $i } 15000
-          Check "Tutorial ${tid}: $($r.step) geht nach der Aktion per MCP von selbst weiter" ($n -and (-not $n.running -or $n.run.index -gt $i)) ($n.run | ConvertTo-Json -Compress)
+          Check "Tutorial ${tid}: $($r.step) geht nach der Aktion von selbst weiter" ($n -and (-not $n.running -or $n.run.index -gt $i)) ($n.run | ConvertTo-Json -Compress)
         } else {
           Tut-Cmd 'next'
           $n = Tut-Wait { param($x) -not $x.running -or $x.run.index -gt $i }
@@ -2804,14 +2811,16 @@ c.close()
       if ($tid -eq 'basics') {
         # @(…): eine einzelne Sitzung kaeme sonst als PSCustomObject zurueck, und dessen .Count ist in PowerShell 5.1 $null.
         $mine = @(Tut-Sessions)
-        Check 'Tutorial basics: Sitzungen im Projekt "Tutorial" (list_sessions)' ($mine.Count -ge 1) "$($mine.Count)"
+        Check 'Tutorial basics: Sitzungen im Projekt "Tutorial" (Status der Instanz)' ($s.project.sessions -ge 1) "$($s.project.sessions)"
+        Check 'Tutorial basics: list_sessions zeigt externen Agenten keine Sitzung im gesperrten Projekt "Tutorial"' ($mine.Count -eq 0) "$($mine.Count)"
         Check 'Tutorial basics: in der Tour angelegte To-dos gemerkt' (@($s.todos).Count -ge 1) "$(@($s.todos).Count)"
       }
       Tut-Cmd 'end delete'
       $s = Tut-Wait { param($x) -not $x.ask -and -not $x.project.exists }
       Check "Tutorial ${tid}: Loeschen entfernt das Projekt" ($s -and -not $s.ask -and -not $s.project.exists -and @($s.todos).Count -eq 0 -and $null -eq $s.plan_project) ($s | ConvertTo-Json -Depth 2 -Compress)
-      Start-Sleep -Milliseconds 500
-      Check "Tutorial ${tid}: keine Sitzung mehr im Projekt Tutorial" (@(Tut-Sessions).Count -eq 0)
+      # Das gesperrte Projekt sieht list_sessions nicht; deshalb zaehlt der Status der Instanz alle Sitzungen.
+      $s = Tut-Wait { param($x) $x.sessions_total -eq $sessions0 }
+      Check "Tutorial ${tid}: keine Sitzung mehr im Projekt Tutorial" ($s -and $s.sessions_total -eq $sessions0 -and @(Tut-Sessions).Count -eq 0) "vorher $sessions0, jetzt $($s.sessions_total)"
     }
     $todos = Tool 'list_todos' @{ state = 'all'; limit = 200 }
     Check 'Tutorial: To-dos der Tour geloescht (list_todos)' (-not $todos.err -and -not ("$($todos.text)" -match 'Smoke-Tutorial-Todo')) "$($todos.text)"

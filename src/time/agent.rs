@@ -476,7 +476,12 @@ pub fn call<Tz: TimeZone>(ctx: &Ctx<Tz>, data: &mut TimeData, tool: &str, args: 
                 *x = al.clone();
             }
             data.alarms.sort_by_key(|a| (a.hour, a.minute, a.id));
-            Ok(Done { value: json!({"alarm": alarm_json(&al, ctx)}), change: Some(text), silence_alarms: silence, ..Default::default() })
+            let mut aj = alarm_json(&al, ctx);
+            // `ctx.ringing_alarms` ist der Stand vor dem Aufruf; das Klingeln endet gleich danach (`silence_alarms`).
+            if silence.contains(&al.id) {
+                aj["ringing"] = json!(false);
+            }
+            Ok(Done { value: json!({"alarm": aj}), change: Some(text), silence_alarms: silence, ..Default::default() })
         }
         "create_timer" => {
             let conn = ctx.conn.ok_or_else(db_missing)?;
@@ -552,7 +557,12 @@ pub fn call<Tz: TimeZone>(ctx: &Ctx<Tz>, data: &mut TimeData, tool: &str, args: 
                 *x = t.clone();
             }
             let text = format!("{} {}: {what}", lang.t("Timer", "Timer"), t.display_name(lang));
-            Ok(Done { value: json!({"timer": timer_json(&t, ctx)}), change: Some(text), silence_timers: silence, ..Default::default() })
+            let mut tj = timer_json(&t, ctx);
+            // Wie bei den Weckern: Stand nach dem Aufruf melden (zurückgesetzt = klingelt nicht mehr).
+            if silence.contains(&t.id) {
+                tj["ringing"] = json!(false);
+            }
+            Ok(Done { value: json!({"timer": tj}), change: Some(text), silence_timers: silence, ..Default::default() })
         }
         "create_stopwatch" => {
             let conn = ctx.conn.ok_or_else(db_missing)?;
@@ -735,6 +745,9 @@ mod tests {
         let r = call(&c, &mut d, "update_alarm", &json!({"alarm": id, "enabled": false, "snooze_max": 3})).unwrap();
         assert_eq!((r.value["alarm"]["enabled"].as_bool(), r.value["alarm"]["next"].is_null(), r.value["alarm"]["snooze_max"].as_i64()), (Some(false), true, Some(3)));
         assert_eq!(r.silence_alarms, vec![id]);
+        let ringing = Ctx { ringing_alarms: vec![id], ..ctx(&conn, c.now_ms) };
+        assert_eq!(call(&ringing, &mut d, "update_alarm", &json!({"alarm": id, "enabled": false})).unwrap().value["alarm"]["ringing"], false, "ausgeschaltet: klingelt nicht mehr");
+        assert_eq!(call(&ringing, &mut d, "update_alarm", &json!({"alarm": id, "name": "x"})).unwrap().value["alarm"]["ringing"], true);
         assert_eq!(call(&c, &mut d, "update_alarm", &json!({"alarm": 999})).unwrap_err().0, "not_found");
         let l = call(&c, &mut d, "list_alarms", &json!({})).unwrap();
         assert_eq!(l.value["alarms"].as_array().unwrap().len(), 2);
@@ -767,6 +780,16 @@ mod tests {
         assert_eq!((r.value["timer"]["state"].as_str(), r.value["timer"]["remaining_seconds"].as_i64()), (Some("paused"), Some(180)));
         let r = call(&c2, &mut d, "update_timer", &json!({"timer": id, "action": "reset"})).unwrap();
         assert_eq!(r.silence_timers, vec![id]);
+        // Klingelt er gerade, meldet die Antwort den Stand nach dem Zurücksetzen (Smoke-Test 3.2.0)
+        let ringing = Ctx { ringing_timers: vec![id], ..ctx(&conn, now + 60_000) };
+        let listed = call(&ringing, &mut d, "list_timers", &json!({})).unwrap().value;
+        assert_eq!(listed["timers"].as_array().unwrap().iter().find(|x| x["id"] == id).unwrap()["ringing"], true);
+        for act in ["reset", "restart", "start"] {
+            let r = call(&ringing, &mut d, "update_timer", &json!({"timer": id, "action": act})).unwrap();
+            assert_eq!(r.value["timer"]["ringing"], false, "{act}");
+        }
+        let r = call(&ringing, &mut d, "update_timer", &json!({"timer": id, "action": "pause"})).unwrap();
+        assert_eq!(r.value["timer"]["ringing"], true, "Pause beendet kein Klingeln");
         assert_eq!(call(&c2, &mut d, "update_timer", &json!({"timer": id, "action": "explode"})).unwrap_err().0, "bad_args");
         let l = call(&c2, &mut d, "list_timers", &json!({})).unwrap();
         assert_eq!(l.value["timers"].as_array().unwrap().len(), 3);
