@@ -553,7 +553,11 @@ pub struct Preview {
 /// `read_file`/`move_file` nur, wenn eine sensible Datei betroffen ist (Hinweis, kein „Immer“). `None` sonst.
 pub fn preview(name: &str, args: &Value, env: &AgentEnv) -> Option<Preview> {
     let call = super::ToolCall { id: String::new(), name: name.to_string(), arguments: args.clone() };
-    let sensitive = super::sensitive_call(&call, env);
+    preview_with(name, args, env, super::sensitive_call(&call, env))
+}
+
+/// [`preview`] mit schon ermittelter Antwort auf „sensibel“ (`agent::file_check`, im Hintergrund).
+pub fn preview_with(name: &str, args: &Value, env: &AgentEnv, sensitive: bool) -> Option<Preview> {
     let p = match name {
         "edit_file" => match edit_target(args, env) {
             Ok((_, r, tf, plan)) => Preview { path: r.rel, diff: Some(diff::diff(&tf.text, &plan.new_text, 3, PREVIEW_LINES)), tolerant: plan.tolerant, ..Preview::default() },

@@ -66,18 +66,19 @@ pub fn drive(host: &mut dyn ChatToolHost, id: u64) -> Driven {
         out.changed |= c.rev() != before;
         match step {
             ToolStep::Idle => {
-                // Freigabe-Zeile: Ziel mit Namen und – bei edit_file/write_file – die Diff-Vorschau (einmal je wartendem
-                // Aufruf; die Vorschau liest die Datei einmal von der Platte).
+                // Freigabe-Zeile: Ziel mit Namen und – bei edit_file/write_file – die Diff-Vorschau. Die Vorschau stammt aus
+                // der Prüfung im Hintergrund (`agent::file_check`, Review 3.2.0): hier liest nichts von der Platte.
                 let pending = host.chat(id).and_then(|c| {
                     let call = c.pending_approval()?.clone();
                     let need_label = c.approval_target.is_none();
                     let need_preview = c.approval_preview.as_ref().is_none_or(|(cid, _)| *cid != call.id);
-                    (need_label || need_preview).then_some((call, need_label, need_preview))
+                    let stored = if need_preview { c.pending_file_preview() } else { None };
+                    (need_label || need_preview).then_some((call, need_label, stored))
                 });
-                if let Some((call, need_label, need_preview)) = pending {
+                if let Some((call, need_label, stored)) = pending {
                     let lang = host.lang();
                     let label = need_label.then(|| if agent::is_local(&call) { agent::target(&call, lang) } else { target_label(&call, |s| host.session_name(s), lang) }).flatten();
-                    let preview = if need_preview && agent::is_local(&call) { agent::files::preview(&call.name, &call.arguments, &policy.agent).map(|p| (call.id.clone(), p)) } else { None };
+                    let preview = stored.filter(|(cid, _)| *cid == call.id);
                     if let Some(c) = host.chat(id) {
                         if need_label {
                             c.approval_target = label;

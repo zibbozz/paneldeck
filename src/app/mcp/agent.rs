@@ -15,6 +15,18 @@ use crate::chat::store::ToolCall;
 /// So lange wartet `run_command` auf die Shell-Integration eines frisch gestarteten Terminals.
 const READY_WAIT: Duration = Duration::from_secs(20);
 
+/// So lange gilt ein geprüfter Projektordner eines Chats (danach wird beim nächsten Befehl neu geprüft).
+const ROOT_TTL: Duration = Duration::from_secs(10);
+/// So lange wartet `run_command` höchstens auf die Prüfung des Projektordners (WSL kann beim ersten Zugriff dauern).
+const ROOT_WAIT: Duration = Duration::from_secs(30);
+
+/// Prüfung des Projektordners eines Chats (Review 3.2.0): läuft im Hintergrund oder ist fertig. `input` = der geprüfte
+/// Ordner (ändert er sich, wird neu geprüft).
+pub(super) enum RootCheck {
+    Pending { input: Option<std::path::PathBuf>, rx: std::sync::mpsc::Receiver<Result<chat_agent::paths::Root, (String, String)>> },
+    Done { input: Option<std::path::PathBuf>, result: Result<chat_agent::paths::Root, (String, String)>, at: Instant },
+}
+
 /// Schlüssel in den Argumenten eines wartenden `run_command` eines Chats: Korrekturen für das Ergebnis (#355).
 pub(super) const CORRECTED_KEY: &str = "_paneldeck_corrected";
 
@@ -160,10 +172,64 @@ impl App {
         }
     }
 
+    /// Kanonischer Projektordner des Chats (`paths::root`), im Hintergrund geprüft und kurz zwischengespeichert (Review
+    /// 3.2.0: Kanonisieren und WSL-Prüfungen nie in der UI-Schleife). `None` = die Prüfung läuft noch (sie zeichnet neu,
+    /// wenn sie fertig ist).
+    pub(super) fn chat_root_checked(&mut self, ctx: &egui::Context, chat: u64) -> Option<Result<chat_agent::paths::Root, (String, String)>> {
+        let env = self.agent_env(chat);
+        let input = env.root.clone();
+        let now = Instant::now();
+        let mut done = None;
+        match self.mcp.chat_roots.get(&chat) {
+            Some(RootCheck::Done { input: i, result, at }) if *i == input && now.duration_since(*at) < ROOT_TTL => return Some(result.clone()),
+            Some(RootCheck::Pending { input: i, rx }) if *i == input => match rx.try_recv() {
+                Ok(r) => done = Some(r),
+                Err(std::sync::mpsc::TryRecvError::Empty) => return None,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => done = Some(Err(er("no_project_folder", "The chat's project folder could not be checked; try again."))),
+            },
+            _ => {}
+        }
+        if let Some(r) = done {
+            self.mcp.chat_roots.insert(chat, RootCheck::Done { input, result: r.clone(), at: now });
+            return Some(r);
+        }
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        let c = ctx.clone();
+        let spawned = std::thread::Builder::new().name("chat-root-check".into()).spawn(move || {
+            let _ = tx.send(chat_agent::paths::root(&env));
+            c.request_repaint();
+        });
+        if spawned.is_err() {
+            return Some(Err(er("no_project_folder", "The chat's project folder could not be checked; try again.")));
+        }
+        self.mcp.chat_roots.insert(chat, RootCheck::Pending { input, rx });
+        None
+    }
+
+    /// Zuletzt geprüfter Projektordner des Chats (ohne neue Prüfung; für das Anlegen seines Terminals direkt nach
+    /// [`App::chat_root_checked`]).
+    fn chat_root_cached(&self, chat: u64) -> Result<chat_agent::paths::Root, (String, String)> {
+        let input = self.agent_env(chat).root;
+        match self.mcp.chat_roots.get(&chat) {
+            Some(RootCheck::Done { input: i, result, .. }) if *i == input => result.clone(),
+            _ => Err(er("no_project_folder", "The chat's project folder is still being checked; try again.")),
+        }
+    }
+
+    /// Wartendes `run_command` eines Chats: ist der Projektordner geprüft, läuft `agent_run` noch einmal; nach der Frist
+    /// ein Fehler (nichts wurde ausgeführt).
+    pub(super) fn agent_root_ready(&mut self, ctx: &egui::Context, p: PendingMcp) {
+        let chat = p.caller.unwrap_or(0);
+        match self.chat_root_checked(ctx, chat) {
+            None if Instant::now() < p.deadline => self.mcp.pending.push(p),
+            None => self.mcp_finish(&p.reply, &p.tool, &p.args, p.caller, p.how, Err(er("timeout", "Checking the chat's project folder took too long; nothing was run. Try again."))),
+            Some(_) => self.agent_run(ctx, chat, &p.args, &p.reply),
+        }
+    }
+
     /// Neues Terminal für Befehle des Chats `chat` im Projektordner mit der Shell `pick` (Kind des Chats).
     pub(super) fn agent_new_terminal(&mut self, ctx: &egui::Context, chat: u64, pick: &ShellPick, name: &str) -> Result<u64, (String, String)> {
-        let env = self.agent_env(chat);
-        let root = chat_agent::paths::root(&env)?;
+        let root = self.chat_root_cached(chat)?;
         let cwd = chat_agent::paths::display(&root.canon);
         let mut args = json!({"cwd": cwd, "name": name});
         if let Some(s) = &pick.shell {
@@ -192,14 +258,22 @@ impl App {
             if !self.settings.shell_integration {
                 return Err(er("no_shell_integration", "Shell integration is switched off (Settings → General); without it the end of a command cannot be detected. Ask the user to switch it on."));
             }
-            // Ohne Projektordner kein Terminal (wie bisher).
-            chat_agent::paths::root(&self.agent_env(chat))?;
             Ok((req, fixes))
         })();
         let (req, mut fixes) = match parsed {
             Ok(x) => x,
             Err(e) => return self.mcp_finish(tx, "run_command", args, Some(chat), "chat", Err(e)),
         };
+        // Ohne Projektordner kein Terminal (wie bisher). Geprüft im Hintergrund (Review 3.2.0); bis dahin wartet der Aufruf.
+        match self.chat_root_checked(ctx, chat) {
+            None => {
+                self.mcp.pending.push(PendingMcp { reply: tx.clone(), tool: "run_command".into(), args: args.clone(), caller: Some(chat), how: "chat", session: 0, deadline: Instant::now() + ROOT_WAIT, kind: Pend::AgentRoot });
+                ctx.request_repaint_after(Duration::from_millis(50));
+                return;
+            }
+            Some(Err(e)) => return self.mcp_finish(tx, "run_command", args, Some(chat), "chat", Err(e)),
+            Some(Ok(_)) => {}
+        }
         if req.background {
             let r = self.agent_bg_start(ctx, chat, &req, &fixes);
             return self.mcp_finish(tx, "run_command", args, Some(chat), "chat", r);

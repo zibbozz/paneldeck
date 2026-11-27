@@ -103,11 +103,27 @@ pub struct TurnContext {
     pub compact: super::compact::CompactSettings,
     /// Bilder des Chats (#357): Ordner und Einträge, auf die die Nachrichten verweisen.
     pub images: super::images::TurnImages,
+    /// Stufe des Projekts des Chats für die Paneldeck-Werkzeuge (#386; `ToolPolicy::with_project_cap`): die Anfrage bietet
+    /// nur, was sie erlaubt, und der Prompt nennt die wirksame Stufe (Review 3.2.0). Ohne Projekt-Grenze „Steuern“.
+    pub project_cap: crate::mcp::McpLevel,
 }
 
 impl Default for TurnContext {
     fn default() -> Self {
-        TurnContext { project: String::new(), folder: String::new(), servers: Vec::new(), lang: Lang::En, expert: false, token_scale: 1.0, prompt_parts: Default::default(), agent: Default::default(), compact: Default::default(), images: Default::default(), plan: None }
+        TurnContext {
+            project: String::new(),
+            folder: String::new(),
+            servers: Vec::new(),
+            lang: Lang::En,
+            expert: false,
+            token_scale: 1.0,
+            prompt_parts: Default::default(),
+            agent: Default::default(),
+            compact: Default::default(),
+            images: Default::default(),
+            plan: None,
+            project_cap: crate::mcp::McpLevel::Control,
+        }
     }
 }
 

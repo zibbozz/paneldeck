@@ -3535,7 +3535,7 @@ impl App {
             let Some(e) = self.entries.get(&id) else { continue };
             let (Some(c), Some(meta)) = (e.chat.as_ref(), e.meta.chat.as_ref()) else { continue };
             let mut h = std::collections::hash_map::DefaultHasher::new();
-            (base, c.rev(), c.token_scale.to_bits(), &meta.server, &meta.model, &e.meta.cwd).hash(&mut h);
+            (base, c.rev(), c.token_scale.to_bits(), &meta.server, &meta.model, &e.meta.cwd, self.chat_project_cap(id).as_u8()).hash(&mut h);
             self.projects.iter().find(|p| p.id == e.meta.project).map(|p| &p.name).hash(&mut h);
             let key = h.finish();
             if c.context_key == Some(key) {
@@ -3562,6 +3562,7 @@ impl App {
         .with_origins(origins)
         .with_agent(self.agent_env(id))
         .with_project_cap(self.chat_project_cap(id))
+        .with_general_cap(self.chat_general_cap(id))
     }
 
     /// Neue Kennung für ein Seitenleisten-Projekt (#386): steigt immer, auch über gelöschte Projekte hinweg.
@@ -3572,10 +3573,10 @@ impl App {
     }
 
     /// Stufe des Projekts eines Chats für seine Paneldeck-Werkzeuge (#386): „wie global“ = wie das Modell; gesperrt = keine.
+    /// Eingeordnet wie bei jedem Werkzeugaufruf (`access_who`, Review 3.2.0): ein von einem externen Agenten angelegter
+    /// Chat gilt als extern – es gilt das Strengere.
     fn chat_project_cap(&self, id: u64) -> crate::mcp::McpLevel {
-        let Some(project) = self.entries.get(&id).map(|e| e.meta.project) else { return crate::mcp::McpLevel::Off };
-        // Obergrenze hier „Steuern“: die Stufe des Modells begrenzt `ToolPolicy` selbst (es gilt das Minimum).
-        self.access_map(crate::mcp::McpLevel::Control).sidebar(crate::access::Caller::Home(project), project)
+        self.chat_cap_of(id)
     }
 
     /// Muss der Chat vor dem Senden einmal nach der Stufe seines Modells fragen? Ja, wenn das Modell Werkzeuge nutzen
@@ -3635,6 +3636,8 @@ impl App {
             plan: e.and_then(|e| e.chat.as_ref()).and_then(|c| c.next_plan_phase()),
             compact: self.settings.chat_compact,
             images: self.chat_turn_images(id),
+            // Stufe des Projekts (#386, Review 3.2.0): Werkzeuge, Prompt und Kontext der Anfrage folgen ihr.
+            project_cap: self.chat_project_cap(id),
         }
     }
 

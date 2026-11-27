@@ -1224,11 +1224,21 @@ fn error_scope(code: &str) -> &'static [&'static str] {
     }
 }
 
+/// Zeile für „Your access“, wenn das Projekt des Chats die Paneldeck-Werkzeuge begrenzt (#386, Review 3.2.0).
+fn project_limit_note(policy: &ToolPolicy) -> String {
+    let level = policy.prompt_level();
+    if level == McpLevel::Off {
+        "- This chat's project is locked for agents: you have no Paneldeck tools here (only the user can release it in Settings → Agents); your own file and command tools are not affected.\n".to_string()
+    } else {
+        format!("- This chat's project limits the Paneldeck tools to **{}** (the model's level is {}); only the user can change it in Settings → Agents.\n", level_name(level), level_name(policy.cfg.level))
+    }
+}
+
 fn errors_block(defs: &[ToolDef], policy: &ToolPolicy) -> String {
     let mut out = String::from("## Errors\n\nA failed call returns a JSON object {\"error\": \"<code>\", \"message\": \"…\"}; the message can be in the user's interface language and can end with `details: {…}` (for example `missing_fields`). What the codes mean and what to do:\n");
     let has = |s: &str| match s {
         "@expert" => policy.expert,
-        "@control" => policy.prompt_level() == McpLevel::Control,
+        "@control" => policy.can_write(defs),
         t => defs.iter().any(|d| d.name == t),
     };
     for (code, text) in ERRORS {
@@ -1262,8 +1272,11 @@ pub fn render(policy: &ToolPolicy, model: &str) -> String {
 /// `tools` bleiben).
 pub fn render_with(policy: &ToolPolicy, spec: &Spec) -> String {
     let defs = offered_defs(policy);
+    // Wirksame Stufe der Paneldeck-Werkzeuge (Modell und Projekt, #386); die eigenen Werkzeuge des Chats (Dateien,
+    // Befehle) folgen der Stufe des Modells – auch ein gesperrtes Projekt lässt sie dem Chat.
     let level = policy.prompt_level();
-    let tools_on = level != McpLevel::Off && !defs.is_empty();
+    let tools_on = policy.enabled() && !defs.is_empty();
+    let writes = policy.can_write(&defs);
     let docs = spec.on(PromptPart::ToolDocs);
     let examples = spec.on(PromptPart::Examples);
     let mut out = String::with_capacity(64 * 1024);
@@ -1290,9 +1303,12 @@ pub fn render_with(policy: &ToolPolicy, spec: &Spec) -> String {
     if tools_on {
         let mode = if policy.expert { "expert mode (projects and tickets)" } else { "simple mode (the simple to-do list)" };
         out.push_str(&format!("- Tool level: **{}**. To-do mode: **{mode}**.\n", level_name(level)));
+        if policy.project_limited() {
+            out.push_str(&project_limit_note(policy));
+        }
         let listed = if docs { "all listed under \"Tools\" below" } else { "all in your tool definitions" };
         out.push_str(&format!("- You have {} tools, {listed}. Other tools do not exist for you; a tool the user unchecked or one above your level returns `forbidden`.\n", defs.len()));
-        if level == McpLevel::Control {
+        if writes {
             if policy.cfg.ask_write {
                 out.push_str("- Write tools wait for the user's approval in the chat (Allow, Always for this chat, Deny). A denied call returns `denied` – do not retry it.\n");
             } else {
@@ -1541,8 +1557,10 @@ pub fn render_compact_with(policy: &ToolPolicy, spec: &Spec) -> String {
     let defs = offered_defs(policy);
     let listed = policy.listed_specs();
     let more = super::more_tools::deferred(policy).len();
+    // Wie in `render_with`: wirksame Stufe (Modell und Projekt), eigene Werkzeuge des Chats auch bei gesperrtem Projekt.
     let level = policy.prompt_level();
-    let tools_on = level != McpLevel::Off && !defs.is_empty();
+    let tools_on = policy.enabled() && !defs.is_empty();
+    let writes = policy.can_write(&defs);
     let mut out = String::with_capacity(8 * 1024);
     out.push_str("# Paneldeck chat\n\nYou are the assistant in a chat inside Paneldeck, a terminal manager on the user's computer.");
     if spec.on(PromptPart::Language) {
@@ -1580,7 +1598,10 @@ pub fn render_compact_with(policy: &ToolPolicy, spec: &Spec) -> String {
     if tools_on {
         let mode = if policy.expert { "expert mode" } else { "simple mode" };
         out.push_str(&format!("- Level **{}**, {mode}, {} tools. At most {} tool calls per answer.\n", level_name(level), defs.len(), policy.cfg.max_steps));
-        if level == McpLevel::Control {
+        if policy.project_limited() {
+            out.push_str(&project_limit_note(policy));
+        }
+        if writes {
             out.push_str(if policy.cfg.ask_write { "- Write tools wait for the user's approval in the chat.\n" } else { "- Write tools run without approval.\n" });
         } else {
             out.push_str("- Read only: you cannot change anything.\n");
@@ -1590,7 +1611,7 @@ pub fn render_compact_with(policy: &ToolPolicy, spec: &Spec) -> String {
             out.push_str("\n## Errors\n\nA failed call returns {\"error\": code, \"message\": …}:\n");
             let has = |s: &str| match s {
                 "@expert" => policy.expert,
-                "@control" => level == McpLevel::Control,
+                "@control" => writes,
                 t => defs.iter().any(|d| d.name == t),
             };
             for (what, codes) in ERROR_GROUPS {
