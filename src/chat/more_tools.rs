@@ -23,8 +23,9 @@
 //! * `create_project`, `delete_ticket`, `update_comment`, `delete_comment` (#386): die Schalter in
 //!   `access::offered_to_chats` bleiben; `update_comment` (ohne Schalter erlaubt) dort immer anbieten;
 //!
-//! Was Chats trotz allem nie bekommen sollen, steht an genau einer Stelle: `tools::NOT_FOR_CHATS` (derzeit Reiter „Zeit“
-//! und Kalender, #164 – eine Entscheidung über die volle Fassung, nicht über Platz in der Kurzfassung).
+//! Was Chats trotz allem nie bekommen sollen, steht an genau einer Stelle: `tools::NOT_FOR_CHATS` (derzeit leer;
+//! Reiter „Zeit“ und Kalender, #164, gehören seit der Freigabe durch den Nutzer dazu: Stufe Lesen bzw. Steuern wie bei
+//! externen Agenten).
 
 use super::agent;
 use super::master_prompt;

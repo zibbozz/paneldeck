@@ -1594,8 +1594,8 @@ mod tests {
                     let ctx = crate::llm::config::auto_context(sys + tools, None);
                     assert!(!crate::llm::config::context_too_small(ctx, sys + tools), "{model} {expert} {level:?}: {ctx}");
                     eprintln!("SIZES   -> auto context {ctx}");
-                    // Nur Steuern im Expertenmodus (die meisten Werkzeuge) braucht mehr als 32768.
-                    assert!(ctx <= 32768 || (expert && level == McpLevel::Control), "{model} {expert} {level:?}: {ctx}");
+                    // Steuern (mit Zeit und Kalender, #164) braucht mehr als 32768; Lesen bleibt darunter.
+                    assert!(ctx <= 32768 || level == McpLevel::Control,"{model} {expert} {level:?}: {ctx}");
                 }
             }
         }
@@ -1608,7 +1608,7 @@ mod tests {
         s.set_model_cfg(LlmModel { level: McpLevel::Control, level_chosen: true, ..LlmModel::named("m1") });
         let p = prepare(&meta(), &[msg(store::Role::User, "q")], &cx(vec![s.clone()])).unwrap();
         let ctx = p.request.num_ctx.unwrap();
-        assert!(ctx > 8192 && ctx <= 32768 && ctx.is_power_of_two(), "{ctx}");
+        assert!(ctx > 8192 && ctx <= 65536 && ctx.is_power_of_two(), "{ctx}");
         assert!(p.note.is_none() && p.context_notice.is_none(), "{:?} {:?}", p.note, p.context_notice);
         assert!(p.history_budget >= 4096 * 3 / 4, "{}", p.history_budget);
         // erkannte Länge kleiner: höchstens diese

@@ -61,7 +61,14 @@ fn the_compact_list_is_the_core_plus_the_meta_tool_and_nothing_gets_lost() {
 fn the_list_names_only_tools_the_level_mode_switches_and_selection_allow() {
     let read = list(&policy(McpLevel::Read, false));
     assert!(read.contains(&"screenshot".to_string()) && read.contains(&"search_history".to_string()), "{read:?}");
-    assert!(!read.iter().any(|n| crate::chat::tools::NOT_FOR_CHATS.contains(&n.as_str())), "Zeit/Kalender nie: {read:?}");
+    assert!(!read.iter().any(|n| crate::chat::tools::NOT_FOR_CHATS.contains(&n.as_str())), "nie: {read:?}");
+    // Zeit und Kalender (#164): lesende ab Stufe Lesen, schreibende erst bei Steuern
+    for t in ["list_alarms", "list_calendar_events"] {
+        assert!(read.contains(&t.to_string()), "Lesen: {t}");
+    }
+    for t in ["create_alarm", "create_calendar_event"] {
+        assert!(!read.contains(&t.to_string()), "Lesen: kein {t}");
+    }
     for w in ["rename_session", "close_session", "move_file", "add_todo", "send_text"] {
         assert!(!read.contains(&w.to_string()), "Lesen: kein {w}");
     }
@@ -237,7 +244,7 @@ fn the_full_prompt_and_its_tools_stay_as_they_were() {
         assert!(!full.contains(NAME), "{level:?}: kein more_tools in der vollen Fassung");
         assert!(full.contains(&format!("You have {} tools", p.specs().len())));
         // jedes erlaubte Werkzeug hat seinen Abschnitt
-        assert!(full.contains("\n### screenshot\n") && !full.contains("\n### list_alarms\n"), "Zeit/Kalender nie (NOT_FOR_CHATS)");
+        assert!(full.contains("\n### screenshot\n") && full.contains("\n### list_alarms\n"), "Zeit/Kalender direkt in der vollen Fassung");
         // die Kurzfassung nennt more_tools mit einer klaren Anleitung
         let compact = master_prompt::render_compact(&p, "qwen3:8b");
         assert!(compact.contains("more tools are not listed: call `more_tools` for their names, then `more_tools` with `name` for one tool's fields, then call that tool by its name."), "{compact}");

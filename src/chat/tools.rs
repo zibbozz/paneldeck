@@ -70,30 +70,12 @@ pub struct ToolPolicy {
 /// Werkzeuge, die Chats nie bekommen – weder in der Werkzeug-Liste noch über `more_tools` noch beim Aufruf (#393: die eine
 /// Stelle dafür; `ToolPolicy::allowed` und `ToolPolicy::check`).
 ///
-/// Reiter „Zeit“ und Kalender (#164, so in 3.2.0 dokumentiert: „Chats bekommen diese Werkzeuge nicht“): Platz in der
-/// Kurzfassung wäre mit `more_tools` kein Grund mehr, aber die **volle** Fassung listete sie sonst direkt – dann bräuchte
-/// Steuern ohne Expertenmodus 65536 statt 32768 Tokens automatischen Kontext und Lesen im Expertenmodus mit Agenten-
-/// Werkzeugen bei 32768 die Kurzfassung. Ob Chats sie bekommen, entscheidet der Nutzer; dann genügt es, sie hier zu
-/// streichen (Tests und Doku nennen die Folgen). Platz-Ausschlüsse anderer Zweige gehören **nicht** hierher (siehe
-/// `more_tools`: `editor_diff`, `list_save_actions`, `update_comment` fallen beim Zusammenführen einfach weg).
-pub const NOT_FOR_CHATS: &[&str] = &[
-    // Reiter „Zeit“ (`time::agent::TOOLS`)
-    "list_alarms",
-    "list_timers",
-    "list_stopwatches",
-    "list_clocks",
-    "list_birthdays",
-    "create_alarm",
-    "update_alarm",
-    "create_timer",
-    "update_timer",
-    "create_stopwatch",
-    "control_stopwatch",
-    // Kalender (`calendar::agent::TOOLS`)
-    "list_calendar_events",
-    "create_calendar_event",
-    "update_calendar_event",
-];
+/// Derzeit leer: Reiter „Zeit“ und Kalender (#164) standen hier, der Nutzer hat sie für Chats freigegeben. Folge: Die volle
+/// Fassung listet sie direkt (Steuern ohne Expertenmodus braucht 65536 statt 32768 Tokens automatischen Kontext), die
+/// Kurzfassung nennt sie über `more_tools`. Der Mechanismus bleibt für künftige Werkzeuge. Platz-Ausschlüsse anderer
+/// Zweige gehören **nicht** hierher (siehe `more_tools`: `editor_diff`, `list_save_actions`, `update_comment` fallen beim
+/// Zusammenführen einfach weg).
+pub const NOT_FOR_CHATS: &[&str] = &[];
 
 impl ToolPolicy {
     /// Eine nie gewählte Stufe gilt als „Aus“ – überall (Senden, Neu erzeugen, Wiederholen, Weiter, laufende Runde,
@@ -158,7 +140,7 @@ impl ToolPolicy {
             && !self.cfg.disabled_tools.iter().any(|t| t == def.name)
             // Editor (#54): schreibende Werkzeuge nur, wenn ihr Schalter an ist (geprüft wird beim Ausführen ohnehin).
             && crate::editor_svc::tools::offered_to_chats(def.name, self.editor_switches)
-            // Was Chats nie bekommen (Reiter „Zeit“, Kalender), steht in `NOT_FOR_CHATS` – Platz in der Kurzfassung ist seit
+            // Was Chats nie bekommen, steht in `NOT_FOR_CHATS` (derzeit nichts) – Platz in der Kurzfassung ist seit
             // #393 kein Grund mehr (`more_tools`).
             && !NOT_FOR_CHATS.contains(&def.name)
     }
@@ -706,22 +688,30 @@ mod tests {
         assert!(read < crate::llm::config::DEFAULT_CONTEXT as usize / 2, "{read}");
     }
 
-    /// Reiter „Zeit“ und Kalender (#164): nur für externe Agenten (`NOT_FOR_CHATS`) – weder gelistet noch über `more_tools`
-    /// (#393) noch beim Aufruf.
+    /// Reiter „Zeit“ und Kalender (#164): Chats bekommen sie wie externe Agenten – Lesen ab Stufe Lesen, Schreiben erst bei
+    /// Steuern und mit Freigabe. `NOT_FOR_CHATS` ist leer (der Mechanismus bleibt).
     #[test]
-    fn time_and_calendar_tools_are_never_offered_to_chats() {
-        let all = names(&policy(McpLevel::Control, &[], true));
-        let mut want: Vec<&str> = crate::time::agent::TOOLS.iter().chain(crate::calendar::agent::TOOLS.iter()).copied().collect();
-        want.sort_unstable();
-        let mut have = NOT_FOR_CHATS.to_vec();
-        have.sort_unstable();
-        assert_eq!(have, want, "genau die Werkzeuge von Zeit und Kalender");
-        for t in NOT_FOR_CHATS {
-            assert!(!all.contains(&t.to_string()), "{t}");
+    fn time_and_calendar_tools_are_offered_to_chats_by_level() {
+        assert!(NOT_FOR_CHATS.is_empty(), "derzeit nichts ausgeschlossen: {NOT_FOR_CHATS:?}");
+        let all: Vec<&str> = crate::time::agent::TOOLS.iter().chain(crate::calendar::agent::TOOLS.iter()).copied().collect();
+        assert_eq!(all.len(), 14, "11 Zeit + 3 Kalender");
+        let read = names(&policy(McpLevel::Read, &[], false));
+        let ctl = names(&policy(McpLevel::Control, &[], false));
+        for t in all {
+            let level = mcp::tool_level(t).unwrap_or_else(|| panic!("{t}: kein MCP-Werkzeug"));
+            assert_eq!(read.contains(&t.to_string()), level == McpLevel::Read, "{t}: Lesen");
+            assert!(ctl.contains(&t.to_string()), "{t}: Steuern");
+            assert_eq!(crate::chat::plan::is_read_only(t), level == McpLevel::Read, "{t}: Plan-Modus");
             let r = policy(McpLevel::Control, &[], false).check(&call(t, json!({})));
-            assert!(matches!(r, Err((ToolStatus::Denied, _))), "{t}: {r:?}");
-            assert_eq!(crate::chat::more_tools::run(&policy(McpLevel::Control, &[], true), &json!({"name": t})).unwrap_err().0, "forbidden", "{t}");
+            assert!(!matches!(r, Err((ToolStatus::Denied, _))), "{t}: nicht gesperrt: {r:?}");
+            let r = policy(McpLevel::Read, &[], false).check(&call(t, json!({})));
+            assert_eq!(matches!(r, Err((ToolStatus::Denied, _))), level != McpLevel::Read, "{t}: Lesen: {r:?}");
         }
+        // Schreibende fragen nach (Stufe Steuern, keine Ausnahme), lesende nicht.
+        let log = call("create_alarm", json!({"time": "07:30"}));
+        assert_eq!(policy(McpLevel::Control, &[], false).check(&log), Ok(true));
+        assert_eq!(policy(McpLevel::Control, &[], false).check(&call("list_alarms", json!({}))), Ok(false));
+        assert!(crate::chat::more_tools::run(&policy(McpLevel::Control, &[], true), &json!({"name": "create_calendar_event"})).is_ok());
     }
 
     #[test]
