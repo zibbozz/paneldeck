@@ -70,6 +70,8 @@ mod panels;
 mod paste_ask;
 mod planning_ui;
 mod procs_ui;
+mod save_actions_dialog;
+mod save_actions_ui;
 mod session_settings;
 mod settings;
 #[cfg(feature = "readme-shots")]
@@ -93,6 +95,7 @@ mod tutorial;
 pub(crate) mod update;
 
 use tutorial::{Spot, TutMark};
+use save_actions_dialog::SaPaletteCmd;
 
 /// Vorgabefarbe einer neuen Sitzung/eines neuen Projekts Nummer `i` aus der geltenden Palette des Terminal-Hubs
 /// (läuft im Kreis; bis 2.2 die feste Palette, jetzt `crate::palette::HUB_DEFAULTS` bzw. die gemeinsame).
@@ -357,6 +360,8 @@ enum Action {
     /// Sitzung, Text, aus abgedocktem Fenster, Rückfrage nur wegen möglicher Broadcast-Ziele (`Session::take_paste_ask`).
     PasteAsk(u64, String, bool, bool),
     OpenPalette,
+    /// Aktionen beim Speichern (#383) aus der Befehls-Palette.
+    SaveActions(SaPaletteCmd),
     OpenTemplates,
     OpenCosts,
     TemplateStart(usize),
@@ -965,6 +970,8 @@ pub struct App {
     quit_ok: bool,
     /// Prozessliste (#243): Einträge, Laufzeit, Ausgabeansicht, Dialoge.
     procs: procs_ui::ProcsState,
+    /// Aktionen beim Speichern im Editor (#383).
+    save_actions: save_actions_ui::SaState,
     /// Dienste des Editor-Reiters (#54): Plattenänderungen, Suche in Dateien, `--edit`, Explorer-Eintrag.
     editor_svc: editor_services::EditorServices,
     detached: Vec<u64>,
@@ -1237,6 +1244,7 @@ impl App {
         }
         let bg = std::sync::mpsc::channel::<String>();
         let procs_state = procs_ui::ProcsState::load(&dir);
+        let save_actions_state = save_actions_ui::SaState::load(&dir);
         let mut app = App {
             settings,
             shells,
@@ -1342,6 +1350,7 @@ impl App {
             quitting: false,
             quit_ok: false,
             procs: procs_state,
+            save_actions: save_actions_state,
             editor_svc: editor_services::EditorServices::from_cli(),
             detached: saved.detached.clone(),
             settings_tab: 0,
@@ -3965,6 +3974,7 @@ impl App {
             }
             Action::OpenPalette => self.palette = Some(Palette { query: String::new(), sel: 0 }),
             Action::EditorFormat(op) => self.editor_format_active(ctx, op),
+            Action::SaveActions(c) => self.sa_palette(c),
             Action::OpenHistory => {
                 self.history_open = true;
                 if self.history_rx.is_none() {
@@ -4590,6 +4600,7 @@ impl eframe::App for App {
         self.poll_mcp(ctx);
         self.editor_tick(ctx);
         self.poll_procs(ctx);
+        self.poll_save_actions(ctx);
         self.poll_editor_services(ctx);
         self.poll_retired(ctx);
         // Linux/macOS: Master-Passwort für API-Schlüssel, wenn ein Zugriff darauf wartet (#149).

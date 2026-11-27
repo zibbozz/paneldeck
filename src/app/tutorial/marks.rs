@@ -112,6 +112,8 @@ spots! {
     TimeOptions = "time.options",
     // Menüleiste je Teilung (#381, 3.2.0)
     EditorMenuBar = "editor.menu_bar",
+    // Aktionen beim Speichern (#383, 3.2.0)
+    EditorSaveActions = "settings.editor.save_actions",
 }
 
 /// Wo ein Ziel in diesem Bild lag: ganzes Rechteck und der sichtbare (nicht weggeschnittene) Teil.

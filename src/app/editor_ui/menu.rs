@@ -149,6 +149,8 @@ pub(super) fn menus(ed: &mut EditorUi, g: u64, prefs: &super::EditorPrefs, lang:
         item("save_all", lang.t("Alle speichern", "Save all"), String::new(), f(Cmd::SaveAll)).off((!any_dirty).then(|| lang.t("Keine ungespeicherten Dateien", "No unsaved files").to_string())),
     ));
     file.push(Entry::Sep);
+    file.extend(on_save_entries(doc_id, ed.on_save.paused, need_doc(), prefs, lang, f));
+    file.push(Entry::Sep);
     file.push(Entry::Item(match doc_id {
         Some(id) => item("close", lang.t("Reiter schließen", "Close tab"), fixed("Ctrl+W", lang), f(Cmd::Close(vec![(g, id)]))),
         None => item("close", lang.t("Reiter schließen", "Close tab"), fixed("Ctrl+W", lang), vec![]).off(no_doc()),
@@ -254,6 +256,19 @@ pub(super) fn menus(ed: &mut EditorUi, g: u64, prefs: &super::EditorPrefs, lang:
         Menu { id: "view", title: lang.t("Ansicht", "View"), entries: view },
         Menu { id: "format", title: lang.t("Format", "Format"), entries: format },
     ]
+}
+
+/// Aktionen beim Speichern (#383) im Menü *Datei*: *Aktionen beim Speichern …*, *Ohne Aktionen speichern* (eigenes
+/// Kürzel aus den Einstellungen), *Pausieren*/*Fortsetzen*. Ausgeführt von [`crate::app::App::on_save_menu_items`].
+fn on_save_entries(doc: Option<u64>, paused: bool, need_doc: Option<String>, prefs: &super::EditorPrefs, lang: Lang, f: impl Fn(Cmd) -> Vec<Cmd>) -> Vec<Entry> {
+    use super::super::save_actions_dialog::OnSaveMenu;
+    let rules = item("on_save_rules", lang.t("Aktionen beim Speichern …", "Actions on save …"), String::new(), f(Cmd::OnSaveMenu(OnSaveMenu::Rules(doc))));
+    let without = match doc {
+        Some(d) => item("save_no_actions", lang.t("Ohne Aktionen speichern", "Save without actions"), key(prefs, lang, "save_no_actions"), f(Cmd::OnSaveMenu(OnSaveMenu::SaveWithout(d)))).off(need_doc),
+        None => item("save_no_actions", lang.t("Ohne Aktionen speichern", "Save without actions"), key(prefs, lang, "save_no_actions"), vec![]).off(need_doc),
+    };
+    let pause = if paused { lang.t("Aktionen beim Speichern fortsetzen", "Resume actions on save") } else { lang.t("Aktionen beim Speichern pausieren (bis zum Neustart)", "Pause actions on save (until restart)") };
+    vec![Entry::Item(rules), Entry::Item(without), Entry::Item(item("on_save_pause", pause, String::new(), f(Cmd::OnSaveMenu(OnSaveMenu::TogglePause))))]
 }
 
 impl EditorUi {

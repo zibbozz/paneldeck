@@ -383,6 +383,14 @@ pub fn tools() -> Vec<ToolDef> {
             description: "Restart a process-list entry (`process`) or a group (`group`) - give exactly one: a running entry is stopped like stop_process and started again once it has ended; a stopped, exited, crashed or failed one starts at once. Returns at once.",
             schema: schema(json!({"process": {"type": ["integer", "string"], "description": "Process id or name from list_processes"}, "group": {"type": "string", "description": "Group name from list_processes"}}), &[]),
         },
+        // ---- Aktionen beim Speichern (#383, nur lesen; Regeln legt nur der Nutzer an)
+        ToolDef {
+            name: "list_save_actions",
+            level: Read,
+            group: Group::Always,
+            description: "List the user's actions on save for the Editor tab (Settings -> Editor -> Actions on save): `enabled` (master switch), `paused` (until restart), `parallel`, `running` and per rule id, name, enabled, scope (file/folder/pattern), path, patterns (like .gitignore, relative to the folder), actions (kinds only: format, trim_whitespace, final_newline, line_endings, encoding, tabs_to_spaces, spaces_to_tabs, command, copy, send_to_session, restart_process, notify), on_autosave / on_agent_save (whether autosave and agent saves trigger it - explicit saves by the user always do), stop_after, no_parent_rules, terminal, timeout_secs, folder_missing and last_result (status ok/failed/time_limit/cancelled/skipped/running, at = seconds since 1970). Command lines, copy targets, texts and environment values are never returned. Agents cannot create or change rules.",
+            schema: schema(json!({}), &[]),
+        },
         // ---- Themes (#309, nur lesen)
         ToolDef {
             name: "theme_list",

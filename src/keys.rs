@@ -50,6 +50,8 @@ pub const DEFAULTS: &[(&str, &str)] = &[
     ("ed_format_alt", "Ctrl+Shift+I"),
     ("ed_minify_alt", ""),
     ("ed_validate_alt", ""),
+    // Editor: Ohne Aktionen speichern (#383): standardmäßig ohne Kürzel
+    ("save_no_actions", ""),
 ];
 
 /// Kürzel, die in jedem Bereich gelten (Reiterwechsel) – die übrigen nur im Terminal-Bereich.
@@ -57,9 +59,10 @@ pub fn is_global(id: &str) -> bool {
     id.starts_with("mode_")
 }
 
-/// Kürzel nur des Editor-Reiters (#381) – der Terminal-Bereich lässt diese Tasten den Terminals.
+/// Kürzel nur des Editor-Reiters (Formatieren #381, *Ohne Aktionen speichern* #383, …) – dort ausgewertet; der
+/// Terminal-Bereich lässt diese Tasten den Terminals.
 pub fn is_editor(id: &str) -> bool {
-    id.starts_with("ed_")
+    id.starts_with("ed_") || id == "save_no_actions"
 }
 
 pub fn label(id: &str, de: bool) -> &'static str {
@@ -100,6 +103,7 @@ pub fn label(id: &str, de: bool) -> &'static str {
         "ed_format_alt" => ("Editor: JSON/XML formatieren (zweite Belegung)", "Editor: format JSON/XML (alternative)"),
         "ed_minify_alt" => ("Editor: JSON/XML minifizieren (zweite Belegung)", "Editor: minify JSON/XML (alternative)"),
         "ed_validate_alt" => ("Editor: JSON/XML prüfen (zweite Belegung)", "Editor: validate JSON/XML (alternative)"),
+        "save_no_actions" => ("Editor: Ohne Aktionen speichern", "Editor: Save without actions"),
         _ => ("?", "?"),
     };
     if de { d } else { e }
@@ -166,6 +170,13 @@ pub fn pretty(s: &str, de: bool) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// *Ohne Aktionen speichern* gilt nur im Editor-Reiter (im Terminal-Bereich gehören die Tasten dem Terminal).
+    #[test]
+    fn editor_only_shortcuts() {
+        assert!(is_editor("save_no_actions") && !is_global("save_no_actions"));
+        assert!(!is_editor("new") && label("save_no_actions", false) != "?");
+    }
 
     #[test]
     fn roundtrip() {

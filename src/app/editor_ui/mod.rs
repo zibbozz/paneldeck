@@ -28,6 +28,7 @@ mod view;
 mod tests;
 
 pub(crate) use doc::DocInfo;
+pub(crate) use doc::ENCODINGS as ENCODING_CHOICES;
 pub(crate) use view::lang_label;
 use doc::DocEntry;
 use panes::Panes;
@@ -164,6 +165,8 @@ pub(crate) struct EditorUi {
     pub(super) fmt: format::FmtState,
     /// Menüleiste je Teilung im letzten Bild: Fläche und ob sie zusammengeklappt ist (Tests, Tutorial).
     pub(super) menu_rects: HashMap<u64, (eframe::egui::Rect, bool)>,
+    /// Aktionen beim Speichern (#383): Stand für Statusleiste und Reiter, Klicks zurück an die App.
+    pub(crate) on_save: super::save_actions_ui::OnSaveView,
 }
 
 impl EditorUi {
@@ -482,27 +485,34 @@ impl super::App {
     }
 
     /// Jedes Bild im Hauptdurchgang, auch außerhalb des Editor-Reiters: fertige Formatier-Läufe übernehmen (#381),
-    /// automatisches Speichern.
+    /// automatisches Speichern (Auslöser „automatisch“ für die Aktionen beim Speichern, #383).
     pub(crate) fn editor_tick(&mut self, ctx: &eframe::egui::Context) {
         self.ed.poll_formats(self.settings.language);
         let prefs = self.editor_prefs();
         let Some(delay) = prefs.autosave else { return };
-        let lang = self.settings.language;
         let mut next: Option<std::time::Duration> = None;
-        for d in self.ed.docs.values_mut() {
+        let mut due = Vec::new();
+        for (id, d) in self.ed.docs.iter() {
             let Some(at) = d.edited_at else { continue };
             if d.path.is_none() || !d.dirty() || d.disk_conflict {
                 continue;
             }
             let age = at.elapsed();
             if age >= delay {
-                if d.save(None, lang).is_ok() {
-                    d.drop_hot(&self.dir);
-                }
-                d.edited_at = None;
+                due.push(*id);
             } else {
                 let rest = delay - age;
                 next = Some(next.map_or(rest, |n| n.min(rest)));
+            }
+        }
+        let dir = self.dir.clone();
+        for id in due {
+            let ok = self.editor_save_with(id, None, crate::save_actions::SaveOrigin::Autosave).is_ok();
+            if let Some(d) = self.ed.docs.get_mut(&id) {
+                if ok {
+                    d.drop_hot(&dir);
+                }
+                d.edited_at = None;
             }
         }
         if let Some(n) = next {
@@ -684,11 +694,10 @@ impl super::App {
         r
     }
 
-    /// Dokument speichern (für `editor_save`; der Aufrufer prüft die Regeln, z. B. nur vorhandene Dateien).
+    /// Dokument speichern (für `editor_save` und Chats; der Aufrufer prüft die Regeln, z. B. nur vorhandene Dateien).
+    /// Auslöser „Agent“ für die Aktionen beim Speichern (#383).
     pub(crate) fn editor_save_doc(&mut self, id: u64) -> Result<(), String> {
-        let lang = self.settings.language;
-        let d = self.ed.docs.get_mut(&id).ok_or_else(|| lang.t("Kein solches Dokument", "No such document").to_string())?;
-        d.save(None, lang)
+        self.editor_save_with(id, None, crate::save_actions::SaveOrigin::Agent).map(|_| ())
     }
 
     /// Pfade der offenen Dateien (für die Überwachung auf Änderungen).

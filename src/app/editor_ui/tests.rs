@@ -1060,6 +1060,68 @@ fn format_on_save_follows_save_as_and_is_undone_when_the_save_fails() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Ein Speicherweg (#381 + #383, `EditorUi::save_doc`): Formatieren beim Speichern und die Text-Aktionen der Regeln
+/// sind **ein** Rückgängig-Schritt; *Formatieren* einer Regel läuft nach dem Formatieren beim Speichern nicht noch einmal;
+/// ohne `format` (automatisch, Agent) kein Formatieren; scheitert das Schreiben, ist alles zurückgenommen (auch
+/// Zeilenenden).
+#[test]
+fn save_doc_formats_and_runs_builtins_as_one_undo_step() {
+    use crate::editor::LineEnding;
+    use crate::save_actions::Builtin;
+    let dir = test_dir("savedoc");
+    let ctx = egui::Context::default();
+    let mut t = 0.0;
+    let mut ed = EditorUi::default();
+    ed.fmt.runner = Some(fake_fmt());
+    let en = crate::state::Lang::En;
+    let prefs = EditorPrefs { format_on_save_json: true, ..EditorPrefs::default() };
+    let p = write(&dir, "a.json", "[1,2]  ");
+    let id = ed.open_path(&p, false);
+    frame(&ctx, &mut ed, vec![], &mut t);
+    frame(&ctx, &mut ed, vec![], &mut t);
+    let list = [Builtin::Format, Builtin::TrimWhitespace, Builtin::FinalNewline];
+    let s = ed.save_doc(id, None, true, &list, &prefs, en, &[]).unwrap();
+    // Der Ersatz-Formatierer schreibt „[1,\n  2]“; der echte (die Aktion *Formatieren*) hätte „[\n  1,\n  2\n]“ daraus gemacht.
+    // Ohne Zeilenende in der Datei gilt das Standard-Zeilenende des Systems.
+    assert_eq!(std::fs::read_to_string(&p).unwrap().replace("\r\n", "\n"), "[1,\n  2]\n");
+    assert_eq!(s.hint, None);
+    assert_eq!(s.builtins, vec![(Builtin::Format, Ok(None)), (Builtin::TrimWhitespace, Ok(None)), (Builtin::FinalNewline, Ok(None))]);
+    {
+        let d = ed.docs.get_mut(&id).unwrap();
+        let doc = d.doc.as_mut().unwrap();
+        let mut sels = doc.new_selections(0);
+        assert!(doc.undo(&mut sels), "ein Schritt");
+        assert_eq!(doc.text(), "[1,2]  ", "Formatieren und Aktionen zusammen zurück");
+        assert!(!doc.can_undo());
+    }
+    // Ohne Formatieren (automatisches Speichern, Agent): nur die Aktionen.
+    let b = write(&dir, "b.json", "[5,6]  \n");
+    let idb = ed.open_path(&b, false);
+    frame(&ctx, &mut ed, vec![], &mut t);
+    let s = ed.save_doc(idb, None, false, &[Builtin::TrimWhitespace], &prefs, en, &[]).unwrap();
+    assert_eq!(std::fs::read_to_string(&b).unwrap(), "[5,6]\n");
+    assert_eq!(s.builtins, vec![(Builtin::TrimWhitespace, Ok(None))]);
+    // Ungültig: Hinweis des Formatierens, die Aktion *Formatieren* der Regel bekommt den Fehler (ohne zweiten Lauf).
+    let v = write(&dir, "v.json", "[1!]\n");
+    let idv = ed.open_path(&v, false);
+    frame(&ctx, &mut ed, vec![], &mut t);
+    let s = ed.save_doc(idv, None, true, &[Builtin::Format], &prefs, en, &[]).unwrap();
+    assert!(s.hint.as_deref().is_some_and(|h| h.starts_with("Saved unchanged: invalid JSON at line 1, column 3")), "{s:?}");
+    assert!(matches!(&s.builtins[..], [(Builtin::Format, Err(e))] if e.starts_with("Invalid content, not formatted: 1:3")), "{s:?}");
+    // Schreiben scheitert (Zeichen passt nicht in Windows-1252): Text und Zeilenenden wie vorher.
+    let k = write(&dir, "k.json", "[1,\"中\"]  \n");
+    let idk = ed.open_path(&k, false);
+    frame(&ctx, &mut ed, vec![], &mut t);
+    let _ = ed.docs.get_mut(&idk).unwrap().set_encoding("windows-1252", en);
+    let before = ed.docs[&idk].doc.as_ref().unwrap().format_state();
+    assert!(ed.save_doc(idk, None, true, &[Builtin::TrimWhitespace, Builtin::LineEndings(LineEnding::CrLf)], &prefs, en, &[]).is_err());
+    let doc = ed.docs[&idk].doc.as_ref().unwrap();
+    assert_eq!(doc.text(), "[1,\"中\"]  \n", "Dokument wie vorher");
+    assert!(doc.format_state() == before, "Zeilenenden/Kodierung wie vorher");
+    assert!(!doc.can_undo(), "kein übrig gebliebener Schritt");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn agent_formatting_is_marked_undoable_and_never_takes_the_keyboard() {
     let dir = test_dir("fmtagent");

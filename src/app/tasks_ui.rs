@@ -1534,6 +1534,11 @@ impl App {
             self.end_retired(token & !super::closing::RETIRED_TOKEN);
             return;
         }
+        // „Ausgabe zeigen“ der Aktionen beim Speichern (#383)
+        if token & super::save_actions_ui::SA_TOKEN != 0 {
+            self.sa_toast_clicked(token);
+            return;
+        }
         if window != self.wins.cur {
             self.wins_undo_later(ctx, window, token);
             return;

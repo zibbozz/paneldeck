@@ -729,6 +729,19 @@ const EDITOR: &[Step] = &[
         need: None,
     },
     Step {
+        id: "editor.save_actions",
+        since: "3.2.0",
+        spot: Some(Spot::EditorSaveActions),
+        title: tx("Aktionen beim Speichern", "Actions on save"),
+        body: tx(
+            "Regeln je Datei, Ordner oder Muster (wie .gitignore, z. B. src/**/*.ts): vor dem Schreiben Leerraum entfernen, Zeilenenden setzen oder formatieren, danach eigene Befehle (Lint, Upload mit scp/rsync), Kopieren an einen anderen lokalen Ort oder Paneldeck-Aktionen. Die Datei wird immer gespeichert; Fehler zeigen ein roter Punkt im Reiter und ein Hinweis mit der Ausgabe. Rechtsklick im Ordnerbaum legt eine Regel für Datei oder Ordner an.",
+            "Rules per file, folder or pattern (like .gitignore, e.g. src/**/*.ts): before writing trim whitespace, set line endings or format, afterwards your own commands (lint, upload with scp/rsync), copying to another local place or Paneldeck actions. The file is always saved; errors show a red dot on the tab and a notice with the output. Right-click in the folder tree to create a rule for a file or folder.",
+        ),
+        prep: &[Prep::Editor, Prep::Settings(S_EDITOR)],
+        done: None,
+        need: None,
+    },
+    Step {
         id: "editor.agents",
         since: "3.0.0",
         spot: Some(Spot::EditorAgentSwitches),

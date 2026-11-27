@@ -148,6 +148,30 @@ impl History {
         }
     }
 
+    /// Join all transactions recorded after the state `mark` (a [`History::state_id`]) into one undo step – e.g. format
+    /// on save and the actions on save before writing (#381/#383). Nothing happens when `mark` is unknown or fewer than
+    /// two transactions follow it.
+    pub(crate) fn join_since(&mut self, mark: u64) {
+        let start = match self.undo.iter().rposition(|t| t.id == mark) {
+            Some(p) => p + 1,
+            None if self.base_id == mark => 0,
+            None => return,
+        };
+        if self.undo.len() < start + 2 {
+            return;
+        }
+        let rest = self.undo.split_off(start + 1);
+        let first = self.undo.last_mut().expect("checked");
+        for t in rest {
+            first.steps.extend(t.steps);
+            first.sel_after = t.sel_after;
+            first.last_at = t.last_at;
+            first.id = t.id;
+            first.size += t.size;
+        }
+        self.group_open = false;
+    }
+
     pub(crate) fn pop_undo(&mut self) -> Option<Transaction> {
         self.group_open = false;
         self.undo.pop()

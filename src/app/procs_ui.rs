@@ -759,7 +759,7 @@ impl App {
             }
             if ui.button(lang.t("Duplizieren", "Duplicate")).clicked() {
                 let mut c = d.clone();
-                c.id = procs::next_id(&self.procs.defs);
+                c.id = procs::take_id(&self.procs.defs, &mut self.procs.meta);
                 c.name = procs::unique_name(&d.name, &self.procs.defs);
                 c.autostart = Autostart::Never;
                 self.procs.defs.push(c);
@@ -1068,7 +1068,10 @@ impl App {
             return;
         }
         if save {
-            let id = ed.id.unwrap_or_else(|| procs::next_id(&self.procs.defs));
+            let id = match ed.id {
+                Some(i) => i,
+                None => procs::take_id(&self.procs.defs, &mut self.procs.meta),
+            };
             let base = self.procs.defs.iter().find(|d| d.id == id).cloned();
             match ed.build(id, base.as_ref(), lang) {
                 Ok(d) => {

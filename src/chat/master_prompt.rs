@@ -242,6 +242,12 @@ pub const DOCS: &[ToolDoc] = &[
         examples: &[(r#"{"process": "web"}"#, "restart the entry named web")],
     },
     ToolDoc {
+        name: "list_save_actions",
+        purpose: "Lists the user's actions on save for the Editor tab: per rule its name, scope, patterns, action kinds, whether it is on, its triggers and its last result.",
+        usage: &["Command lines, targets and environment values are never returned. Only the user can create or change rules; editor_save reports which rules ran."],
+        examples: &[("{}", "all rules")],
+    },
+    ToolDoc {
         name: "theme_list",
         purpose: "Lists the colour themes (built-in and custom) and which one is active.",
         usage: &["Read-only: you cannot change themes."],

@@ -28,6 +28,8 @@ Mit `--profile <name>` wird der Unterordner `profiles\<name>` dieses Ordners gen
 | `plans/` | freigegebene Pläne aus dem [Plan-Modus](chat.md#plan-modus) der Chats als Markdown-Dateien (seit 3.1.0) |
 | `processes.json` | Einträge der [Prozessliste](processes.md) (siehe [unten](#prozessliste-processesjson)) |
 | `process-logs/` | Protokolldateien von Einträgen der Prozessliste mit eingeschalteter *Protokolldatei* |
+| `save-actions.json` | Regeln der [Aktionen beim Speichern](editor.md#aktionen-beim-speichern) des Editors (siehe [unten](#aktionen-beim-speichern-save-actionsjson), seit 3.2.0) |
+| `save-action-logs/` | Protokolldateien von Aktionen beim Speichern mit eingeschalteter *Ausgabe in eine Protokolldatei* (seit 3.2.0) |
 | `prompts.json` | Prompt-Bibliothek |
 | `themes/*.json` | eigene Themes (Beispiel liegt bei; Format und Farbnamen: [Themes](themes.md#dateiformat), optionales Feld `ui` seit 2.6.0, optionales Feld `background` seit 3.2.0, höchstens 1 MB) |
 | `system-prompt.md` | deine eigene Vorlage des [Systemprompts für Agenten](agent-interface.md#systemprompt) (nur wenn du eine gespeichert hast); `system-prompt.md.bak` = die vorige Vorlage nach *Auf Standard zurücksetzen* |
@@ -41,7 +43,7 @@ Mit `--profile <name>` wird der Unterordner `profiles\<name>` dieses Ordners gen
 | `ipc.json` | Port und Token der laufenden Instanz (intern) |
 | `cleanup-pending.json` | Aufräum-Schritte, die für den nächsten Start vorgemerkt sind (intern, siehe [Aufräumen](#aufräumen); wird nach dem Ausführen gelöscht) |
 
-`settings.json`, `state.json`, `prompts.json`, `themes/*.json`, `system-prompt.md`, `chats/*.json`, `processes.json` und `mcp-log.jsonl` sind stabile Formate: Neuere Versionen lesen ältere Dateien weiter, neue Felder sind optional.
+`settings.json`, `state.json`, `prompts.json`, `themes/*.json`, `system-prompt.md`, `chats/*.json`, `processes.json`, `save-actions.json` und `mcp-log.jsonl` sind stabile Formate: Neuere Versionen lesen ältere Dateien weiter, neue Felder sind optional.
 
 ## Chatverläufe
 Jeder [Chat](chat.md) speichert seinen Verlauf in `chats/<id>.json` (`<id>` = Kennung der Sitzung; Formatversion 1, seit 2.2.0):
@@ -101,6 +103,42 @@ Die Einträge der [Prozessliste](processes.md) (seit 2.6.0, Formatversion 1):
 - `env`: Liste von `{ "name", "value_protected" }`. Der Wert steht **nur** als `value_protected` = Base64 eines Windows-DPAPI-Blobs (aktueller Benutzer) in der Datei – nie im Klartext; ein Wert, der sich nicht entschlüsseln lässt (anderer Benutzer oder Rechner), fehlt beim Start mit einem Hinweis. Namen dürfen kein `=` und keine Leerzeichen enthalten, Namen mit `PANELDECK_` am Anfang werden abgelehnt.
 - Lesen ist tolerant: BOM erlaubt, ein ungültiger Eintrag wird übersprungen (die Datei wird vorher als `processes.defekt-<zeit>.json` gesichert), doppelte oder fehlende Kennungen werden neu vergeben. **Unbekannte Felder bleiben** beim Speichern erhalten (in den Einträgen und auf oberster Ebene), neuere Versionen können also Felder ergänzen. Geschrieben wird atomar. Paneldeck überschreibt die Datei nicht, wenn sie sich nicht lesen ließ (z. B. gesperrt) oder eine beschädigte Datei sich nicht sichern ließ, oder wenn ihre `version` neuer ist als die, die dieses Paneldeck kennt – Änderungen an der Liste werden dann mit einem Hinweis nicht gespeichert.
 - Laufzustand, Ausgabe und erkannte Adressen werden nicht gespeichert: Nach einem Neustart ist jeder Eintrag gestoppt.
+
+## Aktionen beim Speichern (save-actions.json)
+Die Regeln der [Aktionen beim Speichern](editor.md#aktionen-beim-speichern) des Editors (seit 3.2.0, Formatversion 1):
+
+```json
+{
+  "version": 1,
+  "enabled": true,
+  "parallel": 2,
+  "rules": [
+    {
+      "id": 1,
+      "name": "Lint",
+      "scope": "pattern",
+      "path": "C:\\work\\web",
+      "patterns": ["src/**/*.ts", "!dist/**"],
+      "actions": [
+        { "kind": "trim_whitespace" },
+        { "kind": "command", "command": "npx eslint --fix ${file}" },
+        { "kind": "copy", "target": "D:\\mirror", "keep_structure": true, "continue_on_error": true }
+      ],
+      "on_autosave": true,
+      "shell": "pwsh",
+      "env": [ { "name": "TOKEN", "value_protected": "AQAAANCMnd8BFdER…" } ],
+      "timeout_secs": 120
+    }
+  ]
+}
+```
+
+- Oberste Ebene: `enabled` (Hauptschalter, Standard `true`), `parallel` (gleichzeitige Läufe, 1–8, Standard `2`), `rules` (in der Reihenfolge, in der sie laufen).
+- Pflicht je Regel: `id` (eindeutige Zahl > 0). Alles andere ist optional; ein fehlendes Feld bedeutet seinen Standard und wird nicht geschrieben: `name`, `enabled` (`true`), `scope` (`"file"`, `"folder"` Standard, `"pattern"`), `path` (die Datei bzw. der Regelordner), `patterns` (Syntax wie `.gitignore`, nur bei `pattern`), `actions`, `on_autosave` / `on_agent_save` (`false`), `stop_after` / `no_parent_rules` (`false`), `shell` (Kennung einer erkannten Shell, leer = PowerShell), `env` (wie in `processes.json`: Namen im Klartext, Werte nur als `value_protected` = DPAPI-Blob des aktuellen Benutzers), `cwd` (leer = der Regelordner), `timeout_secs` (`60`, 1–3600), `terminal`, `notify_success`, `log_file` (`false`).
+- `actions`: eine Liste von Objekten mit `kind` und seinen Feldern – `format`, `trim_whitespace`, `final_newline`, `line_endings` (`eol`: `"lf"`/`"crlf"`), `encoding` (`encoding`: `utf-8`, `utf-8-bom`, `utf-16le`, `utf-16be`, `windows-1252`), `tabs_to_spaces` / `spaces_to_tabs` (`width`, fehlt = Tabbreite der Datei), `command` (`command`), `copy` (`target`, `keep_structure`, Standard `true`), `send_to_session` (`session`-Kennung, `name`, `text`), `restart_process` (`process`-Kennung oder `group`, `name`), `notify` (`text`); jede kann `continue_on_error: true` haben. Eine Aktion mit unbekanntem `kind` (aus einer neueren Version) bleibt erhalten und wird übersprungen.
+- Gelesen wird tolerant wie bei `processes.json` (BOM erlaubt, ungültige Regeln übersprungen nach einer Sicherung `save-actions.defekt-<zeit>.json`, doppelte Kennungen neu vergeben, unbekannte Felder bleiben, atomar geschrieben, eine neuere `version` wird nie überschrieben). Fehlt die Datei, gibt es keine Regeln.
+- Ergebnisse und der Verlauf der Ausgabe werden nicht gespeichert (nur im Speicher); `save-action-logs/` enthält die rotierenden Protokolldateien von Regeln mit *Ausgabe in eine Protokolldatei*.
+- Ein Export (*Gewählte exportieren …*) enthält dieselben Regel-Objekte unter `{"paneldeck_save_actions": 1, "rules": [...]}`, ohne `value_protected`.
 
 ## Neue Felder in 2.2.0
 - `settings.json` → `llm_servers`: die Server aus *Einstellungen → Modelle*, je mit `id`, `name`, `kind` (`ollama`/`openai`), `url`, optional `api_key` (Base64 eines Windows-DPAPI-Blobs – nie Klartext; nur derselbe Windows-Benutzer auf demselben Rechner kann ihn entschlüsseln), optional `receive_timeout_secs`, `models` (Einstellungen je Modell: `name`, `level`, `level_chosen`, `disabled_tools`, `ask_write`, `max_steps`, optional `tools`, `context_length`, `temperature`; `level_chosen: true` = die Stufe wurde in der [Frage nach der Stufe](chat.md#die-frage-nach-der-stufe) oder unter *Einstellungen → Modelle* gewählt – fehlt es oder ist es `false`, gilt das Modell als *Aus*, egal was in `level` steht) und `last_models` (Ergebnis des letzten *Verbinden*). Ein Server-Eintrag, der sich nicht lesen lässt (z. B. ein unbekannter `kind` einer neueren Version), bleibt unverändert erhalten und wird nur lesbar mit *Entfernen* angezeigt.
@@ -185,6 +223,11 @@ Alle Felder sind optional; ältere Versionen ignorieren sie, fehlende Felder bed
   | `agent_open`, `agent_edit`, `agent_save` | `false` | die [Agenten-Schalter](editor.md#agenten) (nur `true` schaltet ein; wirken nur bei Stufe *Steuern*) |
 
 - `hot-exit/`: ungespeicherte Editor-Puffer; `editor-state.json`: offener Ordner, Tabs, Teilungen und zuletzt geöffnete Dateien des Editor-Reiters (beides interne Formate; im *Aufräumen* als *Editor: ungespeicherte Puffer* bzw. als Teil von *Sitzungen und Layout*).
+
+## Neue Felder in 3.2.0
+- Neue Datei `save-actions.json` für die [Aktionen beim Speichern](editor.md#aktionen-beim-speichern) des Editors (siehe [oben](#aktionen-beim-speichern-save-actionsjson)) und der Ordner `save-action-logs/`. Ältere Versionen ignorieren beides.
+- Kürzel-Kennung `save_no_actions` (*Editor: Ohne Aktionen speichern*, ohne Standardtaste, nur im Editor-Reiter) in den Einstellungen der Tastenkürzel.
+- `processes.json` → optional auf oberster Ebene `next_id`: die nächste Kennung für einen neuen Eintrag, damit die Kennung eines gelöschten Eintrags nie an einen neuen geht (Aktionen beim Speichern merken sich Prozesse per Kennung). Ältere Versionen behalten das Feld.
 
 ## Neue Felder in 3.1.0
 Alle Felder sind optional; ältere Versionen ignorieren sie, fehlende Felder bedeuten die Standardwerte unten. Siehe [Befehle im Hintergrund](chat.md#befehle-im-hintergrund).

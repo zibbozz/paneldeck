@@ -8,7 +8,7 @@ use crate::state::Lang;
 use std::path::{Path, PathBuf};
 
 /// Kodierungen für das Menü der Statusleiste (Kennung des Kerns, Anzeige).
-pub(super) const ENCODINGS: &[(&str, &str)] = &[("utf-8", "UTF-8"), ("utf-8-bom", "UTF-8 BOM"), ("utf-16le", "UTF-16 LE"), ("utf-16be", "UTF-16 BE"), ("windows-1252", "Windows-1252")];
+pub(crate) const ENCODINGS: &[(&str, &str)] = &[("utf-8", "UTF-8"), ("utf-8-bom", "UTF-8 BOM"), ("utf-16le", "UTF-16 LE"), ("utf-16be", "UTF-16 BE"), ("windows-1252", "Windows-1252")];
 
 /// Angaben zu einem offenen Dokument (für `editor_list`).
 #[derive(Clone, Debug, PartialEq)]
@@ -422,6 +422,61 @@ impl DocEntry {
             Err(core::SaveError::NoPath) => Err(lang.t("Die Datei hat noch keinen Namen.", "The file has no name yet.").to_string()),
             Err(e) => Err(format!("{}: {e}", lang.t("Fehler beim Speichern", "Error while saving"))),
         }
+    }
+
+    /// Text-Aktionen beim Speichern (#383) vor dem Schreiben: Text-Änderungen als ein rückgängig machbarer Schritt,
+    /// Zeilenenden/Kodierung als Format. Je Aktion `Ok(None)`, `Ok(Some(hinweis))` (nichts geändert, z. B. kein JSON)
+    /// oder `Err(fehler)`. Große Dateien bekommen keine Text-Änderungen (nur Format). `path` = Ziel des Speicherns (bei
+    /// *Speichern unter* der neue Name – danach richtet sich *Formatieren*). Aufruf nur über [`super::EditorUi::save_doc`].
+    pub fn apply_save_builtins(&mut self, list: &[crate::save_actions::Builtin], path: Option<&std::path::Path>, prefs: &super::EditorPrefs, lang: Lang, keep_lines: &[usize]) -> Vec<(crate::save_actions::Builtin, Result<Option<String>, String>)> {
+        use crate::save_actions::{builtin, Builtin};
+        let large = self.is_large(prefs);
+        let Some(d) = self.doc.as_mut() else { return Vec::new() };
+        let mut out = Vec::new();
+        let text_list: Vec<Builtin> = list.iter().filter(|b| !matches!(b, Builtin::LineEndings(_) | Builtin::Encoding(_))).cloned().collect();
+        if !text_list.is_empty() {
+            if large {
+                for b in text_list {
+                    out.push((b, Ok(Some(lang.t("Große Datei – Text nicht geändert", "Large file – text not changed").to_string()))));
+                }
+            } else {
+                let ind = d.indent_settings();
+                let indent = match ind.style {
+                    core::IndentStyle::Tabs => builtin::Indent::Tab,
+                    core::IndentStyle::Spaces(n) => builtin::Indent::Spaces(n),
+                };
+                let cx = builtin::TextCx { path, tab_width: d.tab_width(), indent, keep_lines };
+                let a = builtin::apply_text(&d.text(), &text_list, cx, lang);
+                if !a.changed.is_empty() {
+                    d.replace_all_text(&mut self.scratch, &a.text, EditOrigin::User);
+                }
+                for b in text_list {
+                    let r = match (a.errors.iter().find(|(x, _)| *x == b), a.notes.iter().find(|(x, _)| *x == b)) {
+                        (Some((_, e)), _) => Err(e.clone()),
+                        (None, Some((_, n))) => Ok(Some(n.clone())),
+                        _ => Ok(None),
+                    };
+                    out.push((b, r));
+                }
+            }
+        }
+        for b in list {
+            match b {
+                Builtin::LineEndings(e) => {
+                    d.set_eol(*e);
+                    out.push((b.clone(), Ok(None)));
+                }
+                Builtin::Encoding(e) => match core::encoding::first_unencodable(d.rope(), *e) {
+                    Some(u) => out.push((b.clone(), Err(format!("{} U+{:04X} – {}", lang.t("Zeichen passt nicht in die Kodierung:", "Character does not fit the encoding:"), u.ch as u32, lang.t("Kodierung unverändert", "encoding unchanged"))))),
+                    None => {
+                        d.set_encoding(*e);
+                        out.push((b.clone(), Ok(None)));
+                    }
+                },
+                _ => {}
+            }
+        }
+        out
     }
 
     /// Kodierung für das nächste Speichern setzen.

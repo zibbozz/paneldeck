@@ -82,6 +82,7 @@ $AllViews = @(
   @{ Name = 'time-alarms';         Spec = 'time-alarms';         W = 1300; H = 820; Wait = 2 }
   @{ Name = 'time-timers';         Spec = 'time-timers';         W = 1300; H = 820; Wait = 2 }
   @{ Name = 'time-clocks';         Spec = 'time-clocks';         W = 1300; H = 820; Wait = 2 }
+  @{ Name = 'editor-on-save';      Spec = 'editor-on-save';      W = 1400; H = 900; Wait = 2 }
   # Chats
   @{ Name = 'chat-images';         Spec = 'chat-images';         W = 1300; H = 860; Wait = 3 }
   # Prozesse

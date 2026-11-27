@@ -541,6 +541,14 @@ impl App {
                 let _ = self.editor_open(&demo.join("config/shop.json"), true, false);
                 self.ed.open_path(&demo.join("config/orders.json"), true);
             }
+            // Aktionen beim Speichern (#383): Regel-Dialog über dem Editor.
+            "editor-on-save" => {
+                write_demo_project(&demo);
+                self.set_mode(titlebar::Mode::Editor);
+                self.ed.set_root(&demo);
+                let _ = self.editor_open(&demo.join("src/orders.rs"), true, false);
+                self.shot_save_actions_demo(&demo);
+            }
             "editor-settings" => {
                 self.set_mode(titlebar::Mode::Editor);
                 self.settings_open = true;
