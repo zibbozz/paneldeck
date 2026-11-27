@@ -344,6 +344,13 @@ fn import_and_export_from_the_ui_report_back() {
     std::fs::write(&p, "BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:a@x\r\nDTSTART:20261124T100000\r\nSUMMARY:Imported\r\nEND:VEVENT\r\nBEGIN:VEVENT\r\nUID:b@x\r\nSUMMARY:Broken\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n").unwrap();
     let env = CalEnv { conn: Some(&h.conn), lang: Lang::En, now: h.now, zone: &h.zone };
     h.cal.import_path(&env, &p);
+    // Lesen und Zerlegen im Hilfsthread: erst ein Hinweis, der Bericht kommt mit einem der nächsten Bilder
+    assert!(h.cal.msg.as_ref().is_some_and(|m| m.0.starts_with("Importing") && !m.1), "{:?}", h.cal.msg);
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while h.cal.importing() && std::time::Instant::now() < until {
+        h.frames(1);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
     let rep = h.cal.report.clone().expect("Bericht");
     assert_eq!((rep.imported, rep.skipped.len()), (1, 1));
     let out = dir.join("out.ics");

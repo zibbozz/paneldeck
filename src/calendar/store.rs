@@ -322,6 +322,12 @@ pub fn uid_exists(conn: &Connection, uid: &str) -> SRes<bool> {
     Ok(conn.query_row("SELECT 1 FROM cal_events WHERE uid = ?1", [uid], |_| Ok(())).optional()?.is_some())
 }
 
+/// Alle vorhandenen `UID`s (Stand für den iCal-Import im Hilfsthread).
+pub fn all_uids(conn: &Connection) -> SRes<std::collections::HashSet<String>> {
+    let mut st = conn.prepare("SELECT uid FROM cal_events")?;
+    Ok(st.query_map([], |r| r.get::<_, String>(0))?.collect::<Result<_, _>>()?)
+}
+
 /// Alle Termine (für Export und Erinnerungen).
 pub fn all_events(conn: &Connection) -> SRes<Vec<Event>> {
     let mut st = conn.prepare(&format!("SELECT {COLS} FROM cal_events ORDER BY start, id"))?;

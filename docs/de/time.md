@@ -47,7 +47,7 @@ Der Unterreiter **Kalender** im Reiter **Zeit** zeigt deine eigenen Termine zusa
 
 **+ Neuer Termin** öffnet den Dialog: Titel, *Ganztägig*, Beginn (Datum `JJJJ-MM-TT` und Uhrzeit `HH:MM`), Dauer (bei ganztägigen Terminen die Zahl der Tage – ab zwei Tagen ist der Termin mehrtägig), Erinnerung, Farbe und Notiz. **Strg+Enter** speichert, **Esc** bricht ab.
 
-Im Detailbereich: **Bearbeiten …**, **Dieses Vorkommen auslassen** (nur bei Wiederholungen – trägt für diesen Tag eine Ausnahme ein) und **Löschen …** (mit Rückfrage; löscht die ganze Serie).
+Im Detailbereich: **Bearbeiten …**, **Dieses Vorkommen auslassen** (nur bei Wiederholungen – trägt für diesen Tag eine Ausnahme ein; bei Terminen, die sich mehrmals am Tag wiederholen, heißt der Knopf **Diesen Tag überspringen** und lässt alle Vorkommen dieses Tages aus) und **Löschen …** (mit Rückfrage; löscht die ganze Serie).
 
 ![Termin-Dialog mit dem Baukasten für Wiederholungen (werktags), dem Cron-Feld und der Vorschau der nächsten 5 Termine](../images/de/time-calendar-dialog.png)
 
@@ -70,7 +70,7 @@ Der Baukasten schreibt den **Cron-Ausdruck** in das Feld darunter. Fachleute tip
 
 Der Baukasten erzeugt nur eindeutige Ausdrücke. Setzt du selbst **beides**, einen Tag im Monat und einen Wochentag (z. B. `0 9 13 * FRI`), wiederholt Cron an jedem Tag, an dem **eines von beiden** passt – jeden 13. *und* jeden Freitag; der Dialog warnt davor. Unter dem Feld stehen das Muster in Worten und die **nächsten 5 Termine**.
 
-**Ende:** nie, an einem Datum oder nach einer Anzahl (Ausnahmen zählen mit, wie bei iCal). **Ausnahmen** sind einzelne Tage ohne Termin.
+**Ende:** nie, an einem Datum oder nach einer Anzahl (Ausnahmen zählen mit, wie bei iCal). **Ausnahmen** sind ganze Tage ohne Termin (bei Terminen, die sich mehrmals am Tag wiederholen: alle Vorkommen dieses Tages).
 
 **Sommer-/Winterzeit:** Zeiten sind lokale Zeit. Eine Uhrzeit, die es wegen der Umstellung nicht gibt (z. B. 02:30), rückt auf die nächste gültige (03:00); wird die Uhr zurückgestellt, zählt die doppelte Stunde einmal.
 
@@ -87,11 +87,11 @@ Der Baukasten erzeugt nur eindeutige Ausdrücke. Setzt du selbst **beides**, ein
 
 ### iCal-Import und -Export
 
-**iCal ▾ → Importieren …** liest eine lokale `.ics`-Datei (höchstens 10 MB). Termine, deren `UID` es schon gibt, werden übersprungen, fehlerhafte Einträge einzeln übersprungen; ein Bericht nennt beides und alle Hinweise. Zeiten in UTC oder in einer in der Datei beschriebenen Zeitzone werden in die lokale Zeit umgerechnet.
+**iCal ▾ → Importieren …** liest eine lokale `.ics`-Datei (höchstens 10 MB) im Hintergrund („Importiere …“). Termine, deren `UID` es schon gibt, werden übersprungen, fehlerhafte Einträge einzeln übersprungen; ein Bericht nennt beides und alle Hinweise. Zeiten in UTC oder in einer in der Datei beschriebenen Zeitzone werden in die lokale Zeit umgerechnet.
 
 **iCal ▾ → Exportieren …** schreibt alle eigenen Termine mit deiner Zeitzone (`VTIMEZONE`) in eine `.ics`-Datei. Wiederholungen stehen, wo möglich, als `RRULE` darin und immer als `X-PANELDECK-CRON`, damit ein erneuter Import genau stimmt.
 
-Grenzen der Übersetzung: Der ODER-Fall von Cron („Tag im Monat ODER Wochentag“) hat keine `RRULE` (andere Programme sehen dann nur das erste Vorkommen). Beim Import haben `INTERVAL` über 1 bei täglichen, wöchentlichen oder jährlichen Regeln, `BYSETPOS`, `BYWEEKNO`, `BYYEARDAY`, vom Ende gezählte Tage (`-1FR`, `BYMONTHDAY=-1`) und `BYMONTHDAY` zusammen mit `BYDAY` keine Cron-Entsprechung – solche Termine kommen als Einzeltermin und stehen im Bericht.
+Grenzen der Übersetzung: Der ODER-Fall von Cron („Tag im Monat ODER Wochentag“) hat keine `RRULE` (andere Programme sehen dann nur das erste Vorkommen). Beim Import haben `INTERVAL` über 1 bei täglichen, wöchentlichen oder jährlichen Regeln, `BYSETPOS`, `BYWEEKNO`, `BYYEARDAY`, vom Ende gezählte Tage (`-1FR`, `BYMONTHDAY=-1`) und `BYMONTHDAY` zusammen mit `BYDAY` keine Cron-Entsprechung – solche Termine kommen als Einzeltermin und stehen im Bericht. Ausnahmen (`EXDATE`) und geänderte oder abgesagte Einzelvorkommen (`RECURRENCE-ID`) gelten für den ganzen Tag: Bei einem Termin, der sich mehrmals am Tag wiederholt, fallen alle Vorkommen dieses Tages aus.
 
 ### Agenten
 

@@ -79,6 +79,57 @@ fn long_and_point_events_overlap_correctly() {
     assert_eq!(fmt(&s.occurrences(dt("2026-11-05"), dt("2026-11-06"), &z)), ["2026-11-04 23:00", "2026-11-05 23:00"]);
 }
 
+/// Kurzer Takt mit langer Dauer (z. B. importiert: `RRULE:FREQ=MINUTELY`, `DURATION:P366D`, Beginn vor einem Jahr):
+/// Die Suche rechnet nicht jedes hineinreichende Vorkommen seit einem Jahr durch, liefert höchstens die Höchstzahl vor
+/// dem Zeitraum (die spätesten) plus die Höchstzahl darin und ist schnell. Lange Vorkommen mit langem Takt (wöchentlich
+/// drei Tage) bleiben vollständig.
+#[test]
+fn short_step_with_long_duration_is_capped_and_fast() {
+    let z = RuleZone::berlin();
+    let e = ev("2025-11-27T00:00", super::MAX_MINUTES, Some("* * * * *"));
+    let (from, to) = (dt("2026-11-01"), dt("2026-12-01"));
+    let t0 = std::time::Instant::now();
+    let occ = e.occurrences(from, to, &z);
+    let took = t0.elapsed();
+    assert!(took < std::time::Duration::from_secs(2), "{took:?}");
+    let before = occ.iter().filter(|s| **s < from).count();
+    assert_eq!(before, super::MAX_OCC_PER_RANGE, "die spätesten hineinreichenden");
+    assert_eq!(occ.len(), 2 * super::MAX_OCC_PER_RANGE);
+    assert_eq!(fmt(&occ[before - 1..before + 1]), ["2026-10-31 23:59", "2026-11-01 00:00"], "lückenlos bis in den Zeitraum");
+    assert!(occ.windows(2).all(|w| w[0] < w[1]));
+    // Ausgelassene Tage kosten keine Minute je Schritt (fast alle Tage vor dem Zeitraum ausgelassen)
+    let mut x = e.clone();
+    x.recur.as_mut().unwrap().except = (0..300).map(|i| super::add_days(d("2026-01-01"), i)).collect();
+    let t0 = std::time::Instant::now();
+    let occ = x.occurrences(from, to, &z);
+    assert!(t0.elapsed() < std::time::Duration::from_secs(2));
+    assert!(occ.len() <= 2 * super::MAX_OCC_PER_RANGE && occ.iter().all(|s| x.recur.as_ref().unwrap().except.binary_search(&s.date()).is_err()));
+    // Mit Anzahl (vom Beginn an gezählt): ebenso begrenzt
+    let mut c = e.clone();
+    c.recur.as_mut().unwrap().count = Some(super::MAX_COUNT);
+    let occ = c.occurrences(dt("2025-12-10"), dt("2025-12-11"), &z);
+    assert!(occ.len() <= 2 * super::MAX_OCC_PER_RANGE, "{}", occ.len());
+    // Wöchentlich drei Tage: das Vorkommen von vor zwei Tagen reicht hinein und bleibt
+    let w = ev("2026-11-02T09:00", 3 * 1440, Some("0 9 * * MON"));
+    assert_eq!(fmt(&w.occurrences(dt("2026-11-11"), dt("2026-11-12"), &z)), ["2026-11-09 09:00"]);
+    assert_eq!(w.occurrences(dt("2026-11-01"), dt("2026-12-01"), &z).len(), 5);
+}
+
+/// Ausnahmen gelten ganzen Tagen: Termine mit mehreren Vorkommen am Tag erkennt die Oberfläche („Diesen Tag
+/// überspringen“).
+#[test]
+fn several_occurrences_per_day_are_recognised() {
+    assert!(ev("2026-11-02T09:00", 30, Some("0 * * * *")).several_per_day(), "stündlich");
+    assert!(ev("2026-11-02T09:00", 30, Some("0,30 9 * * *")).several_per_day());
+    assert!(ev("2026-11-02T09:00", 30, Some("0 9,17 * * MON-FRI")).several_per_day());
+    assert!(!ev("2026-11-02T09:00", 30, Some("0 9 * * MON-FRI")).several_per_day());
+    assert!(!ev("2026-11-02T09:00", 30, None).several_per_day());
+    assert!(!ev("2026-11-02T09:00", 30, Some("kaputt")).several_per_day());
+    let mut a = ev("2026-11-01", 1440, Some("0 0 * * *"));
+    a.all_day = true;
+    assert!(!a.several_per_day());
+}
+
 #[test]
 fn all_day_series_and_multi_day() {
     let z = RuleZone::berlin();

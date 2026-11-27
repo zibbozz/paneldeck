@@ -1140,18 +1140,31 @@ pub fn decode(bytes: &[u8]) -> Result<String, FileError> {
 
 /// Importiert eine lokale Datei in die Datenbank (eine Transaktion).
 pub fn import_file(conn: &Connection, path: &std::path::Path, zone: &dyn Zone) -> Result<ImportReport, FileError> {
+    let (items, rep) = read_and_parse(path, &|u| store::uid_exists(conn, u).unwrap_or(false), zone)?;
+    insert_parsed(conn, items, rep)
+}
+
+/// Datei lesen und zerlegen, ohne Datenbank (für einen Hilfsthread: bis 10 MB dauern spürbar). `exists(uid)` wie bei
+/// [`parse`]; danach [`insert_parsed`].
+pub fn read_and_parse(path: &std::path::Path, exists: &dyn Fn(&str) -> bool, zone: &dyn Zone) -> Result<(Vec<Parsed>, ImportReport), FileError> {
     let meta = std::fs::metadata(path).map_err(|e| FileError::Read(e.to_string()))?;
     if meta.len() > MAX_FILE_BYTES {
         return Err(FileError::TooLarge(meta.len()));
     }
     let bytes = std::fs::read(path).map_err(|e| FileError::Read(e.to_string()))?;
     let text = decode(&bytes)?;
-    import_text(conn, &text, zone)
+    Ok(parse(&text, exists, zone))
 }
 
 /// Importiert iCal-Text in die Datenbank.
 pub fn import_text(conn: &Connection, text: &str, zone: &dyn Zone) -> Result<ImportReport, FileError> {
-    let (items, mut rep) = parse(text, &|u| store::uid_exists(conn, u).unwrap_or(false), zone);
+    let (items, rep) = parse(text, &|u| store::uid_exists(conn, u).unwrap_or(false), zone);
+    insert_parsed(conn, items, rep)
+}
+
+/// Zerlegte Termine in **einer** Transaktion anlegen; was scheitert (z. B. eine inzwischen angelegte `UID`), steht im
+/// Bericht.
+pub fn insert_parsed(conn: &Connection, items: Vec<Parsed>, mut rep: ImportReport) -> Result<ImportReport, FileError> {
     conn.execute_batch("SAVEPOINT cal_import").map_err(|e| FileError::Db(e.to_string()))?;
     for p in items {
         match store::create_event(conn, p.input, Some(&p.uid), "import") {

@@ -247,6 +247,11 @@ impl Cron {
         })
     }
 
+    /// Mehr als ein Vorkommen an einem passenden Tag (mehrere Minuten oder Stunden)?
+    pub fn several_per_day(&self) -> bool {
+        self.minutes.count_ones() * self.hours.count_ones() > 1
+    }
+
     /// Passt der Tag (Monat, Tag, Wochentag)?
     pub fn day_matches(&self, d: NaiveDate) -> bool {
         if self.months & (1 << d.month()) == 0 {

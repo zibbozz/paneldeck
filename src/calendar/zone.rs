@@ -30,6 +30,8 @@ pub trait Zone {
     fn offset_at(&self, utc: i64) -> i32;
     /// Name für die iCal-Ausgabe (`TZID`), z. B. `Europe/Berlin`.
     fn name(&self) -> String;
+    /// Eigene Kopie für einen Hilfsthread (iCal-Import im Hintergrund).
+    fn boxed(&self) -> Box<dyn Zone + Send>;
 
     /// Lokale Wanduhrzeit zum Zeitpunkt `utc`.
     fn to_local(&self, utc: i64) -> NaiveDateTime {
@@ -67,6 +69,10 @@ pub fn naive_from_secs(s: i64) -> NaiveDateTime {
 pub struct SystemZone;
 
 impl Zone for SystemZone {
+    fn boxed(&self) -> Box<dyn Zone + Send> {
+        Box::new(SystemZone)
+    }
+
     fn local(&self, t: NaiveDateTime) -> LocalTime {
         use chrono::offset::LocalResult;
         match chrono::Local.from_local_datetime(&t) {
@@ -220,6 +226,10 @@ impl RuleZone {
 }
 
 impl Zone for RuleZone {
+    fn boxed(&self) -> Box<dyn Zone + Send> {
+        Box::new(self.clone())
+    }
+
     fn local(&self, t: NaiveDateTime) -> LocalTime {
         // Kandidaten: als Normalzeit und als Sommerzeit gelesen; gültig ist, was zum Versatz zu diesem Zeitpunkt passt.
         let fits = |t: NaiveDateTime| {

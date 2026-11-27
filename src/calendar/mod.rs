@@ -123,10 +123,61 @@ impl Event {
         (self.minutes / 1440).max(1)
     }
 
+    /// Wiederholt sich der Termin mehrmals am Tag (z. B. stündlich)? Ausnahmen gelten ganzen Tagen – die Oberfläche
+    /// sagt dann „Diesen Tag überspringen“.
+    pub fn several_per_day(&self) -> bool {
+        !self.all_day && self.recur.as_ref().and_then(|r| Cron::parse(&r.cron).ok()).is_some_and(|c| c.several_per_day())
+    }
+
     /// Vorkommen (Beginn, lokale Wanduhrzeit), die sich mit `[from, to)` überschneiden; Wiederholungen werden nur in
     /// diesem Zeitraum ausgerechnet. Ein ungültiger Cron-Ausdruck ergibt nur den Beginn. Höchstens
-    /// [`MAX_OCC_PER_RANGE`] Vorkommen, die ab `from` beginnen (davor beginnende, hineinreichende zählen nicht mit).
+    /// [`MAX_OCC_PER_RANGE`] Vorkommen, die ab `from` beginnen, und höchstens noch einmal so viele davor beginnende, die
+    /// hineinreichen (die spätesten). Kurzer Takt mit langer Dauer (importiert: `FREQ=MINUTELY`, `DURATION:P366D`)
+    /// rechnet so nie hunderttausende Vorkommen vor dem Zeitraum durch (die Erinnerungen fragen alle 30 s).
     pub fn occurrences(&self, from: NaiveDateTime, to: NaiveDateTime, zone: &dyn Zone) -> Vec<NaiveDateTime> {
+        let mut out = self.occurrences_uncapped_before(from, to, zone);
+        let before = out.iter().take_while(|s| **s < from).count();
+        if before > MAX_OCC_PER_RANGE {
+            out.drain(..before - MAX_OCC_PER_RANGE);
+        }
+        out
+    }
+
+    /// Wo die Suche nach Vorkommen vor `from` beginnt (ohne Anzahl): vom frühesten möglichen Beginn `lower` aus, außer
+    /// es gibt dazwischen mehr als [`MAX_OCC_PER_RANGE`] Vorkommen – dann bei einem späteren Punkt, ab dem es gerade so
+    /// viele sind (Fenster vor `from` wachsen um das Vierfache; jede Zählung endet nach der Höchstzahl, ausgelassene
+    /// Tage kosten je einen Schritt).
+    fn scan_lower(&self, cron: &Cron, rec: &Recurrence, lower: NaiveDateTime, from: NaiveDateTime, zone: &dyn Zone) -> NaiveDateTime {
+        if lower >= from {
+            return lower;
+        }
+        let mut w: i64 = 60;
+        loop {
+            let cand = lower.max(add_minutes(from, -w));
+            if cand == lower {
+                return lower;
+            }
+            let mut c = 0usize;
+            let mut t = add_minutes(cand, -1);
+            while let Some((wall, _)) = cron.next_in(t, zone) {
+                if wall >= from || rec.until.is_some_and(|u| wall.date() > u) {
+                    break;
+                }
+                if rec.except.binary_search(&wall.date()).is_ok() {
+                    t = last_minute_of(wall.date()).max(wall);
+                    continue;
+                }
+                c += 1;
+                if c >= MAX_OCC_PER_RANGE {
+                    return cand;
+                }
+                t = wall;
+            }
+            w = w.saturating_mul(4);
+        }
+    }
+
+    fn occurrences_uncapped_before(&self, from: NaiveDateTime, to: NaiveDateTime, zone: &dyn Zone) -> Vec<NaiveDateTime> {
         let overlaps = |s: NaiveDateTime| {
             let e = self.end_of(s);
             s < to && (e > from || (self.minutes == 0 && s >= from))
@@ -173,14 +224,26 @@ impl Event {
             }
             return out;
         }
+        // Ohne Anzahl: vor dem Zeitraum höchstens so weit zurück, dass es nicht mehr als die Höchstzahl hineinreichende
+        // Vorkommen gibt; mit Anzahl begrenzt `count` (≤ MAX_COUNT) die Schritte.
+        let lower = if rec.count.is_some() { lower } else { self.scan_lower(&cron, rec, lower, from, zone) };
         let mut t = add_minutes(lower, -1);
+        // Sicherheitsnetz (wird bei gültigen Daten nicht erreicht: jeder Schritt zählt ein Vorkommen oder überspringt
+        // einen ausgelassenen Tag).
+        let mut steps = 0usize;
         while let Some((wall, _)) = cron.next_in(t, zone) {
-            if wall >= to || rec.until.is_some_and(|u| wall.date() > u) {
+            steps += 1;
+            if wall >= to || rec.until.is_some_and(|u| wall.date() > u) || steps > MAX_STEPS {
                 break;
             }
             n += 1;
             if rec.count.is_some_and(|c| n > c) {
                 break;
+            }
+            // Ausgelassener Tag ohne Anzahl: gleich zum nächsten Tag (nicht jede Minute einzeln).
+            if rec.count.is_none() && rec.except.binary_search(&wall.date()).is_ok() {
+                t = last_minute_of(wall.date()).max(wall);
+                continue;
             }
             if keep(wall, &mut out) {
                 break;
@@ -206,6 +269,14 @@ impl Event {
             span *= 4;
         }
     }
+}
+
+/// Höchstzahl der Schritte einer Suche nach Vorkommen (Sicherheitsnetz gegen Hänger der Oberfläche).
+const MAX_STEPS: usize = 4 * (MAX_OCC_PER_RANGE + MAX_EXCEPTIONS) + MAX_COUNT as usize;
+
+/// 23:59 des Tages (Weitersuchen ab dem nächsten Tag).
+fn last_minute_of(d: NaiveDate) -> NaiveDateTime {
+    add_minutes(add_days(d, 1).and_time(NaiveTime::MIN), -1)
 }
 
 /// Kurzform einer Uhrzeit für Listen.

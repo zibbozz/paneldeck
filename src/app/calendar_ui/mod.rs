@@ -101,6 +101,8 @@ pub struct CalUi {
     scrolled: Option<(ViewKind, NaiveDate)>,
     /// Daten geändert (andere Fenster neu laden).
     changed: bool,
+    /// iCal-Import läuft (Lesen und Zerlegen im Hilfsthread; angelegt wird danach hier, in einer Transaktion).
+    importing: Option<std::sync::mpsc::Receiver<Result<(Vec<ics::Parsed>, ics::ImportReport), ics::FileError>>>,
 }
 
 impl CalUi {
@@ -198,6 +200,9 @@ impl CalUi {
             return;
         };
         let _ = self.options(conn);
+        if self.poll_import(env) {
+            ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
+        }
         self.toolbar(ui, env);
         ui.add_space(style::S1);
         let items = self.items(env);
@@ -272,7 +277,7 @@ impl CalUi {
                 self.form = Some(dialog::EventForm::new_at(a.and_time(NaiveTime::from_hms_opt(9, 0, 0).unwrap_or_default()), false));
             }
             ui.menu_button(lang.t("iCal ▾", "iCal ▾"), |ui| {
-                if ui.button(lang.t("Importieren …", "Import …")).clicked() {
+                if ui.add_enabled(self.importing.is_none(), egui::Button::new(lang.t("Importieren …", "Import …"))).clicked() {
                     ui.close();
                     if let Some(p) = crate::platform::notify::open_ics() {
                         self.import_path(env, &p);
@@ -397,7 +402,12 @@ impl CalUi {
                 self.form = Some(dialog::EventForm::from_event(&ev));
             }
             if ev.recur.is_some() {
-                let r = ui.button(lang.t("Dieses Vorkommen auslassen", "Skip this occurrence"));
+                // Ausnahmen gelten ganzen Tagen: bei mehreren Vorkommen am Tag heißt der Knopf auch so.
+                let r = if ev.several_per_day() {
+                    ui.button(lang.t("Diesen Tag überspringen", "Skip this day")).on_hover_text(lang.t("Ausnahmen gelten für ganze Tage: alle Vorkommen an diesem Tag fallen aus.", "Exceptions apply to whole days: all occurrences on this day are skipped."))
+                } else {
+                    ui.button(lang.t("Dieses Vorkommen auslassen", "Skip this occurrence"))
+                };
                 self.hits.push((Hit::Button("skip"), r.rect));
                 if r.clicked()
                     && let Some(conn) = env.conn {
@@ -427,16 +437,64 @@ impl CalUi {
             }
     }
 
+    /// iCal-Datei importieren: Lesen und Zerlegen (bis 10 MB) im Hilfsthread mit Hinweis „Importiere …“, danach
+    /// ([`CalUi::poll_import`]) Anlegen in einer Transaktion und der Bericht.
     pub(crate) fn import_path(&mut self, env: &CalEnv, path: &std::path::Path) {
+        let lang = env.lang;
         let Some(conn) = env.conn else { return };
-        match ics::import_file(conn, path, env.zone) {
-            Ok(rep) => {
-                self.msg = Some((rep.summary(env.lang), false));
-                self.report = Some(rep);
-                self.touched();
-            }
-            Err(e) => self.msg = Some((e.message(env.lang), true)),
+        if self.importing.is_some() {
+            self.msg = Some((lang.t("Es läuft schon ein Import.", "An import is already running.").to_string(), true));
+            return;
         }
+        let uids = match store::all_uids(conn) {
+            Ok(u) => u,
+            Err(e) => {
+                self.msg = Some((e.message(lang), true));
+                return;
+            }
+        };
+        let zone = env.zone.boxed();
+        let p = path.to_path_buf();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(ics::read_and_parse(&p, &|u| uids.contains(u), zone.as_ref()));
+        });
+        self.importing = Some(rx);
+        let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        self.msg = Some((format!("{} {} …", lang.t("Importiere", "Importing"), lang.q(&name)), false));
+    }
+
+    /// Fertigen iCal-Import übernehmen; `true` = läuft noch.
+    fn poll_import(&mut self, env: &CalEnv) -> bool {
+        let Some(rx) = &self.importing else { return false };
+        let r = match rx.try_recv() {
+            Err(std::sync::mpsc::TryRecvError::Empty) => return true,
+            r => r,
+        };
+        self.importing = None;
+        let lang = env.lang;
+        match r {
+            Ok(Ok((items, rep))) => {
+                let Some(conn) = env.conn else { return false };
+                match ics::insert_parsed(conn, items, rep) {
+                    Ok(rep) => {
+                        self.msg = Some((rep.summary(lang), false));
+                        self.report = Some(rep);
+                        self.touched();
+                    }
+                    Err(e) => self.msg = Some((e.message(lang), true)),
+                }
+            }
+            Ok(Err(e)) => self.msg = Some((e.message(lang), true)),
+            Err(_) => self.msg = Some((lang.t("Import abgebrochen.", "The import was interrupted.").to_string(), true)),
+        }
+        false
+    }
+
+    /// Läuft ein iCal-Import (Tests)?
+    #[cfg(test)]
+    pub(crate) fn importing(&self) -> bool {
+        self.importing.is_some()
     }
 
     pub(crate) fn export_path(&mut self, env: &CalEnv, path: &std::path::Path) {

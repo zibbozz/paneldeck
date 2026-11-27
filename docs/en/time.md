@@ -47,7 +47,7 @@ The **Calendar** sub-tab of the **Time** tab shows your own events together with
 
 **+ New event** opens the dialog: title, *All day*, start (date `YYYY-MM-DD` and time `HH:MM`), duration (or number of days for all-day events – two or more days make a multi-day event), reminder, colour and note. **Ctrl+Enter** saves, **Esc** cancels.
 
-In the detail pane: **Edit …**, **Skip this occurrence** (recurring events only – adds an exception for that day) and **Delete …** (asks first; deletes the whole series).
+In the detail pane: **Edit …**, **Skip this occurrence** (recurring events only – adds an exception for that day; for events that recur several times a day the button is called **Skip this day** and skips all occurrences of that day) and **Delete …** (asks first; deletes the whole series).
 
 ![Event dialog with the recurrence builder (weekdays), the cron field and the preview of the next 5 occurrences](../images/time-calendar-dialog.png)
 
@@ -70,7 +70,7 @@ The builder writes the **cron expression** into the field below it. Experts can 
 
 The builder only creates unambiguous expressions. If you set **both** a day of the month and a day of the week yourself (e.g. `0 9 13 * FRI`), cron repeats on every day where **either** fits – every 13th *and* every Friday; the dialog warns about this. Under the field you see the pattern in words and the **next 5 occurrences**.
 
-**Ends:** never, on a date, or after a number of occurrences (exceptions count towards the number, as in iCal). **Exceptions** are single days without an occurrence.
+**Ends:** never, on a date, or after a number of occurrences (exceptions count towards the number, as in iCal). **Exceptions** are whole days without an occurrence (for events that recur several times a day: all occurrences of that day).
 
 **Daylight saving time:** times are local time. A time that does not exist because the clock moves forward (e.g. 02:30) moves to the next valid time (03:00); when the clock moves back, the repeated hour counts once.
 
@@ -87,11 +87,11 @@ The builder only creates unambiguous expressions. If you set **both** a day of t
 
 ### iCal import and export
 
-**iCal ▾ → Import …** reads a local `.ics` file (at most 10 MB). Events whose `UID` already exists are skipped, broken entries are skipped one by one; a report lists both and any notes. Times in UTC or in a time zone defined in the file are converted into your local time.
+**iCal ▾ → Import …** reads a local `.ics` file (at most 10 MB) in the background (“Importing …”). Events whose `UID` already exists are skipped, broken entries are skipped one by one; a report lists both and any notes. Times in UTC or in a time zone defined in the file are converted into your local time.
 
 **iCal ▾ → Export …** writes all own events into an `.ics` file with your time zone (`VTIMEZONE`). Recurrences are written as `RRULE` where possible and always as `X-PANELDECK-CRON`, so a re-import is exact.
 
-Limits of the translation: cron's "day of month OR day of week" case has no `RRULE` (other programs then see only the first occurrence). When importing, `INTERVAL` above 1 for daily, weekly or yearly rules, `BYSETPOS`, `BYWEEKNO`, `BYYEARDAY`, days counted from the end (`-1FR`, `BYMONTHDAY=-1`) and `BYMONTHDAY` combined with `BYDAY` have no cron equivalent – such events come in as a single event and are named in the report.
+Limits of the translation: cron's "day of month OR day of week" case has no `RRULE` (other programs then see only the first occurrence). When importing, `INTERVAL` above 1 for daily, weekly or yearly rules, `BYSETPOS`, `BYWEEKNO`, `BYYEARDAY`, days counted from the end (`-1FR`, `BYMONTHDAY=-1`) and `BYMONTHDAY` combined with `BYDAY` have no cron equivalent – such events come in as a single event and are named in the report. Exceptions (`EXDATE`) and changed or cancelled single occurrences (`RECURRENCE-ID`) apply to the whole day: for an event that recurs several times a day, every occurrence of that day is left out.
 
 ### Agents
 
