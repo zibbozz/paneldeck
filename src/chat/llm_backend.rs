@@ -294,7 +294,8 @@ pub fn plan_prompt(server: &crate::llm::config::LlmServer, model: &str, policy: 
     let variant = super::master_prompt::choose(ctx_len, real(sys_tokens + tool_tokens));
     if variant == super::master_prompt::Variant::Compact {
         system = system_prompt_variant(policy, model, cx, variant);
-        tools = super::master_prompt::minimal_specs(tools);
+        // Nur Kern, nachgeladene und `more_tools` (#393); erlaubt bleibt alles aus `policy.specs()`.
+        tools = super::master_prompt::request_specs(policy, variant);
         tool_tokens = tokens_of(&tools);
         sys_tokens = llm::tokens::message_tokens(&ChatMessage::new(Role::System, system.clone()));
     }
@@ -324,7 +325,8 @@ fn build(meta: &ChatMeta, history: &[ChatMsg], cx: &TurnContext, with_key: bool)
     }
     let cfg = server.model_cfg(model);
     let endpoint = if with_key { server.endpoint(lang)? } else { Endpoint::new(server.kind, &server.url) };
-    let policy = ToolPolicy::new(cfg.clone(), server.tools_supported(model), cx.expert).with_agent(cx.agent.clone());
+    // Über `more_tools` nachgeladene Werkzeuge (#393) listet die Kurzfassung mit – nur, soweit die Regeln sie erlauben.
+    let policy = ToolPolicy::new(cfg.clone(), server.tools_supported(model), cx.expert).with_agent(cx.agent.clone()).with_loaded(super::more_tools::loaded(history));
     // Bilder (#357): an alle Modelle außer denen, die sicher keine lesen (unbekannt = versuchen; lehnt der Server ab,
     // merkt sich die App „keine Bilder“). Ohne Bildverständnis ein Hinweis, wenn die laufende Runde Bilder hat.
     let vision = server.vision_supported(model);
@@ -1592,8 +1594,8 @@ mod tests {
                     let ctx = crate::llm::config::auto_context(sys + tools, None);
                     assert!(!crate::llm::config::context_too_small(ctx, sys + tools), "{model} {expert} {level:?}: {ctx}");
                     eprintln!("SIZES   -> auto context {ctx}");
-                    // Nur Steuern im Expertenmodus (die meisten Werkzeuge) braucht mehr als 32768.
-                    assert!(ctx <= 32768 || (expert && level == McpLevel::Control), "{model} {expert} {level:?}: {ctx}");
+                    // Steuern (mit Zeit und Kalender, #164) braucht mehr als 32768; Lesen bleibt darunter.
+                    assert!(ctx <= 32768 || level == McpLevel::Control,"{model} {expert} {level:?}: {ctx}");
                 }
             }
         }
@@ -1606,22 +1608,48 @@ mod tests {
         s.set_model_cfg(LlmModel { level: McpLevel::Control, level_chosen: true, ..LlmModel::named("m1") });
         let p = prepare(&meta(), &[msg(store::Role::User, "q")], &cx(vec![s.clone()])).unwrap();
         let ctx = p.request.num_ctx.unwrap();
-        assert!(ctx > 8192 && ctx <= 32768 && ctx.is_power_of_two(), "{ctx}");
+        assert!(ctx > 8192 && ctx <= 65536 && ctx.is_power_of_two(), "{ctx}");
         assert!(p.note.is_none() && p.context_notice.is_none(), "{:?} {:?}", p.note, p.context_notice);
         assert!(p.history_budget >= 4096 * 3 / 4, "{}", p.history_budget);
         // erkannte Länge kleiner: höchstens diese
         s.last_models[0].context_length = Some(4096);
         assert_eq!(prepare(&meta(), &[msg(store::Role::User, "q")], &cx(vec![s.clone()])).unwrap().request.num_ctx, Some(4096));
-        // eigene zu kleine Angabe: bleibt, aber mit Hinweis
+        // eigene Angabe 8192: seit #393 (Kurzfassung nur mit Kern und `more_tools`) genug für Steuern – kein Hinweis
         s.last_models[0].context_length = Some(131_072);
         s.set_model_cfg(LlmModel { level: McpLevel::Control, level_chosen: true, context_length: Some(8192), ..LlmModel::named("m1") });
         let p = prepare(&meta(), &[msg(store::Role::User, "q")], &cx(vec![s.clone()])).unwrap();
-        assert_eq!(p.request.num_ctx, Some(8192));
-        assert_eq!(p.context_notice.as_deref(), Some("This model's context (8192 tokens) is too small for its tool level – raise it in Settings → Models or use level Read."));
+        assert_eq!((p.request.num_ctx, p.context_notice.as_deref()), (Some(8192), None));
+        // eigene zu kleine Angabe: bleibt, aber mit Hinweis
+        s.set_model_cfg(LlmModel { level: McpLevel::Control, level_chosen: true, context_length: Some(4096), ..LlmModel::named("m1") });
+        let p = prepare(&meta(), &[msg(store::Role::User, "q")], &cx(vec![s.clone()])).unwrap();
+        assert_eq!(p.request.num_ctx, Some(4096));
+        assert_eq!(p.context_notice.as_deref(), Some("This model's context (4096 tokens) is too small for its tool level – raise it in Settings → Models or use level Read."));
         assert!(context_notice(8192, Lang::De).contains("zu klein"));
         // Stufe Aus: kein Hinweis
         s.set_model_cfg(LlmModel { level: McpLevel::Off, level_chosen: true, context_length: Some(8192), ..LlmModel::named("m1") });
         assert!(prepare(&meta(), &[msg(store::Role::User, "q")], &cx(vec![s])).unwrap().context_notice.is_none());
+    }
+
+    /// #393: Ein über `more_tools` nachgeladenes Werkzeug steht in den folgenden Anfragen der Kurzfassung mit in der
+    /// Werkzeug-Liste – aber nur, solange die Stufe es erlaubt; die volle Fassung bleibt unberührt.
+    #[test]
+    fn a_tool_loaded_with_more_tools_is_listed_in_the_next_compact_request() {
+        let mut ask = msg(store::Role::Assistant, "");
+        ask.tool_calls = vec![store::ToolCall { id: "m1".into(), name: super::super::more_tools::NAME.into(), arguments: serde_json::json!({"name": "screenshot"}) }];
+        let res = super::super::logic::tool_result(&ask.tool_calls[0], store::ToolStatus::Ok, "{\"tool\":\"screenshot\"}".into());
+        let history = vec![msg(store::Role::User, "screenshot?"), ask, res, msg(store::Role::Assistant, "Let me look."), msg(store::Role::User, "go on")];
+        let names = |level: McpLevel, ctx: u32, h: &[ChatMsg]| {
+            let mut o = server("http://localhost:1234/v1", ServerKind::OpenAi);
+            o.set_model_cfg(LlmModel { level, level_chosen: true, context_length: Some(ctx), ..LlmModel::named("m1") });
+            prepare(&meta(), h, &cx(vec![o])).unwrap().request.tools.into_iter().map(|t| t.name).collect::<Vec<_>>()
+        };
+        let before = names(McpLevel::Read, 8192, &history[..1]);
+        assert!(!before.contains(&"screenshot".to_string()) && before.contains(&"more_tools".to_string()));
+        let after = names(McpLevel::Read, 8192, &history);
+        assert!(after.contains(&"screenshot".to_string()) && after.contains(&"more_tools".to_string()), "{after:?}");
+        // großer Kontext: jedes Werkzeug direkt, kein more_tools
+        let full = names(McpLevel::Read, 131_072, &history);
+        assert!(full.contains(&"screenshot".to_string()) && full.contains(&"search_history".to_string()) && !full.contains(&"more_tools".to_string()));
     }
 
     /// Kleiner Kontext (#340): OpenAI-kompatibler Server ohne gemeldete Länge (8192) oder eigene kleine Angabe – die
@@ -1643,9 +1671,13 @@ mod tests {
             assert!(!sys.contains(full_marker) && sys.contains("## Tool call rules") && sys.contains("## Safety rules"), "{level:?} {expert}: Kurzfassung");
             assert_eq!(p.note, None, "{level:?} {expert}: passt in 8192");
             assert!(p.request.tools.iter().all(|t| t.parameters["properties"].as_object().unwrap().values().all(|v| v.get("description").is_none())), "knappe Werkzeuge");
-            assert_eq!(p.request.tools.len(), ToolPolicy::new(cfg.clone(), None, expert).specs().len(), "alle Werkzeuge der Stufe");
+            // #393: nur der Kern und `more_tools` – die übrigen erlaubten Werkzeuge kommen über `more_tools`.
+            let pol = ToolPolicy::new(cfg.clone(), None, expert);
+            assert_eq!(p.request.tools, super::super::master_prompt::request_specs(&pol, super::super::master_prompt::Variant::Compact), "{level:?} {expert}");
+            assert!(p.request.tools.iter().all(|t| t.name == super::super::more_tools::NAME || super::super::more_tools::is_core(&t.name)), "{level:?} {expert}: nur der Kern");
+            assert!(p.request.tools.iter().any(|t| t.name == super::super::more_tools::NAME) && sys.contains("`more_tools`"), "{level:?} {expert}: more_tools mit Anleitung");
             eprintln!("SMALL {level:?} expert={expert}: history budget {} of 6144", p.history_budget);
-            assert!(p.history_budget >= 1200, "{level:?} {expert}: Platz für das Gespräch {}", p.history_budget);
+            assert!(p.history_budget >= 6144 / 2, "{level:?} {expert}: Platz für das Gespräch {}", p.history_budget);
             // eigene Angabe 65536: voller Prompt mit vollen Werkzeugen
             let mut o = server("http://localhost:1234/v1", ServerKind::OpenAi);
             o.set_model_cfg(LlmModel { context_length: Some(65536), ..cfg.clone() });

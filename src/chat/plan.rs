@@ -196,11 +196,18 @@ pub enum PlanPhase {
 /// Werkzeuge, die nur lesen oder fragen und in einer Plan-Runde laufen dürfen, obwohl sie keine Paneldeck-Werkzeuge der
 /// Stufe „Lesen“ sind: die lesenden Agenten-Werkzeuge (#338), Webseiten/Websuche (fragen ohnehin), `wait_for_status`
 /// (wartet nur), die Rückfrage `ask_user` (#356) und Stand bzw. Ausgabe von Hintergrund-Befehlen (`command_status`,
-/// `command_output`, #355 – starten und anhalten (`run_command`, `stop_command`) gilt als schreibend).
-pub const READ_ONLY_TOOLS: &[&str] = &["read_file", "list_dir", "glob", "grep", "git_status", "git_diff", "git_log", "web_fetch", "web_search", "wait_for_status", "ask_user", "command_status", "command_output"];
+/// `command_output`, #355 – starten und anhalten (`run_command`, `stop_command`) gilt als schreibend) und `more_tools`
+/// (#393: nennt nur Werkzeuge; ein so geladenes schreibendes Werkzeug bleibt gesperrt).
+pub const READ_ONLY_TOOLS: &[&str] = &["read_file", "list_dir", "glob", "grep", "git_status", "git_diff", "git_log", "web_fetch", "web_search", "wait_for_status", "ask_user", "command_status", "command_output", "more_tools"];
 
 /// Rückfragen an den Nutzer: in einer Plan-Runde erlaubt, zählen aber nicht gegen das Recherche-Budget.
 pub const QUESTION_TOOLS: &[&str] = &["ask_user"];
+
+/// Zählt der Aufruf nicht gegen das Recherche-Budget? Rückfragen ([`QUESTION_TOOLS`]) und `more_tools` (#393: nachschlagen,
+/// welche Werkzeuge es gibt, ist keine Recherche).
+pub fn budget_free(name: &str) -> bool {
+    QUESTION_TOOLS.contains(&name) || name == super::more_tools::NAME
+}
 
 /// Werkzeuge, die in einer Plan-Runde immer gesperrt sind, auch wenn ihre Stufe „Lesen“ ist: `update_todos` (die
 /// To-do-Liste füllt der freigegebene Plan).
@@ -232,8 +239,8 @@ pub fn gate(level: PlanLevel, call: &ToolCall, research: u32, grants: u32) -> Re
         );
         return Err((ToolStatus::Denied, super::tools::error_json("plan_mode", &msg)));
     }
-    // Rückfragen an den Nutzer sind keine Recherche: sie gehen auch nach dem Budget.
-    if QUESTION_TOOLS.contains(&call.name.as_str()) {
+    // Rückfragen an den Nutzer und `more_tools` sind keine Recherche: sie gehen auch nach dem Budget.
+    if budget_free(&call.name) {
         return Ok(());
     }
     if let Some(b) = level.research_budget().filter(|b| research >= b.saturating_mul(grants.max(1))) {
@@ -1184,12 +1191,12 @@ mod tests {
     }
 
     /// Größe der Plan-Anweisungen: die volle Fassung bleibt unter 1000 Tokens, die Kurzfassung (für kleine Kontexte)
-    /// unter 300. Mit der Kurzfassung des Master-Prompts passt eine Plan-Runde bei Lesen und bei Steuern ohne
-    /// Expertenmodus samt allen Werkzeugen weiter in 8192 Tokens mit einem Fünftel Platz; Steuern im Expertenmodus mit
-    /// allen Werkzeugen war schon vorher randvoll (siehe `master_prompt`) – dort zeigt der Test nur die Zahlen.
+    /// unter 300. Mit der Kurzfassung des Master-Prompts (seit #393 nur der Kern und `more_tools`) passt eine Plan-Runde
+    /// der höchsten Stufe bei jeder Stufe und jedem Modus samt allen Werkzeugen in 8192 Tokens und lässt dem Gespräch
+    /// mindestens die Hälfte des Platzes (bis 3.1.0 war Steuern im Expertenmodus dort randvoll).
     #[test]
     fn plan_instructions_fit_into_small_contexts() {
-        use crate::chat::master_prompt::{minimal_specs, Variant};
+        use crate::chat::master_prompt::{request_specs, Variant};
         let tok = crate::llm::tokens::estimate_tokens;
         let all: Vec<String> = ["read_file", "grep", "list_sessions", "edit_file", "run_command", "ask_user", "update_todos"].iter().map(|s| s.to_string()).collect();
         for level in PlanLevel::ALL {
@@ -1206,11 +1213,9 @@ mod tests {
             for phase in [None, Some(PlanPhase::Research { level: PlanLevel::Max, revision: true })] {
                 let cx = TurnContext { plan: phase.clone(), ..TurnContext::default() };
                 let sys = tok(&crate::chat::llm_backend::system_prompt_variant(&p, "qwen3:8b", &cx, Variant::Compact)) + 4;
-                let n = sys + tok(&serde_json::to_string(&minimal_specs(p.specs())).unwrap());
+                let n = sys + tok(&serde_json::to_string(&request_specs(&p, Variant::Compact)).unwrap());
                 eprintln!("COMPACT+PLAN {level:?} expert={expert} plan={}: {n} of {budget}, room {}", phase.is_some(), budget as i64 - n as i64);
-                if !(level == McpLevel::Control && expert) {
-                    assert!(n + budget / 5 <= budget, "{level:?} {expert}: {n} von {budget}");
-                }
+                assert!(n <= budget / 2, "{level:?} {expert}: {n} von {budget}");
             }
         }
     }

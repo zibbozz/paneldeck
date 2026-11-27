@@ -17,6 +17,7 @@
 //!   Modelle ohne Bildverständnis, Bilder aus Werkzeug-Ergebnissen.
 //! * [`bg_commands`]: Befehle im Hintergrund (#355), Zeitlimits und Wahl der Shell für `run_command`.
 //! * [`ask`]: `ask_user` (#356) – Fragen mit Auswahl an den Nutzer (Prüfung der Argumente, Zustand des Formulars).
+//! * [`more_tools`]: Werkzeuge nachladen (#393) – die Kurzfassung des Prompts nennt nur den Kern, `more_tools` den Rest.
 
 pub mod agent;
 pub mod ask;
@@ -29,6 +30,7 @@ pub mod images;
 pub mod llm_backend;
 pub mod logic;
 pub mod master_prompt;
+pub mod more_tools;
 pub mod plan;
 pub mod repair;
 pub mod session;

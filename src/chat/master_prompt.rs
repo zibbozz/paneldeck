@@ -960,8 +960,8 @@ pub fn fields_block(schema: &Value) -> String {
     out
 }
 
-/// Freigabe-Hinweis für ein Werkzeug (Stufe Steuern, „Vor Schreibzugriff fragen“).
-fn approval_text(def: &ToolDef, ask_write: bool) -> &'static str {
+/// Freigabe-Hinweis für ein Werkzeug (Stufe Steuern, „Vor Schreibzugriff fragen“); auch in der Karte von `more_tools`.
+pub fn approval_text(def: &ToolDef, ask_write: bool) -> &'static str {
     // Agenten-Werkzeuge (#338) haben eigene Regeln (sensible Dateien, Web mit Freigabe auch bei Stufe Lesen).
     if agent::is_agent_tool(def.name) {
         return agent::approval_text(def.name, ask_write);
@@ -1426,11 +1426,27 @@ pub fn minimal_specs(specs: Vec<crate::llm::ToolSpec>) -> Vec<crate::llm::ToolSp
             if agent::compact_fields_in_description(&s.name) {
                 s.parameters = serde_json::json!({"type": "object"});
             }
-            // Der Hinweis „(needs a switch)“ der Editor-Werkzeuge entfällt: ein Chat bekommt sie nur mit Schalter.
-            s.description = first_sentence(&short_purpose(&s.name).replace(" (needs a switch)", ""), 80);
+            s.description = compact_purpose(&s.name);
             s
         })
         .collect()
+}
+
+/// Zweck eines Werkzeugs in einem kurzen Satz (höchstens 80 Zeichen) – die Beschreibung der Kurzfassung und die Zeilen der
+/// Liste von `more_tools` (#393). Der Hinweis „(needs a switch)“ der Editor-Werkzeuge entfällt: ein Chat bekommt sie nur
+/// mit Schalter.
+pub fn compact_purpose(name: &str) -> String {
+    first_sentence(&short_purpose(name).replace(" (needs a switch)", ""), 80)
+}
+
+/// Werkzeug-Beschreibungen für das API-Feld `tools` in der Fassung `v` – die eine Stelle für Anfrage, Vorschau und Tests:
+/// voll = jedes erlaubte Werkzeug ([`ToolPolicy::specs`]); Kurzfassung = Kern, nachgeladene und `more_tools`
+/// ([`ToolPolicy::listed_specs`], #393), knapp ([`minimal_specs`]).
+pub fn request_specs(policy: &ToolPolicy, v: Variant) -> Vec<crate::llm::ToolSpec> {
+    match v {
+        Variant::Full => policy.specs(),
+        Variant::Compact => minimal_specs(policy.listed_specs()),
+    }
 }
 
 /// Text bis zum ersten Satzende bzw. einer Klammer, höchstens `max` Zeichen (an einer Wortgrenze gekürzt).
@@ -1449,6 +1465,9 @@ fn first_sentence(s: &str, max: usize) -> String {
 fn short_purpose(name: &str) -> &'static str {
     if name == "whoami" {
         return "Your own session (this chat) and the sessions you created.";
+    }
+    if name == super::more_tools::NAME {
+        return super::more_tools::PURPOSE;
     }
     // Agenten-Werkzeuge (#338, auch `run_command` in der Fassung des Chats).
     if let Some(p) = agent::short_purpose(name) {
@@ -1520,7 +1539,11 @@ pub fn render_compact(policy: &ToolPolicy, model: &str) -> String {
 /// (#341) gelten auch hier, soweit es den Teil in der Kurzfassung gibt (Werkzeug-Beschreibungen und Beispiele hat sie
 /// ohnehin nicht).
 pub fn render_compact_with(policy: &ToolPolicy, spec: &Spec) -> String {
+    // Alle erlaubten Werkzeuge (für Zugriff und Fehlercodes – auch nachgeladene können sie liefern) und die gelisteten
+    // (#393: Kern, nachgeladene und `more_tools`).
     let defs = offered_defs(policy);
+    let listed = policy.listed_specs();
+    let more = super::more_tools::deferred(policy).len();
     let level = policy.prompt_level();
     let tools_on = level != McpLevel::Off && !defs.is_empty();
     let mut out = String::with_capacity(8 * 1024);
@@ -1587,7 +1610,15 @@ pub fn render_compact_with(policy: &ToolPolicy, spec: &Spec) -> String {
         }
         // Namen, Zweck, Felder und Pflichtfelder stehen in den Werkzeug-Beschreibungen der Anfrage; eine zweite Liste
         // hier kostete bei Steuern im Expertenmodus den Platz, den 8192 Tokens nicht haben.
-        out.push_str(&format!("\n## Tools\n\nYou have exactly the {} tools in your tool definitions; each definition gives the purpose, the fields and the required fields.\n", defs.len()));
+        if more == 0 {
+            out.push_str(&format!("\n## Tools\n\nYou have exactly the {} tools in your tool definitions; each definition gives the purpose, the fields and the required fields.\n", listed.len()));
+        } else {
+            // Werkzeuge nachladen (#393): eine kurze, ausdrückliche Anleitung für kleine Modelle.
+            out.push_str(&format!(
+                "\n## Tools\n\nYour tool definitions list {} tools; each gives the purpose, the fields and the required fields. {more} more tools are not listed: call `more_tools` for their names, then `more_tools` with `name` for one tool's fields, then call that tool by its name. Never guess fields.\n",
+                listed.len()
+            ));
+        }
         if let Some(f) = spec.family.filter(|_| spec.on(PromptPart::Family)) {
             let (name, note) = family_note(f);
             out.push_str(&format!("\n## Notes for {name} models\n\n{note}\n"));
@@ -1719,7 +1750,7 @@ mod tests {
         // Kurzfassung: Zahl der Werkzeuge und Zweck der Agenten-Werkzeuge in den knappen Beschreibungen
         let pol = policy(McpLevel::Control, true);
         let c = render_compact(&pol, "m");
-        assert!(c.contains(&format!("You have exactly the {} tools", pol.specs().len())) && c.contains("Files only in the project folder, web only via these tools."));
+        assert!(c.contains(&format!("Your tool definitions list {} tools", pol.listed_specs().len())) && c.contains("Files only in the project folder, web only via these tools."));
         let min = minimal_specs(pol.specs());
         assert!(min.iter().find(|s| s.name == "grep").unwrap().description.starts_with("Search file contents"));
         assert!(min.iter().find(|s| s.name == "run_command").unwrap().description.contains("chat's own terminal"));
@@ -1992,66 +2023,63 @@ mod tests {
     /// Geschätzte Tokens von Prompt-Fassung plus Werkzeug-Beschreibungen der Anfrage, wie `llm_backend::prepare` rechnet.
     fn request_tokens(p: &ToolPolicy, model: &str, v: Variant) -> usize {
         let sys = crate::llm::tokens::estimate_tokens(&render_variant(p, model, v)) + 4;
-        let specs = if v == Variant::Compact { minimal_specs(p.specs()) } else { p.specs() };
-        sys + crate::llm::tokens::estimate_tokens(&serde_json::to_string(&specs).unwrap())
+        sys + crate::llm::tokens::estimate_tokens(&serde_json::to_string(&request_specs(p, v)).unwrap())
     }
 
     const COMBOS: [(McpLevel, bool); 4] = [(McpLevel::Read, false), (McpLevel::Read, true), (McpLevel::Control, false), (McpLevel::Control, true)];
 
     /// Die Kurzfassung samt knappen Werkzeug-Beschreibungen passt bei jeder Stufe und jedem Modus in 8192 Tokens und
-    /// lässt dem Gespräch Platz: mindestens ein Fünftel des Platzes nach der Antwort-Reserve (1228 Tokens; Steuern im
-    /// Expertenmodus liegt seit `ask_user` (#356) knapp darunter, mindestens ein Sechstel; die übrigen Stufen haben
-    /// deutlich mehr).
+    /// lässt dem Gespräch reichlich Platz (#393): Sie listet nur den Kern (`more_tools::CORE`) und `more_tools`, der Rest
+    /// kommt bei Bedarf. Bis 3.1.0 listete sie jedes Werkzeug; Steuern im Expertenmodus mit allen Agenten-, Hintergrund-
+    /// und Editor-Werkzeugen ließ dann kaum 1 % Platz, und neue Werkzeuge (Reiter „Zeit“, Kalender, Vergleich, Aktionen
+    /// beim Speichern, #386) passten gar nicht mehr.
     ///
-    /// Mit allen Agenten-Werkzeugen (#338, Projektordner und Suchdienst) passt jede Stufe weiter in 8192 Tokens; Steuern im
-    /// Expertenmodus (58 Werkzeuge) lässt dann aber nur noch gut 5 % Platz (wer dort ein kleines Modell nutzt, wählt
-    /// Werkzeuge ab), Steuern ohne Expertenmodus weiter ein Fünftel, Lesen weiter die Hälfte.
-    ///
-    /// Editor (#54): Die Editor-Werkzeuge kommen nur mit offenen Dokumenten bzw. eingeschalteten Schaltern dazu (sonst
-    /// unverändert wie oben). Sind alle da, bleibt Steuern ohne Expertenmodus bei einem Fünftel und Lesen bei der Hälfte;
-    /// Steuern im Expertenmodus mit allen Agenten- und Editor-Werkzeugen passt noch, seit `ask_user` (#356, 3.1.0) mit nur
-    /// gut 1 % Platz.
+    /// Jetzt bleibt bei jeder Stufe, jedem Modus und mit allem (Projektordner, Suchdienst, Hintergrund-Befehle, offene
+    /// Dokumente und alle Editor-Schalter) mindestens die Hälfte des Platzes nach der Antwort-Reserve frei – auch mit
+    /// [`crate::chat::more_tools::MAX_LOADED`] nachgeladenen Werkzeugen (die größten, die es gibt) noch ein Drittel. Und
+    /// das hängt nicht mehr an der Zahl der Werkzeuge: nachzuladende Werkzeuge kosten in der Anfrage nichts.
     #[test]
     fn the_compact_prompt_fits_into_8192_with_room_left() {
+        use crate::chat::more_tools;
         let budget = 8192 * 3 / 4;
+        let all_switches = crate::editor_svc::settings::DOCS_OPEN | crate::editor_svc::settings::FORMAT | 7;
+        let mut bg = agent_env();
+        bg.background = true;
+        let mut worst = 0;
         for (level, expert) in COMBOS {
             for model in ["qwen3:8b", "llama3.1:8b", "m"] {
-                let n = request_tokens(&policy_without_folder(level, expert), model, Variant::Compact);
-                eprintln!("COMPACT {level:?} expert={expert} {model}: {n} tokens, room {}", budget - n.min(budget));
-                // Steuern im Expertenmodus: seit `ask_user` (#356, 3.1.0) knapp unter einem Fünftel, mindestens ein Sechstel.
-                let room = if level == McpLevel::Control && expert { budget / 6 } else { budget / 5 };
-                assert!(n + room <= budget, "{level:?} {expert} {model}: {n} von {budget}");
-                // ohne Steuern im Expertenmodus mindestens die Hälfte
-                assert!((level == McpLevel::Control && expert) || n <= budget / 2 + 500,"{level:?} {expert} {model}: {n}");
-                // mit allen Agenten-Werkzeugen
-                let a = request_tokens(&policy(level, expert), model, Variant::Compact);
-                eprintln!("COMPACT+AGENT {level:?} expert={expert} {model}: {a} tokens, room {}", budget - a.min(budget));
-                let room = if level == McpLevel::Control && expert { budget / 20 } else { budget / 5 };
-                assert!(a + room <= budget, "Agenten-Werkzeuge {level:?} {expert} {model}: {a} von {budget}");
-                assert!(level == McpLevel::Control || a <= budget / 2 + 500, "Agenten-Werkzeuge {level:?} {expert} {model}: {a}");
-                // dazu Dokumente im Editor offen und alle drei Editor-Schalter an (#54: alle fünf editor_*-Werkzeuge;
-                // bei Lesen nur editor_list/editor_read)
-                let all = crate::editor_svc::settings::DOCS_OPEN | 7;
-                let e = request_tokens(&policy(level, expert).with_editor_switches(all), model, Variant::Compact);
-                eprintln!("COMPACT+AGENT+EDITOR {level:?} expert={expert} {model}: {e} tokens, room {}", budget - e.min(budget));
-                // Steuern im Expertenmodus mit allem: seit `ask_user` (#356) nur noch gut 1 % Platz (passt aber).
-                let room = if level == McpLevel::Control && expert { budget / 100 } else { budget / 5 };
-                assert!(e + room <= budget, "mit Editor-Werkzeugen {level:?} {expert} {model}: {e} von {budget}");
-                assert!(level == McpLevel::Control || e <= budget / 2 + 500, "mit Editor-Werkzeugen {level:?} {expert} {model}: {e}");
-                // dazu Hintergrund-Befehle im Chat (#355): command_status, command_output, stop_command
-                let mut env = agent_env();
-                env.background = true;
-                let b = request_tokens(&policy(level, expert).with_agent(env.clone()), model, Variant::Compact);
-                let be = request_tokens(&policy(level, expert).with_agent(env).with_editor_switches(all), model, Variant::Compact);
-                eprintln!("COMPACT+AGENT+BG {level:?} expert={expert} {model}: {b} tokens, room {}; +EDITOR {be}, room {}", budget - b.min(budget), budget - be.min(budget));
-                // Steuern im Expertenmodus mit Hintergrund-Befehlen: etwa 5 % Platz; mit allem (auch Editor) passt es gerade
-                // noch. Mehr Platz gibt es dort nur mit größerem Kontext oder abgewählten Werkzeugen.
-                let room = if level == McpLevel::Control && expert { budget / 25 } else { budget / 5 };
-                assert!(b + room <= budget, "mit Hintergrund-Befehlen {level:?} {expert} {model}: {b} von {budget}");
-                let room = if level == McpLevel::Control && expert { 0 } else { budget / 5 };
-                assert!(be + room <= budget, "mit Hintergrund-Befehlen und Editor {level:?} {expert} {model}: {be} von {budget}");
+                for (what, p) in [
+                    ("plain", policy_without_folder(level, expert)),
+                    ("agent", policy(level, expert)),
+                    ("agent+editor", policy(level, expert).with_editor_switches(all_switches)),
+                    ("agent+bg+editor", policy(level, expert).with_agent(bg.clone()).with_editor_switches(all_switches)),
+                ] {
+                    let n = request_tokens(&p, model, Variant::Compact);
+                    eprintln!("COMPACT {what} {level:?} expert={expert} {model}: {n} tokens, room {}", budget - n.min(budget));
+                    assert!(n <= budget / 2, "{what} {level:?} {expert} {model}: {n} von {budget}");
+                    worst = worst.max(n);
+                    // mit den größten nachladbaren Werkzeugen (so viele, wie höchstens gelistet werden)
+                    let mut rest = more_tools::deferred(&p);
+                    rest.sort_by_key(|s| std::cmp::Reverse(serde_json::to_string(&minimal_specs(vec![s.clone()])).unwrap().len()));
+                    let loaded: Vec<String> = rest.iter().take(more_tools::MAX_LOADED).map(|s| s.name.clone()).collect();
+                    let l = request_tokens(&p.clone().with_loaded(loaded), model, Variant::Compact);
+                    eprintln!("COMPACT+LOADED {what} {level:?} expert={expert} {model}: {l} tokens, room {}", budget - l.min(budget));
+                    assert!(l <= budget * 2 / 3, "mit nachgeladenen Werkzeugen {what} {level:?} {expert} {model}: {l} von {budget}");
+                }
             }
         }
+        eprintln!("COMPACT worst case without loaded tools: {worst} of {budget}");
+    }
+
+    /// Die Liste der Kurzfassung hängt nicht von der Zahl der erlaubten Werkzeuge ab (#393): mehr Werkzeuge (Expertenmodus,
+    /// Editor, Hintergrund-Befehle) ändern nur die Zahl in der Anleitung zu `more_tools`, nicht die Größe der Anfrage.
+    #[test]
+    fn more_allowed_tools_do_not_grow_the_compact_request() {
+        let all_switches = crate::editor_svc::settings::DOCS_OPEN | crate::editor_svc::settings::FORMAT | 7;
+        let base = request_tokens(&policy(McpLevel::Control, true), "m", Variant::Compact);
+        let more = request_tokens(&policy(McpLevel::Control, true).with_editor_switches(all_switches), "m", Variant::Compact);
+        assert!(more <= base + 40, "nur Zahlen und ggf. Fehlercodes: {base} → {more}");
+        assert!(policy(McpLevel::Control, true).with_editor_switches(all_switches).specs().len() > policy(McpLevel::Control, true).specs().len());
     }
 
     /// Die Editor-Werkzeuge (#54) bekommt ein Chat nur, wenn sie etwas tun können: schreibende nur mit ihrem Schalter
@@ -2089,8 +2117,8 @@ mod tests {
                 assert_eq!(choose(auto, full), Variant::Full, "{level:?} {expert}: automatischer Kontext {auto}");
                 assert_eq!(choose(8192, full), Variant::Compact, "{level:?} {expert}");
                 assert_eq!(choose(1 << 20, full), Variant::Full);
-                // bei 32768 voll, außer Steuern im Expertenmodus bzw. Steuern mit Agenten-Werkzeugen (brauchen 65536)
-                let big = level == McpLevel::Control && (expert || agent);
+                // bei 32768 voll, außer Steuern (mit Zeit und Kalender, #164: braucht 65536)
+                let big = level == McpLevel::Control;
                 assert_eq!(choose(32768, full), if big { Variant::Compact } else { Variant::Full }, "{level:?} {expert} agent={agent}: {full}");
                 assert_eq!(choose(65536, full), Variant::Full);
             }
@@ -2130,7 +2158,10 @@ mod tests {
         for needle in ["## Tool call rules\n\n1. One tool call per step", "## Safety rules", "untrusted data", "## Paneldeck", "## Your access", "## Errors", "- Fix the arguments and call again (the message names the field and shows a correct example): `bad_args`", "## Tools", "## Notes for Mistral models", "Always answer in the language of the user's latest message"] {
             assert!(c.contains(needle), "fehlt: {needle}");
         }
-        assert!(c.contains(&format!("You have exactly the {} tools in your tool definitions", pol.specs().len())));
+        // #393: Kern und `more_tools` in der Liste, der Rest über `more_tools` (mit Anleitung)
+        let more = crate::chat::more_tools::deferred(&pol).len();
+        assert!(more > 0 && c.contains(&format!("Your tool definitions list {} tools", pol.listed_specs().len())) && c.contains(&format!("{more} more tools are not listed: call `more_tools`")), "{c}");
+        assert!(c.contains(&format!("{} tools. At most", pol.specs().len())), "Zugriff: alle erreichbaren Werkzeuge");
         assert!(!c.contains("Example (") && !c.contains("Fields:") && !c.contains("### "), "keine Beispiele und Feld-Einzelheiten");
         assert!(!c.contains("call this first"));
         // Steuern + Expertenmodus: jeder Code steht in genau einer Gruppe und damit im Prompt

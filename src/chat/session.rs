@@ -975,7 +975,7 @@ impl ChatState {
         if m.role != Role::Assistant || m.error.is_some() || !m.tool_calls.is_empty() {
             return false;
         }
-        let Some(found) = repair::find_text_calls(&m.content, &|n| crate::mcp::tool_level(n).is_some() || super::agent::is_agent_tool(n)) else { return false };
+        let Some(found) = repair::find_text_calls(&m.content, &|n| crate::mcp::tool_level(n).is_some() || super::agent::is_agent_tool(n) || n == super::more_tools::NAME) else { return false };
         let mut calls = Vec::new();
         let mut repairs = Vec::new();
         for (k, tc) in found.calls.into_iter().enumerate() {
@@ -1082,7 +1082,7 @@ impl ChatState {
             }
             if !approved {
                 self.steps += 1;
-                if plan_round.is_some() && !plan::QUESTION_TOOLS.contains(&self.calls[0].call.name.as_str()) {
+                if plan_round.is_some() && !plan::budget_free(&self.calls[0].call.name) {
                     self.planning.research += 1;
                 }
                 if policy.needs_approval(ask, &self.calls[0].call, &self.file.always_allow) {
@@ -1092,6 +1092,17 @@ impl ChatState {
                 }
             }
             self.step_executed = true;
+            // `more_tools` (#393) beantwortet der Chat selbst – aus denselben Regeln (`policy`), die jeden Aufruf prüfen.
+            if self.calls[0].call.name == super::more_tools::NAME {
+                let pol = policy.clone().with_loaded(super::more_tools::loaded(&self.file.messages));
+                let r = super::more_tools::run(&pol, &tools::exec_args(&self.calls[0].call));
+                self.record_result(super::more_tools::NAME, r);
+                self.touch();
+                if self.paused {
+                    return ToolStep::Idle;
+                }
+                continue;
+            }
             self.calls[0].state = CallState::Running;
             self.touch();
             let c = &self.calls[0].call;
@@ -1774,6 +1785,61 @@ mod tests {
         assert_eq!(c.messages().last().unwrap().content, "sorry", "das Modell bekommt die Fehler und antwortet");
         assert_eq!(c.steps, 3, "auch abgewiesene Aufrufe zählen (sonst Endlosschleife)");
         consistent(&c);
+    }
+
+    /// #393: `more_tools` beantwortet der Chat selbst (es erreicht den Hub nie); ein so geladenes, nicht gelistetes Werkzeug
+    /// läuft danach wie jedes andere – Prüfung und Ausführung über den Hub unverändert, jeder Aufruf zählt als Schritt.
+    #[test]
+    fn more_tools_is_answered_by_the_chat_and_a_loaded_tool_runs_normally() {
+        use serde_json::json;
+        let b = Script::new(vec![
+            vec![tc("a", "more_tools", json!({})), TurnEvent::Done],
+            vec![tc("b", "more_tools", json!({"name": "screenshot"})), TurnEvent::Done],
+            vec![tc("c", "screenshot", json!({})), TurnEvent::Done],
+            vec![TurnEvent::Delta("Done.".into()), TurnEvent::Done],
+        ]);
+        let mut c = ChatState::new(ChatFile::default(), None);
+        c.draft = "screenshot?".into();
+        c.send(&b, &ChatMeta::default(), &TurnContext::default(), Arc::new(|| {}));
+        let ran = drive(&mut c, &b, &policy(crate::mcp::McpLevel::Read, 10), &ok_exec);
+        assert_eq!(ran, ["screenshot"], "more_tools läuft nie über den Hub");
+        let res: Vec<&ChatMsg> = c.messages().iter().filter(|m| m.role == Role::Tool).collect();
+        assert_eq!(res.len(), 3);
+        assert_eq!(res[0].status, Some(ToolStatus::Ok));
+        assert!(res[0].content.contains("screenshot: ") && !res[0].content.contains("rename_session"), "{}", res[0].content);
+        assert!(res[1].status == Some(ToolStatus::Ok) && res[1].content.contains(r#""tool":"screenshot""#), "{}", res[1].content);
+        assert_eq!(res[2].content, r#"{"sessions":[]}"#);
+        assert_eq!(c.messages().last().unwrap().content, "Done.");
+        assert_eq!(c.steps, 3, "more_tools zählt wie jeder Aufruf");
+        assert_eq!(super::super::more_tools::loaded(c.messages()), ["screenshot"]);
+        consistent(&c);
+    }
+
+    /// #393: `more_tools` schaltet nichts frei – bei Lesen weder die Karte noch den Aufruf eines schreibenden Werkzeugs;
+    /// bei Steuern wartet ein nicht gelistetes schreibendes Werkzeug wie jedes andere auf die Freigabe.
+    #[test]
+    fn more_tools_does_not_unlock_anything_and_approvals_stay() {
+        use serde_json::json;
+        let b = Script::new(vec![
+            vec![tc("a", "more_tools", json!({"name": "rename_session"})), tc("b", "rename_session", json!({"session": 1, "name": "x"})), TurnEvent::Done],
+            vec![TurnEvent::Delta("That needs level Control.".into()), TurnEvent::Done],
+        ]);
+        let mut c = ChatState::new(ChatFile::default(), None);
+        c.draft = "rename 1".into();
+        c.send(&b, &ChatMeta::default(), &TurnContext::default(), Arc::new(|| {}));
+        assert!(drive(&mut c, &b, &policy(crate::mcp::McpLevel::Read, 10), &|_| panic!("darf nicht laufen")).is_empty());
+        let res: Vec<&ChatMsg> = c.messages().iter().filter(|m| m.role == Role::Tool).collect();
+        assert!(res[0].status == Some(ToolStatus::Error) && res[0].content.contains("forbidden") && !res[0].content.contains("parameters"), "{}", res[0].content);
+        assert!(res[1].status == Some(ToolStatus::Denied) && res[1].content.contains("forbidden"), "{}", res[1].content);
+        assert!(super::super::more_tools::loaded(c.messages()).is_empty(), "verweigert = nicht geladen");
+        consistent(&c);
+        // Steuern: Freigabe wie bei einem gelisteten Werkzeug
+        let b = Script::new(vec![vec![tc("c", "rename_session", json!({"session": 1, "name": "x"})), TurnEvent::Done], vec![TurnEvent::Delta("ok".into()), TurnEvent::Done]]);
+        let mut c = ChatState::new(ChatFile::default(), None);
+        c.draft = "rename 1".into();
+        c.send(&b, &ChatMeta::default(), &TurnContext::default(), Arc::new(|| {}));
+        assert!(drive(&mut c, &b, &policy(crate::mcp::McpLevel::Control, 10), &|_| panic!("erst nach der Freigabe")).is_empty());
+        assert_eq!(c.pending_approval().map(|p| p.name.as_str()), Some("rename_session"));
     }
 
     #[test]

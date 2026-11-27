@@ -462,6 +462,10 @@ pub fn normalize(call: &mut ToolCall) -> Vec<String> {
     if let Some(schema) = super::agent::schema_for(call) {
         return normalize_with(&schema, &mut call.arguments);
     }
+    // `more_tools` (#393) gibt es nur in Chats.
+    if call.name == super::more_tools::NAME {
+        return normalize_with(&super::more_tools::schema(), &mut call.arguments);
+    }
     match mcp::tools().into_iter().find(|d| d.name == call.name) {
         Some(def) => normalize_with(&def.schema, &mut call.arguments),
         None => Vec::new(),
