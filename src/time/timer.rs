@@ -42,11 +42,15 @@ pub struct Timer {
     pub sound: String,
     /// Ticket für die Zeiterfassung (z. B. `PAN-12`), leer = keine (Standard).
     pub ticket: String,
+    /// Länge des aktuellen Laufs in ms (Dauer beim Start). Die Dauer darf sich während des Laufs ändern (gilt erst ab dem
+    /// nächsten Start); die Zeiterfassung rechnet mit dieser Länge. Ältere Datenbestände ohne Wert: die Dauer.
+    pub run_ms: i64,
 }
 
 impl Timer {
     pub fn new(name: &str, duration_ms: i64) -> Timer {
-        Timer { id: 0, name: clean_name(name), duration_ms: clamp_duration(duration_ms), state: TimerState::Idle, sound: DEFAULT_SOUND.into(), ticket: String::new() }
+        let duration_ms = clamp_duration(duration_ms);
+        Timer { id: 0, name: clean_name(name), duration_ms, state: TimerState::Idle, sound: DEFAULT_SOUND.into(), ticket: String::new(), run_ms: duration_ms }
     }
 
     pub fn display_name(&self, lang: Lang) -> String {
@@ -63,9 +67,15 @@ impl Timer {
         }
     }
 
-    /// Bisher abgelaufene Zeit dieses Laufs (für die Zeiterfassung).
+    /// Bisher abgelaufene Zeit dieses Laufs (für die Zeiterfassung) – gemessen an der Länge des Laufs, nicht an der
+    /// (inzwischen evtl. geänderten) Dauer.
     pub fn worked(&self, now: i64) -> i64 {
-        (self.duration_ms - self.remaining(now)).clamp(0, self.duration_ms)
+        let run = self.run_ms.max(0);
+        match self.state {
+            TimerState::Idle => 0,
+            TimerState::Expired { .. } => run,
+            TimerState::Running { .. } | TimerState::Paused { .. } => (run - self.remaining(now)).clamp(0, run),
+        }
     }
 
     pub fn is_running(&self) -> bool {
@@ -76,7 +86,10 @@ impl Timer {
     /// Läuft er schon, bleibt alles, wie es ist.
     pub fn start(&mut self, now: i64) {
         self.state = match self.state {
-            TimerState::Idle | TimerState::Expired { .. } => TimerState::Running { ends_at: now + self.duration_ms },
+            TimerState::Idle | TimerState::Expired { .. } => {
+                self.run_ms = self.duration_ms;
+                TimerState::Running { ends_at: now + self.duration_ms }
+            }
             TimerState::Paused { remaining_ms } => TimerState::Running { ends_at: now + remaining_ms },
             s @ TimerState::Running { .. } => s,
         };
@@ -90,6 +103,7 @@ impl Timer {
 
     /// Von vorn mit der vollen Dauer.
     pub fn restart(&mut self, now: i64) {
+        self.run_ms = self.duration_ms;
         self.state = TimerState::Running { ends_at: now + self.duration_ms };
     }
 
@@ -185,6 +199,39 @@ mod tests {
         assert_eq!(late.worked(3_600_000), 600_000);
         late.start(4_000_000);
         assert_eq!(late.state, TimerState::Running { ends_at: 4_600_000 }, "abgelaufen → Start mit voller Dauer");
+    }
+
+    /// Dauer während des Laufs ändern: Restzeit bleibt, gebucht wird die tatsächlich gelaufene Zeit (Länge des Laufs
+    /// minus Rest), nicht „neue Dauer minus Rest“.
+    #[test]
+    fn changing_the_duration_while_running_books_the_real_time() {
+        // Erhöhen: 10 min gestartet, nach 4 min auf 30 min → 4 min gearbeitet (nicht 24)
+        let mut t = Timer::new("Fokus", 600_000);
+        t.start(0);
+        t.set_duration(1_800_000);
+        assert_eq!(t.remaining(240_000), 360_000, "Restzeit unverändert");
+        assert_eq!(t.worked(240_000), 240_000);
+        t.pause(240_000);
+        assert_eq!(t.worked(999_999), 240_000);
+        t.start(300_000);
+        assert_eq!(t.worked(360_000), 300_000, "nach dem Fortsetzen weiter vom alten Lauf");
+        assert_eq!(t.check(700_000, 1000).map(|e| e.at), Some(660_000));
+        assert_eq!(t.worked(700_000), 600_000, "abgelaufen: der ganze Lauf");
+        // Neuer Start: die neue Dauer gilt
+        t.start(1_000_000);
+        assert_eq!(t.worked(1_060_000), 60_000);
+        assert_eq!(t.remaining(1_060_000), 1_740_000);
+        // Senken: 30 min gestartet, nach 10 min auf 5 min → 10 min gearbeitet (nicht 0)
+        let mut s = Timer::new("Lang", 1_800_000);
+        s.start(0);
+        s.set_duration(300_000);
+        assert_eq!(s.worked(600_000), 600_000);
+        s.pause(600_000);
+        assert_eq!(s.worked(600_000), 600_000);
+        s.restart(700_000);
+        assert_eq!((s.run_ms, s.worked(760_000)), (300_000, 60_000));
+        s.reset();
+        assert_eq!(s.worked(800_000), 0, "bereit: nichts gelaufen");
     }
 
     #[test]

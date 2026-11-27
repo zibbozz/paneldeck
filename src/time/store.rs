@@ -75,6 +75,10 @@ CREATE TABLE time_birthdays (
     updated_at TEXT NOT NULL
 );";
 
+/// Länge des aktuellen Timer-Laufs (Schema-Version 14): Die Dauer darf sich während eines Laufs ändern, die
+/// Zeiterfassung rechnet mit der Länge beim Start. `NULL` (ältere Bestände) = die Dauer.
+pub const MIGRATION_TIMER_RUN: &str = "ALTER TABLE time_timers ADD COLUMN run_ms INTEGER;";
+
 type R<T> = rusqlite::Result<T>;
 
 fn now_text() -> String {
@@ -106,7 +110,7 @@ pub fn load(conn: &Connection) -> R<TimeData> {
             .collect::<R<_>>()?;
     }
     {
-        let mut st = conn.prepare("SELECT id, name, duration_ms, state, ends_at, remaining_ms, expired_at, sound, ticket FROM time_timers ORDER BY id")?;
+        let mut st = conn.prepare("SELECT id, name, duration_ms, state, ends_at, remaining_ms, expired_at, sound, ticket, run_ms FROM time_timers ORDER BY id")?;
         d.timers = st
             .query_map([], |r| {
                 let state: String = r.get(3)?;
@@ -117,7 +121,9 @@ pub fn load(conn: &Connection) -> R<TimeData> {
                     ("expired", _, _, Some(a)) => TimerState::Expired { at: a },
                     _ => TimerState::Idle,
                 };
-                Ok(Timer { id: r.get(0)?, name: r.get(1)?, duration_ms: super::timer::clamp_duration(r.get(2)?), state, sound: r.get(7)?, ticket: r.get(8)? })
+                let duration_ms = super::timer::clamp_duration(r.get(2)?);
+                let run_ms = r.get::<_, Option<i64>>(9)?.map(super::timer::clamp_duration).unwrap_or(duration_ms);
+                Ok(Timer { id: r.get(0)?, name: r.get(1)?, duration_ms, state, sound: r.get(7)?, ticket: r.get(8)?, run_ms })
             })?
             .collect::<R<_>>()?;
     }
@@ -198,14 +204,14 @@ pub fn save_timer(conn: &Connection, t: &mut Timer) -> R<()> {
     let (state, ends, rem, exp) = timer_cols(t);
     if t.id == 0 {
         conn.execute(
-            "INSERT INTO time_timers (name, duration_ms, state, ends_at, remaining_ms, expired_at, sound, ticket, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9)",
-            params![t.name, t.duration_ms, state, ends, rem, exp, t.sound, t.ticket, now],
+            "INSERT INTO time_timers (name, duration_ms, state, ends_at, remaining_ms, expired_at, sound, ticket, run_ms, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?10, ?9, ?9)",
+            params![t.name, t.duration_ms, state, ends, rem, exp, t.sound, t.ticket, now, t.run_ms],
         )?;
         t.id = conn.last_insert_rowid();
     } else {
         conn.execute(
-            "UPDATE time_timers SET name = ?1, duration_ms = ?2, state = ?3, ends_at = ?4, remaining_ms = ?5, expired_at = ?6, sound = ?7, ticket = ?8, updated_at = ?9 WHERE id = ?10",
-            params![t.name, t.duration_ms, state, ends, rem, exp, t.sound, t.ticket, now, t.id],
+            "UPDATE time_timers SET name = ?1, duration_ms = ?2, state = ?3, ends_at = ?4, remaining_ms = ?5, expired_at = ?6, sound = ?7, ticket = ?8, updated_at = ?9, run_ms = ?11 WHERE id = ?10",
+            params![t.name, t.duration_ms, state, ends, rem, exp, t.sound, t.ticket, now, t.id, t.run_ms],
         )?;
     }
     Ok(())
@@ -386,7 +392,38 @@ mod tests {
         assert_eq!((a.hour, a.minute, a.days, a.snooze_minutes, a.snooze_max), (23, 0, 0x7f, 1, 30));
         assert_eq!(d.timers[0].state, TimerState::Idle, "running ohne Endzeit → bereit");
         assert_eq!(d.timers[0].duration_ms, 1000);
+        assert_eq!(d.timers[0].run_ms, 1000, "ohne Länge des Laufs (ältere Bestände): die Dauer");
         assert!(d.stopwatches[0].laps.is_empty());
+    }
+
+    /// Länge des Laufs übersteht Speichern/Laden, auch wenn die Dauer währenddessen geändert wurde; Bestände von vor
+    /// Schema-Version 14 (ohne Spalte) werden ergänzt und laden mit der Dauer.
+    #[test]
+    fn timer_run_length_survives_and_old_rows_load() {
+        let conn = crate::db::open_memory();
+        let mut t = Timer::new("Fokus", 600_000);
+        t.start(0);
+        t.set_duration(1_800_000);
+        save_timer(&conn, &mut t).unwrap();
+        let back = load(&conn).unwrap().timers.remove(0);
+        assert_eq!((back.duration_ms, back.run_ms, back.worked(240_000)), (1_800_000, 600_000, 240_000));
+        t.pause(240_000);
+        save_timer(&conn, &mut t).unwrap();
+        assert_eq!(load(&conn).unwrap().timers[0].worked(0), 240_000);
+        // Stand vor der Migration: Tabelle ohne `run_ms`
+        let dir = std::env::temp_dir().join(format!("pd-time-run-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let n = crate::db::migration_index(MIGRATION_TIMER_RUN);
+        {
+            let old = crate::db::open_prefix(&dir, &dir.join("backups"), n).unwrap();
+            old.conn.execute("INSERT INTO time_timers (name, duration_ms, state, ends_at, created_at, updated_at) VALUES ('alt', 600000, 'running', 300000, '', '')", []).unwrap();
+        }
+        let db = crate::db::open(&dir, &dir.join("backups")).unwrap();
+        let old = load(&db.conn).unwrap().timers.remove(0);
+        assert_eq!((old.run_ms, old.worked(0)), (600_000, 300_000));
+        drop(db);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

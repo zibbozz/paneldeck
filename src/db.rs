@@ -62,6 +62,8 @@ const MIGRATIONS: &[&str] = &[
     crate::calendar::store::MIGRATION,
     // 13: Zugriff der Agenten je Projekt, private Einträge, Herkunft, Papierkorb (Issue #386), SQL in `planning/access.rs`
     crate::planning::access::MIGRATION,
+    // 14: Länge des aktuellen Timer-Laufs (Zeiterfassung bei geänderter Dauer), SQL in `time/store.rs`
+    crate::time::store::MIGRATION_TIMER_RUN,
 ];
 
 /// Schema-Version dieser Programmversion (auch für die Rettung einer beschädigten Datenbank in eine neue Datei).
