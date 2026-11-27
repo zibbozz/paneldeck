@@ -55,9 +55,11 @@ Abweichung: Statt `[Unreleased]` stehen noch nicht veröffentlichte Änderungen 
 - Neuer Schalter **Transparenz reduzieren** unter *Einstellungen → Darstellung* (Standard aus): alle Flächen deckend, kein Hintergrund des Themes. Neues optionales Feld `reduce_transparency` in `settings.json` (#387)
 - Neues optionales Objekt `background` in `themes/*.json`; ungültige Werte fallen auf ihren Standard zurück und das Theme bleibt gültig, unbekannte Werte bleiben erhalten. Agenten-Schnittstelle: `theme_get` liefert das neue, nur lesbare Feld `background` (Einstellungen wie in der Datei und `mean_brightness`; das Bild nur als bloßer Dateiname, nie Bilddaten) (#387)
 - **Editor: waagerechte Bildlaufleiste:** Bei ausgeschaltetem Zeilenumbruch zeigt jede Teilung unten am Text eine Bildlaufleiste, wenn Zeilen breiter sind als die Ansicht (sonst ausgeblendet, im Stil der senkrechten). Griff ziehen oder daneben klicken blättert seitenweise nach links/rechts; Umschalt+Mausrad, das Mausrad über der Leiste, das Touchpad und das Mitlaufen mit dem Cursor gehen weiter. Gerollt wird jetzt nur bis kurz hinter das Ende der längsten Zeile statt endlos ins Leere; Tabs und breite Zeichen zählen wie auf dem Bildschirm, bei großen Dateien wird die längste Zeile im Hintergrund gemessen (#389).
-- **Pfade überall in der Form des Ziels:** Wo ein Ordner oder eine Datei eingegeben, ausgewählt, hineingezogen oder eingefügt wird, weiß Paneldeck, ob das Ziel Windows, eine WSL-Distribution oder Git Bash ist, und rechnet in beide Richtungen um (`C:\x` ↔ `/mnt/c/x` bzw. `/c/x`, `\\wsl.localhost\Ubuntu\home\u` ↔ `/home/u`); `~` und Pfade relativ zum Home-Ordner gehen überall, wie bei *Neue Sitzung*. Das WSL-Ordnerfeld aus *Neue Sitzung* (Umschalter Windows/WSL, Vervollständigung, Prüfung, zuletzt benutzte Ordner) gibt es jetzt auch in Terminal-Vorlagen, Profilen, der Prozessliste und beim Arbeitsordner der Planung. Git-Bash-Pfade (`/c/…`, `~`) gehen in Ordnerfeldern, MCP-`cwd`, Links und beim Ziehen, auch für eigene Git-Bash-Profile (#392).
-- **WSL-Dateien im Editor:** Dateien unter `\\wsl.localhost\…` lassen sich öffnen und speichern (Laden im Hintergrund); Agenten bleiben bei lokalen Windows-Dateien. *Als Linux-Pfad kopieren* im Dateibaum (#392).
-- **Strg+Klick auf Linux-Pfade** in der Terminalausgabe öffnet Textdateien im Paneldeck-Editor an der Zeile und Ordner im Explorer; `~`, `/mnt/c` und `/c/` werden aufgelöst; `file://`-Links aus WSL funktionieren (#392).
+- Pfade folgen überall der Pfadart der Ziel-Shell (#392): Die Ordnerfelder von Terminal-Vorlagen, Profilen (*Startordner*), der Prozessliste und der Arbeitsordner der Planung sind jetzt dasselbe Feld wie in *Neue Sitzung* – für WSL mit dem Umschalter *Windows-Pfad / WSL-Pfad*, Vervollständigung, Prüfung und zuletzt benutzten Ordnern, für Git Bash auch `/c/x` und `~`, für jede Shell `~` und `~/x`; wofür ein eingegebener Pfad steht, steht klein darunter.
+- Strg+Klick auf einen Linux-Pfad in der Terminalausgabe (`/home/ich/x.rs:12`, `~/notizen.md`, `/mnt/c/…`, Git Bash `/c/…`) öffnet Textdateien im Editor von Paneldeck an dieser Zeile und Ordner im Explorer; Datei-Links, die Programme setzen (OSC 8), zeigen aus einer WSL-Sitzung auf die Datei in dieser Distribution.
+- Der Editor öffnet und speichert Dateien in WSL-Distributionen (`\\wsl.localhost\…`, im Hintergrund geladen) und bietet für sie *Als Linux-Pfad kopieren*; Agenten bleiben auf lokale Windows-Dateien beschränkt.
+- `create_session` (MCP) nimmt für Git-Bash-Sitzungen Git-Bash-Pfade (`/c/x`, `/cygdrive/c/x`) und `~` als `cwd`, für andere Windows-Shells `~`.
+- WSL: Der Einhängepunkt der Laufwerke einer Distribution (`[automount] root` in `/etc/wsl.conf`) gilt beim Umrechnen `C:\x` ↔ `/mnt/c/x`.
 
 ### Changed
 
@@ -72,9 +74,14 @@ Abweichung: Statt `[Unreleased]` stehen noch nicht veröffentlichte Änderungen 
 
 - Terminals: Die Umgebungsvariablen eines Profils konnten Paneldecks eigene Variablen wie `PANELDECK_SESSION` und `PANELDECK_SESSION_KEY` überschreiben; `PANELDECK_*` und interne Namen kommen jetzt nie aus Profilen, Vorlagen oder Sitzungen, und Paneldecks Werte werden zuletzt gesetzt (#384)
 - Prozessliste: Umgebungsvariablen eines Prozesses mit WSL-Shell kamen nicht beim Linux-Prozess an; sie gehen jetzt über `WSLENV` (#384)
-- Ziehen und *Pfad einfügen* von Dateien unter `\\wsl.localhost\…` in eine WSL-Sitzung ergab `//wsl.localhost/…` statt des Linux-Pfads; eine Datei einer anderen Distribution wird nicht mehr eingefügt (stattdessen ein Hinweis) (#392).
-- Angeklickte Linux-Pfade wurden zu falschen Windows-Pfaden (`\\wsl$\\home…`, `/mnt/c` als Netzwerkpfad) (#392).
-- Die Prozessliste lehnte Linux-Ordner für WSL-Prozesse ab; Vorlagen beachteten bei der Ordnerwahl die Shell nicht; *Neue Sitzung hier* auf einem WSL-Ordner nutzte nicht die Shell dieser Distribution; `--open`/`--edit` mit einem absoluten Linux-Pfad landeten am falschen Ort; ein Chat aus einer WSL-Sitzung hatte keinen Arbeitsordner für seine Datei-Werkzeuge (#392).
+- Drag & Drop von WSL-Dateien und *Pfad einfügen* im Dateibaum einer WSL-Sitzung fügten `//wsl.localhost/…` statt des Linux-Pfads ein; eine Datei einer anderen WSL-Distribution wird nicht mehr eingefügt (ein Hinweis sagt, warum). Als `\\wsl.localhost\…` eingegebene Pfade der Claude-Optionen werden ebenfalls zu Linux-Pfaden.
+- Der von einer WSL-Sitzung gemeldete Arbeitsordner wurde `\\wsl$\…` (bei `wsl.exe` ohne `-d` ohne Distribution, ohne die Zeichenabbildung von WSL), und `/mnt/c/…` blieb ein WSL-Pfad; jetzt `\\wsl.localhost\<Distro>\…` bzw. `C:\…`.
+- Die Prozessliste lehnte Linux-Ordner für WSL-Shells ab; sie starten jetzt über `wsl.exe --cd`.
+- Der Startordner von Terminal-Vorlagen ignorierte die Shell der Vorlage.
+- *Neue Sitzung hier* im Dateibaum auf einem WSL-Ordner nahm nicht die WSL-Shell dieser Distribution.
+- `paneldeck --open` und `paneldeck --edit` mit einem absoluten Linux-Pfad lösten ihn als Windows-Pfad auf; jetzt gilt die Distribution der Sitzung, in der der Befehl getippt wurde (sonst die Standard-Distribution).
+- Ein Chat, der aus einer WSL-Sitzung mit Linux-Ordner angelegt wurde, hatte keine Datei-Werkzeuge; sein Ordner ist jetzt `\\wsl.localhost\<Distro>\…` (Geheimnis-Ordner im Linux-Home bleiben gesperrt).
+- cmd.exe-Sitzungen mit einem Netzwerk- oder WSL-Startordner starteten still in `C:\Windows`; jetzt im Benutzerordner mit Hinweis.
 
 ### Security
 

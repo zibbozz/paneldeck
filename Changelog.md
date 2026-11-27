@@ -55,9 +55,11 @@ Deviation: instead of `[Unreleased]`, changes that are not yet released are list
 - New switch **Reduce transparency** under *Settings → Appearance* (off by default): all surfaces opaque, no theme background. New optional `settings.json` field `reduce_transparency` (#387)
 - New optional object `background` in `themes/*.json`; invalid values fall back to their default and the theme stays valid, unknown values are kept. Agent interface: `theme_get` returns the new read-only field `background` (settings as in the file plus `mean_brightness`; the image only as a bare file name, never image data) (#387)
 - **Editor: horizontal scrollbar:** with word wrap off, every split shows a scrollbar at the bottom of the text when lines are wider than the view (hidden otherwise, styled like the vertical one). Drag the thumb or click beside it to page left/right; Shift+wheel, the wheel over the scrollbar, the touchpad and cursor-follow keep working. Scrolling now stops a little after the end of the longest line instead of going on into empty space; tabs and wide characters count as on screen, and in large files the longest line is measured in the background (#389).
-- **Paths in the target's form everywhere:** wherever a folder or file is entered, picked, dropped or pasted, Paneldeck knows whether the target is Windows, a WSL distribution or Git Bash and converts in both directions (`C:\x` ↔ `/mnt/c/x` or `/c/x`, `\\wsl.localhost\Ubuntu\home\u` ↔ `/home/u`); `~` and paths relative to the home folder work everywhere, like in *New session*. The WSL folder field of *New session* (Windows/WSL switch, completion, check, recent folders) is now also in terminal templates, profiles, the process list and the planning work folder. Git Bash paths (`/c/…`, `~`) work in folder fields, MCP `cwd`, links and drag & drop, also for custom Git Bash profiles (#392).
-- **WSL files in the editor:** files under `\\wsl.localhost\…` can be opened and saved (loaded in the background); agents stay limited to local Windows files. *Copy as Linux path* in the file tree (#392).
-- **Ctrl+click on Linux paths** in terminal output opens text files in the Paneldeck editor at the line and folders in Explorer; `~`, `/mnt/c` and `/c/` are resolved; `file://` links from WSL work (#392).
+- Paths follow the path kind of the target shell everywhere (#392): the folder fields of terminal templates, profiles (*Start folder*), the process list and the planning work folder are now the same field as in *New session* – for WSL with the *Windows path / WSL path* switch, completion, check and recently used folders, for Git Bash also `/c/x` and `~`, for every shell `~` and `~/x`; what a typed path stands for is shown small underneath.
+- Ctrl+click on a Linux path in the terminal output (`/home/me/x.rs:12`, `~/notes.md`, `/mnt/c/…`, Git Bash `/c/…`) opens text files in the Paneldeck editor at that line and folders in Explorer; file links set by programs (OSC 8) from a WSL session point to the file in that distribution.
+- The editor opens and saves files in WSL distributions (`\\wsl.localhost\…`, loaded in the background) and offers *Copy as Linux path* for them; agents stay limited to local Windows files.
+- `create_session` (MCP) accepts Git Bash paths (`/c/x`, `/cygdrive/c/x`) and `~` as `cwd` for Git Bash sessions and `~` for other Windows shells.
+- WSL: the drive mount point of a distribution (`[automount] root` in `/etc/wsl.conf`) is respected when converting `C:\x` ↔ `/mnt/c/x`.
 
 ### Changed
 
@@ -72,9 +74,14 @@ Deviation: instead of `[Unreleased]`, changes that are not yet released are list
 
 - Terminals: a profile's environment variables could overwrite Paneldeck's own variables such as `PANELDECK_SESSION` and `PANELDECK_SESSION_KEY`; `PANELDECK_*` and internal names are now never taken from profiles, templates or sessions, and Paneldeck's values are set last (#384)
 - Process list: environment variables of a process with a WSL shell did not reach the Linux process; they are now passed through `WSLENV` (#384)
-- Drag & drop and *Insert path* of files under `\\wsl.localhost\…` into a WSL session produced `//wsl.localhost/…` instead of the Linux path; a file of another distribution is no longer inserted (hint instead) (#392).
-- Clicked Linux paths resolved to wrong Windows paths (`\\wsl$\\home…`, `/mnt/c` as a network path) (#392).
-- The process list rejected Linux folders for WSL processes; templates ignored the shell when choosing a folder; *New session here* on a WSL folder didn't use that distribution's shell; `--open`/`--edit` with an absolute Linux path ended up in the wrong place; a chat created from a WSL session had no working folder for its file tools (#392).
+- Drag & drop of WSL files and *Insert path* in the file tree of a WSL session inserted `//wsl.localhost/…` instead of the Linux path; a file of another WSL distribution is no longer inserted (a note says why). Claude option paths typed as `\\wsl.localhost\…` are converted to Linux paths as well.
+- The working folder reported by a WSL session became `\\wsl$\…` (without the distribution for `wsl.exe` without `-d`, without the WSL character mapping) and `/mnt/c/…` stayed a WSL path; it is now `\\wsl.localhost\<distro>\…` or `C:\…`.
+- The process list rejected Linux folders for WSL shells; they now start via `wsl.exe --cd`.
+- The start folder of terminal templates ignored the template's shell.
+- *New session here* in the file tree of a WSL folder did not use the WSL shell of that distribution.
+- `paneldeck --open` and `paneldeck --edit` with an absolute Linux path resolved it as a Windows path; they now use the distribution of the session the command was typed in (otherwise the default distribution).
+- A chat created from a WSL session with a Linux folder had no file tools; its folder is now `\\wsl.localhost\<distro>\…` (secret folders in the Linux home stay blocked).
+- cmd.exe sessions with a network or WSL start folder silently started in `C:\Windows`; they now start in the home folder with a note.
 
 ### Security
 
