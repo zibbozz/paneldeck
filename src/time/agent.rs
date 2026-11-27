@@ -219,6 +219,22 @@ pub struct Ctx<'a, Tz: TimeZone> {
     /// Klingelnde Wecker und Timer (Kennungen, aus der Oberfläche).
     pub ringing_alarms: Vec<i64>,
     pub ringing_timers: Vec<i64>,
+    /// Sicht eines Agenten (#386, Review 3.2.0): verknüpfte Tickets (`ticket`) nennen Antworten nur, wenn der Agent sie
+    /// sieht – sonst `null`. `None` = keine Grenze (Tests, interne Aufrufe).
+    pub view: Option<&'a crate::access::AgentView>,
+}
+
+/// Schlüssel des verknüpften Tickets für die Antwort: leer → `null`; mit Sicht nur ein sichtbares Ticket (nicht privat,
+/// nicht im Papierkorb, Projekt erreichbar), sonst `null` (Review 3.2.0).
+fn ticket_field<Tz: TimeZone>(key: &str, ctx: &Ctx<Tz>) -> Value {
+    if key.is_empty() {
+        return Value::Null;
+    }
+    let visible = match ctx.view {
+        None => true,
+        Some(v) => ctx.conn.and_then(|c| crate::planning::tickets::ticket_by_key(c, key).ok()).is_some_and(|t| !t.private && !t.trashed && v.ticket_level(t.project_id) > crate::mcp::McpLevel::Off),
+    };
+    if visible { Value::String(key.to_string()) } else { Value::Null }
 }
 
 /// Ergebnis eines Aufrufs.
@@ -291,7 +307,7 @@ pub fn timer_json<Tz: TimeZone>(t: &Timer, ctx: &Ctx<Tz>) -> Value {
         "expired_at": exp,
         "ringing": ctx.ringing_timers.contains(&t.id),
         "sound": sound_name(&t.sound, super::timer::DEFAULT_SOUND),
-        "ticket": if t.ticket.is_empty() { Value::Null } else { Value::String(t.ticket.clone()) },
+        "ticket": ticket_field(&t.ticket, ctx),
     })
 }
 
@@ -305,7 +321,7 @@ pub fn stopwatch_json<Tz: TimeZone>(s: &Stopwatch, ctx: &Ctx<Tz>, laps_limit: us
         "started_at": s.started_at.map(|t| iso(&ctx.tz, t)).unwrap_or(Value::Null),
         "laps": laps,
         "laps_total": s.laps.len(),
-        "ticket": if s.ticket.is_empty() { Value::Null } else { Value::String(s.ticket.clone()) },
+        "ticket": ticket_field(&s.ticket, ctx),
     })
 }
 
@@ -678,7 +694,7 @@ mod tests {
     }
 
     fn ctx(conn: &Connection, now: i64) -> Ctx<'_, chrono_tz::Tz> {
-        Ctx { conn: Some(conn), now_ms: now, tz: Berlin, lang: Lang::En, ringing_alarms: vec![], ringing_timers: vec![] }
+        Ctx { conn: Some(conn), now_ms: now, tz: Berlin, lang: Lang::En, ringing_alarms: vec![], ringing_timers: vec![], view: None }
     }
 
     #[test]
@@ -820,10 +836,45 @@ mod tests {
         assert_eq!(call(&c, &mut d, "list_stopwatches", &json!({"laps_limit": 5000})).unwrap_err().0, "bad_args");
     }
 
+    /// Review 3.2.0: Timer und Stoppuhren nennen ein verknüpftes Ticket nur, wenn der Agent es sieht (sonst `null`).
+    #[test]
+    fn linked_tickets_are_only_named_when_visible() {
+        use crate::planning::history::Source;
+        let f = crate::planning::tickets::fixture::Fx::new();
+        let open = f.mk(f.task, "Open");
+        let private = f.mk(f.task, "Private");
+        crate::planning::access::set_ticket_private(&f.c, private.id, true, &Source::ui()).unwrap();
+        let mut d = TimeData::default();
+        for (i, key) in [open.key(), private.key(), "NOPE-1".to_string(), String::new()].into_iter().enumerate() {
+            let mut t = Timer::new(&format!("T{i}"), 60_000);
+            t.id = i as i64 + 1;
+            t.ticket = key.clone();
+            d.timers.push(t);
+            let mut s = Stopwatch::new(&format!("S{i}"));
+            s.id = i as i64 + 1;
+            s.ticket = key;
+            d.stopwatches.push(s);
+        }
+        let mut view = crate::access::AgentView::default();
+        view.projects.insert(f.project, crate::mcp::McpLevel::Read);
+        let c = Ctx { conn: Some(&f.c), now_ms: 0, tz: Berlin, lang: Lang::En, ringing_alarms: vec![], ringing_timers: vec![], view: Some(&view) };
+        let tickets = |r: &Value, k: &str| r[k].as_array().unwrap().iter().map(|x| x["ticket"].clone()).collect::<Vec<_>>();
+        let want = vec![json!(open.key()), Value::Null, Value::Null, Value::Null];
+        assert_eq!(tickets(&call(&c, &mut d, "list_timers", &json!({})).unwrap().value, "timers"), want, "privat und unbekannt: null");
+        assert_eq!(tickets(&call(&c, &mut d, "list_stopwatches", &json!({})).unwrap().value, "stopwatches"), want);
+        // Projekt gesperrt: auch das offene Ticket nicht
+        let locked = crate::access::AgentView::default();
+        let c = Ctx { view: Some(&locked), ..c };
+        assert_eq!(tickets(&call(&c, &mut d, "list_timers", &json!({})).unwrap().value, "timers"), vec![Value::Null; 4]);
+        // Ohne Sicht (Oberfläche): wie bisher
+        let c = Ctx { view: None, ..c };
+        assert_eq!(tickets(&call(&c, &mut d, "list_timers", &json!({})).unwrap().value, "timers")[1], json!(private.key()));
+    }
+
     #[test]
     fn writing_without_database_fails_cleanly() {
         let mut d = TimeData::default();
-        let c: Ctx<chrono_tz::Tz> = Ctx { conn: None, now_ms: 0, tz: Berlin, lang: Lang::De, ringing_alarms: vec![], ringing_timers: vec![] };
+        let c: Ctx<chrono_tz::Tz> = Ctx { conn: None, now_ms: 0, tz: Berlin, lang: Lang::De, ringing_alarms: vec![], ringing_timers: vec![], view: None };
         assert_eq!(call(&c, &mut d, "create_timer", &json!({"duration": 60})).unwrap_err().0, "db_unavailable");
         assert!(call(&c, &mut d, "list_timers", &json!({})).is_ok());
     }

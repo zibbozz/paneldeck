@@ -128,23 +128,52 @@ pub struct Ctx<'a> {
     pub view: Option<&'a crate::access::AgentView>,
 }
 
+/// Was ein Agent von den Quellen sieht, einmal je Abfrage geladen (Review 3.2.0: nicht je Eintrag eine Abfrage in der
+/// UI-Schleife): sichtbare Tickets (nach Kennung und Schlüssel) und Karten.
+struct Visible {
+    ticket_ids: std::collections::HashSet<i64>,
+    ticket_keys: std::collections::HashSet<String>,
+    cards: std::collections::HashSet<i64>,
+}
+
+impl Visible {
+    /// Lädt Tickets (eine Abfrage), Tags und Karten (je eine) – nur, wenn die Einträge solche Quellen enthalten.
+    fn load(conn: &Connection, v: &crate::access::AgentView, items: &[sources::Item]) -> Visible {
+        use crate::mcp::McpLevel::Off;
+        let mut out = Visible { ticket_ids: Default::default(), ticket_keys: Default::default(), cards: Default::default() };
+        if items.iter().any(|it| matches!(it.kind, Kind::Due | Kind::Time)) {
+            let sql = format!("SELECT t.id, p.key, t.number, t.project_id, t.private, t.trashed_at IS NOT NULL {}", crate::planning::tickets::FROM);
+            if let Ok(mut st) = conn.prepare(&sql) {
+                let rows = st.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)?, r.get::<_, i64>(3)?, r.get::<_, i64>(4)? != 0, r.get::<_, bool>(5)?)));
+                for (id, key, number, project, private, trashed) in rows.into_iter().flatten().flatten() {
+                    if !private && !trashed && v.ticket_level(project) > Off {
+                        out.ticket_ids.insert(id);
+                        out.ticket_keys.insert(format!("{}-{number}", key.to_ascii_uppercase()));
+                    }
+                }
+            }
+        }
+        if items.iter().any(|it| it.kind == Kind::Todo) {
+            let tags = crate::tasks::list_tags(conn).unwrap_or_default();
+            let all = crate::tasks::list_items(conn, &crate::tasks::ItemFilter { show_done: true, tags: Vec::new() }).unwrap_or_default();
+            out.cards = all.into_iter().filter(|c| !crate::tasks::is_private(c, &tags) && v.card_level(c.project) > Off).map(|c| c.id).collect();
+        }
+        out
+    }
+}
+
 /// Gehört der Eintrag zu einem Bereich, den der Agent sieht (#386)? Termine mit Projekt folgen dem Ticket-Projekt, ohne
 /// Projekt „Allgemein“; Fälligkeiten und Zeiteinträge nur für sichtbare (nicht private, nicht gelöschte) Tickets bzw. Karten.
-fn item_visible(ctx: &Ctx, it: &sources::Item) -> bool {
+fn item_visible(v: &crate::access::AgentView, seen: &Visible, it: &sources::Item) -> bool {
     use crate::mcp::McpLevel::Off;
-    let Some(v) = ctx.view else { return true };
-    let ticket_ok = |t: Option<crate::planning::tickets::Ticket>| t.is_some_and(|t| !t.private && !t.trashed && v.ticket_level(t.project_id) > Off);
     match it.kind {
         Kind::Event => match it.project {
             Some(p) => v.ticket_level(p) > Off,
             None => v.general > Off,
         },
-        Kind::Due => ticket_ok(crate::planning::tickets::get_ticket(ctx.conn, it.id).ok()),
-        Kind::Time => ticket_ok(crate::planning::tickets::ticket_by_key(ctx.conn, &it.key).ok()),
-        Kind::Todo => {
-            let tags = crate::tasks::list_tags(ctx.conn).unwrap_or_default();
-            crate::tasks::get_item(ctx.conn, it.id).is_ok_and(|c| !crate::tasks::is_private(&c, &tags) && v.card_level(c.project) > Off)
-        }
+        Kind::Due => seen.ticket_ids.contains(&it.id),
+        Kind::Time => crate::planning::tickets::parse_key(&it.key).is_some_and(|(k, n)| seen.ticket_keys.contains(&format!("{k}-{n}"))),
+        Kind::Todo => seen.cards.contains(&it.id),
         Kind::Sprint | Kind::Version | Kind::Milestone => it.project.is_none_or(|p| v.ticket_level(p) > Off),
     }
 }
@@ -276,8 +305,9 @@ fn list(ctx: &Ctx, v: &Value) -> R {
     };
     let (events, items) = (&data.0, &data.1);
     let filtered: Vec<sources::Item>;
-    let items: &Vec<sources::Item> = if ctx.view.is_some() {
-        filtered = items.iter().filter(|it| item_visible(ctx, it)).cloned().collect();
+    let items: &Vec<sources::Item> = if let Some(v) = ctx.view {
+        let seen = Visible::load(ctx.conn, v, items);
+        filtered = items.iter().filter(|it| item_visible(v, &seen, it)).cloned().collect();
         &filtered
     } else {
         items

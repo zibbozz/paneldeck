@@ -19,7 +19,7 @@
 
 use super::comments::{add_comment, comments_of};
 use super::fields::{list_fields, Field, FieldKind};
-use super::history::{describe, history_of, Source};
+use super::history::{history_of, Source};
 use super::link_types::{link_type_by_key, list_link_types, LinkType, TargetKind};
 use super::links::{add_link, links_of, Direction, LinkTarget, Target};
 use super::projects::{list_projects, project_by_key, Project};
@@ -900,7 +900,8 @@ fn get_ticket_tool(ctx: &Ctx, v: &Value) -> R {
     let entries = tk(ctx, entries_of(ctx.conn, t.id))?;
     let total = tk(ctx, time_total(ctx.conn, t.id))?;
     let transitions = tk(ctx, available_transitions(ctx.conn, t.id))?;
-    let terminals: Vec<String> = links.iter().filter_map(|l| if let LinkTarget::Terminal(s) = &l.target { Some(s.clone()) } else { None }).collect();
+    // Nur Sitzungen, die der Agent sieht (Review 3.2.0: nie Kennungen von Sitzungen gesperrter Projekte).
+    let terminals: Vec<String> = links.iter().filter_map(|l| if let LinkTarget::Terminal(s) = &l.target { Some(s.clone()) } else { None }).filter(|s| scope::terminal_visible(ctx, s)).collect();
     let mut out = with_fields(ctx, &t)?;
     let recent = |len: usize| len.saturating_sub(DETAIL_LIMIT);
     // Sicht (#386): private, gelöschte und Tickets gesperrter Projekte fehlen auch hier.
@@ -918,7 +919,7 @@ fn get_ticket_tool(ctx: &Ctx, v: &Value) -> R {
             .iter()
             .rev()
             .take(DETAIL_LIMIT)
-            .map(|e| json!({"at": e.at, "source": e.source.kind.as_str(), "source_detail": e.source.detail, "change": short(&describe(ctx.conn, e, ctx.lang), 300)}))
+            .map(|e| json!({"at": e.at, "source": e.source.kind.as_str(), "source_detail": e.source.detail, "change": short(&scope::history_change(ctx, e), 300)}))
             .collect(),
     );
     out["history_total"] = json!(history.len());

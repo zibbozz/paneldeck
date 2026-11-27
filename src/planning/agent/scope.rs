@@ -43,8 +43,32 @@ impl Ctx<'_> {
 pub(super) fn link_visible(ctx: &Ctx, l: &super::super::links::LinkView) -> bool {
     match &l.target {
         LinkTarget::Ticket(r) => ctx.view.is_none() || get_ticket(ctx.conn, r.id).is_ok_and(|t| ctx.ticket_visible(&t)),
+        // Terminal-Verknüpfungen (Review 3.2.0): nur Sitzungen, die der Agent sieht (nie die eines gesperrten Projekts).
+        LinkTarget::Terminal(s) => terminal_visible(ctx, s),
         _ => true,
     }
+}
+
+/// Sieht der Agent die Sitzung dieser Terminal-Verknüpfung (`session:<id>`)? Ohne Sicht: alles.
+pub(super) fn terminal_visible(ctx: &Ctx, target: &str) -> bool {
+    ctx.view.is_none_or(|v| v.terminal_visible(super::parse_terminal_ref(target)))
+}
+
+/// Satz eines Verlaufseintrags für einen Agenten (Review 3.2.0): Kommentar-Einträge ohne den Text (der Kommentar kann
+/// inzwischen im Papierkorb liegen; seinen Text liefern nur `comments`, die den Papierkorb auslassen). Ohne Sicht wie in
+/// der Oberfläche.
+pub(super) fn history_change(ctx: &Ctx, e: &super::super::history::HistoryEntry) -> String {
+    use super::super::history::HistoryField as H;
+    if ctx.view.is_some() && e.field == H::Comment {
+        let l = ctx.lang;
+        return match (&e.old, &e.new) {
+            (None, Some(_)) => l.t("Kommentar hinzugefügt", "Comment added"),
+            (Some(_), None) => l.t("Kommentar gelöscht", "Comment deleted"),
+            _ => l.t("Kommentar geändert", "Comment edited"),
+        }
+        .to_string();
+    }
+    super::super::history::describe(ctx.conn, e, ctx.lang)
 }
 
 fn id_visible(ctx: &Ctx, s: Option<&str>) -> bool {
@@ -75,6 +99,10 @@ pub(super) fn history_visible(ctx: &Ctx, e: &super::super::history::HistoryEntry
         // Verknüpfungen nennen das Ziel mit seinem Schlüssel (`PAN-3`), bei gelöschten Zielen die Kennung.
         H::Link => [&e.old, &e.new].iter().all(|v| {
             let Some(j) = v.as_deref().and_then(|s| serde_json::from_str::<Value>(s).ok()) else { return true };
+            // Terminal-Verknüpfungen (Review 3.2.0): nur Sitzungen, die der Agent sieht.
+            if j["kind"] == "terminal" {
+                return j["target"].as_str().is_some_and(|t| terminal_visible(ctx, t));
+            }
             if j["kind"] != "ticket" {
                 return true;
             }
@@ -322,6 +350,35 @@ mod tests {
         assert!(!d.result.to_string().contains(&s.key()), "nirgends genannt (auch nicht im Verlauf)");
         assert_eq!(call(&ctx, "link_ticket", &json!({"ticket": a.key(), "to_ticket": s.key()}), true).unwrap_err().code, crate::access::LOCKED_CODE);
         assert_eq!(call(&ctx, "link_ticket", &json!({"ticket": a.key(), "to_ticket": p.key()}), true).unwrap_err().code, "not_found");
+    }
+
+    /// Review 3.2.0: Der Verlauf von `get_ticket` nennt Agenten keinen Kommentartext (ein Kommentar im Papierkorb bliebe
+    /// sonst lesbar), und Terminal-Verknüpfungen nennen nur Sitzungen, die der Agent sieht.
+    #[test]
+    fn history_hides_comment_texts_and_links_hide_invisible_sessions() {
+        let (f, sec) = setup();
+        let a = f.mk(f.task, "Visible");
+        let (cid, _) = crate::planning::comments::add_comment(&f.c, a.id, "my secret password is hunter2", &Source::ui()).unwrap();
+        acc::trash_comment(&f.c, cid, &Source::ui()).unwrap();
+        let term = crate::planning::link_types::list_link_types(&f.c).unwrap().into_iter().find(|l| l.target_kind == crate::planning::link_types::TargetKind::Terminal).unwrap().id;
+        crate::planning::links::add_link(&f.c, a.id, term, crate::planning::links::Target::Terminal("session:7".into()), &Source::ui()).unwrap();
+        crate::planning::links::add_link(&f.c, a.id, term, crate::planning::links::Target::Terminal("session:8".into()), &Source::ui()).unwrap();
+        let mut view = map(&f, sec, AreaLevel::Control).view(Caller::Home(1), false, false);
+        view.sessions = Some([7].into_iter().collect());
+        let ctx = with(&f, &view);
+        let d = call(&ctx, "get_ticket", &json!({"ticket": a.key()}), true).unwrap();
+        let text = d.result.to_string();
+        assert!(!text.contains("hunter2"), "kein Kommentartext im Verlauf: {}", d.result["history"]);
+        assert!(text.contains("Comment added"), "der Eintrag selbst bleibt: {}", d.result["history"]);
+        assert_eq!(d.result["comments"].as_array().unwrap().len(), 0, "Papierkorb");
+        assert_eq!(d.result["linked_terminals"], json!(["session:7"]), "Sitzung 8 (gesperrtes Projekt) fehlt");
+        let terminals: Vec<&Value> = d.result["links"].as_array().unwrap().iter().filter(|l| l["kind"] == "terminal").collect();
+        assert_eq!(terminals.len(), 1, "{}", d.result["links"]);
+        assert!(!text.contains("session:8"));
+        // Ohne Sicht (Oberfläche, interne Aufrufe): wie bisher.
+        let ui = Ctx { conn: &f.c, lang: Lang::En, source: Source::ui(), now: now(), view: None, need: Default::default() };
+        let d = call(&ui, "get_ticket", &json!({"ticket": a.key()}), true).unwrap();
+        assert!(d.result.to_string().contains("hunter2") && d.result["linked_terminals"].as_array().unwrap().len() == 2);
     }
 
     #[test]
