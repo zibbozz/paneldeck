@@ -152,6 +152,8 @@ pub(crate) struct DocEntry {
     pub syntax: SyntaxDoc,
     /// Änderungsmarken am Rand (#385).
     pub marks: super::marks::Marks,
+    /// Breite der längsten Zeile für die waagerechte Bildlaufleiste (#389), für alle Ansichten.
+    pub(super) width: super::hscroll::DocWidth,
 }
 
 /// Ab dieser Dateigröße wird im Hilfsthread gelesen (die Oberfläche bleibt bedienbar).
@@ -159,7 +161,7 @@ pub(super) const BACKGROUND_BYTES: u64 = 4 * 1024 * 1024;
 
 impl DocEntry {
     fn blank(path: Option<PathBuf>, untitled: u32) -> Self {
-        DocEntry { path, untitled, doc: None, load_error: None, pending_hot: None, initial_text: None, hot: Default::default(), opened_by_agent: false, agent_edited: false, agent_note_dismissed: false, large_dismissed: false, disk_conflict: false, disk_deleted: false, edited_at: None, touched: false, loading: None, scratch: Selections::default(), syntax: SyntaxDoc::default(), marks: Default::default() }
+        DocEntry { path, untitled, doc: None, load_error: None, pending_hot: None, initial_text: None, hot: Default::default(), opened_by_agent: false, agent_edited: false, agent_note_dismissed: false, large_dismissed: false, disk_conflict: false, disk_deleted: false, edited_at: None, touched: false, loading: None, scratch: Selections::default(), syntax: SyntaxDoc::default(), marks: Default::default(), width: Default::default() }
     }
 
     /// Noch nicht gelesenes Dokument (Datei und/oder Hot-Exit-Inhalt).

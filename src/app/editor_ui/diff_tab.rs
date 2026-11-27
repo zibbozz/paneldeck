@@ -457,6 +457,11 @@ pub(crate) struct DiffTab {
     pub current: Option<usize>,
     pub scroll_y: f32,
     pub scroll_x: f32,
+    /// Griff der waagerechten Leiste wird gezogen (#389): Abstand des Zeigers zum Griffanfang.
+    hdrag: Option<f32>,
+    /// Leiste und größter Bildlauf im letzten Bild (Tests).
+    pub(super) hbar: Option<Rect>,
+    pub(super) hmax: f32,
     goto_hunk: Option<usize>,
     job: Option<Job>,
     pub(super) out: Option<Arc<DiffOut>>,
@@ -473,7 +478,9 @@ pub(crate) struct DiffTab {
 
 /// Zeilen und Höhen für die aktuelle Darstellung.
 struct Cache {
-    key: (usize, bool, usize, bool, u64, Option<usize>, Option<usize>),
+    key: (usize, bool, usize, bool, u64, Option<usize>, Option<usize>, usize),
+    /// Breite der längsten Zeile beider Seiten in Spalten (einmal je Aufbau gemessen, #389).
+    max_cols: usize,
     rows: Vec<Row>,
     items: Vec<Item>,
     /// Oberkante jedes Eintrags (Pixel ab dem Anfang) und Gesamthöhe am Ende.
@@ -496,6 +503,9 @@ impl DiffTab {
             current: None,
             scroll_y: 0.0,
             scroll_x: 0.0,
+            hdrag: None,
+            hbar: None,
+            hmax: 0.0,
             goto_hunk: None,
             job: None,
             out: None,
@@ -875,7 +885,7 @@ impl DiffTab {
         use std::hash::{Hash, Hasher};
         let mut h = std::collections::hash_map::DefaultHasher::new();
         self.revealed.hash(&mut h);
-        let key = (Arc::as_ptr(&out) as usize, unified, self.context, self.show_all, h.finish(), wrap.map(|w| w.0), wrap.map(|w| w.1));
+        let key = (Arc::as_ptr(&out) as usize, unified, self.context, self.show_all, h.finish(), wrap.map(|w| w.0), wrap.map(|w| w.1), tab);
         if self.cache.as_ref().is_some_and(|c| c.key == key) {
             return;
         }
@@ -894,7 +904,8 @@ impl DiffTab {
             };
             spans.push(n);
         }
-        self.cache = Some(Cache { key, rows, items, ys: Vec::new(), spans });
+        let max_cols = [&out.left, &out.right].iter().map(|s| super::hscroll::longest_line_cols(&ropey::Rope::from_str(&s.text), tab)).max().unwrap_or(0);
+        self.cache = Some(Cache { key, max_cols, rows, items, ys: Vec::new(), spans });
     }
 }
 
@@ -1107,8 +1118,8 @@ pub(super) fn show(ui: &mut Ui, rect: Rect, dt: &mut DiffTab, docs: &mut BTreeMa
     let tab = [dt.left.doc(), dt.right.doc()].into_iter().flatten().find_map(|d| docs.get(&d).and_then(|e| e.doc.as_ref()).map(|x| x.tab_width())).unwrap_or(4).max(1);
     let digits = o.left.len().max(o.right.len()).max(1).to_string().len().max(3) as f32;
     let num_w = (digits + 1.0) * cw + 6.0;
-    let inner = Rect::from_min_max(body.min, Pos2::new(body.right() - SCROLLBAR_W, body.bottom()));
-    let (cols, center) = if unified {
+    let mut inner = Rect::from_min_max(body.min, Pos2::new(body.right() - SCROLLBAR_W, body.bottom()));
+    let (mut cols, mut center) = if unified {
         let num = Rect::from_min_max(Pos2::new(inner.left() + ACTION_W, inner.top()), Pos2::new(inner.left() + ACTION_W + num_w * 2.0, inner.bottom()));
         let text = Rect::from_min_max(Pos2::new(num.right() + 2.0 * cw, inner.top()), inner.max);
         ([Col { num, text }, Col { num, text }], Rect::from_min_max(inner.min, Pos2::new(inner.left() + ACTION_W, inner.bottom())))
@@ -1123,6 +1134,30 @@ pub(super) fn show(ui: &mut Ui, rect: Rect, dt: &mut DiffTab, docs: &mut BTreeMa
     };
     let wrap = cx.wrap.then(|| (((cols[0].text.width() / cw).floor() as usize).max(8), ((cols[1].text.width() / cw).floor() as usize).max(8)));
     dt.ensure_cache(unified, wrap, tab);
+    // ---- Waagerechte Leiste (#389): eine für beide Seiten und die Einzelansicht, unter den Textflächen
+    let mut hbar: Option<Rect> = None;
+    dt.hmax = 0.0;
+    let mut hview = cols[0].text.width();
+    if wrap.is_none() {
+        let content = super::hscroll::content_width(dt.cache.as_ref().map_or(0, |c| c.max_cols), cw);
+        if !unified {
+            hview = hview.min(cols[1].text.width());
+        }
+        let mut probe = Rect::from_min_size(cols[0].text.min, Vec2::new(hview, body.height()));
+        let right = if unified { cols[0].text.right() } else { cols[1].text.right() };
+        hbar = super::hscroll::layout(&mut probe, cols[0].text.left(), right, body.bottom(), content);
+        dt.hmax = super::hscroll::max_scroll(content, hview);
+        dt.scroll_x = dt.scroll_x.clamp(0.0, dt.hmax);
+        if hbar.is_some() {
+            body.max.y -= super::hscroll::BAR_H;
+            inner.max.y -= super::hscroll::BAR_H;
+            center.max.y -= super::hscroll::BAR_H;
+            for c in cols.iter_mut() {
+                c.num.max.y -= super::hscroll::BAR_H;
+                c.text.max.y -= super::hscroll::BAR_H;
+            }
+        }
+    }
     let fold_h = row_h + 8.0;
     let (total, n_items) = {
         let c = dt.cache.as_mut().expect("Cache");
@@ -1149,7 +1184,8 @@ pub(super) fn show(ui: &mut Ui, rect: Rect, dt: &mut DiffTab, docs: &mut BTreeMa
         let (dy, dx) = if shift && dx == 0.0 { (0.0, dy) } else { (dy, dx) };
         dt.scroll_y -= dy;
         if wrap.is_none() {
-            dt.scroll_x = (dt.scroll_x - dx).max(0.0);
+            let content = super::hscroll::content_width(dt.cache.as_ref().map_or(0, |c| c.max_cols), cw);
+            dt.scroll_x = (dt.scroll_x - dx).clamp(0.0, super::hscroll::max_scroll(content, hview));
         }
     }
     // Zum gewählten Block rollen (F7)
@@ -1391,6 +1427,17 @@ pub(super) fn show(ui: &mut Ui, rect: Rect, dt: &mut DiffTab, docs: &mut BTreeMa
                 }
             }
         }
+    }
+    // ---- Waagerechte Leiste zeichnen und bedienen
+    dt.hbar = hbar;
+    if let Some(area) = hbar {
+        let content = super::hscroll::content_width(dt.cache.as_ref().map_or(0, |c| c.max_cols), cw);
+        let (mut sx, mut drag) = (dt.scroll_x, dt.hdrag);
+        super::hscroll::bar(ui, area, cx.id.with("hbar"), &mut sx, &mut drag, content, hview);
+        dt.scroll_x = sx;
+        dt.hdrag = drag;
+    } else {
+        dt.hdrag = None;
     }
     // ---- Bildlaufleiste mit Marken der Blöcke
     let track = Rect::from_min_max(Pos2::new(body.right() - SCROLLBAR_W, body.top()), body.max);

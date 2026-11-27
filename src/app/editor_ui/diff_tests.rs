@@ -380,3 +380,56 @@ fn replacing_a_dirty_side_keeps_it_open_and_unreadable_sides_stop_working() {
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn horizontal_bar_appears_for_long_lines_and_clamps_the_scroll() {
+    let dir = test_dir("hbar");
+    let long = "x".repeat(600);
+    let a = write(&dir, "a.txt", format!("short
+{long}
+end
+").as_bytes());
+    let b = write(&dir, "b.txt", format!("short
+{long}!
+end
+").as_bytes());
+    let c = write(&dir, "c.txt", b"one
+two
+");
+    let d = write(&dir, "d.txt", b"one
+three
+");
+    let ctx = egui::Context::default();
+    let mut t = 0.0;
+    let prefs = EditorPrefs::default();
+    let mut ed = EditorUi::default();
+    ed.wrap = false;
+    let diff = ed.compare_paths(&a, &b, &prefs).unwrap();
+    settle(&ctx, &mut ed, &mut t, WIDE, &prefs, diff_settled);
+    let dt = &ed.diffs[&diff];
+    assert!(dt.hbar.is_some(), "lange Zeilen: Leiste unter den Texten");
+    let max = dt.hmax;
+    assert!(max > 0.0);
+    // Weiter als die längste Zeile lässt sich nicht rollen
+    ed.diffs.get_mut(&diff).unwrap().scroll_x = 1.0e9;
+    frame(&ctx, &mut ed, vec![], &mut t, WIDE, &prefs);
+    assert!((ed.diffs[&diff].scroll_x - max).abs() < 0.01, "{} statt {max}", ed.diffs[&diff].scroll_x);
+    ed.diffs.get_mut(&diff).unwrap().scroll_x = -50.0;
+    frame(&ctx, &mut ed, vec![], &mut t, WIDE, &prefs);
+    assert_eq!(ed.diffs[&diff].scroll_x, 0.0);
+    // Einzelansicht (schmal): dieselbe Leiste
+    settle(&ctx, &mut ed, &mut t, Vec2::new(620.0, 700.0), &prefs, |ed| ed.diffs.values().all(|d| d.unified_shown));
+    assert!(ed.diffs[&diff].hbar.is_some());
+    // Umbruch an: keine Leiste, kein Bildlauf
+    ed.wrap = true;
+    frame(&ctx, &mut ed, vec![], &mut t, WIDE, &prefs);
+    assert!(ed.diffs[&diff].hbar.is_none());
+    ed.wrap = false;
+    // Kurze Zeilen: keine Leiste, Bildlauf zurück auf 0
+    let other = ed.compare_paths(&c, &d, &prefs).unwrap();
+    ed.diffs.get_mut(&other).unwrap().scroll_x = 300.0;
+    settle(&ctx, &mut ed, &mut t, WIDE, &prefs, diff_settled);
+    let o = &ed.diffs[&other];
+    assert!(o.hbar.is_none() && o.scroll_x == 0.0);
+    let _ = std::fs::remove_dir_all(&dir);
+}

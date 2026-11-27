@@ -664,6 +664,19 @@ const EDITOR: &[Step] = &[
         need: None,
     },
     Step {
+        id: "editor.hscroll",
+        since: "3.2.0",
+        spot: Some(Spot::EditorText),
+        title: tx("Waagerechte Bildlaufleiste", "Horizontal scrollbar"),
+        body: tx(
+            "Ohne Zeilenumbruch erscheint unten im Text eine Bildlaufleiste, sobald Zeilen breiter sind als die Ansicht: Griff ziehen, ein Klick daneben blättert eine Seite nach links oder rechts; Umschalt+Mausrad und das Touchpad rollen ebenfalls seitwärts. Gerollt wird bis zum Ende der längsten Zeile.",
+            "Without word wrap a scrollbar appears at the bottom of the text as soon as lines are wider than the view: drag the thumb, a click beside it moves one page left or right; Shift+wheel and the touchpad scroll sideways too. Scrolling stops at the end of the longest line.",
+        ),
+        prep: EDITOR_FILE,
+        done: None,
+        need: None,
+    },
+    Step {
         id: "editor.minimap",
         since: "3.0.0",
         spot: Some(Spot::EditorMinimap),

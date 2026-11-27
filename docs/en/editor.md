@@ -32,6 +32,7 @@ Entries that do not apply right now are **greyed out**, and hovering says why (e
 - **Go to line** (*line[:column]*).
 - **Find and replace** in the open file: *Match case*, *Whole word*, *Regular expression* (Rust `regex` syntax; in the replacement `$1`, `${name}`), *Replace*, *Replace all*; Enter / Shift+Enter jump to the next / previous match.
 - **Minimap** and word wrap (both off for [large files](#large-files)).
+- **Horizontal scrollbar** *(since 3.2.0)*: with word wrap off, every split shows a scrollbar at the bottom of the text when lines are wider than the view (hidden otherwise). Drag the thumb, or click beside it to move one page left or right; Shift+wheel, the wheel over the scrollbar and sideways touchpad scrolling work too, and the cursor is followed while you type. Scrolling stops a little after the end of the longest line (tabs and wide characters such as Chinese or emoji count as on screen). The scrollbar never covers the last line; in large files the longest line is measured in the background, so the scrollbar may appear a moment after opening.
 - Undo/redo per document; changes made by an agent are their own undo steps.
 
 ## Syntax colours
@@ -167,7 +168,7 @@ Paneldeck notices when an open file is changed by another program (for example b
 ![Find in files with the matches grouped by file](../images/editor-search.png)
 
 ## Large files
-Files from **20 MB** (*Settings → Editor → Large files from*) open in large-file mode: the editor stays smooth with files of several hundred megabytes, but **minimap, word wrap and syntax colours are off**, and an info bar says so. Search in files skips them; agents can read but not edit them.
+Files from **20 MB** (*Settings → Editor → Large files from*) open in large-file mode: the editor stays smooth with files of several hundred megabytes, but **minimap, word wrap and syntax colours are off** (the [horizontal scrollbar](#editing) stays), and an info bar says so. Search in files skips them; agents can read but not edit them.
 
 ## Settings
 *Settings → Editor*:

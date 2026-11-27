@@ -76,6 +76,8 @@ pub(crate) struct View {
     minimap_drag: Option<f32>,
     scroll_drag: Option<f32>,
     blink_epoch: f64,
+    /// Waagerechte Bildlaufleiste (#389).
+    pub(super) hscroll: super::hscroll::HScroll,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -325,8 +327,9 @@ pub(super) fn show(ui: &mut Ui, rect: Rect, d: &mut DocEntry, view: &mut View, c
     let minimap = show_minimap.then(|| Rect::from_min_max(Pos2::new(scrollbar.left() - MINIMAP_W, rect.top()), Pos2::new(scrollbar.left(), rect.bottom())));
     let text_right = minimap.map(|m| m.left()).unwrap_or(scrollbar.left()) - 4.0;
     let gutter = Rect::from_min_max(rect.min, Pos2::new(rect.left() + gutter_w, rect.bottom()));
-    let text = Rect::from_min_max(Pos2::new(gutter.right() + 6.0, rect.top() + 2.0), Pos2::new(text_right.max(gutter.right() + 20.0), rect.bottom()));
+    let mut text = Rect::from_min_max(Pos2::new(gutter.right() + 6.0, rect.top() + 2.0), Pos2::new(text_right.max(gutter.right() + 20.0), rect.bottom()));
     let wrap_cols = (cx.wrap && !large).then(|| ((text.width() / cw).floor() as usize).max(8));
+    let mut hbar = hbar_prepare(ui, doc, &mut d.width, view, wrap_cols.is_none(), tab, cw, &mut text, gutter.right(), minimap.map(|m| m.left()).unwrap_or(scrollbar.left()), rect.bottom());
     let geo = Geo { text, gutter, scrollbar, row_h, cw, wrap_cols, tab };
 
     // ---- Eingaben ----
@@ -337,7 +340,9 @@ pub(super) fn show(ui: &mut Ui, rect: Rect, d: &mut DocEntry, view: &mut View, c
     // Mausrad
     if resp.hovered() || ui.rect_contains_pointer(rect) {
         let (dy, dx, shift) = ui.input(|i| (i.smooth_scroll_delta.y, i.smooth_scroll_delta.x, i.modifiers.shift));
-        let (dy, dx) = if shift && dx == 0.0 { (0.0, dy) } else { (dy, dx) };
+        // Umschalt+Rad und das Rad über der waagerechten Leiste rollen waagerecht.
+        let over_hbar = hbar.as_ref().and_then(|h| h.area).is_some_and(|a| ui.rect_contains_pointer(a));
+        let (dy, dx) = if (shift || over_hbar) && dx == 0.0 { (0.0, dy) } else { (dy, dx) };
         if dy != 0.0 {
             view.top_off -= dy;
             normalize_scroll(doc, view, &geo);
@@ -351,6 +356,7 @@ pub(super) fn show(ui: &mut Ui, rect: Rect, d: &mut DocEntry, view: &mut View, c
         reveal_cursor(doc, view, &geo);
     }
     normalize_scroll(doc, view, &geo);
+    hbar_clamp(doc, view, tab, hbar.as_mut());
 
     // ---- sichtbare Zeilen ----
     let rows = visible_rows(doc, view, &geo);
@@ -366,6 +372,7 @@ pub(super) fn show(ui: &mut Ui, rect: Rect, d: &mut DocEntry, view: &mut View, c
     {
         ui.ctx().request_repaint_after(SYNTAX_POLL);
     }
+    hbar_clamp(doc, view, tab, hbar.as_mut()); // nach dem Rollen beim Ziehen
     paint(ui, rect, doc, view, &geo, &rows, cx, focused, hl.as_deref());
     if let Some(line) = cx.popup_line
         && let Some(r) = rows.iter().rfind(|r| r.line == line)
@@ -377,6 +384,9 @@ pub(super) fn show(ui: &mut Ui, rect: Rect, d: &mut DocEntry, view: &mut View, c
         crate::app::tutorial::spot_rect(ui, crate::app::tutorial::Spot::EditorMinimap, m);
     }
     scrollbar_ui(ui, &geo, doc, view, &rows, cx);
+    if let Some(h) = &hbar {
+        hbar_ui(ui, h, &geo, view, cx, rect.bottom());
+    }
     if focused {
         ime_output(ui, rect, doc, view, &geo, &rows, cx);
     }
@@ -1047,7 +1057,8 @@ fn strip_click(ui: &Ui, resp: &egui::Response, g: &Geo, rows: &[Row], cx: &TextC
 #[allow(clippy::too_many_arguments)]
 fn paint(ui: &Ui, rect: Rect, doc: &Document, view: &View, g: &Geo, rows: &[Row], cx: &TextCx, focused: bool, hl: Option<&DocHighlight>) {
     let u = style::ui();
-    let painter = ui.painter_at(rect);
+    // Nicht unter die waagerechte Leiste (#389) zeichnen: unten endet alles mit dem Textfeld.
+    let painter = ui.painter_at(Rect::from_min_max(rect.min, Pos2::new(rect.right(), g.text.bottom())));
     let fg = cx.theme.fg;
     let dim = style::dim(ui);
     let text_p = painter.with_clip_rect(g.text.expand2(Vec2::new(2.0, 0.0)).intersect(rect));
@@ -1364,4 +1375,39 @@ fn ime_output(ui: &Ui, rect: Rect, doc: &Document, view: &View, g: &Geo, rows: &
     let cursor_rect = Rect::from_min_size(p, Vec2::new(1.0, g.row_h));
     let to_global = ui.ctx().layer_transform_to_global(ui.layer_id()).unwrap_or_default();
     ui.ctx().output_mut(|o| o.ime = Some(egui::output::IMEOutput { rect: to_global * rect, cursor_rect: to_global * cursor_rect }));
+}
+
+// ---- waagerechte Bildlaufleiste (#389, Zeichnen und Messen in `hscroll`) ----
+
+/// Ohne Umbruch: längste Zeile messen und, wenn sie nicht passt, die Leiste unter den Text legen (`text` wird kürzer).
+#[allow(clippy::too_many_arguments)]
+fn hbar_prepare(ui: &Ui, doc: &Document, width: &mut super::hscroll::DocWidth, view: &mut View, no_wrap: bool, tab: usize, cw: f32, text: &mut Rect, left: f32, right: f32, bottom: f32) -> Option<super::hscroll::Layout> {
+    if !no_wrap {
+        view.hscroll.last_bar = None;
+        return None;
+    }
+    // Die Zeilen der Cursor zählen sofort (Tippen am Ende der längsten Zeile, während im Hintergrund gemessen wird).
+    let cur = match &view.sels {
+        Some(s) => view.hscroll.head_cols(doc, s, tab),
+        None => 0,
+    };
+    Some(super::hscroll::prepare(width, &mut view.hscroll, ui.ctx(), doc, tab, cw, cur, text, left, right, bottom))
+}
+
+/// Waagerechten Bildlauf auf die längste Zeile begrenzen (ohne Umbruch). Die Zeilen der Cursor zählen nach Eingaben
+/// in diesem Bild schon mit (Einfügen am Ende der längsten Zeile, auch mit mehreren Cursorn: sie bleiben sichtbar).
+fn hbar_clamp(doc: &Document, view: &mut View, tab: usize, h: Option<&mut super::hscroll::Layout>) {
+    let Some(h) = h else { return };
+    if let Some(s) = &view.sels {
+        h.include(view.hscroll.head_cols(doc, s, tab));
+    }
+    view.scroll_x = view.scroll_x.clamp(0.0, h.max);
+}
+
+/// Leiste zeichnen und bedienen; der Rand der Zeilennummern reicht weiter bis unten.
+fn hbar_ui(ui: &mut Ui, h: &super::hscroll::Layout, g: &Geo, view: &mut View, cx: &TextCx, bottom: f32) {
+    let Some(area) = h.area else { return };
+    ui.painter().rect_filled(Rect::from_min_max(Pos2::new(g.gutter.left(), area.top()), Pos2::new(g.gutter.right(), bottom)), 0.0, cx.theme.bg);
+    let View { scroll_x, hscroll, .. } = view;
+    super::hscroll::bar(ui, area, cx.id.with("hscroll"), scroll_x, &mut hscroll.drag, h.content, g.text.width());
 }
