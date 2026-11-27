@@ -19,9 +19,9 @@ The **Editor** tab is a plain text editor inside Paneldeck, independent of the t
 
 ## Menu bar
 *(Since 3.2.0.)* Every split has a slim **menu bar** above its tab bar: **File · Edit · View · Format**. The commands act on the active tab of that split, and the shortcuts are shown on the right of each entry:
-- **File:** New file, Open file …, Open folder …, Save, Save as …, Save all (all unsaved files with a name; untitled tabs need *Save as*), Close tab.
+- **File:** New file, Open file …, Open folder …, Save, Save as …, Save all (all unsaved files with a name; untitled tabs need *Save as*), the [actions on save](#actions-on-save) (*Actions on save …*, *Save without actions*, *Pause*), [Compare with …](#comparison-and-change-markers) (file, saved file, HEAD, index, revision, clipboard), Close tab.
 - **Edit:** Undo, Redo, Cut, Copy, Paste, Select all, Find …, Replace …, Find in files …, Go to line …, Add next occurrence, Select all occurrences, Select line, Delete line, Move line up/down.
-- **View:** Word wrap, Minimap, Folder tree, Split right, Split down, mode *Text* / *Syntax*, Language (built-in languages; all languages in the status bar), Commands (palette).
+- **View:** Word wrap, Minimap, Folder tree, Split right, Split down, mode *Text* / *Syntax*, Language (built-in languages; all languages in the status bar), [Change markers](#comparison-and-change-markers) and what they compare with, Next/Previous change (**F7** / **Shift+F7**), Commands (palette). In a comparison tab *File* applies to the focused side; *Edit* and *Format* are greyed out.
 - **Format:** the [formatting commands](#formatting-json-and-xml) and *Format JSON/XML on save*.
 
 Entries that do not apply right now are **greyed out**, and hovering says why (e.g. *Not JSON or XML* for a text file, *Nothing to undo*). In a narrow split the four menus fold into one **Menu ▾**. The menu bar can be switched off under *Settings → Editor → Menu bar* (on by default). The command palette (**Ctrl+Shift+P**) also works in the Editor tab and lists the format commands as *Format: …*.
@@ -118,10 +118,43 @@ Agents cannot create or change rules (they cannot open, edit or save files in th
 ## Files changed on disk
 Paneldeck notices when an open file is changed by another program (for example by Claude Code or an agent): it checks size and modification time about once a second and reacts only once the file has stopped changing.
 - **Without own edits** the file is reloaded quietly with a short hint (*reloaded from disk*).
-- **With unsaved edits** an info bar offers **Keep mine**, **Load from disk** and **Show difference**.
+- **With unsaved edits** an info bar offers **Keep mine**, **Load from disk** and **Show difference** (opens a [comparison tab](#comparison-and-change-markers): saved file ↔ editor).
 - A **deleted** file keeps its text in the editor and is marked unsaved; saving creates it again.
 
 ![Info bar “changed on disk” with Keep mine, Load from disk and Show difference](../images/editor-disk-changed.png)
+
+## Comparison and change markers
+*New in 3.2.0.* The editor compares files like a git diff – oriented on Sublime Text and Sublime Merge, **everything offline** (only the local `git`).
+
+**Opening a comparison** – it opens as its own tab (*a.json ↔ b.json*):
+- the context menu of a tab: **Compare with …** → *Saved file*, *HEAD*, *Index (staged)*, *Revision …*, *Clipboard*, *File …* or another open file;
+- the folder tree: **Select for compare** on one file, then **Compare with “a.json”** on another – or mark two files with **Ctrl+click** and choose **Compare marked files**;
+- the menu bar: **File → Compare with …**;
+- the command palette (**Ctrl+Shift+P** in the Editor tab): *Compare with file …*, *Compare with saved file*, *… HEAD*, *… the index*, *… revision …*, *… clipboard*;
+- **Show difference** in the info bar of a file changed on disk.
+
+**The comparison tab**
+- **Side by side** by default, **unified** automatically when the split is narrower than ~700 px; the toolbar switches between *Automatic*, *Side by side* and *Unified*. Both sides scroll together; lines that exist on one side only get a **hatched filler line** on the other.
+- Changes within a line are highlighted **word by word** (short words down to single characters); lines with very many changes are marked as a whole. Syntax colours and line numbers on both sides (unified: old and new column); word wrap follows the editor (**Alt+Z**) with aligned rows.
+- Unchanged regions are **collapsed** with 3 context lines (number in the toolbar, default in the settings); **↓ 20**, **↑ 20** and **Show all** expand them.
+- **Block arrows** between the sides copy a block to the other side (**→** / **←**, also **Alt+→** / **Alt+←** for the current block). A side is editable when it is a file; git states, the saved file and the clipboard are read-only. Each arrow is **one undo step** in the same document as the normal tab (shared undo, unsaved dot, **Ctrl+S** saves the focused side). **⇄** swaps the sides.
+- **F7** / **Shift+F7** jump to the next / previous change (configurable in *Settings → Shortcuts*). A double-click on a line opens it in the file's tab.
+- The comparison updates about 250 ms after typing; git states are read again after saving, when the window gets the focus and when `.git/index` or `HEAD` change.
+- **Ignore whitespace** (off by default). Differences in **line endings, encoding/BOM and the final newline** are shown in an info bar above the comparison, not as changed lines.
+- **Revision …** compares with HEAD, the index, a branch, a tag or one of the last 50 commits of the file (with search), or any revision you type (checked before use).
+- The menu **⋯**: *Copy diff*, *Copy block*, *Save as patch …* (git-compatible, `git apply` takes it), *Show all lines*.
+- Large files are compared in the background with progress and **Cancel**; on the time limit the result is coarser (a hint says so). Above the large-file threshold and for **binary files** the tab shows size and **SHA-256** of both sides instead.
+- Comparison tabs are restored after a restart (not those with the clipboard).
+
+![Comparison tab side by side with changes within the lines, filler lines and block arrows](../images/editor-diff.png)
+
+**Change markers** (*View → Change markers*, *Settings → Editor*, **off by default**) mark lines in the gutter of the normal editor: a thin bar for **added** and **modified** lines, a triangle where lines were **removed**, plus marks in the scrollbar and the minimap.
+- In a git repository the markers compare with the **index and HEAD at the same time**: **unstaged** changes (file ↔ index) in green/yellow/red, **staged** changes (index ↔ HEAD) in teal/blue/violet. Outside a repository – or with *Markers compare with: Saved file* – they show the unsaved changes against the file on disk.
+- A **click on a marker** opens a small window below the line: the old lines, **Revert** (one undo step), previous/next change and **Open in diff**.
+- **F7** / **Shift+F7** jump between the markers. No markers in large files.
+- The colours are theme colours (*Editor: comparison and change markers* in the theme editor).
+
+![Change markers in the gutter with the window of a marker: old lines, Revert, previous/next, Open in diff](../images/editor-gutter.png)
 
 ## Search in files
 **Ctrl+Shift+F** in the Editor tab opens the window *Search in files*; it searches all files of the open folder. **F4** / **Shift+F4** jump to the next / previous result.
@@ -151,15 +184,20 @@ Files from **20 MB** (*Settings → Editor → Large files from*) open in large-
 | Own mappings | – | file name or extension → language, before the built-in detection |
 | Menu bar | on | the [menu bar](#menu-bar) above every split |
 | Format JSON on save / Format XML on save | off | [format on save](#formatting-json-and-xml) (files up to 1 MB) |
+| Change markers in the gutter | off | [change markers](#comparison-and-change-markers) |
+| Markers compare with | git (index and HEAD) | or the saved file |
+| Comparison layout | Automatic | side by side, unified below ~700 px |
+| Context lines | 3 | unchanged lines around each change in a comparison |
+| Ignore whitespace | off | default for new comparisons |
 | **Agents** | all off | see [Agents](#agents) |
 
-Stored in `settings.json` as `editor` ([data format](data-and-backups.md#new-fields-in-300), [new in 3.1.0](data-and-backups.md#new-fields-in-310), [new in 3.2.0](data-and-backups.md#new-fields-in-320)).
+Stored in `settings.json` as `editor` ([data format](data-and-backups.md#new-fields-in-300), [new in 3.1.0](data-and-backups.md#new-fields-in-310), [new in 3.2.0](data-and-backups.md#new-fields-in-320); for comparison and change markers: `change_markers`, `marker_base`, `diff_context`, `diff_ignore_whitespace`, `diff_layout`).
 
 ![Settings, Editor tab](../images/editor-settings.png)
 
 ## Agents
 Agents (Claude Code and others via the [agent interface](agent-interface.md#editor), and [chats with local models](chat.md)) can use the editor:
-- **Reading** (`editor_list`, `editor_read`) works from level *Read only* – including unsaved changes. So does **validating** JSON/XML (`format_file` with `op: validate`, since 3.2.0).
+- **Reading** (`editor_list`, `editor_read`) works from level *Read only* – including unsaved changes. So does **validating** JSON/XML (`format_file` with `op: validate`, since 3.2.0). **`editor_diff`** (since 3.2.0, level *Read only* like `editor_read`; external agents only) compares a document with its saved file, git HEAD/index or another open document.
 - Four switches in *Settings → Editor → Agents*, **all off by default** and only effective at level **Control** (for chats: the level of the model):
   - **Agents may open files** – in a new tab; only local paths, never network/UNC paths (`\\server\share`, `\\wsl.localhost\…`, mapped network drives) or devices. An agent may also open an untitled tab with text.
   - **Agents may edit open files** – the change stays **unsaved**, is marked as made by the agent (*Opened or changed by an agent*) and can be undone.

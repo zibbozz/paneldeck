@@ -52,6 +52,9 @@ pub const DEFAULTS: &[(&str, &str)] = &[
     ("ed_validate_alt", ""),
     // Editor: Ohne Aktionen speichern (#383): standardmäßig ohne Kürzel
     ("save_no_actions", ""),
+    // Editor (#385): nächste/vorige Änderung im Vergleich und bei den Änderungsmarken – nur im Editor-Reiter.
+    ("ed_next_change", "F7"),
+    ("ed_prev_change", "Shift+F7"),
 ];
 
 /// Kürzel, die in jedem Bereich gelten (Reiterwechsel) – die übrigen nur im Terminal-Bereich.
@@ -104,6 +107,8 @@ pub fn label(id: &str, de: bool) -> &'static str {
         "ed_minify_alt" => ("Editor: JSON/XML minifizieren (zweite Belegung)", "Editor: minify JSON/XML (alternative)"),
         "ed_validate_alt" => ("Editor: JSON/XML prüfen (zweite Belegung)", "Editor: validate JSON/XML (alternative)"),
         "save_no_actions" => ("Editor: Ohne Aktionen speichern", "Editor: Save without actions"),
+        "ed_next_change" => ("Editor: nächste Änderung", "Editor: next change"),
+        "ed_prev_change" => ("Editor: vorige Änderung", "Editor: previous change"),
         _ => ("?", "?"),
     };
     if de { d } else { e }

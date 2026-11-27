@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+#[cfg(test)]
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -43,14 +44,10 @@ fn branch_of(repo: &Path) -> Option<String> {
 }
 
 fn changed_files(repo: &Path) -> usize {
-    let mut cmd = Command::new("git");
-    // Keine Filter-Treiber aus der Konfiguration des Repositorys und kein `git status` in Untermodulen (#253): der Aufruf
-    // läuft automatisch alle paar Sekunden.
-    cmd.args(["-c", "core.fsmonitor=false"])
-        .args(crate::gitops::read_only_overrides(repo))
-        .args(["--no-optional-locks", "status", "--porcelain", crate::gitops::IGNORE_SUBMODULES])
-        .current_dir(repo);
-    crate::platform::process::hide_window(&mut cmd);
+    // Gehärteter Aufruf (#385), keine Filter-Treiber aus der Konfiguration des Repositorys und kein `git status` in
+    // Untermodulen (#253): der Aufruf läuft automatisch alle paar Sekunden.
+    let mut cmd = crate::gitops::command(repo, true);
+    cmd.args(crate::gitops::read_only_overrides(repo)).args(["--no-optional-locks", "status", "--porcelain", crate::gitops::IGNORE_SUBMODULES]);
     cmd.output().map(|o| String::from_utf8_lossy(&o.stdout).lines().count()).unwrap_or(0)
 }
 

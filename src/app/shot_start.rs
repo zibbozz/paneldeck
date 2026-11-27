@@ -549,6 +549,25 @@ impl App {
                 let _ = self.editor_open(&demo.join("src/orders.rs"), true, false);
                 self.shot_save_actions_demo(&demo);
             }
+            // Vergleich und Änderungsmarken (#385): ungespeicherte Änderungen in orders.rs gegen die gespeicherte Datei.
+            "editor-diff" | "editor-gutter" => {
+                write_demo_project(&demo);
+                self.set_mode(titlebar::Mode::Editor);
+                self.ed.set_root(&demo);
+                if view == "editor-gutter" {
+                    self.settings.editor.change_markers = true;
+                    self.settings.editor.marker_base = crate::editor_svc::settings::MarkerBase::Disk;
+                }
+                let p = demo.join("src/orders.rs");
+                if let Ok(id) = self.editor_open(&p, true, false) {
+                    self.editor_shot_edits(id);
+                    if view == "editor-diff" {
+                        let prefs = self.editor_prefs();
+                        let lang = self.settings.language;
+                        let _ = self.ed.compare(id, super::editor_ui::shot_target_disk(), &prefs, lang);
+                    }
+                }
+            }
             "editor-settings" => {
                 self.set_mode(titlebar::Mode::Editor);
                 self.settings_open = true;
@@ -742,6 +761,12 @@ impl App {
                     let op = if validate { crate::editor::format::Op::Validate } else { crate::editor::format::Op::Format };
                     let c = ctx.clone();
                     self.ed.start_format(g, op, false, move || c.request_repaint(), lang);
+                }
+            }
+            "editor-gutter" if n == 15 => {
+                let p = demo.join("src/orders.rs");
+                if let Some(id) = self.ed.doc_for_path(&p) {
+                    self.editor_shot_popup(id, 26);
                 }
             }
             "editor-disk-changed" if n == 15 => {

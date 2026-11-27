@@ -330,6 +330,9 @@ fn whats_new_lists_the_steps_since_a_version() {
     assert!(fmt.contains(&"editor.format") && !fmt.contains(&"editor.status"), "{fmt:?}");
     assert_eq!(steps::tour("editor").and_then(|t| t.steps.iter().find(|s| s.id == "editor.format")).map(|s| s.spot), Some(Some(Spot::EditorMenuBar)));
     assert!(steps::tour("time").is_some_and(|t| t.steps.iter().all(|s| s.since == "3.2.0")));
+    // Vergleich und Änderungsmarken (#385) kamen mit 3.2.0.
+    let diff = ids("3.1.0", "3.2.0");
+    assert!(diff.contains(&"editor.diff") && diff.contains(&"editor.markers"), "{diff:?}");
 }
 
 /// Die Schritte im Editor arbeiten in einer eigenen Beispieldatei der Tour im Temp-Ordner, nie in einer des Nutzers.

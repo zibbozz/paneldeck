@@ -785,7 +785,9 @@ impl App {
     pub(super) fn palette_items(&self) -> Vec<(String, String, Action)> {
         let lang = self.settings.language;
         let f = self.focused;
-        let mut v: Vec<(String, String, Action)> = Vec::new();
+        // Im Editor-Reiter zuerst die Befehle des Editors (#385: Vergleichen, Änderungsmarken, F7).
+        let editor: Vec<(String, String, Action)> = if self.mode == super::titlebar::Mode::Editor && self.wins.cur == 0 { self.editor_palette_items().into_iter().map(|(l, h, a)| (l, h, Action::Editor(a))).collect() } else { Vec::new() };
+        let mut v: Vec<(String, String, Action)> = editor;
         // Editor (#381): Formatier-Befehle für den aktiven Reiter, im Editor-Reiter zuerst.
         if self.mode == titlebar::Mode::Editor && self.ed_has_active_doc() {
             use crate::editor::format::Op;

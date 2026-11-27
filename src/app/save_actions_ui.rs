@@ -823,6 +823,8 @@ impl App {
         // Vor dem Schreiben: Formatieren beim Speichern und Text-Aktionen (ein rückgängig machbarer Schritt), dann schreiben.
         let list: Vec<Builtin> = plan.builtins.iter().map(|(b, ..)| b.clone()).collect();
         let saved = self.ed.save_doc(id, path, origin.explicit(), &list, &prefs, lang, &keep_lines)?;
+        // Vergleiche und Änderungsmarken lesen den gespeicherten Stand neu (#385).
+        self.ed.generation += 1;
         let mut failed_rules: Vec<(u64, String)> = Vec::new();
         let mut pre_notes: Vec<(u64, Builtin, String, bool)> = Vec::new();
         for (b, res) in saved.builtins {

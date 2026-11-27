@@ -7,6 +7,7 @@
 //! * [`format_job`]: ein Formatier-Lauf (JSON/XML, #381) im Hintergrund mit Fortschritt und Abbruch; liefert Änderungen
 //!   als einen Rückgängig-Schritt (Menüleiste, Kürzel, Palette, Formatieren beim Speichern, MCP `format_file`).
 //! * [`find`]: Suche in Dateien des geöffneten Ordners (Hintergrund-Thread, abbrechbar, gedeckelt; `.gitignore`).
+//! * [`git_base`]: Stände einer Datei in git (HEAD, Index, Commits) für Vergleich und Änderungsmarken (#385, nur lokal).
 //! * [`watch`]: Änderungen geöffneter Dateien auf der Platte erkennen (Abfrage von Größe/Zeitstempel im Hintergrund).
 //!
 //! Der Kern des Editors (Dokument, Bearbeiten, Speichern, Hot-Exit) liegt in `crate::editor`, die Oberfläche in `app`.
@@ -14,6 +15,7 @@
 pub mod agent_path;
 pub mod find;
 pub mod format_job;
+pub mod git_base;
 pub mod settings;
 pub mod tools;
 pub mod watch;

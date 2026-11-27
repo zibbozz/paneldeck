@@ -22,6 +22,8 @@ pub enum TreeOut {
     RulesFor(PathBuf),
     /// Neue Regel für diese Datei bzw. diesen Ordner (`true`).
     NewRule(PathBuf, bool),
+    /// Zwei Dateien vergleichen (#385): links, rechts.
+    Compare(PathBuf, PathBuf),
 }
 
 #[derive(Default)]
@@ -32,6 +34,10 @@ pub struct Tree {
     pub hidden: bool,
     /// Zuletzt geöffnete Datei (markiert).
     pub selected: Option<PathBuf>,
+    /// *Zum Vergleichen auswählen* (#385): diese Datei ist die linke Seite des nächsten *Vergleichen mit …*.
+    pub compare_pick: Option<PathBuf>,
+    /// Mit Strg+Klick markierte Dateien (höchstens zwei) – *Vergleichen* nimmt beide.
+    pub marked: Vec<PathBuf>,
 }
 
 const ROW_H: f32 = 22.0;
@@ -94,9 +100,12 @@ impl Tree {
         let w = ui.available_width();
         let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, ROW_H), Sense::click());
         let selected = !it.is_dir && self.selected.as_deref() == Some(it.path.as_path());
+        let marked = !it.is_dir && (self.marked.contains(&it.path) || self.compare_pick.as_deref() == Some(it.path.as_path()));
         let p = ui.painter();
         if selected {
             p.rect_filled(rect, 4.0, style::ui().sidebar_active);
+        } else if marked {
+            p.rect_filled(rect, 4.0, style::ui().selection_bg.gamma_multiply(0.6));
         } else if resp.hovered() {
             p.rect_filled(rect, 4.0, style::ui().hover_bg);
         }
@@ -115,19 +124,32 @@ impl Tree {
         let g = p.layout(it.name.clone(), font, text_c, f32::INFINITY);
         let clip = Rect::from_min_max(Pos2::new(x + 30.0, rect.top()), Pos2::new(x + 30.0 + room, rect.bottom()));
         p.with_clip_rect(clip).galley(Pos2::new(x + 30.0, cy - g.size().y / 2.0), g, text_c);
+        let ctrl = ui.input(|i| i.modifiers.ctrl || i.modifiers.command);
         if resp.clicked() {
             if it.is_dir {
                 if !self.expanded.remove(&it.path) {
                     self.expanded.insert(it.path.clone());
                 }
+            } else if ctrl {
+                // Strg+Klick markiert für *Vergleichen* (höchstens zwei, die älteste fällt heraus).
+                if let Some(i) = self.marked.iter().position(|x| *x == it.path) {
+                    self.marked.remove(i);
+                } else {
+                    self.marked.push(it.path.clone());
+                    if self.marked.len() > 2 {
+                        self.marked.remove(0);
+                    }
+                }
             } else {
                 self.selected = Some(it.path.clone());
+                self.marked.clear();
                 out.push(TreeOut::Open(it.path.clone()));
             }
         }
         let path = it.path.clone();
         let is_dir = it.is_dir;
-        resp.on_hover_text(path.to_string_lossy().to_string()).context_menu(|ui| {
+        let tip = if is_dir { path.to_string_lossy().to_string() } else { format!("{}\n{}", path.to_string_lossy(), lang.t("Strg+Klick: zum Vergleichen markieren", "Ctrl+click: mark for comparing")) };
+        resp.on_hover_text(tip).context_menu(|ui| {
             if !is_dir {
                 if ui.button(lang.t("Öffnen", "Open")).clicked() {
                     out.push(TreeOut::Open(path.clone()));
@@ -137,6 +159,36 @@ impl Tree {
                     out.push(TreeOut::OpenSide(path.clone()));
                     ui.close();
                 }
+                ui.separator();
+                if self.marked.len() == 2 && self.marked.contains(&path) {
+                    if ui.button(lang.t("Markierte vergleichen", "Compare marked files")).clicked() {
+                        out.push(TreeOut::Compare(self.marked[0].clone(), self.marked[1].clone()));
+                        self.marked.clear();
+                        ui.close();
+                    }
+                }
+                match self.compare_pick.clone() {
+                    Some(pick) if pick != path => {
+                        let name = pick.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+                        if ui.button(format!("{} {}", lang.t("Vergleichen mit", "Compare with"), lang.q(&name))).clicked() {
+                            out.push(TreeOut::Compare(pick, path.clone()));
+                            self.compare_pick = None;
+                            ui.close();
+                        }
+                    }
+                    Some(_) => {
+                        if ui.button(lang.t("Auswahl zum Vergleichen aufheben", "Clear selection for compare")).clicked() {
+                            self.compare_pick = None;
+                            ui.close();
+                        }
+                    }
+                    None => {}
+                }
+                if self.compare_pick.as_deref() != Some(path.as_path()) && ui.button(lang.t("Zum Vergleichen auswählen", "Select for compare")).clicked() {
+                    self.compare_pick = Some(path.clone());
+                    ui.close();
+                }
+                ui.separator();
             } else if ui.button(lang.t("Als Wurzel öffnen", "Open as root folder")).clicked() {
                 out.push(TreeOut::SetRoot(path.clone()));
                 ui.close();

@@ -356,6 +356,8 @@ enum Nav {
 enum Action {
     /// Formatier-Befehl des Editors auf den aktiven Reiter (#381, Befehls-Palette).
     EditorFormat(crate::editor::format::Op),
+    /// Befehl des Editors aus der Befehlspalette (#385).
+    Editor(editor_ui::EditorAction),
     /// Eingefügter Text mit mehreren Zeilen wartet auf die Rückfrage (Sitzung, Text, aus abgedocktem Fenster).
     /// Sitzung, Text, aus abgedocktem Fenster, Rückfrage nur wegen möglicher Broadcast-Ziele (`Session::take_paste_ask`).
     PasteAsk(u64, String, bool, bool),
@@ -3975,6 +3977,7 @@ impl App {
             Action::OpenPalette => self.palette = Some(Palette { query: String::new(), sel: 0 }),
             Action::EditorFormat(op) => self.editor_format_active(ctx, op),
             Action::SaveActions(c) => self.sa_palette(c),
+            Action::Editor(a) => self.editor_run_action(ctx, a),
             Action::OpenHistory => {
                 self.history_open = true;
                 if self.history_rx.is_none() {

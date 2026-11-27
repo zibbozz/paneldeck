@@ -218,6 +218,17 @@ The names are part of the public interface (they are only ever added, never rena
 | `code_heading` | Editor: syntax colours | Code: heading, section | `@code_function` |
 | `code_variable` | Editor: syntax colours | Code: variable, parameter | `@code_tag` |
 | `code_invalid` | Editor: syntax colours | Code: invalid | `@error` |
+| `diff_add_bg` | Editor: comparison and change markers | Comparison: background of added lines | `@diff_add/15` |
+| `diff_remove_bg` | Editor: comparison and change markers | Comparison: background of removed lines | `@diff_remove/15` |
+| `diff_add_word` | Editor: comparison and change markers | Comparison: added words within a line | `@diff_add/40` |
+| `diff_remove_word` | Editor: comparison and change markers | Comparison: removed words within a line | `@diff_remove/40` |
+| `diff_filler` | Editor: comparison and change markers | Comparison: hatching of filler lines | `@text_dim/35` |
+| `marker_added` | Editor: comparison and change markers | Change marker: added (unstaged, unsaved) | `@success` |
+| `marker_modified` | Editor: comparison and change markers | Change marker: modified (unstaged, unsaved) | `@warning` |
+| `marker_deleted` | Editor: comparison and change markers | Change marker: removed (unstaged, unsaved) | `@error` |
+| `marker_staged_added` | Editor: comparison and change markers | Change marker: added (staged) | `#56b6c2` (dark) / `#0b7285` (light) |
+| `marker_staged_modified` | Editor: comparison and change markers | Change marker: modified (staged) | `#61afef` (dark) / `#0969da` (light) |
+| `marker_staged_deleted` | Editor: comparison and change markers | Change marker: removed (staged) | `#c678dd` (dark) / `#8250df` (light) |
 
 Terminal colours for links: `fg`, `bg`, `cursor`, `selection`, `ansi0` … `ansi15` (in the file: the fields `fg`, `bg`, `cursor`, `selection` and the list `ansi`).
 

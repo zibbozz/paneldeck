@@ -150,6 +150,8 @@ pub(crate) struct DocEntry {
     pub(super) scratch: Selections,
     /// Syntax-Modus (#312).
     pub syntax: SyntaxDoc,
+    /// Änderungsmarken am Rand (#385).
+    pub marks: super::marks::Marks,
 }
 
 /// Ab dieser Dateigröße wird im Hilfsthread gelesen (die Oberfläche bleibt bedienbar).
@@ -157,7 +159,7 @@ pub(super) const BACKGROUND_BYTES: u64 = 4 * 1024 * 1024;
 
 impl DocEntry {
     fn blank(path: Option<PathBuf>, untitled: u32) -> Self {
-        DocEntry { path, untitled, doc: None, load_error: None, pending_hot: None, initial_text: None, hot: Default::default(), opened_by_agent: false, agent_edited: false, agent_note_dismissed: false, large_dismissed: false, disk_conflict: false, disk_deleted: false, edited_at: None, touched: false, loading: None, scratch: Selections::default(), syntax: SyntaxDoc::default() }
+        DocEntry { path, untitled, doc: None, load_error: None, pending_hot: None, initial_text: None, hot: Default::default(), opened_by_agent: false, agent_edited: false, agent_note_dismissed: false, large_dismissed: false, disk_conflict: false, disk_deleted: false, edited_at: None, touched: false, loading: None, scratch: Selections::default(), syntax: SyntaxDoc::default(), marks: Default::default() }
     }
 
     /// Noch nicht gelesenes Dokument (Datei und/oder Hot-Exit-Inhalt).
@@ -516,23 +518,40 @@ impl DocEntry {
         self.disk_conflict = false;
     }
 
-    /// Unterschied Puffer → Datei als Zeilen ('+' nur auf der Platte, '-' nur hier, ' ' gleich).
-    pub fn disk_diff(&self, _lang: Lang) -> Vec<(char, String)> {
-        let Some(d) = self.doc.as_ref() else { return Vec::new() };
-        let Some(p) = &self.path else { return Vec::new() };
-        let Ok(bytes) = std::fs::read(p) else { return Vec::new() };
-        let disk = core::encoding::decode(&bytes, Some(d.encoding())).text;
-        core::diff::diff_lines(&d.text(), &disk, Some(3))
-            .into_iter()
-            .map(|l| {
-                let k = match l.kind {
-                    core::DiffKind::Insert => '-', // nur auf der Platte → im Fenster „− auf der Platte“
-                    core::DiffKind::Delete => '+', // nur im Puffer → „+ im Editor“
-                    core::DiffKind::Equal => ' ',
-                };
-                (k, l.text)
-            })
-            .collect()
+    /// Stand des Textes (wächst mit jeder Änderung, auch Rückgängig) – `None`, solange nicht gelesen.
+    pub fn revision(&self) -> Option<u64> {
+        self.doc.as_ref().map(|d| d.revision())
+    }
+
+    /// Kodierung, Zeilenende (Format beim Speichern) und Zeilenende am Schluss – für die Hinweisleiste des Vergleichs
+    /// (#385).
+    pub fn facts(&self) -> Option<core::compare::Facts> {
+        let d = self.doc.as_ref()?;
+        let n = d.len_chars();
+        let final_newline = n > 0 && d.char_at(n - 1) == Some('\n');
+        Some(core::compare::Facts { encoding: Some(d.encoding().label().to_string()), eol: Some(if d.eol() == core::LineEnding::CrLf { "CRLF" } else { "LF" }.to_string()), final_newline })
+    }
+
+    /// Änderung des Nutzers außerhalb des Textfelds (Blockpfeil im Vergleich, *Zurücksetzen* einer Marke): ein
+    /// Rückgängig-Schritt, die Cursor der Ansichten folgen. Liefert, ob sich etwas geändert hat.
+    pub fn apply_user_edit(&mut self, edit: core::TextEdit) -> bool {
+        let Some(d) = self.doc.as_mut() else { return false };
+        d.break_undo_group();
+        let changed = d.apply_edits(&mut self.scratch, vec![edit], EditOrigin::User).unwrap_or(false);
+        d.break_undo_group();
+        if changed {
+            self.on_user_edit();
+        }
+        changed
+    }
+
+    /// Rückgängig / Wiederholen außerhalb des Textfelds (Vergleichs-Reiter).
+    pub fn undo_user(&mut self) -> bool {
+        self.doc.as_mut().is_some_and(|d| d.undo(&mut self.scratch))
+    }
+
+    pub fn redo_user(&mut self) -> bool {
+        self.doc.as_mut().is_some_and(|d| d.redo(&mut self.scratch))
     }
 
     /// Meldung der Überwachung verarbeiten.

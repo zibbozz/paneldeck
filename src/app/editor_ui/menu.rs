@@ -102,7 +102,12 @@ impl Item {
 /// Das Modell der Menüs für die Teilung `g`.
 pub(super) fn menus(ed: &mut EditorUi, g: u64, prefs: &super::EditorPrefs, lang: Lang) -> Vec<Menu> {
     let tab = ed.panes.groups.get(&g).and_then(|grp| grp.active_tab()).map(|t| (t.doc, t.view.sels.clone()));
-    let doc_id = tab.as_ref().map(|t| t.0);
+    // Vergleichs-Reiter (#385): *Datei* gilt dem Dokument der fokussierten Seite; Bearbeiten/Format gehen dort nicht.
+    let in_diff = ed.panes.groups.get(&g).and_then(|grp| grp.active_tab()).and_then(|t| t.diff);
+    let doc_id = match in_diff {
+        Some(d) => ed.diffs.get(&d).and_then(|x| x.focused_doc()),
+        None => tab.as_ref().map(|t| t.0),
+    };
     let running = doc_id.is_some_and(|d| ed.fmt.job_for(d).is_some());
     let syn = doc_id.and_then(|id| ed.docs.get_mut(&id)).filter(|d| d.doc.is_some()).map(|d| d.syntax_status(prefs, lang));
     let d = doc_id.and_then(|id| ed.docs.get(&id));
@@ -126,6 +131,8 @@ pub(super) fn menus(ed: &mut EditorUi, g: u64, prefs: &super::EditorPrefs, lang:
             _ => None,
         }
     };
+    // Grund für Befehle, die einen Text-Reiter brauchen (nicht im Vergleich).
+    let need_text = || -> Option<String> { in_diff.map(|_| lang.t("Nicht im Vergleichs-Reiter", "Not in a comparison tab").to_string()).or_else(need_doc) };
     let f = |c: Cmd| vec![Cmd::FocusGroup(g), c];
 
     // ---- Datei
@@ -150,6 +157,11 @@ pub(super) fn menus(ed: &mut EditorUi, g: u64, prefs: &super::EditorPrefs, lang:
     ));
     file.push(Entry::Sep);
     file.extend(on_save_entries(doc_id, ed.on_save.paused, need_doc(), prefs, lang, f));
+    // Vergleichen mit … (#385)
+    let saved = doc_id.and_then(|d| ed.docs.get(&d)).is_some_and(|d| d.path.is_some());
+    let why_cmp = need_doc().or_else(|| (!saved).then(|| lang.t("Die Datei ist noch nicht gespeichert.", "The file has not been saved yet.").to_string()));
+    let cmp = super::diff_menu::file_entries_for(ed, doc_id, lang);
+    diff_items(&mut file, &FILE_DIFF_IDS, cmp, |i| if i == 0 || i == 5 { need_doc() } else { why_cmp.clone() }, f);
     file.push(Entry::Sep);
     file.push(Entry::Item(match doc_id {
         Some(id) => item("close", lang.t("Reiter schließen", "Close tab"), fixed("Ctrl+W", lang), f(Cmd::Close(vec![(g, id)]))),
@@ -157,14 +169,14 @@ pub(super) fn menus(ed: &mut EditorUi, g: u64, prefs: &super::EditorPrefs, lang:
     }));
 
     // ---- Bearbeiten
-    let op = |id: &'static str, label: &str, k: &str, o: EdOp| Entry::Item(item(id, label.to_string(), fixed(k, lang), f(Cmd::EditOp(g, o))).off(need_doc()));
+    let op = |id: &'static str, label: &str, k: &str, o: EdOp| Entry::Item(item(id, label.to_string(), fixed(k, lang), f(Cmd::EditOp(g, o))).off(need_text()));
     let can_undo = loaded.is_some_and(|d| d.can_undo());
     let can_redo = loaded.is_some_and(|d| d.can_redo());
-    let mut undo = item("undo", lang.t("Rückgängig", "Undo"), fixed("Ctrl+Z", lang), f(Cmd::EditOp(g, EdOp::Undo))).off(need_doc());
+    let mut undo = item("undo", lang.t("Rückgängig", "Undo"), fixed("Ctrl+Z", lang), f(Cmd::EditOp(g, EdOp::Undo))).off(need_text());
     if undo.enabled && !can_undo {
         undo = undo.off(Some(lang.t("Nichts rückgängig zu machen", "Nothing to undo").to_string()));
     }
-    let mut redo = item("redo", lang.t("Wiederholen", "Redo"), fixed("Ctrl+Y", lang), f(Cmd::EditOp(g, EdOp::Redo))).off(need_doc());
+    let mut redo = item("redo", lang.t("Wiederholen", "Redo"), fixed("Ctrl+Y", lang), f(Cmd::EditOp(g, EdOp::Redo))).off(need_text());
     if redo.enabled && !can_redo {
         redo = redo.off(Some(lang.t("Nichts zu wiederholen", "Nothing to redo").to_string()));
     }
@@ -177,10 +189,10 @@ pub(super) fn menus(ed: &mut EditorUi, g: u64, prefs: &super::EditorPrefs, lang:
         op("paste", lang.t("Einfügen", "Paste"), "Ctrl+V", EdOp::PasteFromClipboard),
         op("select_all", lang.t("Alles markieren", "Select all"), "Ctrl+A", EdOp::SelectAll),
         Entry::Sep,
-        Entry::Item(item("find", lang.t("Suchen …", "Find …"), fixed("Ctrl+F", lang), f(Cmd::OpenFind(false))).off(need_doc())),
-        Entry::Item(item("replace", lang.t("Ersetzen …", "Replace …"), fixed("Ctrl+H", lang), f(Cmd::OpenFind(true))).off(need_doc())),
+        Entry::Item(item("find", lang.t("Suchen …", "Find …"), fixed("Ctrl+F", lang), f(Cmd::OpenFind(false))).off(need_text())),
+        Entry::Item(item("replace", lang.t("Ersetzen …", "Replace …"), fixed("Ctrl+H", lang), f(Cmd::OpenFind(true))).off(need_text())),
         Entry::Item(item("find_files", lang.t("In Dateien suchen …", "Find in files …"), fixed("Ctrl+Shift+F", lang), f(Cmd::FindInFiles))),
-        Entry::Item(item("goto", lang.t("Gehe zu Zeile …", "Go to line …"), fixed("Ctrl+G", lang), f(Cmd::GotoLineAsk)).off(need_doc())),
+        Entry::Item(item("goto", lang.t("Gehe zu Zeile …", "Go to line …"), fixed("Ctrl+G", lang), f(Cmd::GotoLineAsk)).off(need_text())),
         Entry::Sep,
         op("next_occurrence", lang.t("Nächstes Vorkommen dazu", "Add next occurrence"), "Ctrl+D", EdOp::SelectNextOccurrence),
         op("all_occurrences", lang.t("Alle Vorkommen markieren", "Select all occurrences"), "Ctrl+Shift+L", EdOp::SelectAllOccurrences),
@@ -214,11 +226,14 @@ pub(super) fn menus(ed: &mut EditorUi, g: u64, prefs: &super::EditorPrefs, lang:
             view.push(Entry::Item(item("mode_syntax", lang.t("Modus: Syntax (Farben)", "Mode: Syntax (colours)"), String::new(), vec![]).off(need_doc())));
         }
     }
+    // Änderungsmarken, nächste/vorige Änderung (#385)
+    let marks = super::diff_menu::view_entries(prefs, lang, &key(prefs, lang, "ed_next_change"), &key(prefs, lang, "ed_prev_change"));
+    diff_items(&mut view, &VIEW_DIFF_IDS, marks, |_| Some(lang.t("Die Änderungsmarken sind aus.", "Change markers are off.").to_string()), f);
     view.push(Entry::Sep);
     view.push(Entry::Item(item("palette", lang.t("Befehle (Palette) …", "Commands (palette) …"), key(prefs, lang, "palette"), f(Cmd::OpenPalette))));
 
     // ---- Format
-    let why_fmt = need_doc()
+    let why_fmt = need_text()
         .or_else(|| kind.is_none().then(|| lang.t("Weder JSON noch XML (erkannt an Endung, Dateiname oder Inhalt)", "Not JSON or XML (detected by extension, file name or content)").to_string()))
         .or_else(|| running.then(|| lang.t("Das Formatieren läuft – warten oder abbrechen", "Formatting is running – wait or cancel").to_string()));
     let fop = |id: &'static str, o: FmtOp, k: &str| {
@@ -256,6 +271,26 @@ pub(super) fn menus(ed: &mut EditorUi, g: u64, prefs: &super::EditorPrefs, lang:
         Menu { id: "view", title: lang.t("Ansicht", "View"), entries: view },
         Menu { id: "format", title: lang.t("Format", "Format"), entries: format },
     ]
+}
+
+/// Kennungen der Einträge aus [`super::diff_menu::file_entries`] bzw. [`super::diff_menu::view_entries`] (Tests, Tutorial).
+const FILE_DIFF_IDS: [&str; 6] = ["compare_file", "compare_disk", "compare_head", "compare_index", "compare_revision", "compare_clipboard"];
+const VIEW_DIFF_IDS: [&str; 5] = ["change_markers", "markers_git", "markers_disk", "next_change", "prev_change"];
+
+/// Einträge des Vergleichs (#385, [`super::diff_menu`]) ins Modell übernehmen: Trennlinien, Häkchen, Kürzel; ausgegraute
+/// sagen mit `why(index)` warum.
+fn diff_items(out: &mut Vec<Entry>, ids: &[&'static str], entries: Vec<super::diff_menu::MenuEntry>, why: impl Fn(usize) -> Option<String>, f: impl Fn(Cmd) -> Vec<Cmd>) {
+    for (i, e) in entries.into_iter().enumerate() {
+        if e.separator && !matches!(out.last(), None | Some(Entry::Sep)) {
+            out.push(Entry::Sep);
+        }
+        let mut it = item(ids.get(i).copied().unwrap_or("diff"), e.label, e.shortcut, f(e.cmd));
+        it.checked = e.checked;
+        if !e.enabled {
+            it = it.off(why(i).or_else(|| Some(String::new())));
+        }
+        out.push(Entry::Item(it));
+    }
 }
 
 /// Aktionen beim Speichern (#383) im Menü *Datei*: *Aktionen beim Speichern …*, *Ohne Aktionen speichern* (eigenes
