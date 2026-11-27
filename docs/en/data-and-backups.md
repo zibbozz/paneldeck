@@ -260,8 +260,6 @@ All fields are optional; older versions ignore them, and missing fields mean the
   | Field | Default | Meaning |
   |---|---|---|
   | `menu_bar` | `true` | menu bar above every editor split; only an explicit `false` switches it off |
-  | `format_on_save_json` | `false` | format JSON (also JSONC) on save (files up to 1 MB) |
-  | `format_on_save_xml` | `false` | format XML on save (files up to 1 MB) |
   | `agent_format` | `false` | switch *Agents may format* (MCP `format_file` except `validate`); only an explicit `true` switches it on |
 
 - `settings.json` → `keys` → `ed_format`, `ed_minify`, `ed_validate`, `ed_sort_keys`: own shortcuts of the format commands (defaults `Alt+Shift+F`, `Alt+Shift+M`, `Alt+Shift+V`, none); second bindings `ed_format_alt` (`Ctrl+Shift+I`), `ed_minify_alt`, `ed_validate_alt` (none).

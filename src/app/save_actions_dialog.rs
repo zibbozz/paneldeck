@@ -550,6 +550,9 @@ pub(crate) enum OnSaveMenu {
     Rules(Option<u64>),
     /// *Ohne Aktionen speichern*.
     SaveWithout(u64),
+    /// *Beim Speichern formatieren …* (Menü *Format*): neue Regel für die Datei mit der Aktion *Formatieren* vorbelegt
+    /// (ohne Datei: die Einstellungen).
+    FormatRule(Option<u64>),
     /// *Pausieren* bzw. *Fortsetzen*.
     TogglePause,
 }
@@ -613,6 +616,14 @@ impl App {
         self.save_actions.ui.editor = Some(RuleEditor::of(&r, true));
     }
 
+    /// Regel-Dialog für eine neue Regel öffnen, die die Datei beim Speichern formatiert: Muster `*.endung` im Ordner der
+    /// Datei (ohne Endung: genau diese Datei) mit der Aktion *Formatieren*. Nichts wird gespeichert, bevor der Nutzer
+    /// den Dialog bestätigt.
+    pub(super) fn sa_format_rule_for(&mut self, file: &Path) {
+        let r = Rule::format_for(self.save_actions.cfg.next_id(), file);
+        self.save_actions.ui.editor = Some(RuleEditor::of(&r, true));
+    }
+
     /// Test-Ansicht öffnen (Datei vorbelegt, sonst die aktive Datei des Editors).
     pub(super) fn sa_open_test(&mut self, file: Option<PathBuf>) {
         let file = file.or_else(|| self.ed.active_doc().and_then(|id| self.ed.docs.get(&id)).and_then(|d| d.path.clone()));
@@ -630,6 +641,10 @@ impl App {
                 None => self.sa_open_settings(),
             },
             OnSaveMenu::SaveWithout(d) => self.sa_save_without(d),
+            OnSaveMenu::FormatRule(doc) => match doc.and_then(|d| self.ed.docs.get(&d)).and_then(|d| d.path.clone()) {
+                Some(p) => self.sa_format_rule_for(&p),
+                None => self.sa_open_settings(),
+            },
             OnSaveMenu::TogglePause => self.save_actions.paused = !self.save_actions.paused,
         }
     }
@@ -646,12 +661,11 @@ impl App {
         }
         self.save_actions.without_next = true;
         match self.editor_save_with(doc, None, SaveOrigin::User) {
-            Ok(fos) => {
+            Ok(()) => {
                 if let Some(d) = self.ed.docs.get_mut(&doc) {
                     d.drop_hot(&dir);
                     let t = d.title(lang);
-                    // Formatieren beim Speichern (#381) ist keine Regel: es läuft auch hier; sein Hinweis geht vor.
-                    self.ed.set_hint(fos.unwrap_or_else(|| format!("{t}: {}", lang.t("ohne Aktionen gespeichert", "saved without actions"))));
+                    self.ed.set_hint(format!("{t}: {}", lang.t("ohne Aktionen gespeichert", "saved without actions")));
                 }
             }
             Err(e) => self.notify_text(e),

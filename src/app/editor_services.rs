@@ -316,7 +316,7 @@ impl App {
         self.editor_agents_ui(ui);
     }
 
-    /// Abschnitt „Formatieren“ der Editor-Einstellungen (#381): Formatieren beim Speichern je Sprache (Standard aus).
+    /// Abschnitt „Formatieren“ der Editor-Einstellungen (#381): nur ein Hinweis – es gibt keine Einstellung dafür, formatiert wird nie von allein.
     fn editor_format_settings_ui(&mut self, ui: &mut Ui) {
         let lang = self.settings.language;
         ui.label(RichText::new(lang.t("Formatieren (JSON, XML)", "Formatting (JSON, XML)")).strong());
@@ -326,13 +326,7 @@ impl App {
             Lang::En => format!("Format menu or {f} (format), {m} (minify), {v} (validate); changeable under Shortcuts. Everything runs locally. Indentation follows .editorconfig or the file's indentation."),
         };
         ui.label(RichText::new(text).small().color(style::dim(ui)));
-        let ed = &mut self.settings.editor;
-        row(ui, lang.t("JSON beim Speichern formatieren", "Format JSON on save"), lang.t("Auch JSONC; nur bis 1 MB, ungültige Dateien bleiben unverändert", "Also JSONC; only up to 1 MB, invalid files stay unchanged"), |ui| {
-            style::toggle(ui, &mut ed.format_on_save_json);
-        });
-        row(ui, lang.t("XML beim Speichern formatieren", "Format XML on save"), lang.t("Nur bis 1 MB, ungültige Dateien bleiben unverändert", "Only up to 1 MB, invalid files stay unchanged"), |ui| {
-            style::toggle(ui, &mut ed.format_on_save_xml);
-        });
+        ui.label(RichText::new(lang.t("Formatiert wird nie von allein: nur auf Knopfdruck oder beim Speichern über eine Regel mit der Aktion Formatieren (Abschnitt „Aktionen beim Speichern“; Menü Format → Beim Speichern formatieren …).", "Nothing is ever formatted automatically: only on demand, or on save through a rule with the Format action (section “Actions on save”; Format menu → Format on save …).")).small().color(style::dim(ui)));
     }
 
     /// Abschnitt „Sprachen“ der Editor-Einstellungen (#312): Standard-Modus, Modus je Sprache, eigene Zuordnungen.
@@ -615,8 +609,6 @@ impl App {
             autosave: e.autosave.then(|| Duration::from_millis(e.autosave_delay_ms as u64)),
             syntax: super::editor_ui::SyntaxPrefs::from_settings(e),
             menu_bar: e.menu_bar,
-            format_on_save_json: e.format_on_save_json,
-            format_on_save_xml: e.format_on_save_xml,
             keys: super::editor_ui::MENU_KEYS.iter().map(|id| (id.to_string(), self.binding_raw(id))).collect(),
             markers: e.change_markers,
             marker_base: e.marker_base,

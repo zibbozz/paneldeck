@@ -382,6 +382,23 @@ impl Rule {
         }
     }
 
+    /// Vorschlag *Beim Speichern formatieren …* (Menü *Format* des Editors): Muster `*.endung` im Ordner der Datei (ohne
+    /// Endung: genau diese Datei) mit der Aktion *Formatieren*. Nur ein Vorschlag – er gilt erst, wenn der Nutzer den
+    /// Regel-Dialog bestätigt; ohne Haken bei *Auch beim automatischen Speichern* und *Auch beim Speichern durch Agenten*.
+    pub fn format_for(id: u64, file: &Path) -> Rule {
+        let ext = file.extension().and_then(|e| e.to_str()).filter(|e| !e.is_empty());
+        let mut r = match (ext, file.parent()) {
+            (Some(e), Some(dir)) => {
+                let mut r = Rule::new(id, Scope::Pattern, &dir.to_string_lossy());
+                r.patterns = vec![format!("*.{e}")];
+                r
+            }
+            _ => Rule::new(id, Scope::File, &file.to_string_lossy()),
+        };
+        r.actions = vec![Action::new(ActionKind::Builtin(Builtin::Format))];
+        r
+    }
+
     /// Ordner, auf den sich Muster, `${relativeFile}` und der Arbeitsordner beziehen: bei Datei-Regeln der Ordner der
     /// Datei, sonst `path`.
     pub fn folder(&self) -> PathBuf {
@@ -740,6 +757,27 @@ mod tests {
         if cfg!(windows) {
             assert!(is_inside(Path::new(r"c:\WORK\App\x.txt"), &f), "Windows: ohne Groß/Klein");
         }
+    }
+
+    #[test]
+    fn format_rule_for_a_file_formats_on_save_only_when_the_user_saves() {
+        use matching::{plan, Switches};
+        let dir = PathBuf::from(root());
+        let json = dir.join("data.json");
+        let r = Rule::format_for(1, &json);
+        assert_eq!((r.scope, r.patterns.clone(), r.path.clone()), (Scope::Pattern, vec!["*.json".to_string()], dir.to_string_lossy().to_string()));
+        assert!(!r.on_autosave && !r.on_agent_save, "nie von allein");
+        let cfg = Config { rules: vec![r], ..Default::default() };
+        let sw = Switches::default();
+        let builtins = |file: &Path, origin| plan(&cfg, file, origin, sw).builtins.iter().map(|(b, ..)| b.clone()).collect::<Vec<_>>();
+        assert_eq!(builtins(&json, SaveOrigin::User), vec![Builtin::Format]);
+        assert_eq!(builtins(&json, SaveOrigin::SaveAs), vec![Builtin::Format]);
+        assert!(builtins(&json, SaveOrigin::Autosave).is_empty() && builtins(&json, SaveOrigin::Agent).is_empty());
+        assert!(builtins(&dir.join("data.xml"), SaveOrigin::User).is_empty(), "nur *.json");
+        assert!(plan(&cfg, &json, SaveOrigin::User, Switches { without_actions: true, ..sw }).builtins.is_empty(), "Ohne Aktionen speichern");
+        // Ohne Endung: genau diese Datei.
+        let r = Rule::format_for(2, &dir.join("Jenkinsfile"));
+        assert_eq!((r.scope, r.path.as_str()), (Scope::File, dir.join("Jenkinsfile").to_string_lossy().as_ref()));
     }
 
     #[test]

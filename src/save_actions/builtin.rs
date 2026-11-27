@@ -2,16 +2,16 @@
 //! machbarer Schritt. Zeilenenden und Kodierung ändern nur das Format beim Schreiben (das macht der Aufrufer am
 //! Dokument).
 //!
-//! Formatieren nutzt den Formatierer des Editors (`crate::editor::format`, #381) über [`format_text`]. Ist das
-//! Formatieren beim Speichern des Editors für die Datei an, läuft es vorher und diese Aktion nicht noch einmal
-//! (`EditorUi::save_doc`).
+//! Formatieren nutzt den Formatierer des Editors (`crate::editor::format`, #381) über [`format_text`]. Das ist der
+//! einzige Weg, auf dem beim Speichern formatiert wird: Der Editor formatiert nie von allein, nur eine Regel mit dieser
+//! Aktion (oder der Nutzer per Befehl).
 
 use super::Builtin;
 use crate::state::Lang;
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
 
-/// Größte Datei für *Formatieren* beim Speichern (wie das Formatieren beim Speichern des Editors).
+/// Größte Datei für die Aktion *Formatieren* (größere werden unverändert gespeichert, mit Hinweis).
 pub const FORMAT_MAX_BYTES: usize = 1024 * 1024;
 
 /// Einrückung für das Formatieren.

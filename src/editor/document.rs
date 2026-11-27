@@ -437,7 +437,7 @@ impl Document {
     }
 
     /// Join all undo steps made since the state `mark` (a [`Document::state_id`]) into one, so a single undo takes them
-    /// back together (format on save plus the actions on save before writing).
+    /// back together (the actions on save before writing).
     pub fn join_undo_since(&mut self, mark: u64) {
         self.history.join_since(mark);
     }
@@ -684,7 +684,7 @@ mod tests {
         assert_eq!(d.linecol_to_pos(LineCol::new(0, 5)), 2);
     }
 
-    /// Formatieren beim Speichern + Aktionen beim Speichern (#381/#383): ein Rückgängig-Schritt für beide.
+    /// Mehrere Aktionen beim Speichern (#383): ein Rückgängig-Schritt.
     #[test]
     fn join_undo_since_makes_one_step() {
         let mut d = Document::from_text("a  

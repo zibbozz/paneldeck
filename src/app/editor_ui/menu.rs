@@ -247,21 +247,11 @@ pub(super) fn menus(ed: &mut EditorUi, g: u64, prefs: &super::EditorPrefs, lang:
         Entry::Item(it)
     };
     let mut format = vec![fop("format", FmtOp::Format, "ed_format"), fop("minify", FmtOp::Minify, "ed_minify"), fop("validate", FmtOp::Validate, "ed_validate"), fop("sort_keys", FmtOp::SortKeys, "ed_sort_keys"), Entry::Sep];
-    let fos = match kind {
-        Some(k @ (Kind::Json | Kind::Jsonc)) => {
-            let on = prefs.format_on_save_json;
-            item("format_on_save", lang.t("JSON beim Speichern formatieren", "Format JSON on save"), String::new(), vec![Cmd::SetFormatOnSave(k, !on)]).check(on)
-        }
-        Some(Kind::Xml) => {
-            let on = prefs.format_on_save_xml;
-            item("format_on_save", lang.t("XML beim Speichern formatieren", "Format XML on save"), String::new(), vec![Cmd::SetFormatOnSave(Kind::Xml, !on)]).check(on)
-        }
-        None => item("format_on_save", lang.t("Beim Speichern formatieren", "Format on save"), String::new(), vec![])
-            .off(need_doc().or_else(|| Some(lang.t("Weder JSON noch XML", "Not JSON or XML").to_string()))),
-    };
-    let mut fos = fos;
+    // Formatieren nie von allein: nur auf Knopfdruck oder über eine Regel mit der Aktion *Formatieren* (#383). Der Eintrag
+    // öffnet den Regel-Dialog für diese Datei (Muster und Aktion vorbelegt).
+    let mut fos = item("format_on_save", lang.t("Beim Speichern formatieren …", "Format on save …"), String::new(), f(Cmd::OnSaveMenu(super::super::save_actions_dialog::OnSaveMenu::FormatRule(doc_id)))).off(need_text().or_else(|| kind.is_none().then(|| lang.t("Weder JSON noch XML", "Not JSON or XML").to_string())));
     if fos.enabled {
-        fos.tip = Some(lang.t("Gilt für alle Dateien dieser Sprache (Einstellungen → Editor); große oder ungültige Dateien werden unverändert gespeichert.", "Applies to all files of this language (Settings → Editor); large or invalid files are saved unchanged.").to_string());
+        fos.tip = Some(lang.t("Legt eine Regel „Aktionen beim Speichern“ mit der Aktion Formatieren für diese Datei an. Ohne Regel wird nie von allein formatiert.", "Creates an “Actions on save” rule with the Format action for this file. Without a rule nothing is ever formatted automatically.").to_string());
     }
     format.push(Entry::Item(fos));
 

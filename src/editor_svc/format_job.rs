@@ -1,5 +1,5 @@
 //! Ein Formatier-Lauf im Hintergrund (#381, 3.2.0) – ohne egui, ohne App. Gemeinsam für die Menüleiste des Editors,
-//! Tastenkürzel, Befehls-Palette, Formatieren beim Speichern und das MCP-Werkzeug `format_file`.
+//! Tastenkürzel, Befehls-Palette und das MCP-Werkzeug `format_file` (nie von allein: Formatiert wird nur auf Anforderung).
 //!
 //! Ablauf: Der Aufrufer nimmt einen Klon des Ropes (billig) und optional einen Zeichenbereich (Auswahl) und startet
 //! [`Job::start_with`]. Der Hilfsthread baut den Text, erkennt die Art genau ([`format::detect`] mit dem ganzen Text), ruft
@@ -24,12 +24,6 @@ use std::sync::Arc;
 /// Bis zu dieser Größe (ganzes Dokument) werden die Änderungen zeilenweise minimal berechnet, darüber ersetzt ein
 /// einziger Bereich den ganzen Text (der Zeilenvergleich wäre zu teuer).
 pub const DIFF_MAX_BYTES: usize = 4 * 1024 * 1024;
-/// Formatieren beim Speichern läuft im UI-Thread – nur bis zu dieser Größe; größere Dateien werden unverändert
-/// gespeichert (mit Hinweis).
-pub const SAVE_MAX_BYTES: usize = 1024 * 1024;
-/// Formatieren beim Speichern: bis zu dieser Größe zeilenweise minimale Änderungen, darüber ein einziger Ersatz – der
-/// Zeilenvergleich liefe sonst im UI-Thread (bis 1,5 s bei 1 MB).
-pub const SAVE_DIFF_MAX_BYTES: usize = 256 * 1024;
 /// Frist eines Laufs für MCP `format_file` (die Brücke wartet 30 s auf die Antwort).
 pub const AGENT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(25);
 
@@ -48,7 +42,7 @@ pub struct Request {
     /// JSONC *Minify* wurde bestätigt (Kommentare fallen weg); sonst kommt [`Done::NeedsConfirm`].
     pub confirmed: bool,
     /// Bis zu dieser Größe (Bytes) zeilenweise minimale Änderungen, darüber ein einziger Ersatz
-    /// ([`DIFF_MAX_BYTES`] im Hintergrund, [`SAVE_DIFF_MAX_BYTES`] beim Speichern).
+    /// ([`DIFF_MAX_BYTES`]).
     pub diff_max: usize,
 }
 
@@ -123,11 +117,6 @@ pub fn resolve_kind(path: Option<&std::path::Path>, text: &str, lang: Option<&st
     }
 }
 
-/// Den Lauf synchron ausführen (Hilfsthread, Formatieren beim Speichern, Tests).
-pub fn compute(req: &Request, cancel: &AtomicBool, progress: &dyn Fn(f32)) -> Done {
-    compute_with(req, cancel, progress, &builtin)
-}
-
 /// Der eingebaute Formatierer: ganzes Dokument über [`format::run`]; eine XML-Auswahl (`fragment`) über
 /// `xml::run_with(…, fragment = true, …)` – sie darf mehrere oder keine Elemente auf oberster Ebene haben.
 pub fn builtin(kind: Kind, op: Op, text: &str, opts: Options, fragment: bool, cancel: &AtomicBool, progress: &dyn Fn(f32)) -> Outcome {
@@ -144,7 +133,7 @@ pub type Runner = dyn Fn(Kind, Op, &str, Options, bool, &AtomicBool, &dyn Fn(f32
 /// Wie [`Runner`], ohne `Send` (für [`compute_with`]).
 pub type RunRef = dyn Fn(Kind, Op, &str, Options, bool, &AtomicBool, &dyn Fn(f32)) -> Outcome + Sync;
 
-/// Wie [`compute`] mit eigenem Formatierer.
+/// Den Lauf synchron ausführen (Hilfsthread, Tests) mit einem Formatierer.
 pub fn compute_with(req: &Request, cancel: &AtomicBool, progress: &dyn Fn(f32), run: &RunRef) -> Done {
     let len = req.rope.len_chars();
     let range = req.range.clone().map(|r| r.start.min(len)..r.end.min(len)).filter(|r| r.start < r.end);
@@ -410,7 +399,7 @@ mod tests {
         let mut r = req("[1,2]", Op::Format, None);
         r.lang = Some("python".into());
         assert_eq!(run(&r), Done::NotSupported, "gewählte andere Sprache");
-        // Über `diff_max` ein einziger Ersatz (Formatieren beim Speichern ab 256 KB)
+        // Über `diff_max` ein einziger Ersatz
         let mut r = req("keep\n[1,2]\n", Op::Format, None);
         r.diff_max = 4;
         assert!(matches!(run(&r), Done::Changed { whole: true, .. }));
