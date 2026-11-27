@@ -5,14 +5,20 @@
 //!   hinzusehen. Den Tastaturfokus bekommt nie von selbst ein Knopf; Tab erreicht zuerst *Öffnen*.
 //! * Darunter steht, **was verlangt wird**: das Werkzeug (Bash, Edit …) und der Befehl bzw. Pfad aus der Meldung von
 //!   Claude (`hooks::ToolRequest`) bzw. aus dem wartenden Aufruf des Chats. Das ist fremder Text: als „aus der
-//!   Sitzung“ gekennzeichnet, gedämpft in Festbreitenschrift, nie als Markup gelesen, auf [`REQUEST_ROWS`] Zeilen
-//!   gekürzt und vollständig im Tooltip.
+//!   Sitzung“ gekennzeichnet, gedämpft in Festbreitenschrift, nie als Markup gelesen, Leerraum-Polster
+//!   zusammengezogen, Zeilenumbrüche als `⏎`; was nicht in [`REQUEST_ROWS`] Zeilen passt, zeigt Anfang **und** Ende
+//!   mit der Zahl der verborgenen Zeichen, vollständig im Tooltip.
+//! * **Nie eine Anfrage zeigen, die vielleicht nicht die gefragte ist:** Ja/Nein gibt es nur, wenn genau ein Aufruf in
+//!   Frage kommt, seine Kurzfassung im Dialog auf dem Bildschirm steht (`ToolRequest::confirmed`) und sie ganz in die
+//!   Karte passt. Sonst zeigt die Karte die Unsicherheit (mehrere Kandidaten gleichrangig, „vermutlich“, gekürzt, nur die
+//!   Meldung) und nur *Öffnen*.
 //! * „Ja“/„Nein“ sind kurz nach dem Erscheinen einer Frage gesperrt ([`SETTLE`]) – gegen Klicks, die eigentlich
-//!   etwas anderem an derselben Stelle galten.
+//!   etwas anderem an derselben Stelle galten. Der Hub prüft beim Klick noch einmal ([`Action::Approve`]).
 
 use super::*;
-use crate::hooks::ToolRequest;
+use crate::hooks::{ToolCall, ToolRequest};
 use egui::text::{LayoutJob, TextFormat, TextWrapping};
+use std::sync::Arc;
 
 /// So viele Zeilen der Anfrage zeigt die Karte (der Rest steht im Tooltip).
 pub(super) const REQUEST_ROWS: usize = 3;
@@ -35,7 +41,7 @@ pub(super) enum Answer {
 pub(super) struct InboxItem {
     pub id: u64,
     pub name: String,
-    /// Meldung (z. B. „Claude needs your permission to use Bash“) – fremder Text; gezeigt, wenn `request` fehlt.
+    /// Meldung (z. B. „Claude needs your permission to use Bash“) – fremder Text; gezeigt, wenn keine Anfrage feststeht.
     pub msg: String,
     pub request: Option<ToolRequest>,
     /// Woher die Anfrage stammt (Beschriftung neben dem Werkzeug): Claude-Sitzung oder Modell des Chats.
@@ -69,14 +75,57 @@ pub(super) fn inbox_card(ui: &mut Ui, items: &[InboxItem], lang: Lang, actions: 
         });
 }
 
+/// Was die Karte zur Anfrage zeigen kann.
+enum Shown<'a> {
+    /// Keine Anfrage (oder eine ohne Inhalt): die Meldung.
+    Message,
+    /// Mehrere Aufrufe kommen in Frage – gleichrangig.
+    Several(&'a ToolRequest),
+    /// Genau einer; `sure` = auf dem Bildschirm bestätigt.
+    One(&'a ToolRequest, &'a ToolCall, bool),
+}
+
+fn shown(r: Option<&ToolRequest>) -> Shown<'_> {
+    match r {
+        Some(r) if r.calls.len() > 1 => Shown::Several(r),
+        Some(r) => match r.single().filter(|c| !c.detail.is_empty()) {
+            Some(c) => Shown::One(r, c, r.confirmed),
+            None => Shown::Message,
+        },
+        None => Shown::Message,
+    }
+}
+
 fn item_ui(ui: &mut Ui, it: &InboxItem, lang: Lang, actions: &mut Vec<Action>) {
     ui.label(RichText::new(&it.name).strong());
-    match &it.request {
-        Some(r) => request_ui(ui, r, it.from_model, lang),
-        None if !it.msg.is_empty() => {
-            clipped(ui, &crate::hooks::untrusted_text(&it.msg, crate::hooks::DETAIL_MAX), false);
+    // Ja/Nein nur für genau einen, bestätigten, ganz sichtbaren Aufruf.
+    let mut answer_seq: Option<u64> = None;
+    match shown(it.request.as_ref()) {
+        Shown::Message => {
+            if !it.msg.is_empty() {
+                clipped(ui, &crate::hooks::untrusted_text(&it.msg, crate::hooks::DETAIL_MAX), false);
+            }
         }
-        None => {}
+        Shown::Several(r) => {
+            source_row(ui, &r.tool, it.from_model, None, lang);
+            let n = r.calls.len();
+            let text = match lang {
+                Lang::De => format!("Einer von {n} Aufrufen – welcher, ist nicht sicher. Im Terminal prüfen."),
+                Lang::En => format!("One of {n} calls – it is not certain which. Check it in the terminal."),
+            };
+            ui.add(egui::Label::new(RichText::new(text).small().color(style::ui().warning)).wrap());
+            for c in &r.calls {
+                one_row(ui, &c.detail);
+            }
+        }
+        Shown::One(r, c, sure) => {
+            let note = if sure { lang.t("stimmt mit dem Terminal überein", "matches the terminal") } else { lang.t("vermutlich – im Terminal noch nicht gesehen", "probably – not seen in the terminal yet") };
+            source_row(ui, &r.tool, it.from_model, Some((note, sure)), lang);
+            let fits = detail_view(ui, &c.detail, lang);
+            if sure && fits {
+                answer_seq = Some(c.seq);
+            }
+        }
     }
     ui.horizontal_wrapped(|ui| {
         // Zuerst ansehen: *Öffnen* vorn und farbig, die Antworten danach ohne Farbe.
@@ -84,9 +133,7 @@ fn item_ui(ui: &mut Ui, it: &InboxItem, lang: Lang, actions: &mut Vec<Action>) {
         if ui.add(open).on_hover_text(lang.t("Sitzung anzeigen, um die Frage zu prüfen", "Show the session to check the request")).clicked() {
             actions.push(Action::Activate(it.id));
         }
-        if it.answer == Answer::Open {
-            return;
-        }
+        let Some(seq) = answer_seq.filter(|_| it.answer != Answer::Open) else { return };
         let settled = it.since.is_none_or(|d| d >= SETTLE);
         if let Some(d) = it.since.filter(|_| !settled) {
             ui.ctx().request_repaint_after(SETTLE - d);
@@ -104,18 +151,18 @@ fn item_ui(ui: &mut Ui, it: &InboxItem, lang: Lang, actions: &mut Vec<Action>) {
             }
             actions.push(match &it.answer {
                 Answer::Chat(call) => Action::ChatDecide(it.id, call.clone(), if ok { chatmod::Decision::Allow } else { chatmod::Decision::Deny }),
-                _ => Action::Approve(it.id, ok),
+                _ => Action::Approve(it.id, ok, seq),
             });
         }
     });
 }
 
-/// Werkzeug, Herkunft und Kurzfassung der Anfrage.
-fn request_ui(ui: &mut Ui, r: &ToolRequest, from_model: bool, lang: Lang) {
+/// Werkzeug, Herkunft („aus der Sitzung“/„vom Modell“) und ggf. der Stand der Bestätigung.
+fn source_row(ui: &mut Ui, tool: &str, from_model: bool, note: Option<(&str, bool)>, lang: Lang) {
     let dim = style::dim(ui);
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing.x = 6.0;
-        let tool = crate::hooks::untrusted_text(&r.tool, 200);
+        let tool = crate::hooks::untrusted_text(tool, 200);
         ui.add(egui::Label::new(RichText::new(tool).monospace().strong().size(12.0)).wrap());
         let from = if from_model { lang.t("vom Modell", "from the model") } else { lang.t("aus der Sitzung", "from the session") };
         let tip = if from_model {
@@ -124,43 +171,106 @@ fn request_ui(ui: &mut Ui, r: &ToolRequest, from_model: bool, lang: Lang) {
             lang.t("Von Claude gemeldet – nicht vertrauenswürdig. Im Terminal prüfen, bevor du freigibst.", "Reported by Claude – untrusted. Check it in the terminal before you approve.")
         };
         ui.label(RichText::new(from).small().italics().color(dim)).on_hover_text(tip);
+        if let Some((note, sure)) = note.filter(|_| !from_model) {
+            let col = if sure { dim } else { style::ui().warning };
+            ui.label(RichText::new(note).small().color(col));
+        }
     });
-    if !r.detail.is_empty() {
-        clipped(ui, &r.detail, true);
-    }
-    if !r.others.is_empty() {
-        let n = r.others.len();
-        let text = match lang {
-            Lang::De => format!("+{n} weitere offene Aufrufe dieses Werkzeugs – die Frage kann auch einem davon gelten"),
-            Lang::En => format!("+{n} more open calls of this tool – the request may be for one of them"),
-        };
-        let all = r.others.join("\n\n");
-        ui.add(egui::Label::new(RichText::new(text).small().color(style::ui().warning)).wrap()).on_hover_ui(|ui| {
-            ui.set_max_width(460.0);
-            ui.label(RichText::new(all).monospace().small());
+}
+
+fn text_job(text: &str, font: FontId, color: Color32, width: f32, rows: usize) -> LayoutJob {
+    let mut job = LayoutJob::single_section(text.to_string(), TextFormat { font_id: font, color, ..TextFormat::default() });
+    job.wrap = TextWrapping { max_width: width, max_rows: rows, break_anywhere: true, overflow_character: Some('…') };
+    job
+}
+
+fn mono() -> FontId {
+    FontId::monospace(11.5)
+}
+
+/// Gedämpfter Kasten für fremden Text; der ganze Text im Tooltip.
+fn untrusted_box(ui: &mut Ui, full: &str, add: impl FnOnce(&mut Ui)) {
+    let r = egui::Frame::new().fill(ui.visuals().extreme_bg_color).corner_radius(CornerRadius::same(4)).inner_margin(Margin::symmetric(6, 3)).show(ui, |ui| {
+        ui.set_min_width(ui.available_width());
+        add(ui);
+    });
+    let full = full.to_string();
+    r.response.interact(Sense::hover()).on_hover_ui(move |ui| {
+        ui.set_max_width(460.0);
+        ui.label(RichText::new(full).monospace().small());
+    });
+}
+
+/// Kurzfassung eines Aufrufs: zusammengezogen ([`crate::hooks::compact_text`]); passt sie nicht in [`REQUEST_ROWS`]
+/// Zeilen, Anfang und Ende mit der Zahl der verborgenen Zeichen. `true`, wenn alles zu sehen ist.
+fn detail_view(ui: &mut Ui, detail: &str, lang: Lang) -> bool {
+    let compact = crate::hooks::compact_text(detail);
+    let dim = style::dim(ui);
+    let width = (ui.available_width() - 14.0).max(40.0);
+    let full = ui.painter().layout_job(text_job(&compact, mono(), dim, width, REQUEST_ROWS));
+    if !full.elided {
+        untrusted_box(ui, detail, |ui| {
+            ui.add(egui::Label::new(full).sense(Sense::hover()));
         });
+        return true;
     }
+    let head = ui.painter().layout_job(text_job(&compact, mono(), dim, width, REQUEST_ROWS - 1));
+    let shown_head: usize = head.rows.iter().map(|r| r.char_count_including_newline()).sum::<usize>().saturating_sub(1);
+    let tail = tail_fit(ui, &compact, width, dim);
+    let total = compact.chars().count();
+    let hidden = total.saturating_sub(shown_head + tail.1);
+    untrusted_box(ui, detail, |ui| {
+        ui.add(egui::Label::new(head).sense(Sense::hover()));
+        ui.add(egui::Label::new(tail.0).sense(Sense::hover()));
+    });
+    let text = match lang {
+        Lang::De => format!("{hidden} Zeichen verborgen – im Terminal prüfen"),
+        Lang::En => format!("{hidden} characters hidden – check the terminal"),
+    };
+    ui.add(egui::Label::new(RichText::new(text).small().color(style::ui().warning)).wrap());
+    false
+}
+
+/// Das Ende von `text`, so lang, wie es mit vorangestelltem `…` in eine Zeile passt; dazu die Zahl der Zeichen.
+fn tail_fit(ui: &Ui, text: &str, width: f32, color: Color32) -> (Arc<egui::Galley>, usize) {
+    let chars: Vec<char> = text.chars().collect();
+    let lay = |k: usize| {
+        let s: String = std::iter::once('…').chain(chars[chars.len() - k..].iter().copied()).collect();
+        ui.painter().layout_no_wrap(s, mono(), color)
+    };
+    let (mut lo, mut hi) = (1usize, chars.len().min(400));
+    while lo < hi {
+        let mid = (lo + hi).div_ceil(2);
+        if lay(mid).size().x <= width {
+            lo = mid;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    (lay(lo), lo)
+}
+
+/// Ein Kandidat unter mehreren: eine Zeile, vollständig im Tooltip.
+fn one_row(ui: &mut Ui, detail: &str) {
+    let dim = style::dim(ui);
+    let width = (ui.available_width() - 14.0).max(40.0);
+    let g = ui.painter().layout_job(text_job(&crate::hooks::compact_text(detail), mono(), dim, width, 1));
+    untrusted_box(ui, detail, |ui| {
+        ui.add(egui::Label::new(g).sense(Sense::hover()));
+    });
 }
 
 /// Fremden Text gekürzt auf [`REQUEST_ROWS`] Zeilen zeigen (gedämpft; `mono` = Festbreitenschrift auf eigenem
 /// Hintergrund), vollständig im Tooltip. Nie als Markup: der Text wird als einfacher Abschnitt gesetzt.
-fn clipped(ui: &mut Ui, text: &str, mono: bool) -> egui::Response {
+fn clipped(ui: &mut Ui, text: &str, mono_font: bool) -> egui::Response {
     let dim = style::dim(ui);
-    let font = if mono { FontId::monospace(11.5) } else { FontId::proportional(11.5) };
-    let width = (ui.available_width() - if mono { 12.0 } else { 0.0 }).max(40.0);
-    let mut job = LayoutJob::single_section(text.to_string(), TextFormat { font_id: font, color: dim, ..TextFormat::default() });
-    job.wrap = TextWrapping { max_width: width, max_rows: REQUEST_ROWS, break_anywhere: true, overflow_character: Some('…') };
-    let galley = ui.painter().layout_job(job);
-    let label = |ui: &mut Ui| ui.add(egui::Label::new(galley).sense(Sense::hover()));
-    let r = if mono {
-        egui::Frame::new().fill(ui.visuals().extreme_bg_color).corner_radius(CornerRadius::same(4)).inner_margin(Margin::symmetric(6, 3)).show(ui, label).inner
-    } else {
-        label(ui)
-    };
+    let font = if mono_font { mono() } else { FontId::proportional(11.5) };
+    let width = ui.available_width().max(40.0);
+    let galley = ui.painter().layout_job(text_job(text, font, dim, width, REQUEST_ROWS));
     let full = text.to_string();
-    r.on_hover_ui(move |ui| {
+    ui.add(egui::Label::new(galley).sense(Sense::hover())).on_hover_ui(move |ui| {
         ui.set_max_width(460.0);
-        ui.label(if mono { RichText::new(full).monospace().small() } else { RichText::new(full).small() });
+        ui.label(RichText::new(full).small());
     })
 }
 
@@ -182,11 +292,14 @@ impl App {
                         Some(t) => format!("{} → {t}", call.name),
                         None => call.name.clone(),
                     };
-                    it.request = Some(ToolRequest { tool, detail: crate::hooks::tool_detail(&call.arguments).unwrap_or_default(), others: Vec::new() });
+                    // Der wartende Aufruf ist bekannt: sicher (gezeigt werden alle Argumente).
+                    let detail = crate::hooks::tool_detail(&call.name, &call.arguments).unwrap_or_default();
+                    it.request = Some(ToolRequest { tool, calls: vec![ToolCall { seq: 0, id: Some(call.id.clone()), detail }], confirmed: true });
                     // Erstes Erscheinen genau dieses Aufrufs (für die Sperre gegen Fehlklicks).
                     let seen = ui.ctx().data_mut(|d| *d.get_temp_mut_or_insert_with(Id::new(("inbox_seen", *id, call.id.clone())), || now));
                     it.since = Some(Duration::from_secs_f64((now - seen).max(0.0)));
                     it.answer = Answer::Chat(call.id.clone());
+                    it.msg = lang.t("Das Modell möchte ein Werkzeug nutzen.", "The model wants to use a tool.").to_string();
                 } else if c.awaiting_answer() {
                     it.msg = lang.t("Das Modell hat Fragen an dich.", "The model has questions for you.").to_string();
                 } else {
@@ -231,7 +344,7 @@ mod tests {
         }
         fn frame(&mut self, items: &[InboxItem], lang: Lang, events: Vec<Event>) -> Vec<Action> {
             self.t += 0.6;
-            let input = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(280.0, 700.0))), time: Some(self.t), events, ..Default::default() };
+            let input = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(280.0, 900.0))), time: Some(self.t), events, ..Default::default() };
             let mut actions = Vec::new();
             let full = self.ctx.run(input, |ctx| {
                 egui::CentralPanel::default().show(ctx, |ui| inbox_card(ui, items, lang, &mut actions));
@@ -242,7 +355,10 @@ mod tests {
         fn texts(&self) -> Vec<String> {
             self.galleys().into_iter().map(|g| g.text().to_string()).collect()
         }
-        fn galleys(&self) -> Vec<std::sync::Arc<egui::Galley>> {
+        fn has(&self, text: &str) -> bool {
+            self.texts().iter().any(|t| t == text)
+        }
+        fn galleys(&self) -> Vec<Arc<egui::Galley>> {
             self.shapes.iter().filter_map(|s| if let egui::Shape::Text(t) = &s.shape { Some(t.galley.clone()) } else { None }).collect()
         }
         fn rect_of(&self, text: &str) -> Option<Rect> {
@@ -275,14 +391,23 @@ mod tests {
         fn focused(&self) -> Option<Id> {
             self.ctx.memory(|m| m.focused())
         }
+        /// Ja/Nein vorhanden?
+        fn answers(&self) -> bool {
+            self.has("Yes") || self.has("No") || self.has("Ja") || self.has("Nein")
+        }
     }
 
+    fn call(seq: u64, detail: &str) -> ToolCall {
+        ToolCall { seq, id: Some(format!("toolu_{seq}")), detail: detail.into() }
+    }
+
+    /// Eine Claude-Frage mit genau einem, auf dem Bildschirm bestätigten Aufruf.
     fn bash(detail: &str) -> InboxItem {
         InboxItem {
             id: 7,
             name: "api-server".into(),
             msg: "Claude needs your permission to use Bash".into(),
-            request: Some(ToolRequest { tool: "Bash".into(), detail: detail.into(), others: Vec::new() }),
+            request: Some(ToolRequest { tool: "Bash".into(), calls: vec![call(3, detail)], confirmed: true }),
             from_model: false,
             answer: Answer::Terminal,
             since: None,
@@ -296,7 +421,7 @@ mod tests {
     /// Reihenfolge Öffnen – Ja – Nein, nur Öffnen in der Akzentfarbe, beide Sprachen.
     #[test]
     fn open_comes_first_in_the_accent_colour_and_yes_no_are_plain() {
-        for (lang, open, yes, no) in [(Lang::En, "Open", "Yes", "No"), (Lang::De, "Öffnen", "Ja", "Nein")] {
+        for (lang, open, yes, no, sure) in [(Lang::En, "Open", "Yes", "No", "matches the terminal"), (Lang::De, "Öffnen", "Ja", "Nein", "stimmt mit dem Terminal überein")] {
             let items = [bash("cargo test --release")];
             let mut h = H::new();
             h.frame(&items, lang, vec![]);
@@ -308,7 +433,7 @@ mod tests {
             assert_eq!(h.fill_of(yes), Some(plain), "Ja ohne eigene Farbe");
             assert_eq!(h.fill_of(no), Some(plain), "Nein ohne eigene Farbe");
             assert_ne!(open_fill(), plain);
-            assert!(!h.texts().iter().any(|t| t.contains("Standardauswahl") || t.contains("default choice")), "Tooltip erst beim Zeigen");
+            assert!(h.has(sure), "{:?}", h.texts());
         }
     }
 
@@ -323,13 +448,13 @@ mod tests {
         h.frame(&items, Lang::En, vec![key(Key::Tab)]);
         h.frame(&items, Lang::En, vec![]);
         let first = h.focused().expect("Tab fokussiert einen Knopf");
-        // Enter auf dem fokussierten Knopf: *Öffnen*, nicht *Ja*.
         let acts = h.frame(&items, Lang::En, vec![key(Key::Enter)]);
         assert!(matches!(acts.as_slice(), [Action::Activate(7)]), "erster Tab-Halt ist Öffnen ({first:?})");
     }
 
+    /// Ja/Nein tragen die Nummer des gezeigten Aufrufs (der Hub prüft sie beim Klick).
     #[test]
-    fn buttons_send_activate_and_approve_for_terminals() {
+    fn buttons_send_activate_and_approve_for_the_shown_call() {
         let items = [bash("ls")];
         for (label, want) in [("Open", "activate"), ("Yes", "yes"), ("No", "no")] {
             let mut h = H::new();
@@ -337,51 +462,99 @@ mod tests {
             let acts = h.click(&items, Lang::En, label);
             let ok = match want {
                 "activate" => matches!(acts.as_slice(), [Action::Activate(7)]),
-                "yes" => matches!(acts.as_slice(), [Action::Approve(7, true)]),
-                _ => matches!(acts.as_slice(), [Action::Approve(7, false)]),
+                "yes" => matches!(acts.as_slice(), [Action::Approve(7, true, 3)]),
+                _ => matches!(acts.as_slice(), [Action::Approve(7, false, 3)]),
             };
             assert!(ok, "{label}: {}", acts.len());
         }
     }
 
-    /// Werkzeug und Befehl stehen in der Karte, als fremder Text gekennzeichnet; ein langer Befehl ist auf drei Zeilen
-    /// gekürzt und steht vollständig im Tooltip.
+    /// (a) Mehrere Kandidaten: alle gleichrangig, Hinweis auf die Unsicherheit, nur *Öffnen*.
     #[test]
-    fn the_request_is_shown_marked_truncated_and_complete_in_the_tooltip() {
-        let long = format!("{} && rm -rf C:\\important", "echo step && ".repeat(60));
+    fn several_candidates_are_shown_as_equals_with_open_only() {
+        let r = ToolRequest { tool: "Bash".into(), calls: vec![call(1, "npm run dev"), call(2, "rm -rf build")], confirmed: false };
+        let items = [InboxItem { request: Some(r), ..bash("") }];
+        for (lang, hint) in [(Lang::En, "One of 2 calls"), (Lang::De, "Einer von 2 Aufrufen")] {
+            let mut h = H::new();
+            h.frame(&items, lang, vec![]);
+            assert!(h.has("npm run dev") && h.has("rm -rf build"), "{:?}", h.texts());
+            assert!(h.texts().iter().any(|t| t.starts_with(hint)), "{:?}", h.texts());
+            let (a, b) = (h.rect_of("npm run dev").unwrap(), h.rect_of("rm -rf build").unwrap());
+            let size = |t: &str| h.galleys().into_iter().find(|g| g.text() == t).unwrap().size();
+            assert!((size("npm run dev").y - size("rm -rf build").y).abs() < 0.5 && a.min.y < b.min.y, "gleichrangig, älterer zuerst");
+            assert!(!h.answers(), "nur Öffnen");
+        }
+    }
+
+    /// Ein Kandidat, den der Bildschirm (noch) nicht bestätigt: „vermutlich“, nur *Öffnen*.
+    #[test]
+    fn an_unconfirmed_candidate_is_marked_probable_with_open_only() {
+        let items = [InboxItem { request: Some(ToolRequest { confirmed: false, ..bash("ls").request.unwrap() }), ..bash("") }];
+        for (lang, note) in [(Lang::En, "probably – not seen in the terminal yet"), (Lang::De, "vermutlich – im Terminal noch nicht gesehen")] {
+            let mut h = H::new();
+            h.frame(&items, lang, vec![]);
+            assert!(h.has("ls") && h.has(note), "{:?}", h.texts());
+            assert!(!h.answers());
+        }
+    }
+
+    /// Ohne Anfrage oder mit leerer Kurzfassung: die Meldung, nur *Öffnen*.
+    #[test]
+    fn without_a_usable_request_the_message_is_shown_with_open_only() {
+        for request in [None, Some(ToolRequest { tool: "Bash".into(), calls: vec![call(1, "")], confirmed: true })] {
+            let items = [InboxItem { request, ..bash("") }];
+            let mut h = H::new();
+            h.frame(&items, Lang::En, vec![]);
+            assert!(h.has("Claude needs your permission to use Bash"), "{:?}", h.texts());
+            assert!(h.has("Open") && !h.answers());
+        }
+    }
+
+    /// Lange Anfrage: Anfang und Ende sichtbar, verborgene Zeichen gezählt, ganz im Tooltip – und nur *Öffnen*.
+    #[test]
+    fn a_long_request_shows_head_and_tail_and_offers_open_only() {
+        let long = format!("{}&& rm -rf C:\\important", "echo step && ".repeat(60));
         let items = [bash(&long)];
-        for (lang, from) in [(Lang::En, "from the session"), (Lang::De, "aus der Sitzung")] {
+        for (lang, hidden) in [(Lang::En, "characters hidden – check the terminal"), (Lang::De, "Zeichen verborgen – im Terminal prüfen")] {
             let mut h = H::new();
             h.frame(&items, lang, vec![]);
             h.frame(&items, lang, vec![]);
             let texts = h.texts();
-            assert!(texts.iter().any(|t| t == "Bash"), "Werkzeug: {texts:?}");
-            assert!(texts.iter().any(|t| t == from), "Herkunft: {texts:?}");
-            assert!(!texts.iter().any(|t| t.starts_with("Claude needs")), "die Meldung tritt hinter die Anfrage zurück");
-            let g = h.galleys().into_iter().find(|g| g.text() == long).expect("Anfrage gezeichnet");
-            assert!(g.elided && g.rows.len() <= REQUEST_ROWS, "gekürzt: {} Zeilen", g.rows.len());
-            assert!(g.rows.len() >= 2, "mehr als eine Zeile");
+            assert!(texts.iter().any(|t| t.starts_with("echo step")), "Anfang: {texts:?}");
+            assert!(texts.iter().any(|t| t.starts_with('…') && t.ends_with("rm -rf C:\\important")), "Ende: {texts:?}");
+            let note = texts.iter().find(|t| t.ends_with(hidden)).expect("Hinweis");
+            let n: usize = note.split(' ').next().unwrap().parse().unwrap();
+            assert!(n > 400 && n < long.len(), "{n}");
+            assert!(!h.answers(), "gekürzt: nur Öffnen");
             // Tooltip mit dem ganzen Text
-            let p = h.rect_of(&long).unwrap().center();
+            let p = h.rect_of(texts.iter().find(|t| t.starts_with('…')).unwrap()).unwrap().center();
             h.frame(&items, lang, vec![Event::PointerMoved(p)]);
             for _ in 0..3 {
                 h.frame(&items, lang, vec![]);
             }
-            let full: Vec<_> = h.galleys().into_iter().filter(|g| g.text() == long).collect();
-            assert!(full.iter().any(|g| !g.elided), "Tooltip zeigt alles: {}", full.len());
+            assert!(h.galleys().iter().any(|g| g.text() == long && !g.elided && g.rows.len() > REQUEST_ROWS), "Tooltip zeigt alles");
         }
     }
 
-    /// Markup bleibt Text, und ohne zuzuordnende Anfrage zeigt die Karte die Meldung.
+    /// Leerraum-Polster kann den gefährlichen Teil nicht verstecken; Zeilenumbrüche sind sichtbar.
     #[test]
-    fn markup_is_plain_text_and_the_message_is_the_fallback() {
+    fn padding_is_collapsed_and_newlines_are_visible() {
+        let padded = format!("echo harmless{}&& rm -rf /", " ".repeat(800));
+        let mut h = H::new();
+        h.frame(&[bash(&padded)], Lang::En, vec![]);
+        assert!(h.has("echo harmless && rm -rf /"), "{:?}", h.texts());
+        assert!(h.answers(), "passt ganz: Ja/Nein");
+        h.frame(&[bash("echo a\nrm -rf /")], Lang::En, vec![]);
+        assert!(h.has("echo a ⏎ rm -rf /"), "{:?}", h.texts());
+    }
+
+    /// Markup bleibt Text.
+    #[test]
+    fn markup_is_plain_text() {
         let items = [bash("<b>**rm**</b> [x](http://evil)")];
         let mut h = H::new();
         h.frame(&items, Lang::En, vec![]);
-        assert!(h.texts().iter().any(|t| t == "<b>**rm**</b> [x](http://evil)"), "{:?}", h.texts());
-        let items = [InboxItem { request: None, ..bash("") }];
-        h.frame(&items, Lang::En, vec![]);
-        assert!(h.texts().iter().any(|t| t == "Claude needs your permission to use Bash"), "{:?}", h.texts());
+        assert!(h.has("<b>**rm**</b> [x](http://evil)"), "{:?}", h.texts());
     }
 
     /// Kurz nach dem Erscheinen sind Ja/Nein gesperrt (Fehlklick), Öffnen nicht.
@@ -394,19 +567,20 @@ mod tests {
         assert!(h.click(&items, Lang::En, "No").is_empty());
         assert!(matches!(h.click(&items, Lang::En, "Open").as_slice(), [Action::Activate(7)]));
         let items = [InboxItem { since: Some(SETTLE), ..bash("ls") }];
-        assert!(matches!(h.click(&items, Lang::En, "Yes").as_slice(), [Action::Approve(7, true)]));
+        assert!(matches!(h.click(&items, Lang::En, "Yes").as_slice(), [Action::Approve(7, true, 3)]));
     }
 
-    /// Chat-Freigabe in der Karte: Werkzeug mit Ziel, Kurzfassung der Argumente, „vom Modell“; Ja/Nein entscheiden genau
-    /// diesen Aufruf. Fragen des Modells haben nur *Öffnen*.
+    /// Chat-Freigabe in der Karte: Werkzeug mit Ziel, alle Argumente als JSON, „vom Modell“; Ja/Nein entscheiden genau
+    /// diesen Aufruf. Zu lange Argumente und Fragen des Modells: nur *Öffnen*.
     #[test]
     fn chat_approvals_show_tool_and_arguments_and_decide_that_call() {
         let args = serde_json::json!({"session": 4, "text": "dir /s"});
+        let detail = crate::hooks::tool_detail("send_text", &args).unwrap();
         let chat = InboxItem {
             id: 9,
             name: "Chat".into(),
-            msg: String::new(),
-            request: Some(ToolRequest { tool: "send_text → session 4 \"build\"".into(), detail: crate::hooks::tool_detail(&args).unwrap(), others: Vec::new() }),
+            msg: "The model wants to use a tool.".into(),
+            request: Some(ToolRequest { tool: "send_text → session 4 \"build\"".into(), calls: vec![ToolCall { seq: 0, id: Some("call-1".into()), detail: detail.clone() }], confirmed: true }),
             from_model: true,
             answer: Answer::Chat("call-1".into()),
             since: None,
@@ -415,30 +589,21 @@ mod tests {
             let items = [chat.clone()];
             let mut h = H::new();
             h.frame(&items, lang, vec![]);
-            let texts = h.texts();
-            for want in ["send_text → session 4 \"build\"", "dir /s", from] {
-                assert!(texts.iter().any(|t| t == want), "{want}: {texts:?}");
+            for want in ["send_text → session 4 \"build\"", detail.as_str(), from] {
+                assert!(h.has(want), "{want}: {:?}", h.texts());
             }
             let acts = h.click(&items, lang, yes);
             assert!(matches!(acts.as_slice(), [Action::ChatDecide(9, c, chatmod::Decision::Allow)] if c == "call-1"));
             let acts = h.click(&items, lang, no);
             assert!(matches!(acts.as_slice(), [Action::ChatDecide(9, c, chatmod::Decision::Deny)] if c == "call-1"));
         }
+        let long = crate::hooks::tool_detail("send_text", &serde_json::json!({"session": 4, "text": "x ".repeat(400)})).unwrap();
+        let big = InboxItem { request: Some(ToolRequest { calls: vec![ToolCall { seq: 0, id: Some("call-1".into()), detail: long }], ..chat.request.clone().unwrap() }), ..chat.clone() };
+        let mut h = H::new();
+        h.frame(&[big], Lang::En, vec![]);
+        assert!(!h.answers(), "gekürzt: nur Öffnen");
         let ask = InboxItem { request: None, msg: "The model has questions for you.".into(), answer: Answer::Open, ..chat };
-        let mut h = H::new();
-        h.frame(&[ask.clone()], Lang::En, vec![]);
-        let texts = h.texts();
-        assert!(texts.iter().any(|t| t == "Open") && !texts.iter().any(|t| t == "Yes" || t == "No"), "{texts:?}");
-    }
-
-    /// Weitere offene Aufrufe desselben Werkzeugs werden genannt (die Frage kann einem davon gelten).
-    #[test]
-    fn other_open_calls_of_the_tool_are_mentioned() {
-        let items = [InboxItem { request: Some(ToolRequest { tool: "Bash".into(), detail: "rm -rf x".into(), others: vec!["npm test".into()] }), ..bash("") }];
-        let mut h = H::new();
-        h.frame(&items, Lang::En, vec![]);
-        assert!(h.texts().iter().any(|t| t.starts_with("+1 more open calls of this tool")), "{:?}", h.texts());
-        h.frame(&items, Lang::De, vec![]);
-        assert!(h.texts().iter().any(|t| t.starts_with("+1 weitere offene Aufrufe")), "{:?}", h.texts());
+        h.frame(&[ask], Lang::En, vec![]);
+        assert!(h.has("Open") && h.has("The model has questions for you.") && !h.answers(), "{:?}", h.texts());
     }
 }

@@ -241,7 +241,8 @@ impl App {
                 e.launched_claude = true;
                 e.status = st;
                 e.status_msg = msg.to_string();
-                e.track.request = (st == ClaudeStatus::Permission).then(|| crate::hooks::ToolRequest { tool: "Bash".into(), detail: "cargo test --release".into(), others: Vec::new() });
+                let call = crate::hooks::ToolCall { seq: 1, id: None, detail: "cargo test --release".into() };
+                e.track.request = (st == ClaudeStatus::Permission).then(|| crate::hooks::ToolRequest { tool: "Bash".into(), calls: vec![call], confirmed: true });
             }
         }
     }

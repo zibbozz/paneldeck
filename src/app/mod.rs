@@ -392,7 +392,8 @@ enum Action {
     OpenQueue(u64),
     ToggleDiff,
     QueueAdd(u64, String),
-    Approve(u64, bool),
+    /// Freigabe-Frage von Claude beantworten: Sitzung, Ja/Nein, laufende Nummer des gezeigten Aufrufs (#390).
+    Approve(u64, bool, u64),
     OpenGlobalSearch,
     GlobalJump(u64, i32, String),
     JumpCmd(i32),
@@ -3780,10 +3781,18 @@ impl App {
                     }
                 }
             }
-            Action::Approve(id, yes) => {
+            Action::Approve(id, yes, seq) => {
                 if let Some(e) = self.entries.get_mut(&id) {
                     let settled = e.perm_since.is_none_or(|t| t.elapsed() >= std::time::Duration::from_millis(500));
-                    if e.status == ClaudeStatus::Permission && settled && !e.exited() {
+                    // Nur, wenn die Frage noch genau den Aufruf verlangt, den die Karte zeigte, und der Dialog ihn gerade
+                    // zeigt (#390) – sonst nichts senden; die Karte zeigt bis zur nächsten Prüfung nur *Öffnen*.
+                    let screen = e.live.as_ref().map(|s| s.screen_text()).unwrap_or_default();
+                    if !e.answerable(seq, &screen) {
+                        if let Some(r) = e.track.request.as_mut() {
+                            r.confirmed = false;
+                        }
+                    } else if e.status == ClaudeStatus::Permission && settled && !e.exited() {
+                        e.track.tools.answered();
                         if let Some(s) = &e.live {
                             s.write(if yes { b"\r" } else { b"\x1b" });
                         }
@@ -3792,8 +3801,7 @@ impl App {
                         } else {
                             // Abgelehnt: Claude bricht die Runde ab und wartet (dafür gibt es keinen Stop-Hook). Der
                             // abgelehnte Aufruf meldet kein PostToolUse mehr (#390).
-                            let tool = e.track.perm_tool.clone();
-                            e.track.tools.forget_newest(&tool);
+                            e.track.tools.forget(seq);
                             e.apply_fallback(ClaudeStatus::Idle);
                         }
                         e.clear_status_msg();
