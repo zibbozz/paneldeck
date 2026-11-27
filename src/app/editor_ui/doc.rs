@@ -166,6 +166,8 @@ enum DiskJob {
     Save { rx: std::sync::mpsc::Receiver<Result<core::WriteResult, core::SaveError>>, path: PathBuf, state: u64 },
     /// `force`: „Von der Platte laden“ (immer übernehmen); sonst Meldung der Überwachung (wie [`DocEntry::disk_changed`]).
     Reload { rx: std::sync::mpsc::Receiver<std::io::Result<(Vec<u8>, std::fs::Metadata)>>, force: bool },
+    /// „Meine behalten“: Stand der Datei lesen und als bekannt übernehmen (lesen und hashen, nie im UI-Thread).
+    KeepMine { rx: std::sync::mpsc::Receiver<std::io::Result<core::DiskSnapshot>> },
 }
 
 /// Ergebnis eines fertigen [`DiskJob`] für die Oberfläche.
@@ -252,6 +254,42 @@ mod wsl_io_tests {
         assert_eq!(e.text().as_deref(), Some("hot text\n"));
         assert!(e.dirty() && !e.is_loading());
         assert!(e.hot_key().is_some(), "Eintrag bleibt verknüpft (wird nach dem Speichern gelöscht)");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// #392: „Meine behalten“ liest und hasht eine WSL-Datei im Hilfsthread (nie im UI-Thread); die Hinweisleiste
+    /// verschwindet sofort, der neue Stand wird erst mit dem Ergebnis übernommen.
+    #[test]
+    fn keep_mine_of_a_wsl_file_takes_the_snapshot_in_the_background() {
+        let wsl = PathBuf::from(r"\\wsl.localhost\pd-test-no-such-distro\home\u\a.txt");
+        let opts = core::OpenOptions { use_editorconfig: false, ..Default::default() };
+        let (d, _) = Document::from_bytes(b"mine\n", Some(&wsl), &opts);
+        let mut e = DocEntry::pending(Some(wsl), 0, None);
+        e.doc = Some(d);
+        e.disk_conflict = true;
+        e.keep_mine();
+        assert!(e.disk_busy() && !e.disk_conflict, "im Hilfsthread, Hinweisleiste sofort weg");
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        let r = loop {
+            if let Some(r) = e.poll_disk_job(Lang::En) {
+                break r;
+            }
+            assert!(std::time::Instant::now() < until, "Hilfsthread endet nicht");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        };
+        assert_eq!(r, DiskJobDone::Unchanged);
+        assert!(!e.disk_busy());
+        // Lokale Dateien bleiben im Aufruf (kein Hilfsthread).
+        let dir = std::env::temp_dir().join(format!("pd-keep-mine-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("a.txt");
+        std::fs::write(&p, "x\n").unwrap();
+        let (d, _) = Document::from_bytes(b"mine\n", Some(&p), &opts);
+        let mut l = DocEntry::pending(Some(p), 0, None);
+        l.doc = Some(d);
+        l.keep_mine();
+        assert!(!l.disk_busy() && l.doc.as_ref().and_then(|d| d.disk_snapshot()).is_some());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -713,6 +751,19 @@ impl DocEntry {
                     Some(DiskJobDone::Saved)
                 }
             },
+            DiskJob::KeepMine { rx } => match rx.try_recv() {
+                Err(TryRecvError::Empty) => {
+                    self.disk_job = Some(DiskJob::KeepMine { rx });
+                    None
+                }
+                Err(TryRecvError::Disconnected) | Ok(Err(_)) => Some(DiskJobDone::Unchanged),
+                Ok(Ok(snap)) => {
+                    if let Some(d) = self.doc.as_mut() {
+                        d.acknowledge_disk(snap);
+                    }
+                    Some(DiskJobDone::Unchanged)
+                }
+            },
             DiskJob::Reload { rx, force } => match rx.try_recv() {
                 Err(TryRecvError::Empty) => {
                     self.disk_job = Some(DiskJob::Reload { rx, force });
@@ -800,6 +851,20 @@ impl DocEntry {
 
     /// „Meine behalten“: nicht noch einmal für diesen Stand der Datei fragen.
     pub fn keep_mine(&mut self) {
+        if self.path.as_deref().is_some_and(is_wsl_path) {
+            // WSL (#392): lesen und hashen im Hilfsthread; das Ergebnis übernimmt `poll_disk_job`.
+            if self.disk_job.is_none()
+                && let Some(p) = self.path.clone()
+            {
+                let (tx, rx) = std::sync::mpsc::channel();
+                std::thread::spawn(move || {
+                    let _ = tx.send(core::DiskSnapshot::of_file(&p));
+                });
+                self.disk_job = Some(DiskJob::KeepMine { rx });
+            }
+            self.disk_conflict = false;
+            return;
+        }
         if let Some(d) = self.doc.as_mut() {
             let _ = d.resolve_conflict(&mut self.scratch, core::ConflictChoice::KeepMine);
         }
