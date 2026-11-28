@@ -13,3 +13,4 @@
 2.7.0|Paneldeck 2.7.0 – Agent tools, context display and prompt switches for local chats
 3.0.0|Paneldeck 3.0.0 – Editor tab and interactive tutorial
 3.1.0|Paneldeck 3.1.0 – Syntax colours, and background commands, questions, images, plan mode and compaction for local chats
+3.2.0|Paneldeck 3.2.0 – Time tab, editor menu bar, formatting and diff, session environment variables, project access
