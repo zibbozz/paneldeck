@@ -337,7 +337,7 @@ fn whats_new_lists_the_steps_since_a_version() {
     assert!(editor.contains(&"basics.editor") && editor.contains(&"editor.agents") && editor.contains(&"editor.search"), "{editor:?}");
     // Ab 3.2.0 kommen Schritte dazu (Menüleiste und Formatieren #381, Aktionen beim Speichern #383); die übrigen der
     // Tour sind von 3.0.0.
-    assert!(steps::tour("editor").is_some_and(|t| t.steps.iter().all(|s| s.since == "3.0.0" || s.since == "3.2.0")));
+    assert!(steps::tour("editor").is_some_and(|t| t.steps.iter().all(|s| ["3.0.0", "3.2.0", "3.3.0"].contains(&s.since))));
     let fmt = ids("3.1.0", "3.2.0");
     assert!(fmt.contains(&"editor.format") && !fmt.contains(&"editor.status"), "{fmt:?}");
     // Waagerechte Bildlaufleiste (#389) kam mit 3.2.0, Ziel ist das Textfeld.
@@ -348,6 +348,9 @@ fn whats_new_lists_the_steps_since_a_version() {
     // Vergleich und Änderungsmarken (#385) kamen mit 3.2.0.
     let diff = ids("3.1.0", "3.2.0");
     assert!(diff.contains(&"editor.diff") && diff.contains(&"editor.markers"), "{diff:?}");
+    // Tippen im Vergleich (#391) kam mit 3.3.0.
+    let typing = ids("3.2.0", "3.3.0");
+    assert!(typing.contains(&"editor.diff_type") && !typing.contains(&"editor.diff"), "{typing:?}");
     // Pfadarten des Ziels (#392) kamen mit 3.2.0, im Kapitel Werkzeuge hinter dem Dateibaum.
     assert!(fmt.contains(&"tools.paths") && !fmt.contains(&"tools.files"), "{fmt:?}");
     let tools = steps::tour("tools").map(|t| t.steps.iter().map(|s| s.id).collect::<Vec<_>>()).unwrap_or_default();

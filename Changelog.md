@@ -9,6 +9,10 @@ Deviation: instead of `[Unreleased]`, changes that are not yet released are list
 
 ## [3.3.0] - WIP
 
+### Added
+
+- Editor: **type directly in the comparison tab** – click into an editable side (a document, not the saved file, a git state or the clipboard) and type, delete, paste, cut and copy a selection, press Enter or Tab, move with the arrow keys, Home/End and Page Up/Down (Shift selects), Ctrl+A selects the side. The text appears at once; the differences are recomputed about 300 ms after the last key. The cursor skips filler lines (a click on one puts it at the end of the line above), typing in a collapsed region expands it. Typing shares the undo history of the document with the block arrows and the normal tab (Ctrl+Z/Y on the focused side); Alt+←/→, Ctrl+S and double-click to open the line in the normal tab work as before. Without a cursor the arrow keys scroll as before; typing into a read-only side shows a hint. One cursor only – multiple cursors in the comparison come later (#391).
+
 ## [3.2.0] - 2026-11-28
 
 ### Added

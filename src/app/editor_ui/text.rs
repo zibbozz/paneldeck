@@ -913,6 +913,12 @@ fn move_cursors(doc: &Document, sels: &mut Selections, mv: Move, extend: bool, g
     });
 }
 
+/// Cursor ohne Textfeld bewegen (Vergleichs-Reiter, #391): senkrecht in Textzeilen (ohne Umbruch).
+pub(super) fn move_in_doc(doc: &Document, sels: &mut Selections, mv: Move, extend: bool, tab: usize) {
+    let g = Geo { text: Rect::NOTHING, gutter: Rect::NOTHING, scrollbar: Rect::NOTHING, row_h: 1.0, cw: 1.0, wrap_cols: None, tab: tab.max(1) };
+    move_cursors(doc, sels, mv, extend, &g);
+}
+
 /// `n` Bildschirmzeilen hoch/runter ab `pos`, Zielspalte `goal` (visuell innerhalb der Bildschirmzeile).
 fn vertical(doc: &Document, pos: usize, goal: Option<usize>, n: usize, down: bool, g: &Geo) -> (usize, usize) {
     let rope = doc.rope();

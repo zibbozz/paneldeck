@@ -9,6 +9,10 @@ Abweichung: Statt `[Unreleased]` stehen noch nicht veröffentlichte Änderungen 
 
 ## [3.3.0] - WIP
 
+### Added
+
+- Editor: **direkt im Vergleichs-Reiter tippen** – in eine bearbeitbare Seite klicken (ein Dokument, nicht die gespeicherte Datei, ein git-Stand oder die Zwischenablage) und tippen, löschen, einfügen, eine Auswahl ausschneiden und kopieren, Eingabe oder Tab drücken, mit den Pfeiltasten, Pos1/Ende und Bild auf/ab bewegen (mit Umschalt markieren), Strg+A markiert die Seite. Der Text erscheint sofort, die Unterschiede werden etwa 300 ms nach der letzten Taste neu berechnet. Der Cursor überspringt Füllzeilen (ein Klick darauf setzt ihn ans Ende der Zeile darüber), Tippen in einem eingeklappten Bereich klappt ihn auf. Tippen teilt sich das Rückgängig des Dokuments mit den Blockpfeilen und dem normalen Reiter (Strg+Z/Y auf der fokussierten Seite); Alt+←/→, Strg+S und Doppelklick zum Öffnen der Zeile im normalen Reiter bleiben wie bisher. Ohne Cursor rollen die Pfeiltasten wie bisher; Tippen in einer schreibgeschützten Seite zeigt einen Hinweis. Nur ein Cursor – mehrere Cursor im Vergleich kommen später (#391).
+
 ## [3.2.0] - 2026-11-28
 
 ### Added

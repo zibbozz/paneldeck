@@ -716,6 +716,19 @@ const EDITOR: &[Step] = &[
         need: None,
     },
     Step {
+        id: "editor.diff_type",
+        since: "3.3.0",
+        spot: Some(Spot::EditorTabBar),
+        title: tx("Im Vergleich tippen", "Typing in the comparison"),
+        body: tx(
+            "Im Vergleichs-Reiter lässt sich eine bearbeitbare Seite direkt ändern: hineinklicken und tippen. Füllzeilen überspringt der Cursor, Tippen in einem eingeklappten Bereich klappt ihn auf. Der Text erscheint sofort, die Unterschiede werden nach einer kurzen Tipp-Pause neu berechnet. Tippen und Blockpfeile teilen sich das Rückgängig mit dem normalen Reiter; ein Doppelklick öffnet die Zeile dort.",
+            "In a comparison tab an editable side can be changed directly: click into it and type. The cursor skips filler lines, and typing in a collapsed region expands it. The text appears at once; the differences are recomputed after a short pause in typing. Typing and block arrows share the undo history of the normal tab; a double-click opens the line there.",
+        ),
+        prep: EDITOR_FILE,
+        done: None,
+        need: None,
+    },
+    Step {
         id: "editor.markers",
         since: "3.2.0",
         spot: Some(Spot::EditorText),
@@ -1468,7 +1481,7 @@ pub(super) static TOURS: &[Tour] = &[
 
 /// Version, mit der das Tutorial erscheint (Schritte dürfen bis zu ihr reichen, auch solange `Cargo.toml` noch davor steht).
 #[cfg_attr(not(test), allow(dead_code))]
-pub(super) const TUTORIAL_VERSION: &str = "3.2.0";
+pub(super) const TUTORIAL_VERSION: &str = "3.3.0";
 
 /// Kennung der Tour „Was ist neu“ (ihre Schritte stellt `whats_new_steps` zusammen).
 pub(super) const WHATS_NEW: &str = "whatsnew";
