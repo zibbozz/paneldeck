@@ -88,7 +88,7 @@ rfd = { version = "0.17", default-features = false }
 tauri-winrt-notification = "0.8"
 tray-icon = { version = "0.21", default-features = false }
 raw-window-handle = "0.6"
-windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_System_Diagnostics_ToolHelp", "Win32_NetworkManagement_IpHelper", "Win32_Graphics_Dwm", "Win32_Graphics_Gdi", "Win32_System_Console", "Win32_System_Environment", "Win32_System_Registry", "Win32_Security", "Win32_Security_Cryptography", "Win32_Networking_WinHttp", "Win32_System_Threading", "Win32_System_JobObjects", "Win32_UI_Shell", "Win32_System_LibraryLoader", "Win32_System_Com", "Win32_Storage_FileSystem"] }
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_System_Diagnostics_ToolHelp", "Win32_NetworkManagement_IpHelper", "Win32_Graphics_Dwm", "Win32_Graphics_Gdi", "Win32_System_Console", "Win32_System_Environment", "Win32_System_Registry", "Win32_Security", "Win32_Security_Cryptography", "Win32_Networking_WinHttp", "Win32_System_Threading", "Win32_System_JobObjects", "Win32_UI_Shell", "Win32_System_LibraryLoader", "Win32_System_Com", "Win32_Storage_FileSystem", "Win32_System_ProcessStatus"] }
 rfd = { version = "0.17", default-features = false }
 # Klänge des Reiters „Zeit“ (#164, `platform::sound`): Wiedergabe über WASAPI (cpal), WAV über hound, MP3 über symphonia
 # (reines Rust). Nur unter Windows – Linux/macOS spielen über die Programme des Systems (kein ALSA-Bauzwang).

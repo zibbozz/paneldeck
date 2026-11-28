@@ -36,13 +36,15 @@ impl Trust {
         std::fs::rename(&tmp, data.join(FILE))
     }
 
-    /// Ist `path` (Datei oder Ordner) in einem vertrauenswürdigen Ordner?
+    /// Ist der Ordner `path` vertrauenswürdig? Lokal zählen auch Unterordner eines vertrauten Ordners; UNC- und
+    /// WSL-Pfade (`\\server\…`, `\\wsl.localhost\…`) nur als genau dieser Ordner (Entscheidung zu #367).
     pub fn trusted(&self, path: &Path) -> bool {
         let p = key(path);
         let sep = if cfg!(windows) { '\\' } else { '/' };
+        let unc = p.starts_with("\\\\") || p.starts_with("//");
         self.folders.iter().any(|f| {
             let f = key(f);
-            !f.is_empty() && (p == f || p.starts_with(&format!("{f}{sep}")))
+            !f.is_empty() && (p == f || (!unc && p.starts_with(&format!("{f}{sep}"))))
         })
     }
 
@@ -99,6 +101,13 @@ mod tests {
         let mut b = back;
         assert!(b.remove(&root));
         assert!(!b.trusted(&inner));
+        // UNC/WSL: nur genau der Ordner
+        let mut u = Trust::default();
+        if cfg!(windows) {
+            assert!(u.add(Path::new(r"\\wsl.localhost\Ubuntu\home\u\proj")));
+            assert!(u.trusted(Path::new(r"\\wsl.localhost\Ubuntu\home\u\proj")));
+            assert!(!u.trusted(Path::new(r"\\wsl.localhost\Ubuntu\home\u\proj\sub")), "kein Unterordner");
+        }
         std::fs::write(dir.join(FILE), b"{kaputt").unwrap();
         assert!(Trust::load(&dir).folders().is_empty());
         let _ = std::fs::remove_dir_all(&dir);

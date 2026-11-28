@@ -567,6 +567,46 @@ pub fn real_linux_path(distro: &str, path: &str) -> Option<String> {
     (p.starts_with('/') && validate_linux_path(&p).is_ok()).then_some(p)
 }
 
+/// Taugt `name` als Programmname eines Sprachservers (nur Buchstaben, Ziffern, `._+-`, nicht mit `-` am Anfang)?
+pub fn valid_program_name(name: &str) -> bool {
+    !name.is_empty() && name.len() <= 100 && !name.starts_with('-') && name.chars().all(|c| c.is_ascii_alphanumeric() || "._+-".contains(c))
+}
+
+/// `wsl.exe`-Argumente: Programm im Linux-PATH der Distribution suchen (#367). Login-Shell (`sh -l`), damit auch
+/// `~/.cargo/bin` oder `~/.local/bin` aus der `.profile` zählen; der Name ist ein eigenes Argument (`$1`), nie Teil der
+/// Shell-Zeichenkette.
+pub fn which_args(distro: &str, name: &str) -> Vec<String> {
+    ["-d", distro, "--exec", "sh", "-lc", "command -v -- \"$1\"", "sh", name].iter().map(|s| s.to_string()).collect()
+}
+
+/// Absoluter Linux-Pfad von `name` im PATH der Distribution (blockiert bis [`FAST_TIMEOUT`] – nur im Hintergrund;
+/// in Tests nie). `None` = nicht gefunden.
+pub fn find_program(distro: &str, name: &str) -> Option<String> {
+    if cfg!(test) || !cfg!(windows) || !valid_distro(distro) || !valid_program_name(name) {
+        return None;
+    }
+    let out = run(&which_args(distro, name), FAST_TIMEOUT).filter(|o| o.code == Some(0) && !o.truncated)?;
+    let p = String::from_utf8_lossy(&out.stdout).lines().next().unwrap_or("").trim().to_string();
+    (p.starts_with('/') && validate_linux_path(&p).is_ok()).then_some(p)
+}
+
+/// `wsl.exe`-Argumente: Sprachserver in der Distribution starten (#367) – `--cd` in die Projektwurzel, `--exec` ohne
+/// Shell (Programm und Argumente einzeln, nichts wird von einer Shell gelesen). `None` bei ungültiger Distribution,
+/// Wurzel oder Programm.
+pub fn server_args(distro: &str, root: &str, program: &str, args: &[&str]) -> Option<Vec<String>> {
+    if !valid_distro(distro) || validate_linux_path(root).is_err() || !root.starts_with('/') || validate_linux_path(program).is_err() || !program.starts_with('/') {
+        return None;
+    }
+    let mut v: Vec<String> = ["-d", distro, "--cd", root, "--exec", program].iter().map(|s| s.to_string()).collect();
+    v.extend(args.iter().map(|a| a.to_string()));
+    Some(v)
+}
+
+/// Pfad von `wsl.exe` (System32).
+pub fn exe_path() -> std::path::PathBuf {
+    std::env::var_os("SystemRoot").map(|r| std::path::PathBuf::from(r).join("System32").join("wsl.exe")).unwrap_or_else(|| std::path::PathBuf::from(r"C:\Windows\System32\wsl.exe"))
+}
+
 /// `wsl.exe`-Argumente: `/etc/wsl.conf` lesen (ohne Shell, feste Argumente).
 pub fn mount_args(distro: &str) -> Vec<String> {
     ["-d", distro, "-e", "cat", "/etc/wsl.conf"].iter().map(|s| s.to_string()).collect()
