@@ -281,6 +281,8 @@ pub(super) struct Nav {
     pub last_focus: Option<Id>,
     /// Offene Rückfrage „Zurücksetzen?“: Einträge (Schlüssel), die zurückgesetzt werden sollen.
     pub ask: Option<Vec<&'static str>>,
+    /// Geänderte Einträge, solange sich die Einstellungen nicht ändern (nicht in jedem Bild neu vergleichen).
+    pub mod_cache: super::settings_items::ModCache,
 }
 
 impl Default for Nav {
@@ -299,6 +301,7 @@ impl Default for Nav {
             geo: None,
             last_focus: None,
             ask: None,
+            mod_cache: None,
         }
     }
 }

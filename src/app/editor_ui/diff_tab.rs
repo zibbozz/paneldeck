@@ -36,6 +36,15 @@ use std::time::{Duration, Instant};
 
 /// So lange nach der letzten Änderung (Tipp-Pause, #391) wird neu verglichen.
 pub(super) const LIVE_DELAY: Duration = Duration::from_millis(300);
+/// Ab dieser Größe einer Seite kopiert der vorläufige Stand ([`DiffTab::live_update`]) ihren Text höchstens alle
+/// [`LIVE_BIG_EVERY`] statt bei jedem Tastendruck.
+const LIVE_BIG_BYTES: usize = 1 << 20;
+const LIVE_BIG_EVERY: Duration = Duration::from_millis(250);
+
+/// Vorläufigen Stand jetzt bilden? Kleine Seiten immer, große höchstens alle [`LIVE_BIG_EVERY`].
+fn live_due(bytes: usize, last: Option<Instant>, now: Instant) -> bool {
+    bytes <= LIVE_BIG_BYTES || last.is_none_or(|t| now.saturating_duration_since(t) >= LIVE_BIG_EVERY)
+}
 /// So oft wird geprüft, ob sich ein fester Stand (Platte, git) geändert hat.
 const REFRESH: Duration = Duration::from_secs(2);
 /// Schmaler als das: automatisch untereinander.
@@ -529,6 +538,8 @@ pub(crate) struct DiffTab {
     job: Option<Job>,
     pub(super) out: Option<Arc<DiffOut>>,
     changed_at: Option<Instant>,
+    /// Letzter vorläufiger Stand (Drossel für große Seiten).
+    live_last: Option<Instant>,
     force: bool,
     cancelled: Option<JobKey>,
     cache: Option<Cache>,
@@ -597,6 +608,7 @@ impl DiffTab {
             job: None,
             out: None,
             changed_at: None,
+            live_last: None,
             force: false,
             cancelled: None,
             cache: None,
@@ -853,6 +865,10 @@ impl DiffTab {
             if seen.0 != d || seen.1 == doc.revision() {
                 continue;
             }
+            // Große Seite: nicht bei jedem Tastendruck den ganzen Text kopieren (der Vergleich folgt ohnehin).
+            if !live_due(doc.rope().len_bytes(), self.live_last, now) {
+                continue;
+            }
             let old = if left { cur.left.clone() } else { cur.right.clone() };
             let new = Arc::new(Snap::new(Arc::new(doc.rope().to_string())));
             let (edit, n) = compare::changed_lines_by(old.len(), new.len(), |i, j| old.line(i) == new.line(j));
@@ -922,23 +938,28 @@ impl DiffTab {
         self.out = Some(Arc::new(w));
         self.cache = None;
         self.changed_at = Some(now);
+        self.live_last = Some(now);
         true
     }
 
-    /// Bearbeiten in einem eingeklappten Bereich klappt ihn auf (#391): Zeile `line` der Seite `left`.
-    fn unfold_line(&mut self, left: bool, line: usize) {
+    /// Bearbeiten in einem eingeklappten Bereich klappt ihn auf (#391): Zeilen `lines` der Seite `left` (jeder
+    /// eingeklappte Bereich, der eine davon enthält).
+    fn unfold_lines(&mut self, left: bool, lines: std::ops::RangeInclusive<usize>) {
         let Some(c) = &self.cache else { return };
         let side = |r: &Row| if left { r.left } else { r.right };
+        let mut add = Vec::new();
         for it in &c.items {
             if let Item::Fold { rows } = it {
                 let (Some(a), Some(b)) = (side(&c.rows[rows.start]), side(&c.rows[rows.end - 1])) else { continue };
-                if (a as usize..=b as usize).contains(&line) {
-                    let (Some(ra), Some(rb)) = (c.rows[rows.start].right, c.rows[rows.end - 1].right) else { return };
-                    self.revealed.push(ra..rb + 1);
-                    self.cache = None;
-                    return;
+                if (a as usize) <= *lines.end() && *lines.start() <= b as usize {
+                    let (Some(ra), Some(rb)) = (c.rows[rows.start].right, c.rows[rows.end - 1].right) else { continue };
+                    add.push(ra..rb + 1);
                 }
             }
+        }
+        if !add.is_empty() {
+            self.revealed.extend(add);
+            self.cache = None;
         }
     }
 
@@ -2249,8 +2270,16 @@ fn edit_keys(ui: &mut Ui, dt: &mut DiffTab, docs: &mut BTreeMap<u64, DocEntry>, 
             let undo = matches!(op, Op::Undo | Op::Redo);
             let changes = !matches!(op, Op::SelectAll | Op::SelectLine | Op::Undo | Op::Redo);
             if changes {
-                let line = doc.char_to_line(caret.sels.primary().head.min(doc.len_chars()));
-                dt.unfold_line(caret.left, line);
+                // Alle betroffenen Zeilen aufklappen: die der Auswahl, beim Löschen und Verschieben auch die Nachbarn
+                // (Rücktaste am Zeilenanfang ändert die Zeile davor, Entf am Ende die danach).
+                let r = caret.sels.primary().range();
+                let len = doc.len_chars();
+                let (mut a, mut b) = (doc.char_to_line(r.start.min(len)), doc.char_to_line(r.end.min(len)));
+                if matches!(op, Op::Backspace(_) | Op::Delete(_) | Op::DeleteLine | Op::MoveLines(_) | Op::Cut) {
+                    a = a.saturating_sub(1);
+                    b = (b + 1).min(doc.len_lines().saturating_sub(1));
+                }
+                dt.unfold_lines(caret.left, a..=b);
             }
             if super::doc::run(doc, &mut caret.sels, op, tab) {
                 edited = true;
@@ -2625,6 +2654,16 @@ fn prepare_hl(lang: Option<String>, side: &mut Side, docs: &mut BTreeMap<u64, Do
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Große Seiten bilden den vorläufigen Stand gedrosselt, kleine bei jedem Tastendruck.
+    #[test]
+    fn live_update_is_throttled_for_big_sides() {
+        let now = Instant::now();
+        assert!(live_due(10, Some(now), now), "klein: immer");
+        assert!(live_due(LIVE_BIG_BYTES + 1, None, now), "groß: der erste sofort");
+        assert!(!live_due(LIVE_BIG_BYTES + 1, Some(now), now + Duration::from_millis(100)));
+        assert!(live_due(LIVE_BIG_BYTES + 1, Some(now), now + LIVE_BIG_EVERY));
+    }
 
     #[test]
     fn snapshots_split_lines_like_the_core() {

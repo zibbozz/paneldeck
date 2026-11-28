@@ -158,8 +158,8 @@ impl App {
                 }
                 ui.add_space(S1);
                 ui.label(RichText::new(lang.t(
-                    "⚠ = betrifft Sicherheit, Zugriffe, Windows-Integration oder gespeicherte Sitzungen.",
-                    "⚠ = affects security, access, Windows integration or saved sessions.",
+                    "⚠ = betrifft Sicherheit, Zugriffe, Windows-Integration, gespeicherte Sitzungen oder selbst eingegebene Listen.",
+                    "⚠ = affects security, access, Windows integration, saved sessions or lists you entered.",
                 )).small().color(style::dim(ui)));
                 ui.add_space(S2);
                 ui.horizontal(|ui| {
@@ -196,9 +196,17 @@ impl App {
         }
         self.scale_pending = None;
         self.capture_key = None;
-        self.editor_svc.excludes_buf = None;
+        self.reset_text_buffers();
         self.mcp_reach_dirty();
         state::save_json(&self.dir.join("settings.json"), &self.settings);
+    }
+
+    /// Zwischenstände von Textfeldern, die aus den Einstellungen gefüllt werden, verwerfen (nach dem Zurücksetzen sonst
+    /// veraltet und beim nächsten Tippen wieder gespeichert).
+    pub(super) fn reset_text_buffers(&mut self) {
+        self.editor_svc.excludes_buf = None;
+        self.editor_svc.reset_map_buf();
+        self.models_ui.sensitive_text = None;
     }
 
     /// Autostart ausschalten (Zurücksetzen).
@@ -254,7 +262,9 @@ impl App {
         let lang = self.settings.language;
         let q = Query::new(&self.settings_nav.query);
         let found = (!q.is_empty()).then(|| items::search(&q, lang));
-        let modified = items::modified_keys(&self.settings, Some(self));
+        let mut cache = std::mem::take(&mut self.settings_nav.mod_cache);
+        let modified = items::modified_keys_cached(&self.settings, Some(self), &mut cache);
+        self.settings_nav.mod_cache = cache;
         let mod_pages = items::per_page(&modified);
         let filter: Option<BTreeSet<Page>> = match &found {
             Some(f) => Some(f.pages()),
@@ -268,7 +278,8 @@ impl App {
         {
             self.settings_nav.select(*first);
         }
-        self.settings_keys(ui.ctx(), filter.as_ref(), os_window);
+        let area = ui.max_rect();
+        self.settings_keys(ui.ctx(), filter.as_ref(), os_window, area);
         let badges: BTreeMap<Page, usize> = match &found {
             Some(f) => f.per_page.clone(),
             None => mod_pages.clone(),
@@ -431,8 +442,10 @@ impl App {
         tut_cmd
     }
 
-    /// Tasten des Fensters: Strg+F Suche, Strg+Tab Seite, Esc erst Suche leeren, dann schließen; Pfeile im Baum.
-    fn settings_keys(&mut self, ctx: &egui::Context, filter: Option<&BTreeSet<Page>>, os_window: bool) {
+    /// Tasten des Fensters: Strg+F Suche, Strg+Tab Seite, Esc erst Suche leeren, dann schließen; Pfeile im Baum. Im Hub
+    /// (`os_window` = false, `area` = Fläche des Fensters) gilt Esc nur, wenn die Suche die Tastatur hat oder der Zeiger
+    /// über dem Fenster steht – sonst gehört die Taste dem, was der Nutzer gerade bedient.
+    fn settings_keys(&mut self, ctx: &egui::Context, filter: Option<&BTreeSet<Page>>, os_window: bool, area: Rect) {
         // Kürzel-Aufnahme und Rückfragen haben die Tastatur.
         if self.capture_key.is_some() || self.settings_nav.ask.is_some() || self.remember_off_ask.is_some() || (self.settings_owns_dialogs() && self.confirm_restore.is_some()) {
             return;
@@ -452,7 +465,8 @@ impl App {
         }
         // Esc: egui hat ein anderes Feld schon verlassen bzw. ein Menü geschlossen – dann nichts weiter.
         let other_field = n.last_focus.is_some_and(|f| f != search);
-        if ctx.input(|i| i.key_pressed(Key::Escape)) && !egui::Popup::is_any_open(ctx) && !other_field {
+        let ours = os_window || focused == Some(search) || ctx.pointer_hover_pos().is_some_and(|p| area.contains(p));
+        if ours && ctx.input(|i| i.key_pressed(Key::Escape)) && !egui::Popup::is_any_open(ctx) && !other_field {
             if n.query.is_empty() {
                 self.settings_open = false;
             } else {

@@ -621,9 +621,14 @@ impl Document {
             p = Selection::new(r.start, r.end);
         }
         let Some(search) = self.occurrence_search(&p) else { return 0 };
-        let (all, _) = search.find_all(self, limit);
+        let (mut all, _) = search.find_all(self, limit);
         if all.is_empty() {
             return 0;
+        }
+        // Gekürzt und das eigene Vorkommen liegt dahinter: es ersetzt das letzte (die Zahl zeigt weiter „gekürzt“).
+        if all.len() >= limit && !all.contains(&p.range()) {
+            all.pop();
+            all.push(p.range());
         }
         let primary = all.iter().position(|m| *m == p.range()).unwrap_or(0);
         let n = all.len();
@@ -683,7 +688,7 @@ impl Document {
         if content.is_empty() {
             return false;
         }
-        let commented = content.iter().all(|(_, ind, s)| s.chars().skip(*ind).collect::<String>().starts_with(prefix));
+        let commented = content.iter().all(|(_, ind, s)| starts_with_comment(&s.chars().skip(*ind).collect::<String>(), prefix));
         let p_len = prefix.chars().count();
         let mut edits: Vec<(Range<usize>, String)> = Vec::new();
         if commented {
@@ -735,6 +740,17 @@ pub fn parse_goto(input: &str) -> Option<(usize, Option<usize>)> {
         _ => None,
     };
     Some((line, col))
+}
+
+/// Does `s` (a line without its indentation) start with the line comment `prefix`? A word-like prefix (`REM` of
+/// batch files) must stand as a whole word (`REMARK` is no comment) and matches regardless of case (`rem`).
+fn starts_with_comment(s: &str, prefix: &str) -> bool {
+    if !prefix.chars().last().is_some_and(|c| c.is_alphanumeric()) {
+        return s.starts_with(prefix);
+    }
+    let n = prefix.chars().count();
+    let head: String = s.chars().take(n).collect();
+    head.to_lowercase() == prefix.to_lowercase() && !s.chars().nth(n).is_some_and(|c| c.is_alphanumeric() || c == '_')
 }
 
 #[cfg(test)]
@@ -1006,6 +1022,17 @@ mod tests {
         assert_eq!(d.text(), "x\n");
         let mut s = cursors(&d, &[0]);
         assert!(!d.toggle_comment(&mut s, "", EditOrigin::User));
+        // Batch: REM als ganzes Wort, Groß/Klein egal; REMARK ist kein Kommentar.
+        let mut d = Document::from_text("REMARK x\n");
+        let mut s = cursors(&d, &[0]);
+        assert!(d.toggle_comment(&mut s, "REM", EditOrigin::User));
+        assert_eq!(d.text(), "REM REMARK x\n");
+        let mut d = Document::from_text("rem x\n");
+        let mut s = cursors(&d, &[0]);
+        assert!(d.toggle_comment(&mut s, "REM", EditOrigin::User));
+        assert_eq!(d.text(), "x\n");
+        assert!(starts_with_comment("REM", "REM") && starts_with_comment("Rem\tx", "REM") && !starts_with_comment("REM_x", "REM"));
+        assert!(starts_with_comment("//x", "//"), "Zeichen-Kommentar wie bisher");
     }
 
     #[test]

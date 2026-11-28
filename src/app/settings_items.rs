@@ -450,10 +450,11 @@ fn build() -> Vec<Item> {
             ("Eines je Zeile, Syntax wie .gitignore; gilt immer", "One per line, syntax as in .gitignore; always applies"),
             &["exclude", "ausschließen", "node_modules", "gitignore", "muster", "pattern", "suche in dateien", "search in files"],
             f!(editor.search_exclude),
-        ),
+        )
+        .risky(),
         // ---- Editor › Sprachen & Syntax
         it(EditorSyntax, "default_mode", ("Standard-Modus", "Default mode"), ("Für Sprachen ohne eigene Einstellung; Standard: Text", "For languages without their own setting; default: Text"), &["text", "syntax", "smart", "modus", "mode", "farben", "colours"], f!(editor.default_mode)),
-        it(EditorSyntax, "language_modes", ("Modus je Sprache", "Mode per language"), ("Text, Syntax oder Smart für einzelne Sprachen", "Text, Syntax or Smart for single languages"), &["sprache", "language", "modus", "mode"], f!(editor.language_modes)),
+        it(EditorSyntax, "language_modes", ("Modus je Sprache", "Mode per language"), ("Text, Syntax oder Smart für einzelne Sprachen", "Text, Syntax or Smart for single languages"), &["sprache", "language", "modus", "mode"], f!(editor.language_modes)).risky(),
         it(
             EditorSyntax,
             "language_map",
@@ -461,7 +462,8 @@ fn build() -> Vec<Item> {
             ("Endung oder Dateiname → Sprache; gehen vor der eingebauten Erkennung", "Extension or file name → language; take precedence over the built-in detection"),
             &["zuordnung", "mapping", "endung", "extension", "dateiname", "file name", "erkennung", "detection"],
             f!(editor.language_map),
-        ),
+        )
+        .risky(),
         // ---- Editor › Smart-Modus
         it(EditorSmart, "smart_auto_complete", ("Vervollständigen von selbst", "Complete automatically"), ("Nach Auslösezeichen und 2 Wortzeichen; Strg+Leertaste geht immer", "After trigger characters and 2 word characters; Ctrl+Space always works"), &["completion", "vervollständigen", "autocomplete", "lsp"], f!(editor.smart.auto_complete)),
         it(EditorSmart, "smart_trace", ("Nachrichten mitschneiden", "Trace messages"), ("Im Protokoll des Servers (nur im Speicher)", "In the server's log (in memory only)"), &["trace", "log", "protokoll", "lsp"], f!(editor.smart.trace)),
@@ -556,7 +558,8 @@ fn build() -> Vec<Item> {
             ("Nur eine Schätzung auf Basis der lokalen Transkripte. Unbekannte Modelle werden wie Sonnet gerechnet.", "Estimate only, based on local transcripts. Unknown models are priced like Sonnet."),
             &["preise", "prices", "opus", "sonnet", "haiku", "cache", "token", "input", "output"],
             f!(prices),
-        ),
+        )
+        .risky(),
         // ---- Claude › Hooks
         it(
             ClaudeHooks,
@@ -690,7 +693,8 @@ fn build() -> Vec<Item> {
             (crate::keys::label(id, true), crate::keys::label(id, false)),
             NO,
             kw,
-            Def::S { modified: Arc::new(move |s: &Settings, _d: &Settings| s.keys.contains_key(id)), reset: Some(Arc::new(move |s: &mut Settings, _d: &Settings| {
+            // Geändert nur, wenn die Belegung von der Standardbelegung abweicht (ein Eintrag gleich dem Standard zählt nicht).
+            Def::S { modified: Arc::new(move |s: &Settings, _d: &Settings| s.keys.get(id).is_some_and(|v| crate::keys::parse(v) != crate::keys::parse(default))), reset: Some(Arc::new(move |s: &mut Settings, _d: &Settings| {
                 s.keys.remove(id);
             })) },
         ));
@@ -743,6 +747,27 @@ pub(super) fn search(q: &Query, lang: Lang) -> Found {
 pub(super) fn modified_keys(s: &Settings, app: Option<&App>) -> HashSet<&'static str> {
     let d = Settings::default();
     items().iter().filter(|i| i.modified(s, &d, app)).map(|i| i.key).collect()
+}
+
+/// Zwischenspeicher für [`modified_keys_cached`]: Fingerabdruck der Einstellungen und die geänderten `Def::S`-Einträge.
+pub(super) type ModCache = Option<(u64, HashSet<&'static str>)>;
+
+/// Wie [`modified_keys`], aber die Vergleiche mit dem Standard (`Def::S`, ~110 serde-Vergleiche) nur, wenn sich die
+/// Einstellungen geändert haben (in jedem Bild nur noch eine Serialisierung); die Einträge mit App-Zustand (`Def::A`)
+/// sind billig und werden immer gefragt.
+pub(super) fn modified_keys_cached(s: &Settings, app: Option<&App>, cache: &mut ModCache) -> HashSet<&'static str> {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    serde_json::to_vec(s).unwrap_or_default().hash(&mut h);
+    let fp = h.finish();
+    if cache.as_ref().is_none_or(|(f, _)| *f != fp) {
+        let d = Settings::default();
+        let set = items().iter().filter(|i| matches!(i.def, Def::S { .. }) && i.modified(s, &d, None)).map(|i| i.key).collect();
+        *cache = Some((fp, set));
+    }
+    let mut out = cache.as_ref().map(|(_, set)| set.clone()).unwrap_or_default();
+    out.extend(items().iter().filter(|i| matches!(i.def, Def::A { .. }) && i.modified(s, s, app)).map(|i| i.key));
+    out
 }
 
 /// Geänderte je Seite.
@@ -1075,9 +1100,28 @@ mod tests {
         assert!(s.keys.is_empty() && s.last_claude_opts.is_none());
     }
 
+    /// Zwischengespeichert wie ungespeichert; ein Kürzel gleich dem Standard zählt nicht als geändert.
+    #[test]
+    fn cached_modified_keys_follow_changes_and_default_shortcuts_are_unchanged() {
+        let mut s = Settings::default();
+        let mut cache: ModCache = None;
+        assert_eq!(modified_keys_cached(&s, None, &mut cache), modified_keys(&s, None));
+        s.opacity = 0.5;
+        let m = modified_keys_cached(&s, None, &mut cache);
+        assert!(m.contains("opacity"), "neu verglichen nach der Änderung");
+        assert_eq!(m, modified_keys(&s, None));
+        let (id, default) = crate::keys::DEFAULTS.iter().find(|(_, d)| !d.is_empty()).copied().unwrap();
+        s.keys.insert(id.to_string(), default.to_string());
+        let key = format!("key.{id}");
+        assert!(!modified_keys_cached(&s, None, &mut cache).iter().any(|k| *k == key), "gleich dem Standard");
+        s.keys.insert(id.to_string(), "ctrl+alt+shift+F12".into());
+        assert!(modified_keys_cached(&s, None, &mut cache).iter().any(|k| *k == key));
+    }
+
     #[test]
     fn risky_entries_ask_first() {
-        for k in ["remember_sessions", "mcp_level", "autostart", "hooks_global", "osc52_copy", "agent_open", "claude_defaults_access"] {
+        // Auch selbst eingegebene Listen (ein Klick würde sie sonst ohne Rückfrage löschen).
+        for k in ["remember_sessions", "mcp_level", "autostart", "hooks_global", "osc52_copy", "agent_open", "claude_defaults_access", "language_map", "language_modes", "search_exclude", "prices"] {
             assert!(item(k).is_some_and(|i| i.risky), "{k} fragt nach");
         }
         assert!(item("opacity").is_some_and(|i| !i.risky && i.resettable()));

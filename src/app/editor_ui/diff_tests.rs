@@ -561,3 +561,35 @@ fn fillers_are_skipped_folds_unfold_on_edit_and_read_only_sides_refuse() {
     assert!(ed.diffs[&d2].scroll_y >= y0);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Rücktaste am Anfang der ersten Zeile nach einem eingeklappten Bereich ändert dessen letzte Zeile: der Bereich klappt
+/// auf (nicht unsichtbar bearbeiten).
+#[test]
+fn backspace_after_a_folded_region_unfolds_it() {
+    let dir = test_dir("foldbs");
+    let base: Vec<String> = (0..40).map(|i| format!("l{i}")).collect();
+    let mut other = base.clone();
+    other[1] = "x1".into();
+    other[36] = "x36".into();
+    let a = write(&dir, "a.txt", format!("{}\n", base.join("\n")).as_bytes());
+    let b = write(&dir, "b.txt", format!("{}\n", other.join("\n")).as_bytes());
+    let ctx = egui::Context::default();
+    let mut t = 0.0;
+    let prefs = EditorPrefs::default();
+    let mut ed = EditorUi::default();
+    ed.wrap = false;
+    let diff = ed.compare_paths(&a, &b, &prefs).unwrap();
+    settle(&ctx, &mut ed, &mut t, WIDE, &prefs, diff_settled);
+    let la = ed.diffs[&diff].left.doc().unwrap();
+    // erste sichtbare Zeile nach dem eingeklappten Bereich (links)
+    assert!(ed.diffs[&diff].point_at(true, 20, 0).is_none(), "Zeile 20 ist eingeklappt");
+    let line = (21..40).find(|l| ed.diffs[&diff].point_at(true, *l, 0).is_some()).unwrap();
+    assert!(ed.diffs[&diff].point_at(true, line - 1, 0).is_none(), "davor eingeklappt");
+    let p = ed.diffs[&diff].point_at(true, line, 0).unwrap();
+    frame(&ctx, &mut ed, click_at(p), &mut t, WIDE, &prefs);
+    frame(&ctx, &mut ed, vec![], &mut t, WIDE, &prefs);
+    frame(&ctx, &mut ed, vec![key(egui::Key::Home, Modifiers::NONE), key(egui::Key::Backspace, Modifiers::NONE)], &mut t, WIDE, &prefs);
+    assert!(text_of(&ed, la).contains(&format!("\nl{}l{line}\n", line - 1)), "Zeilen verbunden");
+    assert!(!ed.diffs[&diff].revealed.is_empty(), "der Bereich klappt auf");
+    let _ = std::fs::remove_dir_all(&dir);
+}

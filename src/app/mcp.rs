@@ -2404,7 +2404,7 @@ impl App {
         let id = self.mcp_target(args, caller, true)?;
         let mine = self.mcp.created.get(&id).is_some_and(|creator| creator.is(caller));
         if !mine && !self.settings.mcp_close_any {
-            return Err(er("forbidden", tr("Ein Agent darf nur Sitzungen schließen, die er selbst angelegt hat (Einstellungen → Agenten → Zugriff → „Fremde Sitzungen schließen“ erlaubt mehr).", "An agent may only close sessions it created itself (Settings → Agents → Access → “Agents may also close other sessions” allows more).")));
+            return Err(er("forbidden", tr("Ein Agent darf nur Sitzungen schließen, die er selbst angelegt hat (Einstellungen → Agenten → Zugriff → „Fremde Sitzungen schließen“ erlaubt mehr).", "An agent may only close sessions it created itself (Settings → Agents → Access → “Close other sessions” allows more).")));
         }
         if self.entries.get(&id).is_some_and(|e| e.meta.worktree.is_some()) {
             return Err(er("forbidden", tr("Sitzungen mit Git-Worktree müssen im Fenster geschlossen werden (dort fragt Paneldeck, was mit dem Worktree geschehen soll).", "Sessions with a Git worktree must be closed in the window (Paneldeck asks there what to do with the worktree).")));

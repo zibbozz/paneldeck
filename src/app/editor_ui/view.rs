@@ -183,7 +183,7 @@ impl super::super::App {
         let prefs = self.editor_prefs();
         let text_tab = doc.is_some() && diff.is_none();
         let comment = match (text_tab, doc) {
-            (true, Some(d)) => self.ed.docs.get_mut(&d).and_then(|e| e.language(&prefs)).as_deref().and_then(crate::editor::syntax::languages::line_comment),
+            (true, Some(d)) => self.ed.docs.get_mut(&d).and_then(|e| e.line_comment(&prefs)),
             _ => None,
         };
         let mut multi_binds: Vec<(super::doc::Op, Option<(Modifiers, Key)>)> = Vec::new();

@@ -584,6 +584,18 @@ impl DocEntry {
         self.syntax.lang.clone().or_else(|| self.syntax.detected.as_ref().and_then(|(_, l)| l.clone()))
     }
 
+    /// Zeilenkommentar der Sprache für *Kommentar umschalten* (#394) – eine Quelle für Menü, Kürzel und Befehlspalette.
+    /// Erkennt vorher neu (wie die Statusleiste).
+    pub fn line_comment(&mut self, prefs: &super::EditorPrefs) -> Option<&'static str> {
+        self.language(prefs);
+        self.line_comment_cached()
+    }
+
+    /// Wie [`Self::line_comment`] ohne neue Erkennung (Befehlspalette ohne `&mut`; die Statusleiste erkennt in jedem Bild).
+    pub fn line_comment_cached(&self) -> Option<&'static str> {
+        self.language_cached().as_deref().and_then(crate::editor::syntax::languages::line_comment)
+    }
+
     /// Modus: gewählt, sonst die Einstellung der Sprache, sonst der Standard (Text).
     pub fn mode(&mut self, prefs: &super::EditorPrefs) -> Mode {
         if let Some(m) = self.syntax.mode {
@@ -1055,6 +1067,25 @@ pub(super) fn clip(doc: &mut Document, sels: &mut Selections, cut: bool) -> (Str
     (text, doc.revision() != before)
 }
 
+/// *Alle Vorkommen markieren* (#394): höchstens [`core::MAX_CURSORS`]; liefert, ob es mehr gab (dann
+/// „Nur die ersten 10 000 Cursor.“). Gekürzt bleibt das Vorkommen des Hauptcursors immer dabei.
+pub(super) fn select_all_occurrences(doc: &mut Document, sels: &mut Selections) -> bool {
+    // Eins mehr suchen: dann weiß die Ansicht, dass es mehr gibt.
+    if doc.select_all_occurrences(sels, core::MAX_CURSORS + 1) <= core::MAX_CURSORS {
+        return false;
+    }
+    let pi = sels.primary_index();
+    let mut v: Vec<core::Selection> = sels.iter().take(core::MAX_CURSORS).copied().collect();
+    let p = if pi < core::MAX_CURSORS {
+        pi
+    } else {
+        v[core::MAX_CURSORS - 1] = sels.primary();
+        core::MAX_CURSORS - 1
+    };
+    sels.replace(v, p);
+    true
+}
+
 /// Tastenbefehl ausführen. Liefert, ob der Text geändert wurde.
 pub(super) fn run(doc: &mut Document, sels: &mut Selections, op: Op, _tab: usize) -> bool {
     let u = EditOrigin::User;
@@ -1085,12 +1116,7 @@ pub(super) fn run(doc: &mut Document, sels: &mut Selections, op: Op, _tab: usize
             false
         }
         Op::SelectAllOccurrences => {
-            // Eins mehr suchen: dann weiß die Ansicht, dass es mehr gibt („Nur die ersten 10 000“).
-            if doc.select_all_occurrences(sels, core::MAX_CURSORS + 1) > core::MAX_CURSORS {
-                let p = sels.primary_index().min(core::MAX_CURSORS - 1);
-                let v: Vec<core::Selection> = sels.iter().take(core::MAX_CURSORS).copied().collect();
-                sels.replace(v, p);
-            }
+            select_all_occurrences(doc, sels);
             false
         }
         Op::SelectLine => {

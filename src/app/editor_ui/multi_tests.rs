@@ -114,6 +114,72 @@ fn alt_click_is_off_by_default_adds_and_removes_cursors_when_on() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Strg+U nimmt auch Spaltenauswahl und Klick der mittleren Maustaste zurück (Stand beim Drücken).
+#[test]
+fn soft_undo_restores_the_state_before_middle_button_drag_and_click() {
+    let (dir, mut ed, ctx, mut t) = open("midundo.txt", "abcdef\nabcdef\nabcdef\n");
+    let on = EditorPrefs { multi: MultiPrefs { middle: true, ..Default::default() }, ..Default::default() };
+    frame(&ctx, &mut ed, vec![], &mut t, &on);
+    frame(&ctx, &mut ed, vec![], &mut t, &on);
+    let p = at(&ctx, &ed, &on, 0, 2);
+    frame(&ctx, &mut ed, click(p, PointerButton::Primary, Modifiers::NONE), &mut t, &on);
+    frame(&ctx, &mut ed, vec![], &mut t, &on);
+    assert_eq!(sels(&ed), vec![2..2]);
+    // Ziehen mit der mittleren Taste: drei Auswahlen
+    let (a, b) = (at(&ctx, &ed, &on, 0, 1), at(&ctx, &ed, &on, 2, 3));
+    frame(&ctx, &mut ed, vec![Event::PointerMoved(a), button(a, PointerButton::Middle, true, Modifiers::NONE)], &mut t, &on);
+    frame(&ctx, &mut ed, vec![Event::PointerMoved(b)], &mut t, &on);
+    frame(&ctx, &mut ed, vec![button(b, PointerButton::Middle, false, Modifiers::NONE)], &mut t, &on);
+    assert_eq!(sels(&ed), vec![1..3, 8..10, 15..17]);
+    // Klick mit der mittleren Taste: ein Cursor
+    let p = at(&ctx, &ed, &on, 1, 5);
+    frame(&ctx, &mut ed, click(p, PointerButton::Middle, Modifiers::NONE), &mut t, &on);
+    frame(&ctx, &mut ed, vec![], &mut t, &on);
+    assert_eq!(sels(&ed), vec![12..12]);
+    let g = ed.panes.focused;
+    ed.menu_edit_op(&ctx, g, super::doc::Op::SoftUndo);
+    assert_eq!(sels(&ed), vec![1..3, 8..10, 15..17], "vor dem Klick");
+    ed.menu_edit_op(&ctx, g, super::doc::Op::SoftUndo);
+    assert_eq!(sels(&ed), vec![2..2], "vor dem Ziehen");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// *Alle Vorkommen markieren*: „gekürzt“ nur bei mehr als 10 000; gekürzt bleibt das Vorkommen des Hauptcursors.
+#[test]
+fn select_all_occurrences_reports_only_a_real_cut_and_keeps_the_main_cursor() {
+    use crate::editor::{Document, MAX_CURSORS};
+    let mut d = Document::from_text(&"x\n".repeat(MAX_CURSORS));
+    let mut s = d.new_selections(0);
+    assert!(!super::doc::select_all_occurrences(&mut d, &mut s), "genau 10 000: nicht gekürzt");
+    assert_eq!(s.len(), MAX_CURSORS);
+    let mut d = Document::from_text(&"x\n".repeat(MAX_CURSORS + 5));
+    let last = (MAX_CURSORS + 4) * 2;
+    let mut s = d.new_selections(last);
+    assert!(super::doc::select_all_occurrences(&mut d, &mut s), "gekürzt");
+    assert_eq!(s.len(), MAX_CURSORS);
+    assert_eq!(s.primary().range(), last..last + 1, "das Vorkommen des Hauptcursors bleibt");
+}
+
+/// Die Stände von Strg+U sind auch nach der Zahl der Auswahlen begrenzt (viele Cursor).
+#[test]
+fn soft_undo_history_is_capped_by_total_selections() {
+    use crate::editor::{Selection, Selections};
+    let mut v = super::text::View::default();
+    let many = |n: usize, off: usize| {
+        let mut s = Selections::cursor(0);
+        s.replace((0..n).map(|i| Selection::cursor(off + i)).collect(), 0);
+        s
+    };
+    v.sels = Some(Selections::cursor(0));
+    for k in 0..5 {
+        v.note_selection_change(many(60_000, k));
+    }
+    assert!(v.sel_undo_total() <= 200_000, "{}", v.sel_undo_total());
+    assert_eq!(v.sel_undo_len(), 3, "die ältesten fallen weg");
+    v.note_selection_change(many(200_001, 0));
+    assert_eq!(v.sel_undo_len(), 3, "ein zu großer Stand wird nicht gemerkt");
+}
+
 #[test]
 fn middle_button_selects_columns_adds_with_ctrl_and_places_cursors() {
     let (dir, mut ed, ctx, mut t) = open("mid.txt", "abcdef\nab\n\nabcdef\n");

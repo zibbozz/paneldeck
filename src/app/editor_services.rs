@@ -42,6 +42,11 @@ impl Default for EditorServices {
 }
 
 impl EditorServices {
+    /// Zwischenstand der eigenen Sprachzuordnungen verwerfen (Zurücksetzen).
+    pub(super) fn reset_map_buf(&mut self) {
+        self.map_buf = None;
+    }
+
     /// Beim Start: `--edit <datei>` vormerken.
     pub fn from_cli() -> EditorServices {
         let mut s = EditorServices::default();

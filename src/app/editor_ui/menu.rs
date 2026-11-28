@@ -111,6 +111,7 @@ pub(super) fn menus(ed: &mut EditorUi, g: u64, prefs: &super::EditorPrefs, lang:
     };
     let running = doc_id.is_some_and(|d| ed.fmt.job_for(d).is_some());
     let syn = doc_id.and_then(|id| ed.docs.get_mut(&id)).filter(|d| d.doc.is_some()).map(|d| d.syntax_status(prefs, lang));
+    let comment = doc_id.and_then(|id| ed.docs.get_mut(&id)).filter(|d| d.doc.is_some()).and_then(|d| d.line_comment(prefs));
     let d = doc_id.and_then(|id| ed.docs.get(&id));
     let loaded = d.and_then(|d| d.doc.as_ref());
     let kind = d.and_then(|d| d.format_kind());
@@ -195,7 +196,7 @@ pub(super) fn menus(ed: &mut EditorUi, g: u64, prefs: &super::EditorPrefs, lang:
         Entry::Item(item("find_files", lang.t("In Dateien suchen …", "Find in files …"), fixed("Ctrl+Shift+F", lang), f(Cmd::FindInFiles))),
         Entry::Item(item("goto", lang.t("Gehe zu Zeile …", "Go to line …"), fixed("Ctrl+G", lang), f(Cmd::GotoLineAsk)).off(need_text())),
         Entry::Sep,
-        Entry::Item(toggle_comment(g, syn.as_ref().and_then(|s| s.lang.as_deref()), need_text(), prefs, lang)),
+        Entry::Item(toggle_comment(g, comment, need_text(), prefs, lang)),
         op("delete_line", lang.t("Zeile löschen", "Delete line"), "Ctrl+Shift+K", EdOp::DeleteLine),
         op("line_up", lang.t("Zeile nach oben", "Move line up"), "Alt+Up", EdOp::MoveLines(false)),
         op("line_down", lang.t("Zeile nach unten", "Move line down"), "Alt+Down", EdOp::MoveLines(true)),
@@ -276,8 +277,7 @@ pub(super) fn menus(ed: &mut EditorUi, g: u64, prefs: &super::EditorPrefs, lang:
 }
 
 /// *Kommentar umschalten* (#394) mit dem Zeilenkommentar der Sprache; ohne einen ausgegraut.
-fn toggle_comment(g: u64, lang_id: Option<&str>, need_text: Option<String>, prefs: &super::EditorPrefs, lang: Lang) -> Item {
-    let prefix = lang_id.and_then(crate::editor::syntax::languages::line_comment);
+fn toggle_comment(g: u64, prefix: Option<&'static str>, need_text: Option<String>, prefs: &super::EditorPrefs, lang: Lang) -> Item {
     let it = item("toggle_comment", lang.t("Kommentar umschalten", "Toggle comment"), key(prefs, lang, "ed_toggle_comment"), prefix.map(|p| vec![Cmd::FocusGroup(g), Cmd::EditOp(g, EdOp::ToggleComment(p))]).unwrap_or_default());
     it.off(need_text.or_else(|| prefix.is_none().then(|| lang.t("Die Sprache hat keinen Zeilenkommentar (Sprache in der Statusleiste wählen).", "The language has no line comment (choose the language in the status bar).").to_string())))
 }
@@ -299,7 +299,7 @@ pub(super) fn palette_entries(ed: &EditorUi, prefs: &super::EditorPrefs, lang: L
     }
     v.push(e(lang.t("Auswahl: nur ein Cursor", "Selection: single cursor"), fixed("Escape", lang), EdOp::SingleCursor));
     v.push(e(lang.t("Auswahl: Zeile markieren", "Selection: select line"), fixed("Ctrl+L", lang), EdOp::SelectLine));
-    if let Some(p) = ed.docs.get(&t.doc).and_then(|d| d.language_cached()).as_deref().and_then(crate::editor::syntax::languages::line_comment) {
+    if let Some(p) = ed.docs.get(&t.doc).and_then(|d| d.line_comment_cached()) {
         v.push(e(lang.t("Kommentar umschalten", "Toggle comment"), key(prefs, lang, "ed_toggle_comment"), EdOp::ToggleComment(p)));
     }
     v
@@ -357,7 +357,9 @@ impl EditorUi {
         let before = view.sels.clone();
         let Some(sels) = view.sels.as_mut() else { return };
         let tab = doc.tab_width().max(1);
-        let occurrences = matches!(op, EdOp::SelectNextOccurrence | EdOp::SelectAllOccurrences);
+        let before_len = sels.len();
+        let next = op == EdOp::SelectNextOccurrence;
+        let mut cut = false;
         let edited = match op {
             EdOp::Copy | EdOp::Cut => {
                 let (text, edited) = super::doc::clip(doc, sels, op == EdOp::Cut);
@@ -371,9 +373,14 @@ impl EditorUi {
                 Some(t) => super::doc::run(doc, sels, EdOp::Paste(t), tab),
                 None => false,
             },
+            // Hinweis nur, wenn wirklich gekürzt wurde (nicht schon bei genau 10 000 Vorkommen).
+            EdOp::SelectAllOccurrences => {
+                cut = super::doc::select_all_occurrences(doc, sels);
+                false
+            }
             o => super::doc::run(doc, sels, o, tab),
         };
-        let full = occurrences && sels.len() >= crate::editor::MAX_CURSORS;
+        let full = cut || (next && before_len >= crate::editor::MAX_CURSORS);
         if !edited && let Some(b) = before {
             view.note_selection_change(b);
         }

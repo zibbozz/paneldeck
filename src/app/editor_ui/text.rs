@@ -89,6 +89,8 @@ pub(crate) struct View {
 
 /// So viele Stände merkt sich *Cursor/Auswahl zurücknehmen*.
 const SEL_UNDO_MAX: usize = 200;
+/// … und höchstens so viele Auswahlen in allen Ständen zusammen (viele Cursor: Speicher begrenzen).
+const SEL_UNDO_TOTAL: usize = 200_000;
 
 #[derive(Clone, Debug, PartialEq)]
 enum DragMode {
@@ -101,8 +103,8 @@ enum DragMode {
     /// Alt+Klick: weiterer Cursor an `pos`; Ziehen markiert ab dort (eine Auswahl, keine Spalte – #394).
     AddCursor(usize),
     /// Mittlere Maustaste (#394): Druckpunkt (Zeile, Bildschirmzeile darin, visuelle Spalte in ihr, Zeigerposition),
-    /// mit Strg die Auswahlen davor (hinzufügen), gezogen?
-    Middle { line: usize, row: usize, v: usize, press: Pos2, base: Option<Selections>, moved: bool },
+    /// mit Strg die Auswahlen davor (hinzufügen), gezogen? `before` = Stand beim Drücken (für Strg+U).
+    Middle { line: usize, row: usize, v: usize, press: Pos2, base: Option<Selections>, moved: bool, before: Option<Selections> },
 }
 
 impl View {
@@ -157,10 +159,25 @@ impl View {
         if self.sel_undo.last().is_some_and(|l| l.as_slice() == before.as_slice()) {
             return;
         }
-        if self.sel_undo.len() >= SEL_UNDO_MAX {
-            self.sel_undo.remove(0);
+        // Grenze der Auswahlen insgesamt: ein Stand allein darüber wird nicht gemerkt, sonst fallen die ältesten weg.
+        if before.len() > SEL_UNDO_TOTAL {
+            return;
+        }
+        let mut total: usize = self.sel_undo.iter().map(Selections::len).sum();
+        while !self.sel_undo.is_empty() && (self.sel_undo.len() >= SEL_UNDO_MAX || total + before.len() > SEL_UNDO_TOTAL) {
+            total -= self.sel_undo.remove(0).len();
         }
         self.sel_undo.push(before);
+    }
+
+    #[cfg(test)]
+    pub fn sel_undo_len(&self) -> usize {
+        self.sel_undo.len()
+    }
+
+    #[cfg(test)]
+    pub fn sel_undo_total(&self) -> usize {
+        self.sel_undo.iter().map(Selections::len).sum()
     }
 
     /// *Cursor/Auswahl zurücknehmen* (#394): den vorigen Stand der Cursor/Auswahlen, der Text bleibt. Liefert, ob es
@@ -372,9 +389,11 @@ pub(super) fn show(ui: &mut Ui, rect: Rect, d: &mut DocEntry, view: &mut View, c
         return out;
     };
     view.sync(doc);
-    // Für *Cursor/Auswahl zurücknehmen* (#394): Stand vor diesem Bild; Ziehen zählt nur beim Drücken.
-    let sel_before = view.sels.clone();
+    // Für *Cursor/Auswahl zurücknehmen* (#394): Stand vor diesem Bild; Ziehen zählt nur beim Drücken. Nur kopieren,
+    // wenn eine Eingabe die Auswahl ändern kann (nicht in jedem Bild – bei vielen Cursorn teuer).
     let was_dragging = view.drag.is_some();
+    let may_change = !was_dragging && ui.input(|i| i.events.iter().any(|e| !matches!(e, egui::Event::PointerMoved(_) | egui::Event::MouseMoved(_) | egui::Event::PointerGone)));
+    let sel_before = if may_change { view.sels.clone() } else { None };
     let tab = doc.tab_width().max(1);
     let (row_h, cw) = ui.fonts_mut(|f| (f.row_height(&cx.font), f.glyph_width(&cx.font, 'M')));
     let cw = cw.max(1.0);
@@ -708,27 +727,34 @@ fn mouse(ui: &mut Ui, resp: &egui::Response, doc: &mut Document, view: &mut View
         let r = rows.iter().rev().find(|r| p.y >= r.y && r.line == line).copied().or_else(|| rows.iter().find(|r| r.line == line).copied());
         let (row, rv) = r.map(|r| (rows_of(doc, r.line, g.wrap_cols, g.tab).iter().position(|s| *s == r.start).unwrap_or(0), r.vstart)).unwrap_or((0, 0));
         doc.break_undo_group();
-        view.drag = Some(DragMode::Middle { line, row, v: v.saturating_sub(rv), press: p, base: mods.ctrl.then(|| view.sels.clone()).flatten(), moved: false });
+        let before = view.sels.clone();
+        view.drag = Some(DragMode::Middle { line, row, v: v.saturating_sub(rv), press: p, base: mods.ctrl.then(|| before.clone()).flatten(), moved: false, before });
         view.blink_epoch = time;
         return (false, false);
     }
-    if let Some(DragMode::Middle { line, row, v, press, base, moved }) = view.drag.clone() {
+    if let Some(DragMode::Middle { line, row, v, press, base, moved, before }) = view.drag.take() {
         if !m_down {
-            view.drag = None;
+            let mut full = false;
             if !moved {
                 // Klick ohne Ziehen: Cursor setzen (mit Strg einen dazu).
                 let (pos, _, _) = pos_at(doc, view, g, rows, press);
-                let Some(sels) = view.sels.as_mut() else { return (false, false) };
-                match base {
-                    Some(b) if b.len() >= crate::editor::MAX_CURSORS => return (false, true),
-                    Some(mut b) => {
-                        b.push(Selection::cursor(pos));
-                        *sels = b;
+                if let Some(sels) = view.sels.as_mut() {
+                    match base {
+                        Some(b) if b.len() >= crate::editor::MAX_CURSORS => full = true,
+                        Some(mut b) => {
+                            b.push(Selection::cursor(pos));
+                            *sels = b;
+                        }
+                        None => sels.replace(vec![Selection::cursor(pos)], 0),
                     }
-                    None => sels.replace(vec![Selection::cursor(pos)], 0),
                 }
             }
-            return (false, false);
+            // Strg+U nimmt Ziehen wie Klick zurück auf den Stand beim Drücken.
+            if let Some(mut b) = before {
+                doc.sync(&mut b);
+                view.note_selection_change(b);
+            }
+            return (false, full);
         }
         let moved = moved || (p - press).length() > 4.0;
         let mut full = false;
@@ -748,7 +774,7 @@ fn mouse(ui: &mut Ui, resp: &egui::Response, doc: &mut Document, view: &mut View
                 ui.ctx().request_repaint();
             }
         }
-        view.drag = Some(DragMode::Middle { line, row, v, press, base, moved });
+        view.drag = Some(DragMode::Middle { line, row, v, press, base, moved, before });
         return (false, full);
     }
     if pressed && resp.hovered() && inside_text {
