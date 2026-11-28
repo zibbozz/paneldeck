@@ -35,7 +35,8 @@ pub fn read_message(r: &mut dyn BufRead, max: usize) -> Result<Value, ReadError>
     let mut line = String::new();
     loop {
         line.clear();
-        let n = r.read_line(&mut line).map_err(|e| ReadError::Io(e.to_string()))?;
+        // Kopfzeile höchstens 4096 Bytes: nie unbegrenzt lesen.
+        let n = std::io::Read::take(&mut *r, 4097).read_line(&mut line).map_err(|e| ReadError::Io(e.to_string()))?;
         if n == 0 {
             return Err(ReadError::Eof);
         }
@@ -125,10 +126,11 @@ pub fn answer_server_request(id: &Value, method: &str, params: &Value) -> Value 
         "window/workDoneProgress/create" | "client/registerCapability" | "client/unregisterCapability" | "workspace/diagnostic/refresh" | "workspace/semanticTokens/refresh" | "workspace/inlayHint/refresh" | "workspace/codeLens/refresh" => response(id, Value::Null),
         // Auswahl-Frage des Servers: nie beantwortet (keine Aktion) – leere Antwort heißt „nichts gewählt“.
         "window/showMessageRequest" => response(id, Value::Null),
-        // Einstellungen: für jeden erfragten Abschnitt `null` (Standards des Servers).
+        // Einstellungen: für jeden erfragten Abschnitt ein leeres Objekt (= Standards des Servers). Nicht `null`: der
+        // CSS-Server von VS Code scheitert daran beim Prüfen (Probe gegen echte Server, #367).
         "workspace/configuration" => {
-            let n = params.get("items").and_then(Value::as_array).map_or(0, Vec::len);
-            response(id, Value::Array(vec![Value::Null; n]))
+            let n = params.get("items").and_then(Value::as_array).map_or(0, Vec::len).min(1000);
+            response(id, Value::Array(vec![json!({}); n]))
         }
         "workspace/workspaceFolders" => response(id, Value::Null),
         m if REFUSED_SERVER_REQUESTS.contains(&m) => error_response(id, REQUEST_FAILED, "refused by Paneldeck"),
@@ -419,6 +421,8 @@ pub struct Caps {
     pub encoding: Encoding,
     /// Der Server will `didSave` mit Text.
     pub save_text: bool,
+    /// Diagnosen werden abgeholt (`textDocument/diagnostic`, LSP 3.17) statt nur gemeldet (z. B. tsgo).
+    pub pull_diagnostics: bool,
 }
 
 pub fn parse_caps(init_result: &Value) -> Caps {
@@ -437,6 +441,7 @@ pub fn parse_caps(init_result: &Value) -> Caps {
         triggers: comp.and_then(|v| v.get("triggerCharacters")).and_then(Value::as_array).map(|a| a.iter().filter_map(Value::as_str).filter(|s| s.chars().count() == 1).map(str::to_string).take(32).collect()).unwrap_or_default(),
         encoding: c.get("positionEncoding").and_then(Value::as_str).map(Encoding::from_id).unwrap_or_default(),
         save_text,
+        pull_diagnostics: c.get("diagnosticProvider").is_some_and(|v| !v.is_null()),
     }
 }
 
@@ -460,6 +465,7 @@ pub fn initialize_params(pid: u32, root_uri: &str, root_name: &str) -> Value {
                     "completionItem": {"snippetSupport": true, "documentationFormat": ["plaintext", "markdown"], "deprecatedSupport": true, "preselectSupport": true, "insertReplaceSupport": true, "labelDetailsSupport": false},
                     "completionItemKind": {"valueSet": (1..=25).collect::<Vec<i32>>()}
                 },
+                "diagnostic": {"dynamicRegistration": false, "relatedDocumentSupport": false},
                 "publishDiagnostics": {"relatedInformation": false, "versionSupport": true, "tagSupport": {"valueSet": [1, 2]}, "codeDescriptionSupport": false, "dataSupport": false}
             }
         },
@@ -489,6 +495,28 @@ pub fn path_to_uri(path: &str) -> String {
         }
     }
     out
+}
+
+/// Vergleichsform einer Adresse: `file:`-Adressen als Pfad (dekodiert, Laufwerksbuchstabe und unter Windows alles
+/// klein), andere unverändert. So passt `file:///c%3A/x` (vscode-uri) zu `file:///C:/x`.
+pub fn uri_key(uri: &str) -> String {
+    match uri_to_path(uri, true) {
+        Some(p) if cfg!(windows) => p.to_lowercase(),
+        Some(p) => p,
+        None => uri.to_string(),
+    }
+}
+
+/// Antwort auf `textDocument/diagnostic`: `full` mit Einträgen bzw. `unchanged` (`None` = nichts Neues).
+pub fn parse_pull(result: &Value, max: usize) -> Option<(Vec<Diagnostic>, bool)> {
+    if result.get("kind").and_then(Value::as_str) != Some("full") {
+        return None;
+    }
+    let mut all: Vec<Diagnostic> = result.get("items")?.as_array()?.iter().filter_map(Diagnostic::parse).collect();
+    all.sort_by_key(|d| (d.severity, d.range.start));
+    let cut = all.len() > max;
+    all.truncate(max);
+    Some((all, cut))
 }
 
 /// Pfad aus einer `file:`-Adresse (`None` für andere Schemata). Windows: `C:\…` bzw. `\\server\share\…`.
@@ -543,6 +571,9 @@ mod tests {
         assert_eq!(read_message(&mut std::io::BufReader::new(&big[..]), 1000), Err(ReadError::TooLarge(999999)));
         let bad = b"Content-Length: x\r\n\r\n".to_vec();
         assert!(matches!(read_message(&mut std::io::BufReader::new(&bad[..]), 1000), Err(ReadError::Malformed(_))));
+        // Endlose Kopfzeile: abgelehnt, ohne alles zu lesen
+        let long = vec![b'x'; 1 << 20];
+        assert!(matches!(read_message(&mut std::io::BufReader::new(&long[..]), 1000), Err(ReadError::Malformed(_))));
         // Weitere Kopfzeilen (Content-Type) werden überlesen.
         let ct = b"Content-Type: application/vscode-jsonrpc; charset=utf-8\r\nContent-Length: 2\r\n\r\n{}".to_vec();
         assert_eq!(read_message(&mut std::io::BufReader::new(&ct[..]), 1000), Ok(json!({})));
@@ -554,7 +585,9 @@ mod tests {
             let a = answer_server_request(&json!(7), m, &json!({}));
             assert_eq!(a["error"]["code"], REQUEST_FAILED, "{m}");
         }
-        assert_eq!(answer_server_request(&json!(1), "workspace/configuration", &json!({"items": [{}, {}]}))["result"], json!([null, null]));
+        assert_eq!(answer_server_request(&json!(1), "workspace/configuration", &json!({"items": [{}, {}]}))["result"], json!([{}, {}]), "leere Objekte, nicht null");
+        assert!(parse_caps(&json!({"capabilities": {"diagnosticProvider": {"interFileDependencies": false}}})).pull_diagnostics);
+        assert!(!parse_caps(&json!({"capabilities": {}})).pull_diagnostics);
         assert_eq!(answer_server_request(&json!(1), "window/workDoneProgress/create", &json!({}))["result"], Value::Null);
         assert_eq!(answer_server_request(&json!("x"), "custom/thing", &json!({}))["error"]["code"], METHOD_NOT_FOUND);
         assert!(matches!(classify(json!({"id": 3, "result": [1]})), Some(Incoming::Response { id: 3, result: Ok(_) })));
@@ -601,5 +634,7 @@ mod tests {
         assert_eq!(path_to_uri("/home/u/a.py"), "file:///home/u/a.py");
         assert_eq!(uri_to_path("file:///home/u/a%20b.py", false).as_deref(), Some("/home/u/a b.py"));
         assert_eq!(uri_to_path("https://x/y", true), None);
+        assert_eq!(uri_key("file:///c%3A/Work/a.rs"), uri_key("file:///C:/Work/a.rs"));
+        assert_ne!(uri_key("file:///c:/work/a.rs"), uri_key("file:///c:/work/b.rs"));
     }
 }

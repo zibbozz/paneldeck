@@ -13,11 +13,45 @@ pub struct Trust {
     folders: Vec<PathBuf>,
 }
 
-/// Vergleichsform eines Pfads (Windows: ohne Groß/Klein, `\`, ohne Schrägstrich am Ende).
+/// Pfad lexikalisch bereinigen: `.` fällt weg, `..` nimmt den Ordner davor weg (wie Windows es tut); unter Unix
+/// zuerst der echte Pfad (`canonicalize`, Verknüpfungen aufgelöst), sonst ebenso lexikalisch. Nur im Hintergrund bzw.
+/// für schon bekannte Pfade aufrufen (Unix fragt die Platte).
+pub fn normalize(p: &Path) -> PathBuf {
+    #[cfg(unix)]
+    if let Ok(c) = std::fs::canonicalize(p) {
+        return c;
+    }
+    normalize_lexical(p)
+}
+
+/// Vergleichsform eines Pfads (Windows: bereinigt, ohne Groß/Klein, `\`, ohne Trenner am Ende; Unix: bereinigt, `\`
+/// bleibt ein gewöhnliches Zeichen).
 fn key(p: &Path) -> String {
-    let s = p.to_string_lossy().replace('/', "\\");
-    let s = s.trim_end_matches('\\');
-    if cfg!(windows) { s.to_lowercase() } else { s.replace('\\', "/") }
+    let p = normalize_lexical(p);
+    if cfg!(windows) {
+        let s = p.to_string_lossy().replace('/', "\\");
+        s.trim_end_matches('\\').to_lowercase()
+    } else {
+        let s = p.to_string_lossy().to_string();
+        s.trim_end_matches('/').to_string()
+    }
+}
+
+/// Wie [`normalize`], aber immer nur lexikalisch (ohne Plattenzugriff, für den UI-Thread).
+pub fn normalize_lexical(p: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for c in p.components() {
+        match c {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                if !out.pop() {
+                    out.push("..");
+                }
+            }
+            c => out.push(c.as_os_str()),
+        }
+    }
+    out
 }
 
 impl Trust {
@@ -50,11 +84,23 @@ impl Trust {
 
     /// Ordner vertrauen (schon enthalten = nichts).
     pub fn add(&mut self, folder: &Path) -> bool {
-        if !folder.is_absolute() || self.folders.iter().any(|f| key(f) == key(folder)) {
+        // Nie das ganze Dateisystem (`/` unter Unix ergäbe einen leeren Schlüssel): siehe [`Trust::check_folder`].
+        if !folder.is_absolute() || key(folder).is_empty() || self.folders.iter().any(|f| key(f) == key(folder)) {
             return false;
         }
-        self.folders.push(folder.to_path_buf());
+        self.folders.push(normalize_lexical(folder));
         true
+    }
+
+    /// Taugt `folder` als vertrauenswürdiger Ordner? Fehlertext (DE/EN) sonst.
+    pub fn check_folder(folder: &Path) -> Result<(), &'static str> {
+        if !folder.is_absolute() {
+            return Err(crate::state::t("Nur absolute Ordner.", "Only absolute folders."));
+        }
+        if key(folder).is_empty() {
+            return Err(crate::state::t("Dem ganzen Dateisystem (/) kann nicht vertraut werden.", "The whole file system (/) cannot be trusted."));
+        }
+        Ok(())
     }
 
     /// Vertrauen entziehen: `folder` selbst und alle Einträge darunter (liefert, ob sich etwas geändert hat).
@@ -101,6 +147,16 @@ mod tests {
         let mut b = back;
         assert!(b.remove(&root));
         assert!(!b.trusted(&inner));
+        // `..` wird aufgelöst: ein Ordner neben dem vertrauten ist nicht vertraut
+        if cfg!(windows) {
+            assert!(!t.trusted(Path::new(r"C:\Work\A\..\Evil\src")), "..");
+            assert!(t.trusted(Path::new(r"C:\Work\X\..\A\src")));
+        } else {
+            assert!(!t.trusted(Path::new("/work/a/../evil")));
+            assert!(Trust::check_folder(Path::new("/")).is_err());
+            assert!(!Trust::default().add(Path::new("/")));
+            assert_eq!(key(Path::new("/a\\b")), "/a\\b", "Backslash bleibt unter Unix");
+        }
         // UNC/WSL: nur genau der Ordner
         let mut u = Trust::default();
         if cfg!(windows) {

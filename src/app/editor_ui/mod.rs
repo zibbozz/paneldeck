@@ -389,6 +389,15 @@ impl EditorUi {
 
     /// Datei öffnen (oder ihren Reiter zeigen). `side`: in einer neuen Teilung rechts. Liefert das Dokument.
     pub(super) fn open_path(&mut self, path: &Path, side: bool) -> u64 {
+        // `.`/`..` lexikalisch auflösen (wie Windows selbst; Wege über das IPC `--edit`, Strg+Klick, Agenten, Dialoge):
+        // Pfad im Reiter und für Vertrauen/Projektwurzel ist dann der echte Ort (#367, Review).
+        let clean;
+        let path = if cfg!(windows) && path.components().any(|c| matches!(c, std::path::Component::CurDir | std::path::Component::ParentDir)) {
+            clean = crate::lsp::trust::normalize_lexical(path);
+            clean.as_path()
+        } else {
+            path
+        };
         let id = match self.doc_for_path(path) {
             Some(id) => id,
             None => {
