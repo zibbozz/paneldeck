@@ -545,9 +545,12 @@ impl App {
         let cur = self.themes.iter().find(|t| t.name == self.settings.theme).or(self.themes.first()).cloned();
         let Some(cur) = cur else { return };
         let editing = self.theme_ui.editor.is_some();
+        // Unter dem Bedienelement der Zeile „Theme“ (Spalte wie in `settings_items::srow`); beim Umbruch bleibt
+        // auch die zweite Zeile in dieser Spalte statt am linken Rand.
+        let indent = super::settings_items::label_width(ui.available_width()) + style::S3;
+        ui.horizontal(|ui| {
+        ui.add_space(indent - ui.spacing().item_spacing.x);
         ui.horizontal_wrapped(|ui| {
-            // Unter dem Bedienelement der Zeile „Theme“ (Spalte wie in `settings_items::srow`).
-            ui.add_space(super::settings_items::label_width(ui.available_width()) + style::S3 - ui.spacing().item_spacing.x);
             let (label, tip) = if cur.builtin {
                 (lang.t("Als Kopie bearbeiten …", "Edit as copy …"), lang.t("Eingebaute Themes sind schreibgeschützt; bearbeitet wird eine Kopie.", "Built-in themes are read-only; you edit a copy."))
             } else {
@@ -594,6 +597,7 @@ impl App {
                     }
                 }
             });
+        });
         });
         if !self.theme_issues.is_empty() {
             ui.add_space(4.0);

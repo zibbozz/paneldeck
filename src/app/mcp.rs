@@ -2702,7 +2702,8 @@ pub(super) fn level_selector(ui: &mut egui::Ui, level: &mut McpLevel, lang: Lang
     ] {
         ui.horizontal(|ui| {
             afford::choice_value(ui, level, lvl, title, 96.0); // gleich breite Knöpfe untereinander
-            ui.label(RichText::new(hint).small().color(style::dim(ui)));
+            // Umbrechen statt den Block zu verbreitern: sonst wird auch die Warnung darunter abgeschnitten.
+            ui.add(egui::Label::new(RichText::new(hint).small().color(style::dim(ui))).wrap());
         });
     }
 }
