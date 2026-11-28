@@ -225,8 +225,10 @@ pub fn resolve(lang: &str, own: Option<&Path>, own_args: &[String], disabled: &[
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(windows)]
     use std::collections::HashMap;
 
+    #[cfg(windows)]
     fn env<'a>(files: &'a HashMap<PathBuf, u64>, project: Option<&'a Path>, f: &'a dyn Fn(&Path) -> Option<u64>) -> Env<'a> {
         let _ = files;
         Env {
@@ -239,6 +241,8 @@ mod tests {
         }
     }
 
+    // Windows-Pfade (`C:\…`, PATHEXT, cmd.exe): unter Linux/macOS verbindet `Path::join` mit `/`.
+    #[cfg(windows)]
     #[test]
     fn path_lookup_skips_the_project_relative_entries_and_store_stubs() {
         let mut files: HashMap<PathBuf, u64> = HashMap::new();
