@@ -19,7 +19,9 @@ pub(super) fn trust_bar(ui: &mut Ui, r: Rect, root: &Path, lang: Lang, cmds: &mu
     if child.small_button(lang.t("Jetzt nicht", "Not now")).clicked() {
         cmds.push(Cmd::TrustNotNow(root.to_path_buf()));
     }
-    if child.small_button(lang.t("Übergeordneten Ordner vertrauen …", "Trust parent folder …")).clicked() {
+    // UNC/WSL: nur genau dieser Ordner (ein übergeordneter gälte dort nicht).
+    let unc = root.to_string_lossy().starts_with("\\\\");
+    if !unc && child.small_button(lang.t("Übergeordneten Ordner vertrauen …", "Trust parent folder …")).clicked() {
         cmds.push(Cmd::TrustPick(root.parent().unwrap_or(root).to_path_buf()));
     }
     if child.small_button(lang.t("Vertrauen", "Trust")).on_hover_text(root.display().to_string()).clicked() {
@@ -30,6 +32,29 @@ pub(super) fn trust_bar(ui: &mut Ui, r: Rect, root: &Path, lang: Lang, cmds: &mu
             format!("Smart-Modus: Ein Sprachserver liest und startet Dateien dieses Projekts. Ordner „{}“ vertrauen? Bis dahin: Syntax-Modus.", root.display())
         } else {
             format!("Smart mode: a language server reads and runs files of this project. Trust the folder “{}”? Until then: Syntax mode.", root.display())
+        };
+        ui.add(egui::Label::new(RichText::new(t).small()).truncate());
+    });
+}
+
+/// Hinweisleiste nach der Absturz-Regel: Smart ist für die Sprache bis zum Neustart aus – *Erneut versuchen*,
+/// *Protokoll zeigen*.
+pub(super) fn crash_bar(ui: &mut Ui, r: Rect, language: &str, lang: Lang, cmds: &mut Vec<Cmd>) {
+    let u = style::ui();
+    ui.painter().rect_filled(r, 0.0, u.error.gamma_multiply(0.12));
+    let mut child = ui.new_child(egui::UiBuilder::new().max_rect(r.shrink2(Vec2::new(10.0, 2.0))).layout(egui::Layout::right_to_left(egui::Align::Center)));
+    if child.small_button(lang.t("Protokoll zeigen", "Show log")).clicked() {
+        cmds.push(Cmd::SmartShowLog(language.to_string()));
+    }
+    if child.small_button(lang.t("Erneut versuchen", "Retry")).clicked() {
+        cmds.push(Cmd::SmartRetry(language.to_string()));
+    }
+    let name = crate::editor::syntax::language_name(language).unwrap_or(language);
+    child.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+        let t = if lang == Lang::De {
+            format!("Smart-Modus für {name} ist bis zum Neustart aus: Der Sprachserver ist mehrmals kurz hintereinander abgestürzt. Bis dahin: Syntax-Modus.")
+        } else {
+            format!("Smart mode for {name} is off until restart: the language server crashed several times in a short time. Until then: Syntax mode.")
         };
         ui.add(egui::Label::new(RichText::new(t).small()).truncate());
     });
@@ -47,7 +72,9 @@ pub(super) fn status_chip(ui: &mut Ui, ed: &mut EditorUi, doc: u64, lang: Lang, 
         State::NeedsTrust(_) | State::NotNow(_) => (lang.t("Smart: Ordner nicht vertraut", "Smart: folder not trusted").into(), lang.t("Bis zum Vertrauen läuft der Syntax-Modus.", "Syntax mode runs until you trust the folder.").into()),
         State::NoServer => (lang.t("Smart: kein Server", "Smart: no server").into(), lang.t("Für diese Sprache gibt es keinen Sprachserver im PATH und keinen eigenen Pfad (Einstellungen → Editor → Sprachen).", "There is no language server for this language in PATH and no own path (Settings → Editor → Languages).").into()),
         State::TooLarge => (lang.t("Smart: Datei zu groß", "Smart: file too large").into(), lang.t("Über der Grenze des Smart-Modus läuft der Syntax-Modus.", "Above the smart mode limit Syntax mode runs.").into()),
-        State::Unsupported => (lang.t("Smart: nicht für diese Datei", "Smart: not for this file").into(), lang.t("Nur gespeicherte lokale Dateien (WSL-Dateien folgen später).", "Only saved local files (WSL files follow later).").into()),
+        State::Unsupported => (lang.t("Smart: nicht für diese Datei", "Smart: not for this file").into(), lang.t("Nur gespeicherte Dateien, keine Netzwerkpfade.", "Only saved files, no network paths.").into()),
+        State::Resolving => (lang.t("Smart: sucht Server …", "Smart: looking for a server …").into(), lang.t("Projektwurzel und Server werden in WSL ermittelt.", "Project root and server are being looked up in WSL.").into()),
+        State::CrashedOff(_) => (lang.t("Smart: aus (Abstürze)", "Smart: off (crashes)").into(), lang.t("Der Server ist zu oft abgestürzt – Hinweisleiste: Erneut versuchen.", "The server crashed too often – bar: Retry.").into()),
         State::Stopped(w) => (lang.t("Smart: Server aus", "Smart: server off").into(), w.clone()),
     };
     let (e, w) = ed.smart.counts(doc);
@@ -172,8 +199,8 @@ pub(super) fn servers_window(ctx: &egui::Context, ed: &mut EditorUi, lang: Lang)
         if ed.smart.servers.entries.is_empty() {
             ui.label(RichText::new(lang.t("Noch kein Server gestartet. Smart-Modus in der Statusleiste wählen.", "No server started yet. Choose Smart mode in the status bar.")).color(style::dim(ui)));
         }
-        egui::Grid::new("ed_lsp_grid").num_columns(5).striped(true).spacing([10.0, 4.0]).show(ui, |ui| {
-            for h in [lang.t("Server", "Server"), lang.t("Ordner", "Folder"), lang.t("Zustand", "Status"), "PID", ""] {
+        egui::Grid::new("ed_lsp_grid").num_columns(6).striped(true).spacing([10.0, 4.0]).show(ui, |ui| {
+            for h in [lang.t("Server", "Server"), lang.t("Ordner", "Folder"), lang.t("Zustand", "Status"), "PID", lang.t("Speicher", "Memory"), ""] {
                 ui.label(RichText::new(h).small().strong());
             }
             ui.end_row();
@@ -187,6 +214,9 @@ pub(super) fn servers_window(ctx: &egui::Context, ed: &mut EditorUi, lang: Lang)
                 ui.label(RichText::new(e.root.display().to_string()).small());
                 ui.label(RichText::new(e.status()).small());
                 ui.label(RichText::new(e.client.as_ref().and_then(|c| c.pid).map(|p| p.to_string()).unwrap_or_else(|| "–".into())).small());
+                // Unter WSL zählt der Prozess in der Distribution, nicht `wsl.exe`: dort „–“.
+                let mem = if e.launch.lsp_root.is_some() { None } else { e.client.as_ref().and_then(|c| c.memory()) };
+                ui.label(RichText::new(mem.map(|m| format!("{:.0} MB", m as f64 / (1024.0 * 1024.0))).unwrap_or_else(|| "–".into())).small());
                 ui.horizontal(|ui| {
                     if ui.small_button(lang.t("Neu starten", "Restart")).clicked() {
                         action = Some((k.clone(), true));

@@ -90,6 +90,8 @@ pub struct Launch {
     pub found: PathBuf,
     /// Proxy von rustup: startet nur, wenn die Komponente installiert ist (sonst Hinweis bei sofortigem Ende).
     pub rustup_proxy: bool,
+    /// Server in WSL (#367): Projektwurzel als Linux-Pfad (für `rootUri`); `None` = Windows.
+    pub lsp_root: Option<String>,
 }
 
 /// Was die Suche braucht (in Tests ersetzbar).
@@ -169,9 +171,9 @@ pub fn launch_for(p: &Path, ext: &str, args: Vec<String>, env: &Env, size: u64) 
             line.push_str(&cmd_quote(a));
         }
         line.push('"');
-        return Launch { program: env.system32.join("cmd.exe"), args: vec!["/d".into(), "/s".into(), "/c".into(), line], found: p.to_path_buf(), rustup_proxy };
+        return Launch { program: env.system32.join("cmd.exe"), args: vec!["/d".into(), "/s".into(), "/c".into(), line], found: p.to_path_buf(), rustup_proxy, lsp_root: None };
     }
-    Launch { program: p.to_path_buf(), args, found: p.to_path_buf(), rustup_proxy }
+    Launch { program: p.to_path_buf(), args, found: p.to_path_buf(), rustup_proxy, lsp_root: None }
 }
 
 /// Argument für die Zeile von `cmd /c`: nur einfache Zeichen bleiben ungequotet; Sonderzeichen von cmd werden mit `^`
@@ -195,12 +197,13 @@ fn cmd_quote(a: &str) -> String {
     s
 }
 
-/// Server für eine Sprache: eigener Pfad (geht vor), sonst der erste gefundene eingebaute, der nicht abgewählt ist.
-pub fn resolve(lang: &str, own: Option<&Path>, disabled: &[String], env: &Env) -> Option<(String, Launch)> {
+/// Server für eine Sprache: eigener Pfad mit eigenen Argumenten (geht vor), sonst der erste gefundene eingebaute, der
+/// nicht abgewählt ist.
+pub fn resolve(lang: &str, own: Option<&Path>, own_args: &[String], disabled: &[String], env: &Env) -> Option<(String, Launch)> {
     if let Some(p) = own {
         let size = (env.is_file)(p)?;
         let ext = p.extension().map(|e| format!(".{}", e.to_string_lossy().to_ascii_lowercase())).unwrap_or_default();
-        return Some(("own".into(), launch_for(p, &ext, Vec::new(), env, size)));
+        return Some(("own".into(), launch_for(p, &ext, own_args.to_vec(), env, size)));
     }
     known(lang).iter().filter(|k| !disabled.iter().any(|d| d == k.id)).find_map(|k| find(k.program, k.args, env).map(|l| (k.id.to_string(), l)))
 }
@@ -235,22 +238,22 @@ mod tests {
         let f = |p: &Path| files.get(p).copied();
         let e = env(&files, Some(Path::new(r"C:\proj")), &f);
         // npm-Hülle über cmd.exe, nicht die im Projekt
-        let (id, l) = resolve("typescript", None, &[], &e).unwrap();
+        let (id, l) = resolve("typescript", None, &[], &[], &e).unwrap();
         assert_eq!(id, "typescript-language-server");
         assert_eq!(l.found, PathBuf::from(r"C:\Users\u\AppData\Roaming\npm\typescript-language-server.cmd"));
         assert_eq!(l.program, PathBuf::from(r"C:\Windows\System32\cmd.exe"));
         assert_eq!(l.args, vec!["/d", "/s", "/c", "\"\"C:\\Users\\u\\AppData\\Roaming\\npm\\typescript-language-server.cmd\" --stdio\""]);
         // relativer Eintrag „.“ zählt nicht
-        assert_eq!(resolve("c", None, &[], &e).unwrap().1.program, PathBuf::from(r"C:\tools\clangd.exe"));
+        assert_eq!(resolve("c", None, &[], &[], &e).unwrap().1.program, PathBuf::from(r"C:\tools\clangd.exe"));
         // Store-Platzhalter übersprungen
-        let (id, l) = resolve("python", None, &[], &e).unwrap();
+        let (id, l) = resolve("python", None, &[], &[], &e).unwrap();
         assert_eq!((id.as_str(), l.program.clone()), ("pylsp", PathBuf::from(r"C:\tools\pylsp.exe")));
         // rustup-Proxy erkannt
-        assert!(resolve("rust", None, &[], &e).unwrap().1.rustup_proxy);
+        assert!(resolve("rust", None, &[], &[], &e).unwrap().1.rustup_proxy);
         // abgewählt → nichts; eigener Pfad geht vor; unbekannte Sprache
-        assert!(resolve("python", None, &["pylsp".into()], &e).is_none());
-        assert_eq!(resolve("powershell", Some(Path::new(r"C:\tools\clangd.exe")), &[], &e).map(|x| x.0), Some("own".into()));
-        assert!(resolve("powershell", None, &[], &e).is_none());
+        assert!(resolve("python", None, &[], &["pylsp".into()], &e).is_none());
+        assert_eq!(resolve("powershell", Some(Path::new(r"C:\tools\clangd.exe")), &["-x".into()], &[], &e).map(|x| x.0), Some("own".into()));
+        assert!(resolve("powershell", None, &[], &[], &e).is_none());
         assert!(OWN_PATH_ONLY.iter().all(|l| known(l).is_empty()));
     }
 

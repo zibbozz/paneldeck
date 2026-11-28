@@ -2,9 +2,12 @@
 //! je Projektordner, Server starten, Text senden (sofort, ganzer Text), Diagnosen anzeigen (erst ~500 ms nach der
 //! letzten Änderung, veraltete fallen weg), Vervollständigen (Popup, Snippets mit Tab-Stopps), Problemliste und F8.
 //!
-//! Smart gilt nur für gespeicherte lokale Dateien bis zur Größengrenze in vertrauenswürdigen Ordnern; sonst läuft der
-//! Syntax-Modus weiter (die Statusleiste sagt warum). Nicht im Vergleichs-Reiter. WSL-Dateien bekommen in dieser Fassung
-//! noch keinen Server (Hinweis in der Statusleiste).
+//! Smart gilt nur für gespeicherte Dateien bis zur Größengrenze in vertrauenswürdigen Ordnern; sonst läuft der
+//! Syntax-Modus weiter (die Statusleiste sagt warum). Nicht im Vergleichs-Reiter. WSL-Dateien: der Server läuft in der
+//! Distribution (`wsl.exe -d <D> --cd <Wurzel> --exec <Server>`, gefunden im Linux-PATH), Adressen sind Linux-Pfade;
+//! Wurzel und Server werden im Hintergrund ermittelt, nie im UI-Thread. Nach `crash_max` Abstürzen in
+//! `crash_window_minutes` ist Smart für die Sprache bis zum Neustart aus (Hinweisleiste *Erneut versuchen* /
+//! *Protokoll zeigen*); Server ohne offenes Dokument enden nach `idle_minutes`.
 
 use super::doc::DocEntry;
 use super::{EditorPrefs, EditorUi};
@@ -16,8 +19,6 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-/// So lange nach der letzten Änderung werden Diagnosen wieder gezeigt.
-pub(super) const DIAG_PAUSE: Duration = Duration::from_millis(500);
 /// Pause nach zwei Wortzeichen, bevor die Vervollständigung von selbst fragt.
 pub(super) const AUTO_PAUSE: Duration = Duration::from_millis(100);
 /// Zeilen im Popup.
@@ -36,8 +37,12 @@ pub(crate) enum State {
     NotNow(PathBuf),
     NoServer,
     TooLarge,
-    /// Unbenannt bzw. WSL (noch nicht unterstützt).
+    /// Unbenannt bzw. Netzwerkpfad (kein Server).
     Unsupported,
+    /// WSL: Wurzel und Server werden im Hintergrund ermittelt.
+    Resolving,
+    /// Zu oft abgestürzt: Smart für diese Sprache bis zum Neustart aus (Hinweisleiste).
+    CrashedOff(String),
     Running(lsp::Key),
     Stopped(String),
 }
@@ -101,9 +106,42 @@ pub(crate) struct SmartUi {
     /// Von selbst fragen, sobald die Pause um ist: (Dokument, Gruppe, fällig).
     pub auto: Option<(u64, u64, Instant)>,
     ticket: u64,
+    /// WSL (#367): Wurzel und Server je (Ordner der Datei, Sprache), im Hintergrund ermittelt.
+    wsl: HashMap<(PathBuf, String), WslJob>,
     /// Ersatz für die Server-Suche (Tests).
     #[cfg(test)]
     pub test_resolve: Option<servers::Launch>,
+}
+
+/// Ergebnis der Suche für eine WSL-Datei.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct WslFound {
+    /// Projektwurzel als UNC-Pfad (Vertrauen, Schlüssel) und als Linux-Pfad (`--cd`, `rootUri`).
+    pub root_unc: PathBuf,
+    pub root_linux: String,
+    /// Server: (Kennung, Start über `wsl.exe`).
+    pub server: Option<(String, servers::Launch)>,
+}
+
+enum WslJob {
+    Pending(std::sync::mpsc::Receiver<Option<WslFound>>),
+    Done(Instant, Option<WslFound>),
+}
+
+/// Hintergrund: Projektwurzel einer WSL-Datei (Markierungsdateien über den UNC-Pfad, nie über die Distribution
+/// hinaus) und den ersten eingebauten Server im Linux-PATH der Distribution suchen.
+pub(crate) fn wsl_resolve(file: &Path, lang: &str, disabled: &[String]) -> Option<WslFound> {
+    let (distro, _) = crate::wsl::unc_to_linux(&file.to_string_lossy())?;
+    let top = PathBuf::from(crate::wsl::linux_to_unc(&distro, "/"));
+    let exists = |p: &Path| p.exists();
+    let root_unc = client::project_root(file, lang, &exists, Some(&top));
+    let (_, root_linux) = crate::wsl::unc_to_linux(&root_unc.to_string_lossy())?;
+    let server = servers::known(lang).iter().filter(|k| !disabled.iter().any(|d| d == k.id)).find_map(|k| {
+        let prog = crate::wsl::find_program(&distro, k.program)?;
+        let args = crate::wsl::server_args(&distro, &root_linux, &prog, k.args)?;
+        Some((k.id.to_string(), servers::Launch { program: crate::wsl::exe_path(), args, found: PathBuf::from(&prog), rustup_proxy: false, lsp_root: Some(root_linux.clone()) }))
+    });
+    Some(WslFound { root_unc, root_linux, server })
 }
 
 impl SmartUi {
@@ -133,7 +171,7 @@ fn wanted(e: &mut DocEntry, prefs: &EditorPrefs, settings: &lsp::SmartSettings) 
         return Err(State::Off);
     }
     let Some(path) = e.path.clone() else { return Err(State::Unsupported) };
-    if super::doc::is_wsl_path(&path) || crate::pathfmt::is_remote_unc(&path.to_string_lossy()) {
+    if !super::doc::is_wsl_path(&path) && crate::pathfmt::is_remote_unc(&path.to_string_lossy()) {
         return Err(State::Unsupported);
     }
     if e.doc.as_ref().is_some_and(|d| d.len_bytes() as u64 > settings.max_file_bytes()) {
@@ -161,28 +199,89 @@ impl EditorUi {
                     continue;
                 }
             };
-            let exists = |p: &Path| p.exists();
-            let root = client::project_root(&path, &lang, &exists, home.as_deref());
+            if self.smart.servers.off.contains(&lang) {
+                self.smart.state.insert(id, State::CrashedOff(lang));
+                continue;
+            }
+            let disabled: Vec<String> = settings.disabled.get(&lang).cloned().unwrap_or_default();
+            let wsl = super::doc::is_wsl_path(&path);
+            let (root, uri_path, found) = if wsl {
+                // WSL: Wurzel und Server im Hintergrund (nie im UI-Thread), Ergebnis eine Weile gemerkt.
+                let wk = (path.parent().map(Path::to_path_buf).unwrap_or_default(), lang.clone());
+                let job = self.smart.wsl.remove(&wk);
+                let res = match job {
+                    Some(WslJob::Done(at, r)) if now.duration_since(at) < RESOLVE_TTL => {
+                        self.smart.wsl.insert(wk.clone(), WslJob::Done(at, r.clone()));
+                        Some(r)
+                    }
+                    Some(WslJob::Pending(rx)) => match rx.try_recv() {
+                        Ok(r) => {
+                            self.smart.wsl.insert(wk.clone(), WslJob::Done(now, r.clone()));
+                            Some(r)
+                        }
+                        Err(std::sync::mpsc::TryRecvError::Empty) => {
+                            self.smart.wsl.insert(wk.clone(), WslJob::Pending(rx));
+                            None
+                        }
+                        Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                            self.smart.wsl.insert(wk.clone(), WslJob::Done(now, None));
+                            Some(None)
+                        }
+                    },
+                    _ => {
+                        let (tx, rx) = std::sync::mpsc::channel();
+                        let (p, l, dis) = (path.clone(), lang.clone(), disabled.clone());
+                        std::thread::spawn(move || {
+                            let _ = tx.send(wsl_resolve(&p, &l, &dis));
+                        });
+                        self.smart.wsl.insert(wk.clone(), WslJob::Pending(rx));
+                        None
+                    }
+                };
+                let Some(res) = res else {
+                    self.smart.state.insert(id, State::Resolving);
+                    busy = true;
+                    continue;
+                };
+                let Some(f) = res else {
+                    self.smart.state.insert(id, State::NoServer);
+                    continue;
+                };
+                let file_linux = crate::wsl::unc_to_linux(&path.to_string_lossy()).map(|(_, l)| l).unwrap_or_default();
+                (f.root_unc.clone(), file_linux, Some(f.server))
+            } else {
+                let exists = |p: &Path| p.exists();
+                (client::project_root(&path, &lang, &exists, home.as_deref()), path.to_string_lossy().to_string(), None)
+            };
             if !self.smart.trust.get_or_insert_with(|| Trust::load(data)).trusted(&root) {
                 let s = if self.smart.not_now.contains(&root) { State::NotNow(root) } else { State::NeedsTrust(root) };
                 self.smart.state.insert(id, s);
                 continue;
             }
-            let rk = (lang.clone(), root.clone());
-            let fresh = self.smart.resolved.get(&rk).is_some_and(|(at, _)| now.duration_since(*at) < RESOLVE_TTL);
-            if !fresh {
-                #[cfg(test)]
-                let found = self.smart.test_resolve.clone().map(|l| ("test".to_string(), l));
-                #[cfg(not(test))]
-                let found = {
-                    let env = servers::Env::system(Some(&root));
-                    servers::resolve(&lang, settings.own_paths.get(&lang).map(PathBuf::as_path), settings.disabled.get(&lang).map(Vec::as_slice).unwrap_or(&[]), &env)
-                };
-                self.smart.resolved.insert(rk.clone(), (now, found));
-            }
-            let found = self.smart.resolved.get(&rk).and_then(|(_, f)| f.clone());
+            let found = match found {
+                Some(f) => f,
+                None => {
+                    let rk = (lang.clone(), root.clone());
+                    let fresh = self.smart.resolved.get(&rk).is_some_and(|(at, _)| now.duration_since(*at) < RESOLVE_TTL);
+                    if !fresh {
+                        #[cfg(test)]
+                        let found = self.smart.test_resolve.clone().map(|l| ("test".to_string(), l));
+                        #[cfg(not(test))]
+                        let found = {
+                            let env = servers::Env::system(Some(&root));
+                            servers::resolve(&lang, settings.own_paths.get(&lang).map(PathBuf::as_path), settings.own_args.get(&lang).map(Vec::as_slice).unwrap_or(&[]), &disabled, &env)
+                        };
+                        self.smart.resolved.insert(rk.clone(), (now, found));
+                    }
+                    self.smart.resolved.get(&rk).and_then(|(_, f)| f.clone())
+                }
+            };
             let r = self.smart.servers.ensure(&lang, &root, settings, &|_| found.clone());
             let key = match r {
+                lsp::Ensure::CrashedOff => {
+                    self.smart.state.insert(id, State::CrashedOff(lang));
+                    continue;
+                }
                 lsp::Ensure::Running(k) => k,
                 lsp::Ensure::NoServer => {
                     self.smart.state.insert(id, State::NoServer);
@@ -198,7 +297,7 @@ impl EditorUi {
             let Some(e) = self.docs.get(&id) else { continue };
             let Some(doc) = e.doc.as_ref() else { continue };
             let rev = doc.revision();
-            let uri = proto::path_to_uri(&path.to_string_lossy());
+            let uri = proto::path_to_uri(&uri_path);
             let Some(c) = self.smart.servers.client(&key) else { continue };
             let entry = self.smart.docs.get(&id);
             if entry.is_none_or(|d| d.key != key) {
@@ -210,7 +309,7 @@ impl EditorUi {
                 let Some(c) = self.smart.servers.client(&key) else { continue };
                 c.open(&uri, &lang, &doc.text());
                 let encoding = c.caps.encoding;
-                self.smart.docs.insert(id, DocLsp { key: key.clone(), uri, sent_rev: rev, edited_at: now - DIAG_PAUSE, encoding });
+                self.smart.docs.insert(id, DocLsp { key: key.clone(), uri, sent_rev: rev, edited_at: now - settings.typing_pause(), encoding });
             } else if entry.is_some_and(|d| d.sent_rev != rev) {
                 c.change(&uri, &doc.text());
                 if let Some(d) = self.smart.docs.get_mut(&id) {
@@ -222,6 +321,8 @@ impl EditorUi {
                 self.smart.shown.remove(&id);
             }
         }
+        // Server ohne offenes Dokument enden nach der Leerlaufzeit.
+        self.smart.servers.end_idle(settings.idle());
         // Dokumente, die nicht mehr im Smart-Modus laufen (geschlossen, anderer Modus): beim Server schließen.
         let gone: Vec<u64> = self.smart.docs.keys().filter(|d| !alive.contains(d)).copied().collect();
         for id in gone {
@@ -240,7 +341,7 @@ impl EditorUi {
                 let d = &self.smart.docs[&id];
                 (d.key.clone(), d.uri.clone(), d.edited_at, d.encoding)
             };
-            if now.duration_since(edited_at) < DIAG_PAUSE {
+            if now.duration_since(edited_at) < settings.typing_pause() {
                 busy = true;
                 continue;
             }
@@ -310,6 +411,20 @@ impl EditorUi {
         if let Some(c) = self.smart.servers.client(&key) {
             c.saved(&uri, &text);
         }
+    }
+
+    /// *Erneut versuchen* nach der Absturz-Regel: Smart für die Sprache wieder an.
+    pub(crate) fn smart_retry(&mut self, lang: &str) {
+        self.smart.servers.retry(lang);
+        if let Some(k) = self.smart.servers.key_of_language(lang) {
+            self.smart.servers.restart(&k);
+        }
+    }
+
+    /// *Protokoll zeigen*: Fenster „Language Server“ mit dem Server der Sprache.
+    pub(crate) fn smart_show_log(&mut self, lang: &str) {
+        self.smart.window_sel = self.smart.servers.key_of_language(lang);
+        self.smart.window_open = true;
     }
 
     /// Vertrauen entziehen: die Server dort enden sofort.
@@ -717,7 +832,7 @@ mod tests {
         let prefs = EditorPrefs::default();
         let settings = lsp::SmartSettings::default();
         let mut ed = EditorUi::default();
-        ed.smart.test_resolve = Some(servers::Launch { program: exe.clone(), args: vec![], found: exe, rustup_proxy: false });
+        ed.smart.test_resolve = Some(servers::Launch { program: exe.clone(), args: vec![], found: exe, rustup_proxy: false, lsp_root: None });
         let id = ed.open_path(&file, false);
         ed.docs.get_mut(&id).unwrap().ensure_loaded_now(&prefs);
         ed.smart_tick(&prefs, &settings, &data);

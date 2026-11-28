@@ -356,7 +356,7 @@ impl App {
         ui.label(RichText::new(lang.t("Formatiert wird nie von allein: nur auf Knopfdruck oder beim Speichern über eine Regel mit der Aktion Formatieren (Abschnitt „Aktionen beim Speichern“; Menü Format → Beim Speichern formatieren …).", "Nothing is ever formatted automatically: only on demand, or on save through a rule with the Format action (section “Actions on save”; Format menu → Format on save …).")).small().color(style::dim(ui)));
     }
 
-    /// Abschnitt „Smart-Modus“ (#367): Vervollständigen, Grenzen, Server je Sprache (eingebaute abwählen, eigener Pfad),
+    /// Abschnitt „Smart-Modus“ (#367); `initializationOptions` je Sprache nur über `settings.json` (`editor.smart.init_options`).: Vervollständigen, Grenzen, Server je Sprache (eingebaute abwählen, eigener Pfad),
     /// vertrauenswürdige Ordner (entziehen beendet die Server dort sofort).
     fn editor_smart_ui(&mut self, ui: &mut Ui) {
         use crate::lsp::{self, servers};
@@ -381,6 +381,13 @@ impl App {
         row(ui, lang.t("Diagnosen je Datei", "Diagnostics per file"), "", |ui| num(ui, &mut s.max_diagnostics, lsp::MAX_DIAGNOSTICS_RANGE, ""));
         row(ui, lang.t("Größte Nachricht", "Largest message"), "", |ui| num(ui, &mut s.max_message_mb, lsp::MAX_MESSAGE_MB_RANGE, " MB"));
         row(ui, lang.t("Smart-Modus bis", "Smart mode up to"), lang.t("Größere Dateien: Syntax-Modus", "Larger files: Syntax mode"), |ui| num(ui, &mut s.max_file_mb, lsp::MAX_FILE_MB_RANGE, " MB"));
+        row(ui, lang.t("Leerlauf beendet Server nach", "Idle server ends after"), lang.t("Ohne offenes Dokument", "Without an open document"), |ui| num(ui, &mut s.idle_minutes, lsp::IDLE_MINUTES_RANGE, " min"));
+        row(ui, lang.t("Tipp-Pause für Diagnosen", "Typing pause for diagnostics"), "", |ui| num(ui, &mut s.typing_pause_ms, lsp::TYPING_PAUSE_RANGE, " ms"));
+        row(ui, lang.t("Abstürze bis „aus“", "Crashes until “off”"), lang.t("So viele Abstürze im Zeitraum: Smart für die Sprache bis zum Neustart aus", "This many crashes in the period: smart mode off for the language until restart"), |ui| {
+            num(ui, &mut s.crash_max, lsp::CRASH_MAX_RANGE, "");
+            ui.label(lang.t("in", "in"));
+            num(ui, &mut s.crash_window_minutes, lsp::CRASH_WINDOW_RANGE, " min");
+        });
         egui::CollapsingHeader::new(lang.t("Server je Sprache", "Servers per language")).id_salt("editor_smart_servers").show(ui, |ui| {
             ui.label(RichText::new(lang.t("Häkchen = eingebauter Server darf genutzt werden (der erste gefundene gewinnt); ein eigener Pfad (absolut, ohne Argumente) geht vor.", "Checked = the built-in server may be used (the first one found wins); an own path (absolute, without arguments) comes first.")).small().color(style::dim(ui)));
             egui::Grid::new("editor_smart_grid").num_columns(3).spacing([12.0, 4.0]).striped(true).show(ui, |ui| {
@@ -402,15 +409,27 @@ impl App {
                             ui.label(RichText::new(lang.t("nur eigener Pfad", "own path only")).small().color(style::dim(ui)));
                         }
                     });
-                    let mut txt = s.own_paths.get(l.id).map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
-                    if ui.add(egui::TextEdit::singleline(&mut txt).desired_width(220.0).hint_text(lang.t("eigener Pfad …", "own path …"))).changed() {
-                        let p = std::path::PathBuf::from(txt.trim());
-                        if txt.trim().is_empty() {
-                            s.own_paths.remove(l.id);
-                        } else if p.is_absolute() {
-                            s.own_paths.insert(l.id.to_string(), p);
+                    ui.horizontal(|ui| {
+                        let mut txt = s.own_paths.get(l.id).map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
+                        if ui.add(egui::TextEdit::singleline(&mut txt).desired_width(200.0).hint_text(lang.t("eigener Pfad …", "own path …"))).changed() {
+                            let p = std::path::PathBuf::from(txt.trim());
+                            if txt.trim().is_empty() {
+                                s.own_paths.remove(l.id);
+                            } else if p.is_absolute() {
+                                s.own_paths.insert(l.id.to_string(), p);
+                            }
                         }
-                    }
+                        // Argumente durch Leerzeichen getrennt (ein Argument mit Leerzeichen: in "…").
+                        let mut args = s.own_args.get(l.id).map(|a| a.iter().map(|x| if x.contains(' ') { format!("\"{x}\"") } else { x.clone() }).collect::<Vec<_>>().join(" ")).unwrap_or_default();
+                        if ui.add(egui::TextEdit::singleline(&mut args).desired_width(140.0).hint_text(lang.t("Argumente", "arguments"))).changed() {
+                            let v = split_args(&args);
+                            if v.is_empty() {
+                                s.own_args.remove(l.id);
+                            } else {
+                                s.own_args.insert(l.id.to_string(), v);
+                            }
+                        }
+                    });
                     ui.end_row();
                 }
             });
@@ -943,5 +962,42 @@ impl EditorHost for BridgeHost<'_> {
 
     fn hidden(&self, path: &Path) -> bool {
         super::mcp::access_gate::path_hidden(path, &self.hidden)
+    }
+}
+
+/// Argumente aus einer Zeile (Leerzeichen trennen, `"…"` hält zusammen) – für den eigenen Server (#367).
+fn split_args(s: &str) -> Vec<String> {
+    let mut v = Vec::new();
+    let mut cur = String::new();
+    let mut quoted = false;
+    let mut any = false;
+    for c in s.chars() {
+        match c {
+            '"' => {
+                quoted = !quoted;
+                any = true;
+            }
+            ' ' | '\t' if !quoted => {
+                if any || !cur.is_empty() {
+                    v.push(std::mem::take(&mut cur));
+                }
+                any = false;
+            }
+            c => cur.push(c),
+        }
+    }
+    if any || !cur.is_empty() {
+        v.push(cur);
+    }
+    v
+}
+
+#[cfg(test)]
+mod smart_settings_tests {
+    #[test]
+    fn own_server_arguments_split_on_spaces_and_keep_quotes_together() {
+        assert_eq!(super::split_args(r#"-NoLogo -File "C:\a b\x.ps1"  --stdio"#), vec!["-NoLogo", "-File", r"C:\a b\x.ps1", "--stdio"]);
+        assert!(super::split_args("  ").is_empty());
+        assert_eq!(super::split_args("\"\""), vec![String::new()]);
     }
 }

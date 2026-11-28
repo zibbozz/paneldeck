@@ -143,7 +143,7 @@ pub struct Client {
 
 impl Client {
     /// Mit fertigen Strömen (Tests, Prozess): startet Lese- und Schreibfaden und sendet `initialize`.
-    pub fn with_streams(read: Box<dyn Read + Send>, write: Box<dyn Write + Send>, root: &Path, limits: ClientLimits) -> Client {
+    pub fn with_streams(read: Box<dyn Read + Send>, write: Box<dyn Write + Send>, root: &Path, limits: ClientLimits, init: Option<Value>) -> Client {
         let (tx, wrx) = mpsc::channel::<Value>();
         let (etx, rx) = mpsc::channel::<Event>();
         // Schreibfaden
@@ -213,13 +213,17 @@ impl Client {
         let root_s = root.to_string_lossy().to_string();
         let uri = proto::path_to_uri(&root_s);
         let name = root.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| root_s.clone());
-        c.request(Pending::Initialize, "initialize", proto::initialize_params(std::process::id(), &uri, &name));
+        let mut params = proto::initialize_params(std::process::id(), &uri, &name);
+        if let Some(o) = init {
+            params["initializationOptions"] = o;
+        }
+        c.request(Pending::Initialize, "initialize", params);
         c
     }
 
     /// Server starten: `program` mit `args` im Ordner `cwd`, ohne Fenster, in einem eigenen Job Object (endet mit
     /// Paneldeck), Fehlerausgabe ins Protokoll.
-    pub fn spawn(program: &Path, args: &[String], cwd: &Path, root: &Path, limits: ClientLimits) -> Result<Client, String> {
+    pub fn spawn(program: &Path, args: &[String], cwd: &Path, root: &Path, limits: ClientLimits, init: Option<Value>) -> Result<Client, String> {
         let mut cmd = std::process::Command::new(program);
         cmd.args(args).current_dir(cwd).stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
         crate::platform::process::hide_window(&mut cmd);
@@ -241,7 +245,7 @@ impl Client {
         let out = child.stdout.take().ok_or("no stdout")?;
         let inp = child.stdin.take().ok_or("no stdin")?;
         let err = child.stderr.take();
-        let mut c = Client::with_streams(Box::new(out), Box::new(inp), root, limits);
+        let mut c = Client::with_streams(Box::new(out), Box::new(inp), root, limits, init);
         c.pid = Some(pid);
         c.process = Some(child);
         c.job = job;
@@ -304,6 +308,23 @@ impl Client {
         // Diagnosen für einen älteren Stand sind ab jetzt veraltet (die Oberfläche zeigt sie nicht mehr an).
         self.last_used = Instant::now();
         Some(version)
+    }
+
+    pub fn open_docs(&self) -> usize {
+        self.docs.len()
+    }
+
+    /// Arbeitsspeicher des Prozesses (Bytes; unter WSL nur der von `wsl.exe`, darum dort `None`).
+    pub fn memory(&self) -> Option<u64> {
+        #[cfg(windows)]
+        {
+            use std::os::windows::io::AsRawHandle;
+            self.process.as_ref().and_then(|p| crate::platform::process::working_set(p.as_raw_handle()))
+        }
+        #[cfg(not(windows))]
+        {
+            None
+        }
     }
 
     pub fn version(&self, uri: &str) -> Option<i64> {
@@ -615,7 +636,7 @@ pub(crate) mod tests {
                 }
             }
         });
-        let c = Client::with_streams(Box::new(c_read), Box::new(c_write), Path::new(r"C:\proj"), ClientLimits::default());
+        let c = Client::with_streams(Box::new(c_read), Box::new(c_write), Path::new(r"C:\proj"), ClientLimits::default(), Some(json!({"x": 1})));
         (c, Fake { to_client: Some(s_write) })
     }
 
@@ -658,6 +679,7 @@ pub(crate) mod tests {
         }
         let methods: Vec<String> = seen.lock().unwrap().iter().filter_map(|m| m.get("method").and_then(Value::as_str).map(str::to_string)).collect();
         assert_eq!(&methods[..3], &["initialize".to_string(), "initialized".to_string(), "textDocument/didOpen".to_string()]);
+        assert_eq!(seen.lock().unwrap()[0]["params"]["initializationOptions"], json!({"x": 1}));
         // Ändern: neue Version; Schließen nimmt die Diagnosen weg
         assert_eq!(c.change("file:///c:/proj/a.rs", "fn main() { }"), Some(2));
         c.close("file:///c:/proj/a.rs");
@@ -702,8 +724,10 @@ pub(crate) mod tests {
             return;
         };
         let dir = std::env::temp_dir();
-        let mut c = Client::spawn(&exe, &[], &dir, &dir, ClientLimits::default()).expect("startet");
+        let mut c = Client::spawn(&exe, &[], &dir, &dir, ClientLimits::default(), None).expect("startet");
         assert!(c.pid.is_some());
+        #[cfg(windows)]
+        assert!(c.memory().is_some_and(|m| m > 0), "Arbeitsspeicher");
         c.open("file:///c:/t/a.rs", "rust", "abc");
         wait(&mut c, |c| c.diagnostics.contains_key("file:///c:/t/a.rs"));
         assert_eq!(c.diagnostics["file:///c:/t/a.rs"].items[0].message, "fake error");

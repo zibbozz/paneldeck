@@ -37,6 +37,19 @@ pub struct SmartSettings {
     pub auto_complete: bool,
     /// Mitschnitt der Nachrichten im Protokoll (nur im Speicher), Standard aus.
     pub trace: bool,
+    /// Ein Server ohne offenes Dokument endet nach so vielen Minuten, Standard 10 (Grenze aus dem Issue).
+    pub idle_minutes: u32,
+    /// Tipp-Pause, nach der Diagnosen wieder gezeigt werden (ms), Standard 500.
+    pub typing_pause_ms: u32,
+    /// Nach so vielen Abstürzen …, Standard 3 …
+    pub crash_max: u32,
+    /// … innerhalb so vieler Minuten ist der Smart-Modus für die Sprache bis zum Neustart aus (Hinweis mit *Erneut
+    /// versuchen* und *Protokoll zeigen*), Standard 5.
+    pub crash_window_minutes: u32,
+    /// Argumente des eigenen Servers je Sprache.
+    pub own_args: BTreeMap<String, Vec<String>>,
+    /// `initializationOptions` je Sprache (beliebiges JSON, nur über `settings.json`).
+    pub init_options: BTreeMap<String, Value>,
     /// Eigener Server je Sprache (absoluter Pfad, ohne Argumente).
     pub own_paths: BTreeMap<String, PathBuf>,
     /// Abgewählte eingebaute Server je Sprache (Kennungen aus [`servers::known`]).
@@ -48,10 +61,30 @@ pub const COMPLETION_TIMEOUT_RANGE: (u32, u32) = (500, 60_000);
 pub const MAX_DIAGNOSTICS_RANGE: (u32, u32) = (10, 100_000);
 pub const MAX_MESSAGE_MB_RANGE: (u32, u32) = (1, 1024);
 pub const MAX_FILE_MB_RANGE: (u32, u32) = (1, 1024);
+pub const IDLE_MINUTES_RANGE: (u32, u32) = (1, 1440);
+pub const TYPING_PAUSE_RANGE: (u32, u32) = (50, 10_000);
+pub const CRASH_MAX_RANGE: (u32, u32) = (1, 100);
+pub const CRASH_WINDOW_RANGE: (u32, u32) = (1, 1440);
 
 impl Default for SmartSettings {
     fn default() -> Self {
-        SmartSettings { max_servers: 6, completion_timeout_ms: 5000, max_diagnostics: 1000, max_message_mb: 64, max_file_mb: 5, auto_complete: true, trace: false, own_paths: BTreeMap::new(), disabled: BTreeMap::new() }
+        SmartSettings {
+            max_servers: 6,
+            completion_timeout_ms: 5000,
+            max_diagnostics: 1000,
+            max_message_mb: 64,
+            max_file_mb: 5,
+            auto_complete: true,
+            trace: false,
+            idle_minutes: 10,
+            typing_pause_ms: 500,
+            crash_max: 3,
+            crash_window_minutes: 5,
+            own_args: BTreeMap::new(),
+            init_options: BTreeMap::new(),
+            own_paths: BTreeMap::new(),
+            disabled: BTreeMap::new(),
+        }
     }
 }
 
@@ -68,6 +101,16 @@ impl SmartSettings {
             max_file_mb: num("max_file_mb", d.max_file_mb, MAX_FILE_MB_RANGE),
             auto_complete: o.get("auto_complete").and_then(Value::as_bool) != Some(false),
             trace: o.get("trace").and_then(Value::as_bool) == Some(true),
+            idle_minutes: num("idle_minutes", d.idle_minutes, IDLE_MINUTES_RANGE),
+            typing_pause_ms: num("typing_pause_ms", d.typing_pause_ms, TYPING_PAUSE_RANGE),
+            crash_max: num("crash_max", d.crash_max, CRASH_MAX_RANGE),
+            crash_window_minutes: num("crash_window_minutes", d.crash_window_minutes, CRASH_WINDOW_RANGE),
+            own_args: o
+                .get("own_args")
+                .and_then(Value::as_object)
+                .map(|m| m.iter().filter_map(|(k, v)| Some((k.chars().take(100).collect::<String>(), v.as_array()?.iter().filter_map(Value::as_str).map(|s| s.chars().take(1000).collect()).take(50).collect()))).take(200).collect())
+                .unwrap_or_default(),
+            init_options: o.get("init_options").and_then(Value::as_object).map(|m| m.iter().filter(|(_, v)| v.to_string().len() <= 64 * 1024).map(|(k, v)| (k.chars().take(100).collect::<String>(), v.clone())).take(200).collect()).unwrap_or_default(),
             own_paths: o
                 .get("own_paths")
                 .and_then(Value::as_object)
@@ -90,6 +133,12 @@ impl SmartSettings {
             "max_file_mb": self.max_file_mb,
             "auto_complete": self.auto_complete,
             "trace": self.trace,
+            "idle_minutes": self.idle_minutes,
+            "typing_pause_ms": self.typing_pause_ms,
+            "crash_max": self.crash_max,
+            "crash_window_minutes": self.crash_window_minutes,
+            "own_args": self.own_args.iter().map(|(k, v)| (k.clone(), json!(v))).collect::<serde_json::Map<_, _>>(),
+            "init_options": self.init_options.iter().map(|(k, v)| (k.clone(), v.clone())).collect::<serde_json::Map<_, _>>(),
             "own_paths": self.own_paths.iter().map(|(k, v)| (k.clone(), Value::String(v.to_string_lossy().to_string()))).collect::<serde_json::Map<_, _>>(),
             "disabled": self.disabled.iter().map(|(k, v)| (k.clone(), json!(v))).collect::<serde_json::Map<_, _>>(),
         })
@@ -107,6 +156,18 @@ impl SmartSettings {
     pub fn max_file_bytes(&self) -> u64 {
         self.max_file_mb as u64 * 1024 * 1024
     }
+
+    pub fn typing_pause(&self) -> Duration {
+        Duration::from_millis(self.typing_pause_ms as u64)
+    }
+
+    pub fn idle(&self) -> Duration {
+        Duration::from_secs(self.idle_minutes as u64 * 60)
+    }
+
+    pub fn crash_window(&self) -> Duration {
+        Duration::from_secs(self.crash_window_minutes as u64 * 60)
+    }
 }
 
 impl serde::Serialize for SmartSettings {
@@ -122,10 +183,6 @@ impl<'de> serde::Deserialize<'de> for SmartSettings {
     }
 }
 
-/// Wie lange ein abgestürzter Server neu gestartet wird: höchstens so oft …
-const MAX_RESTARTS: u32 = 3;
-/// … innerhalb dieser Zeit; danach bleibt er aus (Meldung, *Neu starten* im Fenster „Language Server“).
-const RESTART_WINDOW: Duration = Duration::from_secs(180);
 
 /// Schlüssel eines Servers: Sprache des Servers (Kennung) und Projektwurzel.
 pub type Key = (String, PathBuf);
@@ -137,10 +194,10 @@ pub struct Entry {
     pub root: PathBuf,
     pub launch: servers::Launch,
     pub client: Option<client::Client>,
-    /// Starts in [`RESTART_WINDOW`] (Absturz-Behandlung).
-    restarts: Vec<Instant>,
-    /// Aufgegeben (zu oft abgestürzt) bzw. vom Nutzer angehalten.
+    /// Vom Nutzer angehalten bzw. Start gescheitert (Grund).
     pub stopped: Option<String>,
+    /// Absturz schon gezählt (der beendete Client wartet auf den Neustart).
+    counted: bool,
 }
 
 impl Entry {
@@ -161,6 +218,10 @@ impl Entry {
 #[derive(Default)]
 pub struct Servers {
     pub entries: BTreeMap<Key, Entry>,
+    /// Abstürze je Sprache (Zeitpunkte, für die Absturz-Regel).
+    crashes: BTreeMap<String, Vec<Instant>>,
+    /// Sprachen, für die der Smart-Modus in dieser Sitzung aus ist (zu oft abgestürzt).
+    pub off: std::collections::BTreeSet<String>,
 }
 
 /// Ergebnis von [`Servers::ensure`].
@@ -169,8 +230,10 @@ pub enum Ensure {
     Running(Key),
     /// Für die Sprache gibt es keinen Server (weder im PATH noch eigener Pfad).
     NoServer,
-    /// Zu oft abgestürzt bzw. angehalten.
+    /// Angehalten bzw. Start gescheitert.
     Stopped(String),
+    /// Zu oft abgestürzt: für die Sprache in dieser Sitzung aus (Hinweis mit *Erneut versuchen*).
+    CrashedOff,
     /// Start gescheitert (Fehlertext).
     Failed(String),
 }
@@ -178,31 +241,41 @@ pub enum Ensure {
 impl Servers {
     /// Server für eine Datei sicherstellen (startet ihn bei Bedarf). `resolve` sucht den Server (Tests ersetzbar).
     pub fn ensure(&mut self, lang: &str, root: &Path, settings: &SmartSettings, resolve: &dyn Fn(&str) -> Option<(String, servers::Launch)>) -> Ensure {
+        if self.off.contains(lang) {
+            return Ensure::CrashedOff;
+        }
         let Some((server, launch)) = resolve(lang) else { return Ensure::NoServer };
         let key: Key = (server.clone(), root.to_path_buf());
+        let now = Instant::now();
         if let Some(e) = self.entries.get_mut(&key) {
             if let Some(why) = &e.stopped {
                 return Ensure::Stopped(why.clone());
             }
-            let alive = e.client.as_ref().is_some_and(|c| !matches!(c.state, client::State::Exited(_)));
-            if alive {
-                return Ensure::Running(key);
-            }
-            // Abgestürzt: neu starten, höchstens MAX_RESTARTS-mal im Zeitfenster.
-            let now = Instant::now();
-            e.restarts.retain(|t| now.duration_since(*t) < RESTART_WINDOW);
-            if e.restarts.len() as u32 >= MAX_RESTARTS {
-                let why = crate::state::t("zu oft abgestürzt – im Fenster „Language Server“ neu starten", "crashed too often – restart it in the “Language servers” window").to_string();
-                e.stopped = Some(why.clone());
-                e.client = None;
-                return Ensure::Stopped(why);
+            match e.client.as_ref().map(|c| &c.state) {
+                Some(client::State::Exited(_)) => {
+                    // Abgestürzt: zählen; nach `crash_max` Abstürzen im Zeitfenster ist die Sprache aus.
+                    if !e.counted {
+                        e.counted = true;
+                        let list = self.crashes.entry(lang.to_string()).or_default();
+                        list.retain(|t| now.duration_since(*t) < settings.crash_window());
+                        list.push(now);
+                        if list.len() as u32 >= settings.crash_max {
+                            self.off.insert(lang.to_string());
+                            return Ensure::CrashedOff;
+                        }
+                    }
+                }
+                Some(_) => return Ensure::Running(key),
+                None => {}
             }
         }
         self.make_room(settings.max_servers as usize, &key);
-        let e = self.entries.entry(key.clone()).or_insert_with(|| Entry { server, language: lang.to_string(), root: root.to_path_buf(), launch: launch.clone(), client: None, restarts: Vec::new(), stopped: None });
+        let e = self.entries.entry(key.clone()).or_insert_with(|| Entry { server, language: lang.to_string(), root: root.to_path_buf(), launch: launch.clone(), client: None, stopped: None, counted: false });
         e.launch = launch;
-        e.restarts.push(Instant::now());
-        match client::Client::spawn(&e.launch.program, &e.launch.args, root, root, settings.client_limits()) {
+        e.counted = false;
+        let lsp_root = e.launch.lsp_root.clone().map(PathBuf::from).unwrap_or_else(|| root.to_path_buf());
+        let cwd = if e.launch.lsp_root.is_some() { std::env::temp_dir() } else { root.to_path_buf() };
+        match client::Client::spawn(&e.launch.program, &e.launch.args, &cwd, &lsp_root, settings.client_limits(), settings.init_options.get(lang).cloned()) {
             Ok(c) => {
                 e.client = Some(c);
                 Ensure::Running(key)
@@ -257,15 +330,40 @@ impl Servers {
         }
     }
 
-    /// Neu starten (setzt die Absturz-Zählung zurück); der nächste [`Servers::ensure`] startet ihn.
+    /// Neu starten (setzt die Absturz-Zählung der Sprache zurück); der nächste [`Servers::ensure`] startet ihn.
     pub fn restart(&mut self, key: &Key) {
         if let Some(e) = self.entries.get_mut(key) {
             if let Some(mut c) = e.client.take() {
                 c.stop();
             }
             e.stopped = None;
-            e.restarts.clear();
+            let lang = e.language.clone();
+            self.retry(&lang);
         }
+    }
+
+    /// *Erneut versuchen* nach der Absturz-Regel: Sprache wieder an, Zählung zurück.
+    pub fn retry(&mut self, lang: &str) {
+        self.off.remove(lang);
+        self.crashes.remove(lang);
+    }
+
+    /// Server ohne offenes Dokument enden nach `idle` (Grenze aus dem Issue: 10 min).
+    pub fn end_idle(&mut self, idle: Duration) {
+        let now = Instant::now();
+        let idle_keys: Vec<Key> = self.entries.iter().filter(|(_, e)| e.client.as_ref().is_some_and(|c| c.open_docs() == 0 && !matches!(c.state, client::State::Exited(_)) && now.duration_since(c.last_used) >= idle)).map(|(k, _)| k.clone()).collect();
+        for k in idle_keys {
+            if let Some(mut e) = self.entries.remove(&k)
+                && let Some(mut c) = e.client.take()
+            {
+                c.stop();
+            }
+        }
+    }
+
+    /// Server einer Sprache (für *Protokoll zeigen*).
+    pub fn key_of_language(&self, lang: &str) -> Option<Key> {
+        self.entries.iter().find(|(_, e)| e.language == lang).map(|(k, _)| k.clone())
     }
 
     /// Alle Server für Dateien unter `folder` beenden (Vertrauen entzogen).
@@ -305,6 +403,12 @@ mod tests {
         }
         assert_eq!(s.disabled["python"], vec!["pylsp".to_string()]);
         assert_eq!(SmartSettings::from_value(Some(&s.to_value())), s);
+        // Grenzen aus dem Issue, alle einstellbar
+        assert_eq!((d.idle_minutes, d.typing_pause_ms, d.crash_max, d.crash_window_minutes), (10, 500, 3, 5));
+        let t = SmartSettings::from_value(Some(&json!({"idle_minutes": 0, "typing_pause_ms": 99999, "crash_max": 2, "crash_window_minutes": 7, "own_args": {"c": ["--log=error"]}, "init_options": {"rust": {"check": {"command": "clippy"}}}})));
+        assert_eq!((t.idle_minutes, t.typing_pause_ms, t.crash_max, t.crash_window_minutes), (1, TYPING_PAUSE_RANGE.1, 2, 7));
+        assert_eq!(t.own_args["c"], vec!["--log=error".to_string()]);
+        assert_eq!(SmartSettings::from_value(Some(&t.to_value())), t);
     }
 
     #[test]
@@ -312,11 +416,60 @@ mod tests {
         let mut sv = Servers::default();
         let set = SmartSettings::default();
         assert_eq!(sv.ensure("rust", Path::new("C:/p"), &set, &|_| None), Ensure::NoServer);
-        let bad = servers::Launch { program: PathBuf::from(r"C:\does\not\exist\srv.exe"), args: vec![], found: PathBuf::from("x"), rustup_proxy: true };
+        let bad = servers::Launch { program: PathBuf::from(r"C:\does\not\exist\srv.exe"), args: vec![], found: PathBuf::from("x"), rustup_proxy: true, lsp_root: None };
         let r = sv.ensure("rust", &std::env::temp_dir(), &set, &|_| Some(("rust-analyzer".into(), bad.clone())));
         assert!(matches!(&r, Ensure::Failed(m) if m.contains("rustup component add")), "{r:?}");
         // danach angehalten, kein Dauerversuch
         assert!(matches!(sv.ensure("rust", &std::env::temp_dir(), &set, &|_| Some(("rust-analyzer".into(), bad.clone()))), Ensure::Stopped(_)));
         assert_eq!(sv.running(), 0);
+    }
+
+    /// Absturz-Regel (#367): nach `crash_max` Abstürzen im Zeitfenster ist die Sprache aus, *Erneut versuchen* hebt es
+    /// auf; Leerlauf beendet Server ohne offenes Dokument.
+    #[cfg(windows)]
+    #[test]
+    fn three_crashes_turn_the_language_off_and_retry_and_idle_work() {
+        let cmd = servers::Launch { program: PathBuf::from(std::env::var("ComSpec").unwrap_or_else(|_| r"C:\Windows\System32\cmd.exe".into())), args: vec!["/c".into(), "exit".into(), "1".into()], found: PathBuf::from("cmd"), rustup_proxy: false, lsp_root: None };
+        let mut sv = Servers::default();
+        let set = SmartSettings::default();
+        let dir = std::env::temp_dir();
+        let res = |_: &str| Some(("crashy".to_string(), cmd.clone()));
+        let mut off = false;
+        let t0 = Instant::now();
+        while t0.elapsed() < Duration::from_secs(20) {
+            match sv.ensure("python", &dir, &set, &res) {
+                Ensure::CrashedOff => {
+                    off = true;
+                    break;
+                }
+                Ensure::Running(_) => {}
+                r => panic!("{r:?}"),
+            }
+            sv.tick();
+            std::thread::sleep(Duration::from_millis(30));
+        }
+        assert!(off, "nach drei Abstürzen aus");
+        assert!(sv.off.contains("python"));
+        assert_eq!(sv.ensure("python", &dir, &set, &res), Ensure::CrashedOff, "bleibt aus");
+        assert!(matches!(sv.ensure("rust", &dir, &set, &|_| None), Ensure::NoServer), "andere Sprachen nicht betroffen");
+        sv.retry("python");
+        assert!(matches!(sv.ensure("python", &dir, &set, &res), Ensure::Running(_)), "Erneut versuchen");
+        // Leerlauf: ohne offenes Dokument nach der Zeit beendet
+        sv.end_idle(Duration::ZERO);
+        assert!(sv.entries.is_empty());
+    }
+
+    #[test]
+    fn wsl_servers_start_inside_the_distribution_without_a_shell() {
+        let a = crate::wsl::server_args("Ubuntu", "/home/u/proj", "/home/u/.cargo/bin/rust-analyzer", &[]).unwrap();
+        assert_eq!(a, ["-d", "Ubuntu", "--cd", "/home/u/proj", "--exec", "/home/u/.cargo/bin/rust-analyzer"]);
+        assert!(crate::wsl::server_args("Ubuntu", "relative", "/x", &[]).is_none());
+        assert!(crate::wsl::server_args("-x", "/p", "/x", &[]).is_none() && crate::wsl::server_args("a/b", "/p", "/x", &[]).is_none(), "keine Option, kein Pfad als Distribution");
+        assert!(crate::wsl::server_args("Ubuntu", "/p", "x", &[]).is_none(), "Programm absolut");
+        let w = crate::wsl::which_args("Ubuntu", "gopls");
+        assert_eq!(w.last().map(String::as_str), Some("gopls"), "Name als eigenes Argument");
+        assert!(!w.iter().any(|x| x.contains("gopls") && x.contains("command")), "nie in der Shell-Zeichenkette");
+        assert!(!crate::wsl::valid_program_name("-rf") && !crate::wsl::valid_program_name("a;b") && crate::wsl::valid_program_name("vscode-json-language-server"));
+        assert_eq!(crate::wsl::find_program("Ubuntu", "gopls"), None, "in Tests nie ein echtes wsl.exe");
     }
 }

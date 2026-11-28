@@ -112,6 +112,9 @@ pub(super) enum Cmd {
     Trust(PathBuf),
     TrustPick(PathBuf),
     TrustNotNow(PathBuf),
+    /// Nach der Absturz-Regel: Smart für die Sprache wieder an bzw. ihr Protokoll zeigen.
+    SmartRetry(String),
+    SmartShowLog(String),
     /// Problemliste ein/aus, nächstes/voriges Problem (F8 / Umschalt+F8), Fenster „Language Server“.
     ToggleProblems,
     StepProblem(bool),
@@ -627,6 +630,8 @@ impl super::super::App {
             Cmd::TrustNotNow(folder) => {
                 self.ed.smart.not_now.insert(folder);
             }
+            Cmd::SmartRetry(l) => self.ed.smart_retry(&l),
+            Cmd::SmartShowLog(l) => self.ed.smart_show_log(&l),
             Cmd::ToggleProblems => self.ed.smart.problems_open = !self.ed.smart.problems_open,
             Cmd::StepProblem(forward) => {
                 let g = self.ed.panes.focused;
@@ -1310,10 +1315,18 @@ fn show_group(ui: &mut Ui, g: u64, rect: Rect, ed: &mut EditorUi, cx: &GroupCx, 
         body.min.y += super::format::LINE_H;
     }
     // Smart-Modus (#367): Ordner noch nicht vertrauenswürdig – Hinweisleiste (nicht modal), bis dahin Syntax-Modus.
-    if let super::smart::State::NeedsTrust(root) = ed.smart.state_of(doc_id) {
-        let r = Rect::from_min_size(body.min, Vec2::new(body.width(), INFO_H));
-        super::smart_ui::trust_bar(ui, r, &root, cx.lang, cmds);
-        body.min.y += INFO_H;
+    match ed.smart.state_of(doc_id) {
+        super::smart::State::NeedsTrust(root) => {
+            let r = Rect::from_min_size(body.min, Vec2::new(body.width(), INFO_H));
+            super::smart_ui::trust_bar(ui, r, &root, cx.lang, cmds);
+            body.min.y += INFO_H;
+        }
+        super::smart::State::CrashedOff(lang) => {
+            let r = Rect::from_min_size(body.min, Vec2::new(body.width(), INFO_H));
+            super::smart_ui::crash_bar(ui, r, &lang, cx.lang, cmds);
+            body.min.y += INFO_H;
+        }
+        _ => {}
     }
     // Suchleiste (nur in der fokussierten Gruppe)
     if focused && ed.find.visible {
