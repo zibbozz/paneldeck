@@ -613,12 +613,12 @@ fn status_bar_picks_the_language_and_the_mode_is_text_by_default() {
     frame(&ctx, &mut back, vec![], &mut t);
     // Ein Modus einer neueren Version bleibt beim Speichern erhalten.
     let mut s = persist::load(&data);
-    s.docs[0].mode = Some("smart".into());
+    s.docs[0].mode = Some("fancy".into());
     persist::save(&data, &s);
     let again = EditorUi::restore(&data);
     assert_eq!(again.docs.values().next().unwrap().syntax.mode, None);
     again.save(&data);
-    assert_eq!(persist::load(&data).docs[0].mode.as_deref(), Some("smart"));
+    assert_eq!(persist::load(&data).docs[0].mode.as_deref(), Some("fancy"));
 
     // Unbenannte Datei: ein später getippter Shebang führt zur Sprache.
     let mut ed2 = EditorUi::default();

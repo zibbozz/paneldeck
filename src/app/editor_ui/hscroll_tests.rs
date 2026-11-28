@@ -43,7 +43,7 @@ impl H {
         let (d, view, prefs, wrap, rect) = (&mut self.d, &mut self.view, &self.prefs, self.wrap, self.rect);
         let _ = self.ctx.run(input, |ctx| {
             egui::CentralPanel::default().frame(egui::Frame::NONE).show(ctx, |ui| {
-                let cx = TextCx { id: Id::new("hs_text"), font: FontId::monospace(FONT), theme: &th, prefs, wrap, minimap: false, request_focus: true, find: None, lang: crate::state::Lang::En, marks: None, popup_line: None };
+                let cx = TextCx { id: Id::new("hs_text"), font: FontId::monospace(FONT), theme: &th, prefs, wrap, minimap: false, request_focus: true, find: None, lang: crate::state::Lang::En, marks: None, popup_line: None, diags: None };
                 text::show(ui, rect, d, view, &cx);
             });
         });

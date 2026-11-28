@@ -353,6 +353,8 @@ fn whats_new_lists_the_steps_since_a_version() {
     assert!(typing.contains(&"editor.diff_type") && !typing.contains(&"editor.diff"), "{typing:?}");
     // Menü Auswahl und Kommentar (#394) kamen mit 3.3.0, Ziel ist die Menüleiste.
     assert!(typing.contains(&"editor.selection_menu") && !typing.contains(&"editor.cursors"), "{typing:?}");
+    // Smart-Modus (#367) kam mit 3.3.0, Ziel ist die Statusleiste.
+    assert!(typing.contains(&"editor.smart"), "{typing:?}");
     assert_eq!(steps::tour("editor").and_then(|t| t.steps.iter().find(|s| s.id == "editor.selection_menu")).map(|s| s.spot), Some(Some(Spot::EditorMenuBar)));
     // Pfadarten des Ziels (#392) kamen mit 3.2.0, im Kapitel Werkzeuge hinter dem Dateibaum.
     assert!(fmt.contains(&"tools.paths") && !fmt.contains(&"tools.files"), "{fmt:?}");

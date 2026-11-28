@@ -108,6 +108,18 @@ pub(super) enum Cmd {
     SetMarkerBase(crate::editor_svc::settings::MarkerBase),
     /// Nächste/vorige Änderung (F7 / Umschalt+F7).
     StepChange(bool),
+    /// Smart-Modus (#367): Ordner vertrauen, einen übergeordneten wählen, jetzt nicht.
+    Trust(PathBuf),
+    TrustPick(PathBuf),
+    TrustNotNow(PathBuf),
+    /// Problemliste ein/aus, nächstes/voriges Problem (F8 / Umschalt+F8), Fenster „Language Server“.
+    ToggleProblems,
+    StepProblem(bool),
+    OpenServers,
+    /// Vervollständigen in der Gruppe (Strg+Leertaste), Vorschlag übernehmen, Popup schließen.
+    Complete(u64),
+    AcceptCompletion,
+    ClosePopupCompletion,
     /// Marke in dieser Zeile des Dokuments zurücksetzen (ein Rückgängig-Schritt).
     RevertMark(u64, usize),
     /// Marke in dieser Zeile im Vergleich öffnen.
@@ -210,7 +222,54 @@ impl super::super::App {
         let ca = Modifiers::CTRL | Modifiers::ALT;
         let mut nav = None;
         let mut no_comment = false;
+        // Smart-Modus (#367): Popup der Vervollständigung (Pfeile, Tab/Eingabe, Esc), Tab im Snippet, Kürzel.
+        let popup = self.ed.smart.popup.as_ref().is_some_and(|p| !p.shown.is_empty() && p.group == g);
+        let snippet = self.ed.smart.snippet.as_ref().is_some_and(|s| s.group == g);
+        let smart_binds: Vec<(&str, Option<(Modifiers, Key)>)> = if text_tab {
+            vec![("ed_complete", self.binding("ed_complete")), ("ed_next_problem", self.binding("ed_next_problem")), ("ed_prev_problem", self.binding("ed_prev_problem"))]
+        } else {
+            Vec::new()
+        };
+        let problems_key = self.binding("ed_problems");
         ctx.input_mut(|i| {
+            let mut take0 = |m: Modifiers, k: Key| super::super::consume_key_exact(i, m, k, false);
+            if popup {
+                if take0(Modifiers::NONE, Key::ArrowDown) {
+                    self.ed.smart_popup_move(true);
+                }
+                if take0(Modifiers::NONE, Key::ArrowUp) {
+                    self.ed.smart_popup_move(false);
+                }
+                if take0(Modifiers::NONE, Key::Tab) || take0(Modifiers::NONE, Key::Enter) {
+                    cmds.push(Cmd::AcceptCompletion);
+                }
+                if take0(Modifiers::NONE, Key::Escape) {
+                    cmds.push(Cmd::ClosePopupCompletion);
+                }
+            } else if snippet {
+                if take0(Modifiers::NONE, Key::Tab) {
+                    self.ed.smart_next_stop();
+                }
+                if take0(Modifiers::NONE, Key::Escape) {
+                    self.ed.smart.snippet = None;
+                }
+            }
+            for (id, b) in &smart_binds {
+                if let Some((m, k)) = b
+                    && super::super::consume_key_exact(i, *m, *k, false)
+                {
+                    match *id {
+                        "ed_complete" => cmds.push(Cmd::Complete(g)),
+                        "ed_next_problem" => cmds.push(Cmd::StepProblem(true)),
+                        _ => cmds.push(Cmd::StepProblem(false)),
+                    }
+                }
+            }
+            if let Some((m, k)) = problems_key
+                && super::super::consume_key_exact(i, m, k, false)
+            {
+                cmds.push(Cmd::ToggleProblems);
+            }
             for (op, b) in &multi_binds {
                 if let Some((m, k)) = b
                     && super::super::consume_key_exact(i, *m, *k, false)
@@ -553,6 +612,43 @@ impl super::super::App {
                     self.ed.set_hint(h);
                 }
             }
+            Cmd::Trust(folder) => {
+                let dir = self.dir.clone();
+                match self.ed.smart_trust(&folder, &dir) {
+                    Ok(()) => self.ed.set_hint(format!("{} {}", lang.t("Vertraut:", "Trusted:"), folder.display())),
+                    Err(e) => self.ed.set_hint(e),
+                }
+            }
+            Cmd::TrustPick(folder) => {
+                if let Some(p) = crate::platform::notify::pick_folder(&folder.to_string_lossy()) {
+                    self.editor_cmd(ctx, Cmd::Trust(PathBuf::from(p)));
+                }
+            }
+            Cmd::TrustNotNow(folder) => {
+                self.ed.smart.not_now.insert(folder);
+            }
+            Cmd::ToggleProblems => self.ed.smart.problems_open = !self.ed.smart.problems_open,
+            Cmd::StepProblem(forward) => {
+                let g = self.ed.panes.focused;
+                if self.ed.smart_step_problem(g, forward).is_none() {
+                    self.ed.set_hint(lang.t("Keine Probleme in dieser Datei.", "No problems in this file.").to_string());
+                }
+            }
+            Cmd::OpenServers => self.ed.smart.window_open = true,
+            Cmd::Complete(g) => {
+                if let Some(d) = self.ed.panes.groups.get(&g).and_then(|grp| grp.active_tab()).filter(|t| t.diff.is_none()).map(|t| t.doc) {
+                    if matches!(self.ed.smart.state_of(d), super::smart::State::Running(_)) {
+                        self.ed.smart_complete(d, g, None);
+                    } else {
+                        self.ed.set_hint(lang.t("Vervollständigen gibt es im Smart-Modus (Statusleiste).", "Completion works in smart mode (status bar).").to_string());
+                    }
+                }
+            }
+            Cmd::AcceptCompletion => {
+                self.ed.smart_accept();
+                self.ed.want_focus = true;
+            }
+            Cmd::ClosePopupCompletion => self.ed.smart.popup = None,
             Cmd::RevertMark(doc, line) => {
                 if let Err(e) = self.ed.revert_mark(doc, line, lang) {
                     self.ed.set_hint(e);
@@ -1046,6 +1142,13 @@ pub(super) fn draw(ctx: &egui::Context, ed: &mut EditorUi, theme: &crate::theme:
         .show(ctx, |ui| status_bar(ui, ed, lang, prefs, cmds))
         .response
         .spot(Spot::EditorStatus);
+    // Problemliste des Smart-Modus (#367) unten im Editor-Reiter.
+    if ed.smart.problems_open {
+        egui::TopBottomPanel::bottom(style::salted(Id::new("ed_problems"))).resizable(true).default_height(150.0).show(ctx, |ui| super::smart_ui::problems_panel(ui, ed, lang, cmds));
+    }
+    if ed.smart.window_open {
+        super::smart_ui::servers_window(ctx, ed, lang);
+    }
     if ed.tree_open {
         use egui::containers::panel::PanelState;
         let id = style::salted(Id::new("ed_tree"));
@@ -1206,6 +1309,12 @@ fn show_group(ui: &mut Ui, g: u64, rect: Rect, ed: &mut EditorUi, cx: &GroupCx, 
         super::format::note_line(ui, r, doc_id, &n, cx.lang, cmds);
         body.min.y += super::format::LINE_H;
     }
+    // Smart-Modus (#367): Ordner noch nicht vertrauenswürdig – Hinweisleiste (nicht modal), bis dahin Syntax-Modus.
+    if let super::smart::State::NeedsTrust(root) = ed.smart.state_of(doc_id) {
+        let r = Rect::from_min_size(body.min, Vec2::new(body.width(), INFO_H));
+        super::smart_ui::trust_bar(ui, r, &root, cx.lang, cmds);
+        body.min.y += INFO_H;
+    }
     // Suchleiste (nur in der fokussierten Gruppe)
     if focused && ed.find.visible {
         let h = ed.find.height();
@@ -1230,6 +1339,7 @@ fn show_group(ui: &mut Ui, g: u64, rect: Rect, ed: &mut EditorUi, cx: &GroupCx, 
     let find_hl = ed.find.highlight();
     let generation = ed.generation;
     let popup_line = ed.mark_popup.as_ref().filter(|p| p.group == g && p.doc == doc_id).map(|p| p.line);
+    let diags = ed.smart.shown.get(&doc_id).cloned();
     let Some(d) = ed.docs.get_mut(&doc_id) else { return };
     // Änderungsmarken (#385): im Hintergrund lesen und vergleichen.
     if super::marks::tick(d, cx.prefs, generation, std::time::Instant::now()) {
@@ -1238,8 +1348,17 @@ fn show_group(ui: &mut Ui, g: u64, rect: Rect, ed: &mut EditorUi, cx: &GroupCx, 
     let marks = d.marks.result.clone().filter(|_| cx.prefs.markers);
     let base_git = d.marks.base.as_ref().is_some_and(|b| b.is_git());
     let Some(view) = ed.panes.groups.get_mut(&g).and_then(|grp| grp.tabs.get_mut(idx)).map(|t| &mut t.view) else { return };
-    let tcx = TextCx { id: text_id(g), font: editor_font(ui.ctx(), cx.prefs.font_size), theme: cx.theme, prefs: cx.prefs, wrap, minimap, request_focus: want, find: find_hl.as_ref(), lang: cx.lang, marks: marks.as_deref(), popup_line };
+    let tcx = TextCx { id: text_id(g), font: editor_font(ui.ctx(), cx.prefs.font_size), theme: cx.theme, prefs: cx.prefs, wrap, minimap, request_focus: want, find: find_hl.as_ref(), lang: cx.lang, marks: marks.as_deref(), popup_line, diags: diags.as_deref() };
     let out = text::show(ui, body, d, view, &tcx);
+    // Smart-Modus (#367): Vervollständigen nach der Eingabe, Popup am Cursor.
+    if out.edited {
+        ed.smart_after_edit(doc_id, g, cx.prefs.smart_auto);
+    }
+    if let Some(at) = out.caret
+        && ed.smart.popup.as_ref().is_some_and(|p| p.group == g && p.doc == doc_id)
+    {
+        super::smart_ui::completion_popup(ui, at, ed, cx.lang, cmds);
+    }
     if let Some(h) = out.hint.clone() {
         cmds.push(Cmd::Hint(h));
     }
@@ -1958,6 +2077,7 @@ fn status_bar(ui: &mut Ui, ed: &mut EditorUi, lang: Lang, prefs: &super::EditorP
             let (Some(id), Some((s, ..)), Some(syn)) = (doc, info, syn) else { return };
             language_picker(ui, ed, id, &syn, lang, cmds);
             mode_picker(ui, ed, id, &syn, prefs, lang, cmds);
+            super::smart_ui::status_chip(ui, ed, id, lang, cmds);
             ui.add_space(style::S2);
             let eol = ui.add(egui::Button::new(RichText::new(if s.crlf { "CRLF" } else { "LF" }).small()).frame(false)).on_hover_text(lang.t("Zeilenende ändern", "Change line endings"));
             egui::Popup::menu(&eol).show(|ui| {
@@ -2092,22 +2212,21 @@ fn mode_picker(ui: &mut Ui, ed: &mut EditorUi, id: u64, syn: &super::doc::Syntax
     let name = |m: Mode| match m {
         Mode::Text => lang.t("Text", "Text"),
         Mode::Syntax => lang.t("Syntax", "Syntax"),
+        Mode::Smart => lang.t("Smart (Sprachserver)", "Smart (language server)"),
     };
-    let label = if syn.mode == Mode::Syntax && syn.large { lang.t("Syntax (aus: große Datei)", "Syntax (off: large file)").to_string() } else { name(syn.mode).to_string() };
+    let label = if syn.mode.colours() && syn.large { lang.t("Syntax (aus: große Datei)", "Syntax (off: large file)").to_string() } else { name(syn.mode).to_string() };
     let tip = if syn.mode_chosen { lang.t("Modus (für diese Datei gewählt) – klicken zum Ändern", "Mode (chosen for this file) – click to change") } else { lang.t("Modus (aus den Einstellungen) – klicken zum Ändern", "Mode (from the settings) – click to change") };
     let b = ui.add(egui::Button::new(RichText::new(label).small()).frame(false)).on_hover_text(tip);
     ed.status_rects.1 = Some(b.rect);
     egui::Popup::menu(&b).show(|ui| {
         ui.set_min_width(240.0);
         ui.label(RichText::new(lang.t("Diese Datei", "This file")).small().color(style::dim(ui)));
-        for m in [Mode::Text, Mode::Syntax] {
+        for m in Mode::ALL {
             if ui.selectable_label(syn.mode_chosen && syn.mode == m, name(m)).clicked() {
                 cmds.push(Cmd::SetDocMode(id, Some(m)));
                 ui.close();
             }
         }
-        ui.add_enabled(false, egui::Button::selectable(false, lang.t("Smart (Sprachserver)", "Smart (language server)")))
-            .on_disabled_hover_text(lang.t("Kommt in einer späteren Version.", "Coming in a later version."));
         if syn.mode_chosen && ui.selectable_label(false, lang.t("Einstellung verwenden", "Use the setting")).clicked() {
             cmds.push(Cmd::SetDocMode(id, None));
             ui.close();
@@ -2118,7 +2237,7 @@ fn mode_picker(ui: &mut Ui, ed: &mut EditorUi, id: u64, syn: &super::doc::Syntax
             ui.label(RichText::new(format!("{} {shown}", lang.t("Alle Dateien:", "All files:"))).small().color(style::dim(ui)));
             let cur = prefs.syntax.language_modes.get(l).copied();
             ui.horizontal(|ui| {
-                for m in [Mode::Text, Mode::Syntax] {
+                for m in Mode::ALL {
                     if ui.selectable_label(cur == Some(m), name(m)).clicked() {
                         cmds.push(Cmd::SetLangMode(id, l.clone(), Some(m)));
                         ui.close();
@@ -2133,7 +2252,7 @@ fn mode_picker(ui: &mut Ui, ed: &mut EditorUi, id: u64, syn: &super::doc::Syntax
         ui.separator();
         ui.label(RichText::new(lang.t("Standard für alle übrigen Dateien", "Default for all other files")).small().color(style::dim(ui)));
         ui.horizontal(|ui| {
-            for m in [Mode::Text, Mode::Syntax] {
+            for m in Mode::ALL {
                 if ui.selectable_label(prefs.syntax.default_mode == m, name(m)).clicked() {
                     cmds.push(Cmd::SetDefaultMode(id, m));
                     ui.close();
@@ -2142,7 +2261,7 @@ fn mode_picker(ui: &mut Ui, ed: &mut EditorUi, id: u64, syn: &super::doc::Syntax
         });
         if syn.large {
             ui.label(RichText::new(lang.t("Große Datei: Syntaxfarben bleiben aus.", "Large file: syntax colours stay off.")).small().color(style::ui().warning));
-        } else if syn.mode == Mode::Syntax && !syn.active {
+        } else if syn.mode.colours() && !syn.active {
             ui.label(RichText::new(lang.t("Für diese Sprache gibt es keine Syntaxfarben.", "There are no syntax colours for this language.")).small().color(style::dim(ui)));
         }
     });

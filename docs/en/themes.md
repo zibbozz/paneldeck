@@ -218,6 +218,10 @@ The names are part of the public interface (they are only ever added, never rena
 | `code_heading` | Editor: syntax colours | Code: heading, section | `@code_function` |
 | `code_variable` | Editor: syntax colours | Code: variable, parameter | `@code_tag` |
 | `code_invalid` | Editor: syntax colours | Code: invalid | `@error` |
+| `diag_error` | Editor: syntax colours | Smart mode: error (squiggle) | `@error` |
+| `diag_warning` | Editor: syntax colours | Smart mode: warning (squiggle) | `@warning` |
+| `diag_info` | Editor: syntax colours | Smart mode: information (squiggle) | `@info` |
+| `diag_hint` | Editor: syntax colours | Smart mode: hint (dotted) | `@text_dim/80` |
 | `diff_add_bg` | Editor: comparison and change markers | Comparison: background of added lines | `@diff_add/15` |
 | `diff_remove_bg` | Editor: comparison and change markers | Comparison: background of removed lines | `@diff_remove/15` |
 | `diff_add_word` | Editor: comparison and change markers | Comparison: added words within a line | `@diff_add/40` |

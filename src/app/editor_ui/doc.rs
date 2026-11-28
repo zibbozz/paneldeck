@@ -603,7 +603,7 @@ impl DocEntry {
             None => lang.t("Reiner Text", "Plain text").to_string(),
         };
         let has_grammar = l.as_deref().is_some_and(syntax::engine::has_grammar) && !self.syntax.hl.as_ref().is_some_and(|h| h.failed());
-        SyntaxStatus { lang: l, lang_name, lang_chosen: self.syntax.lang.is_some(), mode, mode_chosen: self.syntax.mode.is_some(), active: mode == Mode::Syntax && has_grammar && !large, large }
+        SyntaxStatus { lang: l, lang_name, lang_chosen: self.syntax.lang.is_some(), mode, mode_chosen: self.syntax.mode.is_some(), active: mode.colours() && has_grammar && !large, large }
     }
 
     /// Sprache wählen (`None` = wieder erkennen).
@@ -620,7 +620,7 @@ impl DocEntry {
     /// Syntaxfarben bereitstellen, wenn sie an sind (Modus Syntax, Sprache mit Grammatik, keine große Datei), sonst
     /// verwerfen. Danach liegen sie in `self.syntax` für das Zeichnen.
     pub fn ensure_highlight(&mut self, prefs: &super::EditorPrefs) {
-        let want = if self.doc.is_some() && !self.is_large(prefs) && self.mode(prefs) == Mode::Syntax { self.language(prefs) } else { None };
+        let want = if self.doc.is_some() && !self.is_large(prefs) && self.mode(prefs).colours() { self.language(prefs) } else { None };
         match (want, &self.syntax.hl) {
             (Some(l), Some(h)) if h.lang == l => {}
             (Some(l), _) => self.syntax.hl = self.doc.as_ref().and_then(|d| DocHighlight::new(&l, d)),

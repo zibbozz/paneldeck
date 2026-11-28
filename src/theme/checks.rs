@@ -301,6 +301,10 @@ pub fn run_with(t: &Theme, bg: Option<&BgInput>, on: impl Fn(Rule) -> bool) -> V
             // Vergleich und Änderungsmarken (#385): Text auf den Zeilen-Hintergründen, Marken auf dem Editor-Hintergrund.
             ("text", "diff_add_bg", TEXT_MIN),
             ("text", "diff_remove_bg", TEXT_MIN),
+            // Smart-Modus (#367): Wellenlinien auf dem Editor-Hintergrund.
+            ("diag_error", "bg", LARGE_MIN),
+            ("diag_warning", "bg", LARGE_MIN),
+            ("diag_info", "bg", LARGE_MIN),
             ("marker_added", "bg", LARGE_MIN),
             ("marker_modified", "bg", LARGE_MIN),
             ("marker_deleted", "bg", LARGE_MIN),

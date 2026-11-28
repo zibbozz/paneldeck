@@ -503,6 +503,8 @@ fn editor_code(ui: &mut Ui, t: &Theme, u: &UiColors, m: &mut Marks) {
             &[("}", fg, "fg")],
             &[("<div ", u.code_tag, "code_tag"), ("class", u.code_attribute, "code_attribute"), ("=", fg, "fg"), ("\"note\"", u.code_string, "code_string"), (">", u.code_tag, "code_tag")],
             &[("[Setup]", u.code_heading, "code_heading"), ("  ", fg, "fg"), ("## Kapitel / chapter", u.code_heading, "code_heading")],
+            // Smart-Modus (#367): Farben der Wellenlinien (hier als Text gezeigt).
+            &[("error ", u.diag_error, "diag_error"), ("warning ", u.diag_warning, "diag_warning"), ("info ", u.diag_info, "diag_info"), ("hint", u.diag_hint, "diag_hint")],
         ];
         for line in lines {
             ui.horizontal(|ui| {

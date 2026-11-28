@@ -30,6 +30,8 @@ mod menu;
 mod marks;
 mod panes;
 mod persist;
+pub(crate) mod smart;
+mod smart_ui;
 mod text;
 mod tree;
 mod view;
@@ -74,6 +76,8 @@ pub(crate) struct EditorPrefs {
     pub diff_ignore_ws: bool,
     /// Mehrere Cursor (#394; alles standardmäßig aus).
     pub multi: MultiPrefs,
+    /// Smart-Modus (#367): Vervollständigung öffnet sich von selbst.
+    pub smart_auto: bool,
 }
 
 /// Schalter der mehreren Cursor (#394, *Einstellungen → Editor*): Kürzel und Befehle, Alt+Klick, mittlere Maustaste.
@@ -85,7 +89,7 @@ pub(crate) struct MultiPrefs {
 }
 
 /// Kennungen der Kürzel, die die Menüleiste anzeigt.
-pub(crate) const MENU_KEYS: [&str; 15] = [
+pub(crate) const MENU_KEYS: [&str; 19] = [
     "split_r",
     "split_d",
     "palette",
@@ -101,6 +105,10 @@ pub(crate) const MENU_KEYS: [&str; 15] = [
     "ed_soft_undo",
     "ed_toggle_comment",
     "ed_toggle_comment_alt",
+    "ed_complete",
+    "ed_problems",
+    "ed_next_problem",
+    "ed_prev_problem",
 ];
 
 impl Default for EditorPrefs {
@@ -119,6 +127,7 @@ impl Default for EditorPrefs {
             diff_layout: Default::default(),
             diff_ignore_ws: false,
             multi: MultiPrefs::default(),
+            smart_auto: true,
         }
     }
 }
@@ -233,6 +242,8 @@ pub(crate) struct EditorUi {
     next_diff: u64,
     /// Offenes Fenster einer Änderungsmarke.
     pub(super) mark_popup: Option<marks::MarkPopup>,
+    /// Smart-Modus (#367): Language Server, Vertrauen, Diagnosen, Vervollständigen.
+    pub(crate) smart: smart::SmartUi,
     /// Fenster „Vergleichen mit Revision …“.
     pub(super) rev_picker: Option<diff_menu::RevPicker>,
     /// Wächst nach dem Speichern und wenn das Fenster den Fokus bekommt: Vergleiche und Marken lesen die Stände in
@@ -871,6 +882,15 @@ impl super::App {
     pub(crate) fn editor_tick(&mut self, ctx: &eframe::egui::Context) {
         self.ed.poll_formats(self.settings.language);
         let prefs = self.editor_prefs();
+        // Smart-Modus (#367): Server abfragen, Dokumente senden, Diagnosen übernehmen.
+        let smart = self.settings.editor.smart.clone();
+        let dir = self.dir.clone();
+        if self.ed.smart_tick(&prefs, &smart, &dir) {
+            ctx.request_repaint_after(std::time::Duration::from_millis(50));
+        } else if self.ed.smart.servers.running() > 0 {
+            // Antworten der Server kommen in Hilfsfäden an: ruhig nachsehen, solange einer läuft.
+            ctx.request_repaint_after(std::time::Duration::from_millis(250));
+        }
         let Some(delay) = prefs.autosave else { return };
         let mut next: Option<std::time::Duration> = None;
         let mut due = Vec::new();

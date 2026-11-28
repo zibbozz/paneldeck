@@ -218,6 +218,10 @@ Die Namen gehören zur öffentlichen Schnittstelle (sie kommen nur dazu, werden 
 | `code_heading` | Editor: Syntaxfarben | Code: Überschrift, Abschnitt | `@code_function` |
 | `code_variable` | Editor: Syntaxfarben | Code: Variable, Parameter | `@code_tag` |
 | `code_invalid` | Editor: Syntaxfarben | Code: ungültig | `@error` |
+| `diag_error` | Editor: Syntaxfarben | Smart-Modus: Fehler (Wellenlinie) | `@error` |
+| `diag_warning` | Editor: Syntaxfarben | Smart-Modus: Warnung (Wellenlinie) | `@warning` |
+| `diag_info` | Editor: Syntaxfarben | Smart-Modus: Information (Wellenlinie) | `@info` |
+| `diag_hint` | Editor: Syntaxfarben | Smart-Modus: Hinweis (gepunktet) | `@text_dim/80` |
 | `diff_add_bg` | Editor: Vergleich und Änderungsmarken | Vergleich: Hintergrund hinzugefügter Zeilen | `@diff_add/15` |
 | `diff_remove_bg` | Editor: Vergleich und Änderungsmarken | Vergleich: Hintergrund entfernter Zeilen | `@diff_remove/15` |
 | `diff_add_word` | Editor: Vergleich und Änderungsmarken | Vergleich: hinzugefügte Wörter in der Zeile | `@diff_add/40` |

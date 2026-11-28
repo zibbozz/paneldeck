@@ -306,6 +306,8 @@ impl App {
         ui.add_space(S2);
         self.editor_languages_ui(ui);
         ui.add_space(S2);
+        self.editor_smart_ui(ui);
+        ui.add_space(S2);
         self.save_actions_settings_ui(ui);
         self.editor_compare_ui(ui);
         ui.add_space(S2);
@@ -354,6 +356,89 @@ impl App {
         ui.label(RichText::new(lang.t("Formatiert wird nie von allein: nur auf Knopfdruck oder beim Speichern über eine Regel mit der Aktion Formatieren (Abschnitt „Aktionen beim Speichern“; Menü Format → Beim Speichern formatieren …).", "Nothing is ever formatted automatically: only on demand, or on save through a rule with the Format action (section “Actions on save”; Format menu → Format on save …).")).small().color(style::dim(ui)));
     }
 
+    /// Abschnitt „Smart-Modus“ (#367): Vervollständigen, Grenzen, Server je Sprache (eingebaute abwählen, eigener Pfad),
+    /// vertrauenswürdige Ordner (entziehen beendet die Server dort sofort).
+    fn editor_smart_ui(&mut self, ui: &mut Ui) {
+        use crate::lsp::{self, servers};
+        let lang = self.settings.language;
+        ui.label(RichText::new(lang.t("Smart-Modus (Sprachserver)", "Smart mode (language servers)")).strong());
+        ui.label(RichText::new(lang.t(
+            "Modus „Smart“ in der Statusleiste: Vervollständigen und Diagnosen von einem Sprachserver aus dem PATH oder einem eigenen Pfad – nur in vertrauenswürdigen Ordnern, nie aus dem Projektordner selbst.",
+            "Mode “Smart” in the status bar: completion and diagnostics from a language server in PATH or an own path – only in trusted folders, never from the project folder itself.",
+        )).small().color(style::dim(ui)));
+        let s = &mut self.settings.editor.smart;
+        row(ui, lang.t("Vervollständigen von selbst", "Complete automatically"), lang.t("Nach Auslösezeichen und 2 Wortzeichen; Strg+Leertaste geht immer", "After trigger characters and 2 word characters; Ctrl+Space always works"), |ui| {
+            style::toggle(ui, &mut s.auto_complete);
+        });
+        row(ui, lang.t("Nachrichten mitschneiden", "Trace messages"), lang.t("Im Protokoll des Servers (nur im Speicher)", "In the server's log (in memory only)"), |ui| {
+            style::toggle(ui, &mut s.trace);
+        });
+        let num = |ui: &mut Ui, v: &mut u32, (lo, hi): (u32, u32), suffix: &str| {
+            ui.add(egui::DragValue::new(v).range(lo..=hi).suffix(suffix.to_string()));
+        };
+        row(ui, lang.t("Höchstens Server", "At most servers"), lang.t("Der am längsten unbenutzte endet", "The one unused for the longest ends"), |ui| num(ui, &mut s.max_servers, lsp::MAX_SERVERS_RANGE, ""));
+        row(ui, lang.t("Zeitgrenze Vervollständigen", "Completion timeout"), "", |ui| num(ui, &mut s.completion_timeout_ms, lsp::COMPLETION_TIMEOUT_RANGE, " ms"));
+        row(ui, lang.t("Diagnosen je Datei", "Diagnostics per file"), "", |ui| num(ui, &mut s.max_diagnostics, lsp::MAX_DIAGNOSTICS_RANGE, ""));
+        row(ui, lang.t("Größte Nachricht", "Largest message"), "", |ui| num(ui, &mut s.max_message_mb, lsp::MAX_MESSAGE_MB_RANGE, " MB"));
+        row(ui, lang.t("Smart-Modus bis", "Smart mode up to"), lang.t("Größere Dateien: Syntax-Modus", "Larger files: Syntax mode"), |ui| num(ui, &mut s.max_file_mb, lsp::MAX_FILE_MB_RANGE, " MB"));
+        egui::CollapsingHeader::new(lang.t("Server je Sprache", "Servers per language")).id_salt("editor_smart_servers").show(ui, |ui| {
+            ui.label(RichText::new(lang.t("Häkchen = eingebauter Server darf genutzt werden (der erste gefundene gewinnt); ein eigener Pfad (absolut, ohne Argumente) geht vor.", "Checked = the built-in server may be used (the first one found wins); an own path (absolute, without arguments) comes first.")).small().color(style::dim(ui)));
+            egui::Grid::new("editor_smart_grid").num_columns(3).spacing([12.0, 4.0]).striped(true).show(ui, |ui| {
+                for l in crate::editor::syntax::languages::LANGUAGES.iter().filter(|l| !servers::known(l.id).is_empty() || servers::OWN_PATH_ONLY.contains(&l.id)) {
+                    ui.label(l.name);
+                    ui.horizontal(|ui| {
+                        for k in servers::known(l.id) {
+                            let dis = s.disabled.entry(l.id.to_string()).or_default();
+                            let mut on = !dis.iter().any(|d| d == k.id);
+                            if ui.checkbox(&mut on, k.id).changed() {
+                                if on {
+                                    dis.retain(|d| d != k.id);
+                                } else {
+                                    dis.push(k.id.to_string());
+                                }
+                            }
+                        }
+                        if servers::known(l.id).is_empty() {
+                            ui.label(RichText::new(lang.t("nur eigener Pfad", "own path only")).small().color(style::dim(ui)));
+                        }
+                    });
+                    let mut txt = s.own_paths.get(l.id).map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
+                    if ui.add(egui::TextEdit::singleline(&mut txt).desired_width(220.0).hint_text(lang.t("eigener Pfad …", "own path …"))).changed() {
+                        let p = std::path::PathBuf::from(txt.trim());
+                        if txt.trim().is_empty() {
+                            s.own_paths.remove(l.id);
+                        } else if p.is_absolute() {
+                            s.own_paths.insert(l.id.to_string(), p);
+                        }
+                    }
+                    ui.end_row();
+                }
+            });
+            s.disabled.retain(|_, v| !v.is_empty());
+        });
+        let dir = self.dir.clone();
+        let folders: Vec<std::path::PathBuf> = self.ed.smart.trust(&dir).folders().to_vec();
+        egui::CollapsingHeader::new(format!("{} ({})", lang.t("Vertrauenswürdige Ordner", "Trusted folders"), folders.len())).id_salt("editor_smart_trust").show(ui, |ui| {
+            if folders.is_empty() {
+                ui.label(RichText::new(lang.t("Noch keiner – die Hinweisleiste über einer Datei im Smart-Modus fragt.", "None yet – the bar above a file in smart mode asks.")).small().color(style::dim(ui)));
+            }
+            let mut revoke = None;
+            for f in &folders {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(f.display().to_string()).small());
+                    if ui.small_button(lang.t("Entziehen", "Revoke")).on_hover_text(lang.t("Server dort enden sofort", "Servers there stop at once")).clicked() {
+                        revoke = Some(f.clone());
+                    }
+                });
+            }
+            if let Some(f) = revoke
+                && let Err(e) = self.ed.smart_revoke(&f, &dir)
+            {
+                self.ed.set_hint(e);
+            }
+        });
+    }
+
     /// Abschnitt „Sprachen“ der Editor-Einstellungen (#312): Standard-Modus, Modus je Sprache, eigene Zuordnungen.
     fn editor_languages_ui(&mut self, ui: &mut Ui) {
         use crate::editor::syntax::{self, Mode};
@@ -361,12 +446,13 @@ impl App {
         let mode_name = |m: Mode| match m {
             Mode::Text => lang.t("Text", "Text"),
             Mode::Syntax => lang.t("Syntax (Farben)", "Syntax (colours)"),
+            Mode::Smart => lang.t("Smart (Sprachserver)", "Smart (language server)"),
         };
         ui.label(RichText::new(lang.t("Sprachen", "Languages")).strong());
         ui.label(
             RichText::new(lang.t(
-                "Text = schlichter Editor, Syntax = Sprache erkennen und einfärben (Farben aus dem Theme). Die Statusleiste zeigt Modus und Sprache; beides lässt sich dort je Datei ändern. Smart (Sprachserver) kommt in einer späteren Version.",
-                "Text = plain editor, Syntax = detect the language and colour it (colours from the theme). The status bar shows mode and language; both can be changed there per file. Smart (language server) comes in a later version.",
+                "Text = schlichter Editor, Syntax = Sprache erkennen und einfärben (Farben aus dem Theme). Die Statusleiste zeigt Modus und Sprache; beides lässt sich dort je Datei ändern. Smart = zusätzlich ein Sprachserver (Vervollständigen, Diagnosen) in vertrauenswürdigen Ordnern.",
+                "Text = plain editor, Syntax = detect the language and colour it (colours from the theme). The status bar shows mode and language; both can be changed there per file. Smart = a language server on top (completion, diagnostics) in trusted folders.",
             ))
             .small()
             .color(style::dim(ui)),
@@ -374,7 +460,7 @@ impl App {
         row(ui, lang.t("Standard-Modus", "Default mode"), lang.t("Für Sprachen ohne eigene Einstellung; Standard: Text", "For languages without their own setting; default: Text"), |ui| {
             let ed = &mut self.settings.editor;
             egui::ComboBox::from_id_salt("editor_default_mode").selected_text(mode_name(ed.default_mode)).show_ui(ui, |ui| {
-                for m in [Mode::Text, Mode::Syntax] {
+                for m in Mode::ALL {
                     ui.selectable_value(&mut ed.default_mode, m, mode_name(m));
                 }
             });
@@ -389,7 +475,7 @@ impl App {
                     let mut sel = cur;
                     egui::ComboBox::from_id_salt(("editor_lang_mode", l.id)).width(150.0).selected_text(cur.map(|m| mode_name(m).to_string()).unwrap_or_else(|| dflt.clone())).show_ui(ui, |ui| {
                         ui.selectable_value(&mut sel, None, dflt.as_str());
-                        for m in [Mode::Text, Mode::Syntax] {
+                        for m in Mode::ALL {
                             ui.selectable_value(&mut sel, Some(m), mode_name(m));
                         }
                     });
@@ -645,6 +731,7 @@ impl App {
             diff_layout: e.diff_layout,
             diff_ignore_ws: e.diff_ignore_whitespace,
             multi: super::editor_ui::MultiPrefs { on: e.multi_cursor, alt_click: e.multi_cursor_alt_click, middle: e.multi_cursor_middle },
+            smart_auto: e.smart.auto_complete,
         }
     }
 

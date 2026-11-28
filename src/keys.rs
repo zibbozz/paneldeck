@@ -65,11 +65,16 @@ pub const DEFAULTS: &[(&str, &str)] = &[
     // frei, z. B. Strg+#).
     ("ed_toggle_comment", "Ctrl+Slash"),
     ("ed_toggle_comment_alt", ""),
+    // Smart-Modus (#367): Vervollständigen (für IME-Nutzer umbelegbar), Problemliste, nächstes/voriges Problem.
+    ("ed_complete", "Ctrl+Space"),
+    ("ed_problems", "Ctrl+Shift+M"),
+    ("ed_next_problem", "F8"),
+    ("ed_prev_problem", "Shift+F8"),
 ];
 
 /// Kürzel, die im Editor eine andere Belegung des Terminal Hub überdecken dürfen (#394: Strg+Umschalt+D markiert im
 /// Editor alle Vorkommen, im Terminal Hub teilt es rechts).
-pub const EDITOR_OVERRIDES: &[(&str, &str)] = &[("ed_all_occurrences", "split_r")];
+pub const EDITOR_OVERRIDES: &[(&str, &str)] = &[("ed_all_occurrences", "split_r"), ("ed_problems", "composer")];
 
 /// Kürzel, die in jedem Bereich gelten (Reiterwechsel) – die übrigen nur im Terminal-Bereich.
 pub fn is_global(id: &str) -> bool {
@@ -128,6 +133,10 @@ pub fn label(id: &str, de: bool) -> &'static str {
         "ed_soft_undo" => ("Editor: Cursor/Auswahl zurücknehmen", "Editor: undo cursor/selection change"),
         "ed_toggle_comment" => ("Editor: Kommentar umschalten", "Editor: toggle comment"),
         "ed_toggle_comment_alt" => ("Editor: Kommentar umschalten (zweite Belegung)", "Editor: toggle comment (alternative)"),
+        "ed_complete" => ("Editor: Vervollständigen (Smart-Modus)", "Editor: complete (smart mode)"),
+        "ed_problems" => ("Editor: Problemliste ein/aus", "Editor: toggle problem list"),
+        "ed_next_problem" => ("Editor: nächstes Problem", "Editor: next problem"),
+        "ed_prev_problem" => ("Editor: voriges Problem", "Editor: previous problem"),
         _ => ("?", "?"),
     };
     if de { d } else { e }

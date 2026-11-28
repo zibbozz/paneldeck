@@ -10,6 +10,8 @@
 //! Ab 3.3.0 (#394, mehrere Cursor; alle standardmäßig aus): `multi_cursor` (Kürzel und Befehle), `multi_cursor_alt_click`
 //! (Alt+Klick), `multi_cursor_middle` (mittlere Maustaste: Spaltenauswahl und Cursor), `agent_selections`
 //! (`editor_read` nennt die Auswahlen).
+//! Ab 3.3.0 (#367, Smart-Modus): `smart` (Grenzen, Schalter, eigene Server, abgewählte Server; siehe
+//! [`crate::lsp::SmartSettings`]); der Modus `smart` in `default_mode`/`language_modes`.
 
 use crate::editor::syntax::{Mode, UserMap};
 use serde::{Deserialize, Serialize};
@@ -128,6 +130,8 @@ pub struct EditorSettings {
     pub multi_cursor_middle: bool,
     /// `editor_read` liefert zusätzlich die Auswahlen des Nutzers (#394, Feld `selections`). Standard aus.
     pub agent_selections: bool,
+    /// Smart-Modus (#367): Grenzen, Schalter, Server je Sprache.
+    pub smart: crate::lsp::SmartSettings,
 }
 
 impl Default for EditorSettings {
@@ -156,6 +160,7 @@ impl Default for EditorSettings {
             multi_cursor_alt_click: false,
             multi_cursor_middle: false,
             agent_selections: false,
+            smart: crate::lsp::SmartSettings::default(),
         }
     }
 }
@@ -237,6 +242,7 @@ impl EditorSettings {
             multi_cursor_alt_click: flag("multi_cursor_alt_click"),
             multi_cursor_middle: flag("multi_cursor_middle"),
             agent_selections: flag("agent_selections"),
+            smart: crate::lsp::SmartSettings::from_value(o.get("smart")),
         }
     }
 
@@ -351,7 +357,8 @@ mod tests {
                 "multi_cursor_alt_click",
                 "multi_cursor_middle",
                 "search_exclude",
-                "search_include_ignored"
+                "search_include_ignored",
+                "smart"
             ]
         );
         assert!(!d.multi_cursor && !d.multi_cursor_alt_click && !d.multi_cursor_middle && !d.agent_selections, "mehrere Cursor standardmäßig aus (#394)");
@@ -371,15 +378,16 @@ mod tests {
         assert!(old.language_modes.is_empty() && old.language_map.is_empty());
         let s = EditorSettings::from_value(&json!({
             "default_mode": "SYNTAX",
-            "language_modes": {"rust": "text", "python": "syntax", "go": "smart", "": "syntax", "lua": 3},
+            "language_modes": {"rust": "text", "python": "syntax", "go": "smart", "c": "fancy", "": "syntax", "lua": 3},
             "language_map": {"*.tpl": "html", " Jenkinsfile ": "source.groovy", "a/b": "rust", "*": "rust", "x": 5}
         }));
         assert_eq!(s.default_mode, Mode::Syntax);
-        assert_eq!(s.language_modes.len(), 2, "{:?}", s.language_modes);
+        assert_eq!(s.language_modes.len(), 3, "{:?}", s.language_modes);
         let p = crate::app::editor_ui::SyntaxPrefs::from_settings(&s);
         assert_eq!(p.mode_for(Some("rust")), Mode::Text);
         assert_eq!(p.mode_for(Some("python")), Mode::Syntax);
-        assert_eq!(p.mode_for(Some("go")), Mode::Syntax, "unbekannter Modus (smart) → Standard");
+        assert_eq!(p.mode_for(Some("go")), Mode::Smart, "smart ab 3.3.0 (#367)");
+        assert_eq!(p.mode_for(Some("c")), Mode::Syntax, "unbekannter Modus → Standard");
         assert_eq!(p.mode_for(None), Mode::Syntax);
         assert_eq!(s.language_map.len(), 2, "{:?}", s.language_map);
         assert_eq!(s.language_map.get("Jenkinsfile").map(String::as_str), Some("source.groovy"));

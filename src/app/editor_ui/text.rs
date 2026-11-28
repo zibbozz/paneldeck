@@ -294,6 +294,8 @@ pub(super) struct TextCx<'a> {
     pub marks: Option<&'a crate::editor::linemarks::LineMarks>,
     /// Zeile, unter der das Fenster einer Marke offen ist (liefert seinen Anker in [`TextOut::popup_anchor`]).
     pub popup_line: Option<usize>,
+    /// Diagnosen des Smart-Modus (#367): Wellenlinien und Meldung beim Überfahren.
+    pub diags: Option<&'a [super::smart::Shown]>,
 }
 
 /// Ergebnis eines Bildes.
@@ -307,6 +309,8 @@ pub(super) struct TextOut {
     pub strip_click: Option<usize>,
     /// Unterkante der Zeile [`TextCx::popup_line`] (links am Text) und Breite des Textfelds, wenn sie sichtbar ist.
     pub popup_anchor: Option<(Pos2, f32)>,
+    /// Unterkante des Hauptcursors, wenn er sichtbar ist (Popup der Vervollständigung, #367).
+    pub caret: Option<Pos2>,
     /// Hinweis für die Statuszeile (z. B. „Nur die ersten 10 000 Cursor.“, #394).
     pub hint: Option<String>,
 }
@@ -436,6 +440,37 @@ pub(super) fn show(ui: &mut Ui, rect: Rect, d: &mut DocEntry, view: &mut View, c
     }
     hbar_clamp(doc, view, tab, hbar.as_mut()); // nach dem Rollen beim Ziehen
     paint(ui, rect, doc, view, &geo, &rows, cx, focused, hl.as_deref());
+    // Smart-Modus (#367): Wellenlinien der Diagnosen, Meldung beim Überfahren.
+    let scroll = if geo.wrap_cols.is_some() { 0.0 } else { view.scroll_x };
+    if let Some(list) = cx.diags.filter(|l| !l.is_empty()) {
+        let u = style::ui();
+        let p = ui.painter_at(geo.text.expand2(Vec2::new(2.0, 0.0)));
+        let mut hover: Option<&str> = None;
+        let pointer = ui.input(|i| i.pointer.hover_pos()).filter(|p| geo.text.contains(*p));
+        let at = pointer.map(|pp| pos_at(doc, view, &geo, &rows, pp).0);
+        for dgn in list {
+            use crate::lsp::proto::Severity;
+            let col = match dgn.severity {
+                Severity::Error => u.diag_error,
+                Severity::Warning => u.diag_warning,
+                Severity::Information => u.diag_info,
+                Severity::Hint => u.diag_hint,
+            };
+            let r = if dgn.range.is_empty() { dgn.range.start..(dgn.range.start + 1).min(doc.len_chars()) } else { dgn.range.clone() };
+            paint_squiggle(&p, doc, &geo, &rows, r.clone(), scroll, col, dgn.severity == Severity::Hint || dgn.unnecessary, dgn.deprecated);
+            if at.is_some_and(|a| a >= r.start && a <= r.end) && hover.is_none() {
+                hover = Some(&dgn.message);
+            }
+        }
+        if let Some(m) = hover {
+            resp.clone().on_hover_text(m);
+        }
+    }
+    if let Some(s) = view.sels.as_ref()
+        && let Some(cp) = caret_pos(doc, &geo, &rows, s.primary().head, scroll)
+    {
+        out.caret = Some(cp + Vec2::new(0.0, geo.row_h));
+    }
     if let Some(line) = cx.popup_line
         && let Some(r) = rows.iter().rfind(|r| r.line == line)
     {
@@ -1314,6 +1349,47 @@ fn caret_pos(doc: &Document, g: &Geo, rows: &[Row], pos: usize, scroll: f32) -> 
     }
     let v = vcol(doc, r.line, lc.col, g.tab);
     Some(Pos2::new(g.x_of(r, v, scroll) - 1.0, r.y))
+}
+
+/// Wellenlinie (Diagnose, #367) unter `range`; `dotted` = Hinweis bzw. unnötiger Code (gepunktet), `strike` = veraltet
+/// (zusätzlich durchgestrichen).
+#[allow(clippy::too_many_arguments)]
+fn paint_squiggle(p: &egui::Painter, doc: &Document, g: &Geo, rows: &[Row], range: std::ops::Range<usize>, scroll: f32, col: Color32, dotted: bool, strike: bool) {
+    for r in rows {
+        let base = doc.line_to_char(r.line);
+        let (rs, re) = (base + r.start, base + r.end);
+        if range.end <= rs || range.start > re {
+            continue;
+        }
+        let a = range.start.max(rs) - base;
+        let b = range.end.min(re).max(range.start.max(rs)) - base;
+        let x0 = g.x_of(r, vcol(doc, r.line, a, g.tab), scroll);
+        let x1 = g.x_of(r, vcol(doc, r.line, b, g.tab), scroll).max(x0 + g.cw * 0.6);
+        let y = r.y + g.row_h - 2.0;
+        if dotted {
+            let mut x = x0;
+            while x < x1 {
+                p.circle_filled(Pos2::new(x + 0.75, y), 0.9, col);
+                x += 3.0;
+            }
+        } else {
+            let mut pts = Vec::new();
+            let mut x = x0;
+            let mut up = false;
+            while x <= x1 {
+                pts.push(Pos2::new(x, if up { y - 1.5 } else { y + 0.5 }));
+                x += 2.0;
+                up = !up;
+            }
+            if pts.len() >= 2 {
+                p.add(egui::Shape::line(pts, Stroke::new(1.0_f32, col)));
+            }
+        }
+        if strike {
+            let ym = r.y + g.row_h / 2.0;
+            p.line_segment([Pos2::new(x0, ym), Pos2::new(x1, ym)], Stroke::new(1.0_f32, col.gamma_multiply(0.8)));
+        }
+    }
 }
 
 /// Fläche hinter dem Bereich `range` (Auswahl, Treffer, Markierung) in den sichtbaren Zeilen.

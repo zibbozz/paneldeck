@@ -390,7 +390,10 @@ fn very_long_lines_stay_plain_and_keep_the_state() {
 fn modes_read_leniently() {
     assert_eq!(Mode::from_id("Syntax"), Some(Mode::Syntax));
     assert_eq!(Mode::from_id("text"), Some(Mode::Text));
-    assert_eq!(Mode::from_id("smart"), None, "kommt später; ältere Versionen fallen auf den Standard zurück");
+    assert_eq!(Mode::from_id("smart"), Some(Mode::Smart), "ab 3.3.0 (#367)");
+    assert_eq!(Mode::from_id("fancy"), None, "unbekannt (neuere Version) → Standard");
+    assert_eq!(serde_json::to_string(&Mode::Smart).unwrap(), "\"smart\"");
+    assert!(Mode::Smart.colours() && Mode::Syntax.colours() && !Mode::Text.colours());
     assert_eq!(serde_json::to_string(&Mode::Syntax).unwrap(), "\"syntax\"");
     assert_eq!(Mode::default(), Mode::Text, "neue Dateien: Text");
 }

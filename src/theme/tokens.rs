@@ -135,6 +135,10 @@ ui_tokens! {
     code_heading: Code, "Code: Überschrift, Abschnitt", "Code: heading, section";
     code_variable: Code, "Code: Variable, Parameter", "Code: variable, parameter";
     code_invalid: Code, "Code: ungültig", "Code: invalid";
+    diag_error: Code, "Smart-Modus: Fehler (Wellenlinie)", "Smart mode: error (squiggle)";
+    diag_warning: Code, "Smart-Modus: Warnung (Wellenlinie)", "Smart mode: warning (squiggle)";
+    diag_info: Code, "Smart-Modus: Information (Wellenlinie)", "Smart mode: information (squiggle)";
+    diag_hint: Code, "Smart-Modus: Hinweis (gepunktet)", "Smart mode: hint (dotted)";
     diff_add_bg: EditorDiff, "Vergleich: Hintergrund hinzugefügter Zeilen", "Comparison: background of added lines";
     diff_remove_bg: EditorDiff, "Vergleich: Hintergrund entfernter Zeilen", "Comparison: background of removed lines";
     diff_add_word: EditorDiff, "Vergleich: hinzugefügte Wörter in der Zeile", "Comparison: added words within a line";
@@ -333,6 +337,11 @@ pub fn default_expr(name: &str, dark: bool) -> Expr {
         "code_heading" => R("code_function"),
         "code_variable" => R("code_tag"),
         "code_invalid" => R("error"),
+        // Smart-Modus (#367): Diagnosen in den Statusfarben, Hinweise gedämpft.
+        "diag_error" => R("error"),
+        "diag_warning" => R("warning"),
+        "diag_info" => R("info"),
+        "diag_hint" => A("text_dim", 80),
         // Vergleich und Änderungsmarken (#385): Zeilen- und Wort-Hintergründe aus den Diff-Farben; Marken nicht gestagt
         // (bzw. ungespeichert) in Grün/Gelb/Rot, gestagt in Türkis/Blau/Violett – unterscheidbar, auch hell lesbar.
         "diff_add_bg" => A("diff_add", 15),

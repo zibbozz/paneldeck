@@ -292,6 +292,8 @@ Siehe [Umgebungsvariablen](terminals.md#umgebungsvariablen).
 ## Neue Felder in 3.3.0
 Alle Felder sind optional; ältere Versionen ignorieren sie, fehlende Felder bedeuten die Standards (alles aus).
 - `settings.json` → `editor` ([Mehrere Cursor](editor.md#mehrere-cursor)): `multi_cursor` (Kürzel und Befehle), `multi_cursor_alt_click` (Alt+Klick), `multi_cursor_middle` (mittlere Maustaste), `agent_selections` (`editor_read` liefert die Auswahlen) – alle standardmäßig `false`; nur `true` schaltet ein.
+- `settings.json` → `editor.smart` ([Smart-Modus](editor.md#smart-modus)): `max_servers` (6, 1–32), `completion_timeout_ms` (5000), `max_diagnostics` (1000), `max_message_mb` (64), `max_file_mb` (5), `auto_complete` (`true`), `trace` (`false`), `own_paths` (Sprach-Id → absoluter Pfad), `disabled` (Sprach-Id → Kennungen abgewählter eingebauter Server); `default_mode`/`language_modes` nehmen auch `smart`. Vertrauenswürdige Ordner stehen in `trust.json` (internes Format, keine öffentliche API).
+- Kürzel-Kennungen `ed_complete` (Strg+Leertaste), `ed_problems` (Strg+Umschalt+M), `ed_next_problem` (F8), `ed_prev_problem` (Umschalt+F8).
 - Kürzel-Kennungen `ed_next_occurrence` (Strg+D), `ed_all_occurrences` (Strg+Umschalt+D), `ed_soft_undo` (Strg+U), `ed_toggle_comment` (Strg+/), `ed_toggle_comment_alt` (keins) in den Kürzel-Einstellungen, nur im Editor-Reiter.
 
 ## Sicherungen

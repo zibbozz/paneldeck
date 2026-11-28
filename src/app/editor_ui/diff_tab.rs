@@ -2576,12 +2576,12 @@ fn side_highlight(side: &mut Side, docs: &mut BTreeMap<u64, DocEntry>, prefs: &s
         Side::Text(s) => {
             let lang = match other.and_then(|o| docs.get_mut(&o)) {
                 Some(e) => {
-                    let on = e.mode(prefs) == crate::editor::syntax::Mode::Syntax && !e.is_large(prefs);
+                    let on = e.mode(prefs).colours() && !e.is_large(prefs);
                     if on { e.language(prefs) } else { None }
                 }
                 None => {
                     let l = crate::editor::syntax::detect(s.path(), "", "", &prefs.syntax.user_map);
-                    l.filter(|l| prefs.syntax.mode_for(Some(l)) == crate::editor::syntax::Mode::Syntax)
+                    l.filter(|l| prefs.syntax.mode_for(Some(l)).colours())
                 }
             }?;
             if !crate::editor::syntax::engine::has_grammar(&lang) || s.binary || s.raw_len > prefs.large_file_bytes {

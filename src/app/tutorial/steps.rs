@@ -638,6 +638,19 @@ const EDITOR: &[Step] = &[
         need: None,
     },
     Step {
+        id: "editor.smart",
+        since: "3.3.0",
+        spot: Some(Spot::EditorStatus),
+        title: tx("Smart-Modus", "Smart mode"),
+        body: tx(
+            "In der Statusleiste lässt sich der Modus auf „Smart“ stellen: Dann liefert ein Sprachserver aus dem PATH (z. B. rust-analyzer, pyright, typescript-language-server) Vervollständigen ({key:ed_complete}) und Diagnosen als Wellenlinien. Er startet erst, wenn du dem Projektordner vertraust – eine Leiste über dem Text fragt. Der Zähler in der Statusleiste bzw. {key:ed_problems} öffnet die Problemliste, {key:ed_next_problem} springt zum nächsten Problem.",
+            "In the status bar the mode can be set to “Smart”: a language server from PATH (e.g. rust-analyzer, pyright, typescript-language-server) then provides completion ({key:ed_complete}) and diagnostics as squiggles. It only starts once you trust the project folder – a bar above the text asks. The counter in the status bar or {key:ed_problems} opens the problem list, {key:ed_next_problem} jumps to the next problem.",
+        ),
+        prep: EDITOR_FILE,
+        done: None,
+        need: None,
+    },
+    Step {
         id: "editor.selection_menu",
         since: "3.3.0",
         spot: Some(Spot::EditorMenuBar),
