@@ -446,6 +446,8 @@ impl App {
         self.open_session_settings(id);
         if let Some(f) = self.session_settings.as_mut() {
             f.start_tab = Some(super::opts_tabs::Tab::Environment);
+            // neutraler Ordner statt des Aufnahme-Ordners (nur im Formular, gespeichert wird nichts)
+            f.v.cwd = if cfg!(windows) { r"C:\Dev\acme-shop".into() } else { "/home/dev/acme-shop".into() };
         }
     }
 
@@ -731,6 +733,12 @@ impl App {
                 }
                 if view == "kosten" && n % 20 == 0 {
                     self.shot_usage();
+                }
+            }
+            // neutraler Prompt hinter dem Dialog (kein Pfad des Aufnahme-Rechners)
+            "session-env" if n == 30 => {
+                if let Some(id) = self.shot_sessions().first().copied() {
+                    self.shot_run(id, &demo, None);
                 }
             }
             "processes" | "process-output" | "process-new" if n == 40 => {

@@ -62,7 +62,7 @@ impl TimeUi {
             } else {
                 super::big_time(ui, &v.local.format(if settings.clock_seconds { "%H:%M:%S" } else { "%H:%M" }).to_string(), None);
             }
-            ui.label(RichText::new(format!("{} · {} · {}", v.local.format("%A, %Y-%m-%d"), worldclock::fmt_utc(v.utc_offset_min), worldclock::fmt_offset(v.offset_to_local_min, lang))).color(style::dim(ui)));
+            ui.label(RichText::new(format!("{} · {} · {}", day_line(v, lang), worldclock::fmt_utc(v.utc_offset_min), worldclock::fmt_offset(v.offset_to_local_min, lang))).color(style::dim(ui)));
         }
         ui.add_space(8.0);
         let mut e = c.clone();
@@ -112,6 +112,26 @@ impl TimeUi {
 fn clock_sub(c: &WorldClock, v: &ClockView, lang: Lang) -> String {
     let zone = if c.label.trim().is_empty() { c.zone.clone() } else { format!("{} · {}", worldclock::city_of(&c.zone), c.zone) };
     format!("{zone} · {} · {}", v.local.format("%Y-%m-%d"), worldclock::fmt_offset(v.offset_to_local_min, lang))
+}
+
+/// Wochentag und Datum der Uhr in der Sprache der Oberfläche („Samstag, 2026-11-28“; chronos `%A` ist immer englisch).
+fn day_line(v: &ClockView, lang: Lang) -> String {
+    use chrono::Datelike;
+    format!("{}, {}", crate::calendar::builder::weekday_name(v.local.weekday().num_days_from_sunday() as u8, lang), v.local.format("%Y-%m-%d"))
+}
+
+#[cfg(test)]
+mod day_line_tests {
+    use super::*;
+
+    #[test]
+    fn the_weekday_follows_the_language() {
+        // 2026-11-28 ist ein Samstag
+        let local = chrono::NaiveDate::from_ymd_opt(2026, 11, 28).unwrap().and_hms_opt(9, 0, 0).unwrap();
+        let v = ClockView { local, utc_offset_min: 540, offset_to_local_min: 480, abbrev: "JST".into() };
+        assert_eq!(day_line(&v, Lang::De), "Samstag, 2026-11-28");
+        assert_eq!(day_line(&v, Lang::En), "Saturday, 2026-11-28");
+    }
 }
 
 /// Analoges Zifferblatt.

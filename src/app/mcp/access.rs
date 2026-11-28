@@ -208,6 +208,27 @@ pub(in crate::app) fn gate_target(m: &AccessMap, who: Caller, tool: &str, args: 
     })
 }
 
+/// Läuft diese Instanz als Aufnahme der Doku-Screenshots (`tools/docs-shots.ps1`)? Nur mit dem Cargo-Feature
+/// `readme-shots` (nie im Release, `tools/release.sh` prüft das) und nur mit gesetztem `PANELDECK_SHOT`. Dann nimmt
+/// `screenshot` ohne `session` das ganze Fenster auf, auch mit gesperrten Projekten (Beispielprojekte beginnen gesperrt,
+/// #386) und mit offenen Fenstern, Dialogen oder anderen Modi – genau das zeigen die Doku-Bilder. Ohne das Feature immer
+/// `false`: dort gelten alle Prüfungen von `gate_target` und `App::shot_scope` unverändert.
+pub(in crate::app) fn docs_shot_instance() -> bool {
+    #[cfg(feature = "readme-shots")]
+    {
+        crate::app::shot_start::spec().is_some()
+    }
+    #[cfg(not(feature = "readme-shots"))]
+    {
+        false
+    }
+}
+
+/// `screenshot` ohne `session` (ganzes Fenster)?
+fn whole_window_shot(tool: &str, args: &Value) -> bool {
+    tool == "screenshot" && !args.get("session").is_some_and(|s| !s.is_null())
+}
+
 /// Stufe des Projekts `project` für einen Chat, eingeordnet als `who` (Heimat oder extern).
 pub(in crate::app) fn chat_cap(m: &AccessMap, who: Caller, project: u64) -> McpLevel {
     m.sidebar(who, project)
@@ -304,6 +325,8 @@ impl App {
         let overlays = overlay_rects(ctx);
         let hub = self.mode == super::super::titlebar::Mode::Terminals;
         match session {
+            // Nur in der Aufnahme der Doku-Screenshots (Feature `readme-shots`, `PANELDECK_SHOT`), nie im Release.
+            None if docs_shot_instance() => Ok(None),
             None => {
                 if !hub || !self.wins.all_show_terminals() || !overlays.is_empty() || self.chips_hide_something(&self.agent_view(caller, how)) {
                     return Err(shot_refused());
@@ -335,6 +358,10 @@ impl App {
     /// Kalender, Prozesse und `create_session` prüfen selbst. Bei `project_locked` erscheint einmal je Agent und Bereich ein
     /// Hinweis mit „Freigeben …“.
     pub(in crate::app) fn mcp_access_gate(&mut self, tool: &str, args: &Value, caller: Option<u64>, how: &str) -> Result<(), (String, String)> {
+        // Nur in der Aufnahme der Doku-Screenshots (Feature `readme-shots`, `PANELDECK_SHOT`), nie im Release.
+        if whole_window_shot(tool, args) && docs_shot_instance() {
+            return Ok(());
+        }
         let (m, who) = self.access_for(caller, how);
         let session_area = |s: &Value| s.as_u64().and_then(|id| self.entries.get(&id)).map(|e| Area::Project(e.meta.project));
         let Some((area, need)) = gate_target(&m, who, tool, args, &session_area)? else { return Ok(()) };
@@ -655,6 +682,27 @@ mod tests {
         assert_eq!(chat_cap(&m, Caller::External, 1), McpLevel::Off, "extern: nur „Für alle“");
         assert_eq!(chat_cap(&m, Caller::External, 2), McpLevel::Read);
         assert_eq!(chat_cap(&m, Caller::Home(1), 99), McpLevel::Off, "unbekanntes Projekt");
+    }
+
+    /// Ein normaler Build (ohne Feature `readme-shots`) verweigert das ganze Fenster weiterhin, sobald ein Projekt
+    /// gesperrt ist – auch mit gesetztem `PANELDECK_SHOT`: die Ausnahme der Doku-Screenshots gibt es dort nicht.
+    #[cfg(not(feature = "readme-shots"))]
+    #[test]
+    fn whole_window_shot_stays_strict_without_the_docs_feature() {
+        use crate::access::{AgentAccess, AreaLevel};
+        let none = |_: &Value| None;
+        let mut m = AccessMap { global: McpLevel::Control, general: AgentAccess { level: AreaLevel::Control, for_all: true }, ..Default::default() };
+        m.projects.insert(1, AgentAccess { level: AreaLevel::Off, for_all: false });
+        for who in [Caller::External, Caller::Home(1)] {
+            assert_eq!(gate_target(&m, who, "screenshot", &json!({}), &none).unwrap_err().0, acc::LOCKED_CODE, "{who:?}");
+            assert_eq!(gate_target(&m, who, "screenshot", &json!({"session": null}), &none).unwrap_err().0, acc::LOCKED_CODE, "{who:?}");
+        }
+        assert!(whole_window_shot("screenshot", &json!({})) && whole_window_shot("screenshot", &json!({"session": null})));
+        assert!(!whole_window_shot("screenshot", &json!({"session": 3})) && !whole_window_shot("read_terminal", &json!({})));
+        assert!(!docs_shot_instance(), "ohne Feature nie eine Aufnahme der Doku-Screenshots");
+        // Nichts gesperrt: das ganze Fenster prüft dann `App::shot_scope` (Modus, Fenster, Dialoge).
+        m.projects.insert(1, AgentAccess { level: AreaLevel::Control, for_all: true });
+        assert_eq!(gate_target(&m, Caller::External, "screenshot", &json!({}), &none).unwrap(), None);
     }
 
     #[test]

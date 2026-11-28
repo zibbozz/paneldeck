@@ -562,8 +562,14 @@ pub(super) fn session_form_ui(ctx: &egui::Context, f: &mut SessionForm, shells: 
     // Reiter wie im Dialog „Neue Sitzung“ (#292): öffnet auf „Allgemein“, Strg+Tab/Alt+1 … wechseln, Enter speichert.
     let win = Id::new("session_settings");
     if f.focus {
-        tabs::set(ctx, SALT, f.start_tab.take().unwrap_or(Tab::General));
+        let start = f.start_tab.take().unwrap_or(Tab::General);
+        tabs::set(ctx, SALT, start);
         tabs::activate(ctx, SALT);
+        // Das Namensfeld (und damit das Ende von `focus`) gibt es nur auf „Allgemein“: Öffnet der Dialog auf einem
+        // anderen Reiter (z. B. „Umgebung“), sonst setzte das nächste Bild ihn wieder auf „Allgemein“ zurück.
+        if start != Tab::General {
+            f.focus = false;
+        }
     }
     // Nicht modal: nur mit der Tastatur im Fenster (Enter im Terminal speichert nicht).
     let enter = esc_ok && !value_suggest::wants_enter(ctx, egui::Id::new(("session_tags", f.id))) && tabs::enter_confirms(ctx, SALT, win);
@@ -1678,6 +1684,27 @@ mod tests {
             d.frame(&mut f, true, vec![]);
             assert_eq!(win(&d), first);
         }
+    }
+
+    /// „Umgebung bearbeiten“ (#384) öffnet den Dialog auf dem Reiter „Umgebung“ und bleibt dort (sprang nach dem ersten
+    /// Bild auf „Allgemein“ zurück, weil nur das Namensfeld `focus` beendete).
+    #[test]
+    fn a_start_tab_stays_selected() {
+        use super::super::opts_tabs::{self as tabs, Tab};
+        let mut d = Dlg::new();
+        let env = vec![crate::session_env::EnvVar::plain("API_URL", "http://localhost:3000")];
+        let mut f = form(&SessionMeta { id: 1, shell_id: "pwsh".into(), env, ..SessionMeta::default() });
+        f.start_tab = Some(Tab::Environment);
+        for _ in 0..4 {
+            d.frame(&mut f, true, vec![]);
+            assert_eq!(tabs::current(&d.ctx, "sset", &tabs::session_tabs_env(false, true)), Tab::Environment);
+        }
+        assert!(!f.focus);
+        // Name und Wert behalten ihre Breite, auch wenn der Reiter schon im ersten Bild offen ist (das Raster merkte sich
+        // sonst die Spaltenbreiten des noch schmalen Fensters, und die Felder blieben wenige Zeichen breit).
+        let w = |key: &'static str| d.ctx.data(|m| m.get_temp::<Rect>(Id::new(("env_mark", key, 0usize)))).map(|r| r.width()).unwrap_or(0.0);
+        assert!(w("name") >= 100.0, "Name {}", w("name"));
+        assert!(w("value") >= 150.0, "Wert {}", w("value"));
     }
 
     #[test]

@@ -303,7 +303,9 @@ pub(super) fn env_tab_ui(ui: &mut Ui, ed: &mut EnvEditor, o: EnvUiOpts) {
             let bad = err.iter().any(|(k, _)| *k == i);
             let hint = warn.iter().chain(err.iter()).filter(|(k, _)| *k == i).map(|(_, t)| t.as_str()).collect::<Vec<_>>().join("\n");
             ui.horizontal(|ui| {
-                let mut te = egui::TextEdit::singleline(&mut r.name).desired_width(NAME_W - 18.0).hint_text("NAME").font(egui::TextStyle::Monospace);
+                let mut te = egui::TextEdit::singleline(&mut r.name).desired_width(NAME_W - 18.0).min_size(egui::vec2(NAME_W - 18.0, 0.0)).hint_text("NAME").font(egui::TextStyle::Monospace);
+                // `min_size`: Spalten ohne gemerkte Breite gibt das Raster nur `interact_size.x` (40 px); das Feld passte
+                // sich daran an und die Spalte blieb für immer so schmal (erstes Öffnen des Reiters „Umgebung“).
                 if bad {
                     te = te.text_color(crate::style::ui().error);
                 }
@@ -318,7 +320,7 @@ pub(super) fn env_tab_ui(ui: &mut Ui, ed: &mut EnvEditor, o: EnvUiOpts) {
                 }
             });
             let hint_v = if r.secret && r.stored.is_some() { lang.t("•••• (gespeichert)", "•••• (stored)") } else if r.remove { "" } else { lang.t("Wert", "value") };
-            let resp = ui.add_enabled(!r.remove, egui::TextEdit::singleline(&mut r.value).desired_width(VALUE_W).password(r.secret).hint_text(hint_v).font(egui::TextStyle::Monospace));
+            let resp = ui.add_enabled(!r.remove, egui::TextEdit::singleline(&mut r.value).desired_width(VALUE_W).min_size(egui::vec2(VALUE_W, 0.0)).password(r.secret).hint_text(hint_v).font(egui::TextStyle::Monospace));
             mark(ui, "value", i, &resp);
             let sc = ui.checkbox(&mut r.secret, "");
             if sc.changed() {
@@ -748,6 +750,9 @@ mod tests {
     }
 
     fn click(ctx: &egui::Context, ed: &mut EnvEditor, key: &'static str, n: usize) {
+        // erst ein Bild ohne Eingabe: Nach einer neuen Zeile übernimmt das Raster die Spaltenbreiten erst am Ende des
+        // Bildes (das Fenster verwirft so ein Bild und zeichnet neu, der Test nicht) – geklickt wird ins fertige Layout.
+        run(ctx, ed, false, vec![]);
         let p = rect(ctx, key, n).unwrap_or_else(|| panic!("{key} {n} fehlt")).center();
         run(ctx, ed, false, vec![Event::PointerMoved(p), Event::PointerButton { pos: p, button: PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE }]);
         run(ctx, ed, false, vec![Event::PointerButton { pos: p, button: PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE }]);

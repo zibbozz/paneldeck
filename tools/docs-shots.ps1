@@ -57,7 +57,7 @@ $AllViews = @(
   @{ Name = 'app';                 Spec = 'app';                 W = 1400; H = 860;  Wait = 4; Rename = $false }
   @{ Name = 'kosten';              Spec = 'kosten';              W = 1240; H = 860;  Wait = 4; Rename = $false }
   @{ Name = 'agenten';             Spec = 'agenten';             W = 1100; H = 1060 }
-  @{ Name = 'session-env';         Spec = 'session-env';         W = 1300; H = 900;  Wait = 3 }
+  @{ Name = 'session-env';         Spec = 'session-env';         W = 1300; H = 900;  Wait = 5 }
   # Todo-Liste (Demo-Datenbank "Acme Shop")
   @{ Name = 'todo-tickets';        Spec = 'tickets:{TICKET}';    W = 1300; H = 1260 }
   @{ Name = 'todo-dashboard';      Spec = 'dashboard' }
