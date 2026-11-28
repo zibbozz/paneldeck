@@ -1,4 +1,4 @@
-//! Theme-Editor und Verwaltung eigener Themes (#309): *Einstellungen → Darstellung* (Bearbeiten, Als Kopie bearbeiten,
+//! Theme-Editor und Verwaltung eigener Themes (#309): *Einstellungen → Darstellung → Theme* (Bearbeiten, Als Kopie bearbeiten,
 //! Neu, Umbenennen, Duplizieren, Löschen, Im Explorer zeigen, Import/Export) und das Editor-Fenster mit Farbliste links
 //! (Gruppen, Suche, Markierung geänderter Werte, Zurücksetzen auf abgeleitet), Vorschau rechts (echte Bedienelemente)
 //! und Design-Prüfung unten. Die App ändert sich erst nach „Speichern“.
@@ -539,7 +539,7 @@ impl App {
         }
     }
 
-    /// Zeile unter der Theme-Wahl (*Einstellungen → Darstellung*): Bearbeiten, Neu, weitere Aktionen; ungültige Dateien.
+    /// Zeile unter der Theme-Wahl (*Einstellungen → Darstellung → Theme*): Bearbeiten, Neu, weitere Aktionen; ungültige Dateien.
     pub(super) fn theme_manage_ui(&mut self, ui: &mut Ui) {
         let lang = self.settings.language;
         let cur = self.themes.iter().find(|t| t.name == self.settings.theme).or(self.themes.first()).cloned();

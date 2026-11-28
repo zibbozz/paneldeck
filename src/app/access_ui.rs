@@ -1,4 +1,4 @@
-//! Oberfläche „Zugriff für Agenten“ (#386): Tabelle in Einstellungen → Agenten (alle Projekte, „Allgemein“, Ticket-Projekte,
+//! Oberfläche „Zugriff für Agenten“ (#386): Tabelle in Einstellungen → Agenten → Zugriff (alle Projekte, „Allgemein“, Ticket-Projekte,
 //! Schalter), Dialog „Zugriff für Agenten“ (Kontextmenü eines Projekts, Hinweis „Freigeben …“) und der Papierkorb.
 
 use super::*;
@@ -33,7 +33,7 @@ fn rules_hint(ui: &mut Ui, lang: Lang) {
 }
 
 impl App {
-    /// Teil von Einstellungen → Agenten: Schalter und Tabelle „Zugriff je Projekt“.
+    /// Teil von Einstellungen → Agenten → Zugriff: Schalter und Tabelle „Zugriff je Projekt“.
     pub(super) fn access_settings_ui(&mut self, ui: &mut Ui, cx: &super::settings_items::RowCx) {
         use super::settings_items::{block, srow};
         let lang = cx.lang;

@@ -16,7 +16,7 @@
 use std::path::Path;
 
 /// Startargumente dieser Instanz (`--data-dir …`, `--profile …`); leer für die Standardinstanz.
-/// Einzige Quelle für Integrationen (`integration`, Einstellungen → Agenten).
+/// Einzige Quelle für Integrationen (`integration`, Einstellungen → Agenten → Einrichten & Systemprompt).
 pub fn instance_args() -> Vec<String> {
     crate::paths::instance_args()
 }

@@ -475,7 +475,7 @@ impl BgCommands {
             return Err(err(
                 "limit_reached",
                 format!(
-                    "At most {limit} background commands may run at the same time in this chat (set by the user in Settings → Models). Running: {}. Wait until one ends (a message comes) or stop one with stop_command.",
+                    "At most {limit} background commands may run at the same time in this chat (set by the user in Settings → Models → Servers & models). Running: {}. Wait until one ends (a message comes) or stop one with stop_command.",
                     running.join(", ")
                 ),
             ));

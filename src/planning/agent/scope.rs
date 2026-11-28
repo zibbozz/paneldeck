@@ -2,9 +2,9 @@
 //! den Papierkorb legen, eigene Kommentare ändern.
 //!
 //! * Sicht: [`Ctx::view`] (`access::AgentView`). Ohne Sicht (Tests, interne Aufrufe) ist alles erreichbar.
-//! * `create_project` (Schalter „Agenten dürfen Projekte anlegen“): nur Ticket-Projekte, verknüpft mit dem Heimatprojekt
+//! * `create_project` (Schalter „Projekte anlegen“): nur Ticket-Projekte, verknüpft mit dem Heimatprojekt
 //!   des Agenten (Steuern nötig), Herkunft „Agent“. Seitenleisten-Projekte legt nur der Nutzer an, Projekte löscht nie ein Agent.
-//! * `delete_ticket`/`delete_comment` (Schalter „Agenten dürfen Tickets/Kommentare löschen“): nur in den Papierkorb;
+//! * `delete_ticket`/`delete_comment` (Schalter „Löschen“): nur in den Papierkorb;
 //!   endgültig löscht nur der Nutzer. Kommentare nur mit Herkunft Agent (`update_comment` ohne Schalter, Steuern).
 
 use super::*;
@@ -159,7 +159,7 @@ pub(super) fn new_card_meta(ctx: &Ctx) -> Result<tasks::ItemMeta, ToolError> {
 // ------------------------------------------------------------------ neue Werkzeuge
 
 fn switch_off(ctx: &Ctx, de: &str, en: &str) -> ToolError {
-    ctx.err("forbidden", format!("{de} (Einstellungen → Agenten; nur der Nutzer kann das einschalten)."), format!("{en} (Settings → Agents; only the user can switch it on)."))
+    ctx.err("forbidden", format!("{de} (Einstellungen → Agenten → Zugriff; nur der Nutzer kann das einschalten)."), format!("{en} (Settings → Agents → Access; only the user can switch it on)."))
 }
 
 /// `create_project`: neues Ticket-Projekt, verknüpft mit dem Heimatprojekt des Agenten.

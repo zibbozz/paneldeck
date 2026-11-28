@@ -26,7 +26,7 @@ Jedes Release unter [GitHub Releases](https://github.com/zibbozz/paneldeck/relea
 Die Terminals nutzen die Shells aus `/etc/shells`; Standard ist deine Anmelde-Shell (`$SHELL`).
 
 ## Desktop-Integration
-Alle Schalter stehen unter *Einstellungen → Fenster*, Abschnitt *Desktop-Integration*. Geschrieben wird nur in deinen Benutzerordner (kein root), für jedes Paketformat gleich.
+Alle Schalter stehen unter *Einstellungen → Allgemein → Desktop-Integration*. Geschrieben wird nur in deinen Benutzerordner (kein root), für jedes Paketformat gleich.
 - **Tray:** ein StatusNotifierItem (KDE, Xfce, Cinnamon, MATE, Budgie …). **GNOME** braucht die Erweiterung *AppIndicator and KStatusNotifierItem Support*; ohne Tray läuft Paneldeck normal, nur *Schließen → Tray* und *Minimieren → Tray* wirken dann nicht.
 - **Bei der Anmeldung starten** (standardmäßig aus): ein XDG-Autostart-Eintrag `~/.config/autostart/paneldeck.desktop` (Instanzen mit `--profile`/`--data-dir` bekommen eine eigene Datei), Start minimiert im Tray.
 - **Dateimanager: „In Paneldeck öffnen“** (standardmäßig aus): Einschalten schreibt „In Paneldeck öffnen“ und „Mit Claude in Paneldeck starten“ für **Dolphin** (Dienstmenü, Rechtsklick auf einen Ordner), **Nemo** (Aktionen, Rechtsklick auf einen Ordner oder den Hintergrund) und **Nautilus** (Rechtsklick → *Skripte*). Ausschalten entfernt genau diese Dateien wieder (Dateien ohne Paneldeck-Markierung bleiben unberührt).

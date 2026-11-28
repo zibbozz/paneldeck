@@ -29,7 +29,7 @@ Start it from *Applications*, not from the disk image: an app started from the d
 The terminals use the shells from `/etc/shells`; the default is your login shell (`$SHELL`, normally **zsh**). They start as login shells (`-l`), so `PATH` and your profile are set up like in Terminal.app and `claude` is found. zsh and fish get the shell integration (command marks, exit codes, folder tracking, exact `run_command`) without changing your `.zshrc` – see [Terminals](terminals.md).
 
 ## Desktop integration
-All switches are under *Settings → Window*, section *Desktop integration*.
+All switches are under *Settings → General → Desktop integration*.
 - **Menu bar:** instead of a tray icon Paneldeck shows an icon in the menu bar (click = show the window, menu: *Show Paneldeck* / *Quit*). *Close → tray* and *Minimize → tray* use it.
 - **Start at login** (off by default): a LaunchAgent `~/Library/LaunchAgents/io.github.zibbozz.paneldeck.plist` (instances with `--profile`/`--data-dir` get their own file) that starts Paneldeck minimized at the next login. macOS shows "Background item added" and lists it under *System Settings → General → Login Items*. Turning the switch off removes the file (a file without Paneldeck's marker is never touched). It cannot be turned on while Paneldeck runs from the disk image or a translocated location – move the app to *Applications* first.
 - **Notifications** (on by default) are shown through `osascript`. Because the app is not signed they appear under the name **"Script Editor"**; allow (or turn off) them in *System Settings → Notifications → Script Editor*.

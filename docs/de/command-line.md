@@ -57,7 +57,7 @@ Startet minimiert im Tray (so startet *Mit Windows starten*). Läuft Paneldeck s
     paneldeck.exe --tray
 
 ### --no-tray
-Startet ohne Tray-Symbol. *Schließen → Tray* und *Minimieren → Tray* verhalten sich dann wie bei einem normalen Fenster (Schließen beendet, Minimieren in die Taskleiste); *Einstellungen → Fenster* zeigt einen Hinweis.
+Startet ohne Tray-Symbol. *Schließen → Tray* und *Minimieren → Tray* verhalten sich dann wie bei einem normalen Fenster (Schließen beendet, Minimieren in die Taskleiste); *Einstellungen → Allgemein → Fenster & Tray* zeigt einen Hinweis.
 
     paneldeck.exe --no-tray
 
@@ -73,12 +73,12 @@ Nutzt `<Datenordner>\profiles\<name>` und läuft als eigene Instanz neben der no
     paneldeck.exe --data-dir "D:\PaneldeckDaten" --profile kunde-a
 
 ### --backup-dir \<ordner\>
-Schreibt Datenbank-Sicherungen für diesen Start nach `<ordner>`. *Einstellungen → Daten & Sicherung* zeigt den Ordner mit „(festgelegt mit --backup-dir)“ und sperrt die Ordnerwahl; der gespeicherte Sicherungsordner bleibt unverändert.
+Schreibt Datenbank-Sicherungen für diesen Start nach `<ordner>`. *Einstellungen → Daten & Sicherung → Sicherung* zeigt den Ordner mit „(festgelegt mit --backup-dir)“ und sperrt die Ordnerwahl; der gespeicherte Sicherungsordner bleibt unverändert.
 
     paneldeck.exe --backup-dir "E:\Sicherungen\Paneldeck"
 
 ### --lang en|de
-Sprache von Oberfläche und Meldungen für diesen Start (auch für `--help` und Fehlermeldungen). Die gespeicherte Sprache bleibt; Texte, die Paneldeck speichert (z. B. Standardnamen), behalten die gespeicherte Sprache. Wählst du bei einem solchen Start unter *Einstellungen → Allgemein* eine Sprache, wird diese Wahl gespeichert.
+Sprache von Oberfläche und Meldungen für diesen Start (auch für `--help` und Fehlermeldungen). Die gespeicherte Sprache bleibt; Texte, die Paneldeck speichert (z. B. Standardnamen), behalten die gespeicherte Sprache. Wählst du bei einem solchen Start unter *Einstellungen → Allgemein → Sprache & Start* eine Sprache, wird diese Wahl gespeichert.
 
     paneldeck.exe --lang en
 
@@ -89,7 +89,7 @@ Benennt `settings.json` in `settings.json.bak-<JJJJMMTT-HHMMSS>` um und startet 
     paneldeck.exe --profile arbeit --reset-settings
 
 ### --no-update-check
-Unterdrückt die automatische Update-Prüfung für diesen Start, auch wenn sie unter *Einstellungen → Info* eingeschaltet ist. Eine Prüfung von Hand bleibt möglich. Siehe [Updates](updates.md).
+Unterdrückt die automatische Update-Prüfung für diesen Start, auch wenn sie unter *Einstellungen → Info → Updates* eingeschaltet ist. Eine Prüfung von Hand bleibt möglich. Siehe [Updates](updates.md).
 
     paneldeck.exe --no-update-check
 
@@ -109,7 +109,7 @@ Genau ein Argument ohne Option, das ein vorhandener Ordner ist, wirkt wie `--ope
     paneldeck.exe "C:\Dev\meine-app"
 
 ### mcp
-Startet den MCP-Server für KI-Agenten über stdin/stdout und spricht mit dem laufenden Paneldeck. Den Hub sucht er in dieser Reihenfolge: `--data-dir`/`--profile`, das Paneldeck-Terminal, aus dem er gestartet wurde, dann die Suche des Datenordners unten. Nach `mcp` sind nur `--data-dir`, `--profile`, `--lang` und `--help` erlaubt. Die Agenten-Schnittstelle muss unter *Einstellungen → Agenten* eingeschaltet sein – siehe [Agenten-Schnittstelle](agent-interface.md).
+Startet den MCP-Server für KI-Agenten über stdin/stdout und spricht mit dem laufenden Paneldeck. Den Hub sucht er in dieser Reihenfolge: `--data-dir`/`--profile`, das Paneldeck-Terminal, aus dem er gestartet wurde, dann die Suche des Datenordners unten. Nach `mcp` sind nur `--data-dir`, `--profile`, `--lang` und `--help` erlaubt. Die Agenten-Schnittstelle muss unter *Einstellungen → Agenten → Zugriff* eingeschaltet sein – siehe [Agenten-Schnittstelle](agent-interface.md).
 
     claude mcp add paneldeck --scope user -- "C:\Program Files\Paneldeck\paneldeck.exe" mcp
     paneldeck.exe mcp --profile arbeit
@@ -123,7 +123,7 @@ Der Datenordner wird in dieser Reihenfolge gewählt (der erste Treffer gilt):
 5. das aktuelle Verzeichnis (Notlösung)
 
 `--profile <name>` nutzt dann den Unterordner `profiles\<name>` dieses Ordners. Zeigt `--data-dir` oder `PANELDECK_DATA` auf einen unbrauchbaren Ordner, bricht Paneldeck mit einer Fehlermeldung ab, statt auszuweichen.
-*Einstellungen → Info* und *Diagnose kopieren* zeigen den Datenordner, seine Herkunft (Parameter, Umgebungsvariable, portabel, `%APPDATA%`), das Profil und die aktiven Startoptionen. Siehe [Datenordner und Sicherungen](data-and-backups.md).
+*Einstellungen → Info → Version* und *Einstellungen → Daten & Sicherung → Diagnose* (*Diagnose kopieren*) zeigen den Datenordner, seine Herkunft (Parameter, Umgebungsvariable, portabel, `%APPDATA%`), das Profil und die aktiven Startoptionen. Siehe [Datenordner und Sicherungen](data-and-backups.md).
 
 ## Profile und mehrere Instanzen
 - **Pro Datenordner läuft nur ein Paneldeck** (Instanzsperre). Ein zweiter Start mit demselben Ordner übergibt an das laufende (und holt dessen Fenster nach vorn).

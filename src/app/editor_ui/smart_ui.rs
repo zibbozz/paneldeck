@@ -70,7 +70,7 @@ pub(super) fn status_chip(ui: &mut Ui, ed: &mut EditorUi, doc: u64, lang: Lang, 
             (k.0.clone(), format!("{} · {}", k.1.display(), s))
         }
         State::NeedsTrust(_) | State::NotNow(_) => (lang.t("Smart: Ordner nicht vertraut", "Smart: folder not trusted").into(), lang.t("Bis zum Vertrauen läuft der Syntax-Modus.", "Syntax mode runs until you trust the folder.").into()),
-        State::NoServer => (lang.t("Smart: kein Server", "Smart: no server").into(), lang.t("Für diese Sprache gibt es keinen Sprachserver im PATH und keinen eigenen Pfad (Einstellungen → Editor → Sprachen).", "There is no language server for this language in PATH and no own path (Settings → Editor → Languages).").into()),
+        State::NoServer => (lang.t("Smart: kein Server", "Smart: no server").into(), lang.t("Für diese Sprache gibt es keinen Sprachserver im PATH und keinen eigenen Pfad (Einstellungen → Editor → Sprachen & Syntax).", "There is no language server for this language in PATH and no own path (Settings → Editor → Languages & syntax).").into()),
         State::TooLarge => (lang.t("Smart: Datei zu groß", "Smart: file too large").into(), lang.t("Über der Grenze des Smart-Modus läuft der Syntax-Modus.", "Above the smart mode limit Syntax mode runs.").into()),
         State::Unsupported => (lang.t("Smart: nicht für diese Datei", "Smart: not for this file").into(), lang.t("Nur gespeicherte Dateien, keine Netzwerkpfade.", "Only saved files, no network paths.").into()),
         State::Resolving => (lang.t("Smart: sucht Server …", "Smart: looking for a server …").into(), lang.t("Projektwurzel und Server werden in WSL ermittelt.", "Project root and server are being looked up in WSL.").into()),

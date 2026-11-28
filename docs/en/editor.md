@@ -9,7 +9,7 @@ The **Editor** tab is a plain text editor inside Paneldeck, independent of the t
 ## Files and folders
 - **Open folder …** (**Ctrl+Shift+O**) shows a folder as a tree on the left (**Toggle folder tree** hides it); **Close folder** closes it again. In the tree, a click opens a file in the focused split; the context menu has *Open to the side*, *Copy path*, *Show in Explorer* and *Open as root folder*.
 - **Open file …**, **New file** and **Recent** (*Recent files* / *Recent folders*, *Clear list*).
-- **Explorer:** with the switch *Open in Paneldeck editor* in *Settings → Window* a right-click on any file opens it here ([Windows integration](windows-integration.md#open-in-paneldeck-editor)); from the command line: [`paneldeck.exe --edit <file>`](command-line.md#--edit-file).
+- **Explorer:** with the switch *Open in Paneldeck editor* in *Settings → General → Windows integration* a right-click on any file opens it here ([Windows integration](windows-integration.md#open-in-paneldeck-editor)); from the command line: [`paneldeck.exe --edit <file>`](command-line.md#--edit-file).
 - Paneldeck remembers the open folder, the tabs (with cursor and scroll position), the split layout and the recent lists (`editor-state.json` in the data folder).
 - **Files in WSL:** you can open and save files in a WSL distribution (`\\wsl.localhost\<distro>\…`, e.g. via *Open file …* or Ctrl+click on a Linux path in a terminal); they are loaded in the background. For such files the context menus also offer *Copy as Linux path*. `paneldeck.exe --edit /home/me/x` from a WSL session opens the file of that distribution. Agents stay limited to local Windows files (see [Agents](#agents)).
 
@@ -29,7 +29,7 @@ The **Editor** tab is a plain text editor inside Paneldeck, independent of the t
 - **WSL files:** the server runs inside the distribution (`wsl.exe -d <distro> --cd <root> --exec <server>`, no shell in between) and is found in the distribution's Linux PATH (login shell, so `~/.cargo/bin` and similar count); paths are Linux paths for the server. Root and server are looked up in the background. A WSL or network folder is only trusted as exactly that folder. The memory column of the *Language servers* window stays empty for WSL servers. The comparison tab and untitled tabs have no smart mode.
 
 ## Multiple cursors
-*(Since 3.3.0; before, Alt+click and Ctrl+D were always on.)* Like Sublime Text – everything is **off by default** and switched on in *Settings → Editor*:
+*(Since 3.3.0; before, Alt+click and Ctrl+D were always on.)* Like Sublime Text – everything is **off by default** and switched on in *Settings → Editor → General*:
 - **Multiple cursors** (the shortcuts and commands): **Ctrl+D** adds the next occurrence of the selection (with an empty cursor first the word there; plain text, not only whole words), **Ctrl+Shift+D** selects all occurrences (only in the Editor tab – in the Terminal Hub Ctrl+Shift+D still splits right), **Ctrl+U** takes back the last cursor or selection change without touching the text. All three are in the *Selection* menu and in the command palette and can be changed or removed under *Settings → Shortcuts*.
 - **Middle mouse button**: dragging selects a column and replaces all cursors; with **Ctrl** the column is added to the existing cursors. With word wrap the column counts screen rows. Lines that are too short – empty ones too – get a cursor at their end. A click without dragging places the cursor (like the left button), **Ctrl+click** adds a single cursor. A middle-click on a tab still closes it.
 - **Alt+click** adds a cursor; Alt+click on an existing cursor removes it (the last one always stays). Ctrl+click stays free.
@@ -43,7 +43,7 @@ The **Editor** tab is a plain text editor inside Paneldeck, independent of the t
 - **View:** Word wrap, Minimap, Folder tree, Split right, Split down, mode *Text* / *Syntax*, Language (built-in languages; all languages in the status bar), [Change markers](#comparison-and-change-markers) and what they compare with, Next/Previous change (**F7** / **Shift+F7**), Commands (palette). In a comparison tab *File* applies to the focused side; *Edit* and *Format* are greyed out.
 - **Format:** the [formatting commands](#formatting-json-and-xml) and *Format on save …* (opens the rule dialog, see [Actions on save](#actions-on-save)).
 
-Entries that do not apply right now are **greyed out**, and hovering says why (e.g. *Not JSON or XML* for a text file, *Nothing to undo*). In a narrow split the menus fold into one **Menu ▾**. The menu bar can be switched off under *Settings → Editor → Menu bar* (on by default). The command palette (**Ctrl+Shift+P**) also works in the Editor tab and lists the format commands as *Format: …*.
+Entries that do not apply right now are **greyed out**, and hovering says why (e.g. *Not JSON or XML* for a text file, *Nothing to undo*). In a narrow split the menus fold into one **Menu ▾**. The menu bar can be switched off under *Settings → Editor → General → Menu bar* (on by default). The command palette (**Ctrl+Shift+P**) also works in the Editor tab and lists the format commands as *Format: …*.
 
 ## Editing
 - **Multiple cursors:** see [Multiple cursors](#multiple-cursors) (off by default since 3.3.0). Esc goes back to one cursor.
@@ -63,10 +63,10 @@ Entries that do not apply right now are **greyed out**, and hovering says why (e
 
 Switching it on:
 - **For one file:** click the mode in the status bar → *This file: Syntax*. The choice is remembered with the tab.
-- **For all files of a language:** in the same menu *All files: Rust → Syntax*, or in *Settings → Editor → Languages → Mode per language*.
-- **For all files:** *Default for all other files → Syntax* in the menu, or *Settings → Editor → Default mode*.
+- **For all files of a language:** in the same menu *All files: Rust → Syntax*, or in *Settings → Editor → Languages & syntax → Mode per language*.
+- **For all files:** *Default for all other files → Syntax* in the menu, or *Settings → Editor → Languages & syntax → Default mode*.
 
-**Language detection:** your own mappings first (*Settings → Editor → Own mappings*, e.g. `*.tpl` → HTML or `Jenkinsfile` → Groovy), then the file name (`Makefile`, `CMakeLists.txt`, `Dockerfile`, `Gemfile` …) and the extension, then a shebang line (`#!/usr/bin/env python3`) or a modeline (`vim: ft=yaml`, `-*- mode: ruby -*-`). A click on the language in the status bar picks another one for this file (type to filter, Enter takes the first match; *Detect automatically* goes back). The choice is remembered with the tab.
+**Language detection:** your own mappings first (*Settings → Editor → Languages & syntax → Own mappings*, e.g. `*.tpl` → HTML or `Jenkinsfile` → Groovy), then the file name (`Makefile`, `CMakeLists.txt`, `Dockerfile`, `Gemfile` …) and the extension, then a shebang line (`#!/usr/bin/env python3`) or a modeline (`vim: ft=yaml`, `-*- mode: ruby -*-`). A click on the language in the status bar picks another one for this file (type to filter, Enter takes the first match; *Detect automatically* goes back). The choice is remembered with the tab.
 
 **Languages:** AutoIt, Batch, BibTeX, C, C#, C++, CMake, CSS, Diff, Dockerfile, Go, HTML, INI, Inno Setup, Java, JavaScript, JSON, Kotlin, LaTeX, Less, Lua, Makefile, Markdown, NSIS, Pascal / Delphi, Perl, PHP, PowerShell, Python, Ruby, Rust, SCSS, Shell (Bash), SQL, Swift, TeX, TOML, TypeScript, TSX/JSX, Visual Basic (VB.NET, VBA, VBScript), XML, YAML – plus every other grammar bundled from [bat](https://github.com/sharkdp/bat) (Haskell, Kotlin, Terraform, Zig, …; listed under *More grammars* in the picker). AutoIt, Inno Setup, Visual Basic and PowerShell use small grammars of Paneldeck's own.
 
@@ -106,7 +106,7 @@ Colouring is incremental and runs in the background, so typing and scrolling nev
 ## Saving and hot exit
 - **Ctrl+S** saves. Saving is **atomic**: Paneldeck writes a temporary file next to the file and then replaces it, so a crash never leaves a half-written file. Read-only files are not overwritten.
 - **Autosave** (off by default) saves files that already exist after a short delay ([settings](#settings)); untitled tabs are never saved automatically.
-- **Hot exit:** unsaved changes survive closing and restarting Paneldeck – they are stored as plain text in the data folder (`hot-exit\`) and deleted once the tab is saved or closed. *Settings → Data & backup → Clean up* lists them as *Editor: unsaved buffers*.
+- **Hot exit:** unsaved changes survive closing and restarting Paneldeck – they are stored as plain text in the data folder (`hot-exit\`) and deleted once the tab is saved or closed. *Settings → Data & backup → Care & clean-up → Clean up* lists them as *Editor: unsaved buffers*.
 
 ## Actions on save
 *(Since 3.2.0.)* Rules that run when you save a file in the Editor tab – per **file**, per **folder** (with all subfolders) or per **pattern**. Manage them in *Settings → Editor → Actions on save*; right-click a file or folder in the folder tree (*Actions on save for this file/folder …*) or use *File → Actions on save …* to open the rule dialog with the path filled in.
@@ -170,7 +170,7 @@ Paneldeck notices when an open file is changed by another program (for example b
 
 ![Comparison tab side by side with changes within the lines, filler lines and block arrows](../images/editor-diff.png)
 
-**Change markers** (*View → Change markers*, *Settings → Editor*, **off by default**) mark lines in the gutter of the normal editor: a thin bar for **added** and **modified** lines, a triangle where lines were **removed**, plus marks in the scrollbar and the minimap.
+**Change markers** (*View → Change markers*, *Settings → Editor → Comparison*, **off by default**) mark lines in the gutter of the normal editor: a thin bar for **added** and **modified** lines, a triangle where lines were **removed**, plus marks in the scrollbar and the minimap.
 - In a git repository the markers compare with the **index and HEAD at the same time**: **unstaged** changes (file ↔ index) in green/yellow/red, **staged** changes (index ↔ HEAD) in teal/blue/violet. Outside a repository – or with *Markers compare with: Saved file* – they show the unsaved changes against the file on disk.
 - A **click on a marker** opens a small window below the line: the old lines, **Revert** (one undo step), previous/next change and **Open in diff**.
 - **F7** / **Shift+F7** jump between the markers. No markers in large files.
@@ -181,7 +181,7 @@ Paneldeck notices when an open file is changed by another program (for example b
 ## Search in files
 **Ctrl+Shift+F** in the Editor tab opens the window *Search in files*; it searches all files of the open folder. **F4** / **Shift+F4** jump to the next / previous result.
 - respects **`.gitignore`** (also nested ones and those of parent folders), `.git/info/exclude`, the global Git exclude file and `.ignore` – also outside a Git repository; **Include ignored** switches that off for one search (the default is set in the settings);
-- your own **exclude patterns** (*Settings → Editor*, gitignore syntax, e.g. `node_modules`, `*.min.js`, `dist/`) always apply; `.git`, `.hg` and `.svn` are never searched;
+- your own **exclude patterns** (*Settings → Editor → Search & formatting*, gitignore syntax, e.g. `node_modules`, `*.min.js`, `dist/`) always apply; `.git`, `.hg` and `.svn` are never searched;
 - skips **binary files** and files over the large-file threshold (the summary counts them);
 - *Match case*, *Whole word*, *Regular expression*; matches are searched line by line;
 - results arrive while the search runs, grouped by file with line numbers and highlighted matches; **Cancel** stops it. A click opens the file at the match. At most 20 000 matches in 5 000 files (1 000 lines per file) – then narrow the search.
@@ -189,10 +189,10 @@ Paneldeck notices when an open file is changed by another program (for example b
 ![Find in files with the matches grouped by file](../images/editor-search.png)
 
 ## Large files
-Files from **20 MB** (*Settings → Editor → Large files from*) open in large-file mode: the editor stays smooth with files of several hundred megabytes, but **minimap, word wrap and syntax colours are off** (the [horizontal scrollbar](#editing) stays), and an info bar says so. Search in files skips them; agents can read but not edit them.
+Files from **20 MB** (*Settings → Editor → General → Large files from*) open in large-file mode: the editor stays smooth with files of several hundred megabytes, but **minimap, word wrap and syntax colours are off** (the [horizontal scrollbar](#editing) stays), and an info bar says so. Search in files skips them; agents can read but not edit them.
 
 ## Settings
-*Settings → Editor*:
+*Settings → Editor* (pages *General*, *Search & formatting* and *Languages & syntax*):
 
 | Setting | Default | Meaning |
 |---|---|---|
@@ -217,12 +217,12 @@ Files from **20 MB** (*Settings → Editor → Large files from*) open in large-
 
 Stored in `settings.json` as `editor` ([data format](data-and-backups.md#new-fields-in-300), [new in 3.1.0](data-and-backups.md#new-fields-in-310), [new in 3.2.0](data-and-backups.md#new-fields-in-320); for comparison and change markers: `change_markers`, `marker_base`, `diff_context`, `diff_ignore_whitespace`, `diff_layout`; since 3.3.0 `multi_cursor`, `multi_cursor_alt_click`, `multi_cursor_middle`, `agent_selections`).
 
-![Settings, Editor tab](../images/editor-settings.png)
+![Settings, Editor → General page](../images/editor-settings.png)
 
 ## Agents
 Agents (Claude Code and others via the [agent interface](agent-interface.md#editor), and [chats with local models](chat.md)) can use the editor:
-- **Reading** (`editor_list`, `editor_read`) works from level *Read only* – including unsaved changes. So does **validating** JSON/XML (`format_file` with `op: validate`, since 3.2.0). **`editor_diff`** (since 3.2.0, level *Read only* like `editor_read`) compares a document with its saved file, git HEAD/index or another open document. For [chats](chat.md#tools-in-small-contexts) `format_file`, `editor_diff` and `list_save_actions` are off by default: check them per model under *Settings → Models*; then the same rules apply as for external agents.
-- Four switches in *Settings → Editor → Agents*, **all off by default** and only effective at level **Control** (for chats: the level of the model):
+- **Reading** (`editor_list`, `editor_read`) works from level *Read only* – including unsaved changes. So does **validating** JSON/XML (`format_file` with `op: validate`, since 3.2.0). **`editor_diff`** (since 3.2.0, level *Read only* like `editor_read`) compares a document with its saved file, git HEAD/index or another open document. For [chats](chat.md#tools-in-small-contexts) `format_file`, `editor_diff` and `list_save_actions` are off by default: check them per model under *Settings → Models → Servers & models*; then the same rules apply as for external agents.
+- Four switches in *Settings → Agents → Editor*, **all off by default** and only effective at level **Control** (for chats: the level of the model):
   - **Agents may open files** – in a new tab; only local paths, never network/UNC paths (`\\server\share`, `\\wsl.localhost\…`, mapped network drives) or devices. An agent may also open an untitled tab with text.
   - **Agents may edit open files** – the change stays **unsaved**, is marked as made by the agent (*Opened or changed by an agent*) and can be undone.
   - **Agents may save** – only files that are open and already exist; untitled tabs are saved by you only.

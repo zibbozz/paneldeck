@@ -1,4 +1,4 @@
-//! Fenster „Aufräumen …“ (#307, 2.6.0): *Einstellungen → Daten* bzw. Befehls-Palette. Einträge mit Häkchen, Größe und
+//! Fenster „Aufräumen …“ (#307, 2.6.0): *Einstellungen → Daten & Sicherung* bzw. Befehls-Palette. Einträge mit Häkchen, Größe und
 //! kurzer Erklärung (im Hintergrund ermittelt, `crate::cleanup`), Summe unten, dann eine Rückfrage für den ganzen Lauf
 //! (3-Sekunden-Knopf; bei Unwiderruflichem einmal `DELETE`/`LÖSCHEN` tippen) und am Ende ein Ergebnis je Eintrag mit
 //! *Erneut versuchen* und ggf. *Jetzt neu starten*.
@@ -171,8 +171,8 @@ impl App {
                 "bytes": s.profiles.iter().map(|p| p.bytes).sum::<u64>(),
             },
             "note": state::t(
-                "Nur lesend. Aufräumen geht nur im Paneldeck-Fenster (Einstellungen → Daten → Aufräumen …); Agenten können nichts löschen.",
-                "Read-only. Cleaning up is only possible in the Paneldeck window (Settings → Data → Clean up …); agents cannot delete anything.",
+                "Nur lesend. Aufräumen geht nur im Paneldeck-Fenster (Einstellungen → Daten & Sicherung → Pflege & Aufräumen → Aufräumen …); Agenten können nichts löschen.",
+                "Read-only. Cleaning up is only possible in the Paneldeck window (Settings → Data & backup → Care & clean-up → Clean up …); agents cannot delete anything.",
             ),
         })
     }

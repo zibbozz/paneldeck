@@ -118,8 +118,8 @@ impl App {
             });
             ui.add_space(S1);
             ui.label(RichText::new(lang.t(
-                "Abschaltbar unter Einstellungen → Darstellung.",
-                "Can be turned off in Settings → Appearance.",
+                "Abschaltbar unter Einstellungen → Terminal → Zwischenablage & Einfügen.",
+                "Can be turned off in Settings → Terminal → Clipboard & paste.",
             )).small().color(style::dim(ui)));
         });
         match o {

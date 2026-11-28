@@ -26,7 +26,7 @@ Every release on [GitHub Releases](https://github.com/zibbozz/paneldeck/releases
 The terminals use the shells from `/etc/shells`; the default is your login shell (`$SHELL`).
 
 ## Desktop integration
-All switches are under *Settings → Window*, section *Desktop integration*. Everything is written into your home folder only (no root) and works the same for every package format.
+All switches are under *Settings → General → Desktop integration*. Everything is written into your home folder only (no root) and works the same for every package format.
 - **Tray:** a StatusNotifierItem (KDE, Xfce, Cinnamon, MATE, Budgie …). **GNOME** needs the extension *AppIndicator and KStatusNotifierItem Support*; without a tray Paneldeck works normally, only *Close → tray* and *Minimize → tray* have no effect.
 - **Start at login** (off by default): an XDG autostart entry `~/.config/autostart/paneldeck.desktop` (instances with `--profile`/`--data-dir` get their own file), started minimized in the tray.
 - **File manager: "Open in Paneldeck"** (off by default): turning it on writes "Open in Paneldeck" and "Start with Claude in Paneldeck" for **Dolphin** (service menu, right-click a folder), **Nemo** (actions, right-click a folder or the background) and **Nautilus** (right-click → *Scripts*). Turning it off removes exactly these files again (files without Paneldeck's marker are never touched).

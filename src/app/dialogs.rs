@@ -778,7 +778,7 @@ pub(super) enum OptsPlace {
     NewSession,
     /// Einstellungen einer bestehenden Sitzung (auch einer, die ein Agent angelegt hat).
     Session,
-    /// Standards unter Einstellungen → Claude.
+    /// Standards unter Einstellungen → Claude → Neue Sitzungen.
     Defaults,
     /// Editor einer Terminal-Vorlage (#244): wie die Standards ohne `bypassPermissions`; die Datei kann weitergegeben
     /// werden, vor dem Start erweiterter Optionen wird nachgefragt.

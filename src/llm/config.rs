@@ -398,7 +398,7 @@ impl LlmServer {
         }
     }
 
-    /// Eigene Kontextlänge des Nutzers (Einstellungen → Modelle), wenn gesetzt.
+    /// Eigene Kontextlänge des Nutzers (Einstellungen → Modelle → Server & Modelle), wenn gesetzt.
     pub fn user_context(&self, name: &str) -> Option<u32> {
         self.model_cfg(name).context_length.filter(|c| *c > 0)
     }
@@ -414,8 +414,8 @@ impl LlmServer {
                     return Err(format!(
                         "{} ({})",
                         lang.t(
-                            "Der API-Schlüssel ließ sich nicht entschlüsseln – bitte in Einstellungen → Modelle neu eingeben.",
-                            "API key could not be decrypted – enter it again in Settings → Models.",
+                            "Der API-Schlüssel ließ sich nicht entschlüsseln – bitte in Einstellungen → Modelle → Server & Modelle neu eingeben.",
+                            "API key could not be decrypted – enter it again in Settings → Models → Servers & models.",
                         ),
                         e.text(lang)
                     ))
@@ -699,8 +699,8 @@ mod tests {
         assert_eq!((ep.kind, ep.base_url.as_str(), ep.api_key.clone(), ep.receive_timeout), (ServerKind::OpenAi, "http://localhost:1234/v1", None, crate::llm::MIN_RECEIVE_TIMEOUT));
         let bad = LlmServer { api_key: "not base64 !!".into(), ..s.clone() };
         let e = bad.endpoint(Lang::En).unwrap_err();
-        assert!(e.starts_with("API key could not be decrypted – enter it again in Settings → Models."), "{e}");
-        assert!(bad.endpoint(Lang::De).unwrap_err().contains("Einstellungen → Modelle"));
+        assert!(e.starts_with("API key could not be decrypted – enter it again in Settings → Models → Servers & models."), "{e}");
+        assert!(bad.endpoint(Lang::De).unwrap_err().contains("Einstellungen → Modelle → Server & Modelle"));
         #[cfg(windows)]
         {
             let good = LlmServer { api_key: crate::llm::secret::protect("sk-1").unwrap(), ..s };

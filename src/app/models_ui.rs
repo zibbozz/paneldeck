@@ -1,4 +1,4 @@
-//! Einstellungen → Modelle (LLM-Server und Einstellungen je Modell) und der Dialog „Neuer Chat“ (#63).
+//! Einstellungen → Modelle → Server & Modelle (LLM-Server und Einstellungen je Modell) und der Dialog „Neuer Chat“ (#63).
 //!
 //! Die Oberfläche besteht aus freien Funktionen über den Einstellungsdaten (headless testbar); `App` verbindet sie mit
 //! `Settings::llm_servers`, dem Speichern und dem [`Connector`] (Modellliste im Hintergrund abrufen).
@@ -899,8 +899,8 @@ pub(super) fn new_chat_body(ui: &mut Ui, d: &mut NewChatDlg, servers: &[LlmServe
     let mut out = DlgOut::default();
     if servers.is_empty() {
         ui.label(lang.t(
-            "Für Chats brauchst du einen Server mit lokalen Modellen, z. B. Ollama. Richte ihn in Einstellungen → Modelle ein.",
-            "Chats need a server with local models, e.g. Ollama. Set it up in Settings → Models.",
+            "Für Chats brauchst du einen Server mit lokalen Modellen, z. B. Ollama. Richte ihn in Einstellungen → Modelle → Server & Modelle ein.",
+            "Chats need a server with local models, e.g. Ollama. Set it up in Settings → Models → Servers & models.",
         ));
         ui.add_space(S2);
         ui.horizontal(|ui| {
@@ -956,7 +956,7 @@ pub(super) fn new_chat_body(ui: &mut Ui, d: &mut NewChatDlg, servers: &[LlmServe
         if busy {
             ui.spinner();
         }
-        if ui.link(lang.t("Einstellungen → Modelle", "Settings → Models")).clicked() {
+        if ui.link(lang.t("Einstellungen → Modelle → Server & Modelle", "Settings → Models → Servers & models")).clicked() {
             out.open_settings = true;
         }
     });
@@ -1548,7 +1548,7 @@ mod tests {
             let mut d = NewChatDlg::default();
             let mut h = H::new();
             h.run(vec![], |ui| new_chat_body(ui, &mut d, &[], &conn, lang));
-            assert!(h.has(lang.t("Einstellungen → Modelle", "Settings → Models")), "{:?}", h.texts);
+            assert!(h.has(lang.t("Einstellungen → Modelle → Server & Modelle", "Settings → Models → Servers & models")), "{:?}", h.texts);
             let o = h.click(lang.t("Einstellungen öffnen", "Open settings"), |ui| new_chat_body(ui, &mut d, &[], &conn, lang), merge_dlg);
             assert!(o.open_settings && !o.create);
         }

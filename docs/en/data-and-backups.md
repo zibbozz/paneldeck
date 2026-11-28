@@ -10,7 +10,7 @@ Paneldeck keeps everything in one data folder. Which one is used is decided at s
 4. `%APPDATA%\Paneldeck`
 
 With `--profile <name>` the subfolder `profiles\<name>` of that folder is used.
-*Settings → About* shows the active data folder, its source and the profile.
+*Settings → About → Version* shows the active data folder, its source and the profile.
 
 ### Portable vs. installed
 - **Portable ZIP:** `paneldeck-data` is created next to `paneldeck.exe` – the whole folder can be moved or copied to a USB stick. If that place is not writable (e.g. a read-only folder), Paneldeck uses `%APPDATA%\Paneldeck`.
@@ -141,7 +141,7 @@ The rules of the editor's [actions on save](editor.md#actions-on-save) (since 3.
 - An export (*Export selected …*) has the same rule objects under `{"paneldeck_save_actions": 1, "rules": [...]}`, without `value_protected`.
 
 ## New fields in 2.2.0
-- `settings.json` → `llm_servers`: the servers of *Settings → Models*, each with `id`, `name`, `kind` (`ollama`/`openai`), `url`, optional `api_key` (Base64 of a Windows DPAPI blob – never plain text; only the same Windows user on the same computer can decrypt it), optional `receive_timeout_secs`, `models` (settings per model: `name`, `level`, `level_chosen`, `disabled_tools`, `ask_write`, `max_steps`, optional `tools`, `context_length`, `temperature`; `level_chosen: true` = the level was chosen in the [level question](chat.md#the-level-question) or under *Settings → Models* – missing or `false` means the model counts as *Off*, whatever `level` says) and `last_models` (the result of the last *Connect*). A server entry that cannot be read (e.g. an unknown `kind` from a newer version) is kept unchanged and shown read-only with *Remove*.
+- `settings.json` → `llm_servers`: the servers of *Settings → Models → Servers & models*, each with `id`, `name`, `kind` (`ollama`/`openai`), `url`, optional `api_key` (Base64 of a Windows DPAPI blob – never plain text; only the same Windows user on the same computer can decrypt it), optional `receive_timeout_secs`, `models` (settings per model: `name`, `level`, `level_chosen`, `disabled_tools`, `ask_write`, `max_steps`, optional `tools`, `context_length`, `temperature`; `level_chosen: true` = the level was chosen in the [level question](chat.md#the-level-question) or under *Settings → Models → Servers & models* – missing or `false` means the model counts as *Off*, whatever `level` says) and `last_models` (the result of the last *Connect*). A server entry that cannot be read (e.g. an unknown `kind` from a newer version) is kept unchanged and shown read-only with *Remove*.
 - `settings.json` → `last_chat_model`: `{ "server": "<id>", "model": "<name>" }`, the last choice in the *New chat* dialog.
 - `settings.json` → `alt_screen_wheel`: `"arrows"` (default) or `"off"` – the setting *Mouse wheel in full-screen programs* (see [Mouse wheel](terminals.md#mouse-wheel)). Any other value counts as `"arrows"`.
 - `state.json` → per session `kind` (`"chat"`; missing = terminal) and `chat` (`{ "server": "<id>", "model": "<name>" }`). An older Paneldeck (2.1) opening this file shows chats as terminals and leaves `chats/*.json` alone.
@@ -202,7 +202,7 @@ All new fields are optional: a missing field means the previous behaviour, and o
 All fields are optional; older versions ignore them, and missing fields mean the defaults below. See [Agent tools](chat.md#agent-tools).
 - `chats/<id>.json` → `todos`: the model's to-do list (`update_todos`), shown at the top of the chat – a list of `{"content": "…", "status": "pending" | "in_progress" | "completed"}`. Only written when not empty; unreadable entries are skipped. *Clear history* also clears it.
 - `chats/<id>.json` → `always_allow` can now also hold rules of the agent tools **without a session**: `{"tool": "edit_file", "session": null}` applies to that tool in the whole chat; `{"tool": "run_command", "session": null, "prefix": "cargo test"}` applies to commands in the chat's terminal that start with these words (never to commands with `;`, `&`, `|`, redirections, `$( … )` and – since 3.1.0 – parentheses, braces, `%` or `!`). Since 3.1.0 a `run_command` rule can also carry `shell` (the shell name in compare form, e.g. `gitbash`; missing = the project's profile) and `background: true`; it applies only to that shell and mode – older rules apply in the foreground with the project's profile. A `run_command` rule without `prefix`, a `read_file` rule and session-less rules of other tools (e.g. from pre-releases of 2.2.0) still never apply and are not written. Calls that touch a sensitive file always ask, whatever the rules say.
-- `settings.json` → `agent_tools` (*Settings → Models → Agent tools*), with these defaults:
+- `settings.json` → `agent_tools` (*Settings → Models → Tools in chats*), with these defaults:
   - `sensitive`: the patterns of sensitive files (reading, changing or moving them always asks) – default `.env`, `.env.*`, `*.env`, `*.pem`, `*.key`, `*.p12`, `*.pfx`, `*.jks`, `*.keystore`, `*.kdbx`, `*.ppk`, `id_rsa*`, `id_dsa*`, `id_ecdsa*`, `id_ed25519*`, `credentials`, `credentials.*`, `secrets.*`, `*.secret`, `.npmrc`, `.pypirc`, `.htpasswd`, `*.tfstate`, `*.tfstate.*`, `*.tfvars`;
   - `command_timeout_secs`: timeout of `run_command` in the chat's terminal, default `120` (5–600; since 3.1.0 up to `command_timeout_max_secs`);
   - `web_fetch`: offer `web_fetch`, default `true`;
@@ -232,7 +232,7 @@ All fields are optional; older versions ignore them, and missing fields mean the
 ## New fields in 3.1.0
 All fields are optional; older versions ignore them, and missing fields mean the defaults below. See [Background commands](chat.md#background-commands).
 - `chats/<id>.json` → after [compacting](chat.md#compacting-long-chats) the replaced messages carry `"compacted": true` (they stay in the file but are no longer sent to the model), and at the cut stands the summary: a message with `"role": "system"`, `content` = the text the model sees, and `"summary": {"messages": 12, "files": [{"path": "src/a.rs", "changed": true}], "text": "…"}` (number of replaced messages, touched files, the model's own summary). Older versions do not send system messages and therefore still see the whole history. Compacted messages without a summary after them are treated as normal again when loading.
-- `settings.json` → `chat_compact` (*Settings → Models → Compacting chats*), all optional: `auto` (default `false`), `threshold_percent` (`80`, 50–95), `window_percent` (`15`, 5–40) and `window_min` (`4096`, 1024–32768). Only written when something differs from the defaults; an unreadable value falls back to its default.
+- `settings.json` → `chat_compact` (*Settings → Models → Compacting*), all optional: `auto` (default `false`), `threshold_percent` (`80`, 50–95), `window_percent` (`15`, 5–40) and `window_min` (`4096`, 1024–32768). Only written when something differs from the defaults; an unreadable value falls back to its default.
 - `settings.json` → `agent_tools` → `command_timeout_max_secs`: the largest `timeout_secs` a chat model can ask for in the foreground, default `1800` (30 minutes; 10–14400). `command_timeout_secs` (default `120`) is now at most this value (before 3.1.0: 5–600).
 - `settings.json` → `agent_tools` → `background_limit`: how many background commands may run at the same time per chat, default `3` (1–10).
 - `chats/<id>.json` → messages from Paneldeck: a message with `role: "system"` and an object `event` – `{"kind": "background_command", "id": "bg1", "command": "…", "state": "exited" | "stopped" | "failed", "exit_code": 0, "duration_ms": 1234, "error": "…"}` (`exit_code`/`error` only when known). `content` is the text the model gets (as a message from the user); the chat shows its own line. An unreadable `event` is ignored; older versions show such a message as a system message and do not send it.
@@ -278,12 +278,12 @@ See [Environment variables](terminals.md#environment-variables).
   | `by_agent` | `true` = set by an agent (`create_session` with `env`) |
 
   Only written when not empty. Entries that cannot be read, protected names and duplicates (the last one wins) are skipped; a plain `value` of a secret variable written by hand is encrypted when the file is loaded. A `value_protected` that cannot be decrypted (other user or computer) locks the session at start until the values are entered again.
-- `settings.json` → `mcp_session_env` (default `false`): *Agents may set environment variables*; `mcp_env_allow` (default `[]`): allowed name patterns such as `"APP_*"`.
+- `settings.json` → `mcp_session_env` (default `false`): *Set environment variables*; `mcp_env_allow` (default `[]`): allowed name patterns such as `"APP_*"`.
 - `themes/*.json` → optional object `background`: the theme's own [background](themes.md#background) (image, gradient, colour or pattern, filters, overlay, areas; format in [Themes](themes.md#file-format)). Images are stored as bare file names in a folder next to the theme file, `themes/<file>/` (copies of at most 3840 px). An invalid value falls back to its default; the theme stays valid.
-- `settings.json` → `reduce_transparency` (*Settings → Appearance → Reduce transparency*, default `false`): all surfaces opaque, no theme background.
+- `settings.json` → `reduce_transparency` (*Settings → Appearance → Transparency & animation → Reduce transparency*, default `false`): all surfaces opaque, no theme background.
 - `settings.json` → `agent_general`: access of agents to **General** (everything without a project), `{"level": "global" | "off" | "read" | "control", "for_all": true}`. Missing = `{"level": "global", "for_all": true}`; a missing field inside counts the same way, an unknown `level` counts as `"off"` (the safe case).
-- `settings.json` → `agent_create_projects` (default `false`): *Agents may create projects*; `agent_delete` (default `false`): *Agents may delete tickets and their own comments* (to the trash).
-- `settings.json` → `llm_servers[].models[].enabled_tools` (default `[]`, only written when not empty): tools that are off by default for chats and that you checked for this model under *Settings → Models* (see [Tools in small contexts](chat.md#tools-in-small-contexts)); `disabled_tools` wins. Missing = none of them checked.
+- `settings.json` → `agent_create_projects` (default `false`): *Create projects*; `agent_delete` (default `false`): *Agents may delete tickets and their own comments* (to the trash).
+- `settings.json` → `llm_servers[].models[].enabled_tools` (default `[]`, only written when not empty): tools that are off by default for chats and that you checked for this model under *Settings → Models → Servers & models* (see [Tools in small contexts](chat.md#tools-in-small-contexts)); `disabled_tools` wins. Missing = none of them checked.
 - `settings.json` → `todo_new_private` (default `false`): new to-do cards start private; `show_system_notes` (default `true`): lists show system notes (cards and tickets created by agents or by Paneldeck).
 - `state.json` → per project `agent_access`, same form as `agent_general`. Missing (projects from before 3.2.0) = *As global* + *For all*; projects created later are written with `{"level": "off", "for_all": false}`.
 - `mcp-log.jsonl` → optional field `project` per entry: the sidebar project name of the target session or the ticket project key (missing when a call concerns no project).
@@ -297,20 +297,20 @@ All fields are optional; older versions ignore them, and missing fields mean the
 - Shortcut ids `ed_next_occurrence` (Ctrl+D), `ed_all_occurrences` (Ctrl+Shift+D), `ed_soft_undo` (Ctrl+U), `ed_toggle_comment` (Ctrl+/), `ed_toggle_comment_alt` (none) in the shortcut settings, Editor tab only.
 
 ## Backups
-*Settings → Data & backup* controls the automatic backups of `paneldeck.db`: by default one copy every 24 hours, keeping two (plus the database itself). If the computer was off when a backup was due, it is made at the next start; several missed ones result in just one. You can choose another backup folder, open it, press **Back up now** (manual copies are never deleted automatically) and **Restore** any copy from the list – the current state is backed up first, Paneldeck then quits and applies the restore at the next start. Before every database update (migration) Paneldeck makes a copy as well, and it never touches a database created by a newer version.
+*Settings → Data & backup* (pages *Backup* and *Restore*) controls the automatic backups of `paneldeck.db`: by default one copy every 24 hours, keeping two (plus the database itself). If the computer was off when a backup was due, it is made at the next start; several missed ones result in just one. You can choose another backup folder, open it, press **Back up now** (manual copies are never deleted automatically) and **Restore** any copy from the list – the current state is backed up first, Paneldeck then quits and applies the restore at the next start. Before every database update (migration) Paneldeck makes a copy as well, and it never touches a database created by a newer version.
 
 - `--backup-dir <folder>` writes the backups of one start to another folder (the folder choice is then locked; see [Command line](command-line.md#--backup-dir-folder)).
 - Before an update to a **new major version**, the self-update makes a database backup first (see [Updates](updates.md)).
-- **Database care** (check, statistics, compact, repair, rescue into a new file) is on the [maintenance page](todo-and-tickets.md#maintenance) of an expert project; *Settings → Data & backup → Open the maintenance page* takes you there.
+- **Database care** (check, statistics, compact, repair, rescue into a new file) is on the [maintenance page](todo-and-tickets.md#maintenance) of an expert project; *Settings → Data & backup → Care & clean-up → Open the maintenance page* takes you there.
 - The **undo history** of the to-do list (3 to 100 steps, default 25) is set on the same tab.
 
 ## Clean up
-*Settings → Data & backup → **Clean up …*** (also *Clean up …* in the command palette, `Ctrl+Shift+P`) opens a window where you tick what to delete. Each item shows its size or count (calculated in the background; *Refresh* calculates again) and a short explanation; the bottom shows the total (*Will be deleted:*). Only harmless items are preselected: clipboard images, old backup files (`*.bak-*`, `*.defekt-*`), `crash.log` and orphaned scrollback/chat files that no session belongs to. The window opens in the main window only.
+*Settings → Data & backup → Care & clean-up → **Clean up …*** (also *Clean up …* in the command palette, `Ctrl+Shift+P`) opens a window where you tick what to delete. Each item shows its size or count (calculated in the background; *Refresh* calculates again) and a short explanation; the bottom shows the total (*Will be deleted:*). Only harmless items are preselected: clipboard images, old backup files (`*.bak-*`, `*.defekt-*`), `crash.log` and orphaned scrollback/chat files that no session belongs to. The window opens in the main window only.
 
 ![Clean up window with the groups, sizes, the preselected items and the total at the bottom](../images/cleanup.png)
 
 ### How to free disk space
-1. Open *Settings → Data & backup* and click **Clean up …**.
+1. Open *Settings → Data & backup → Care & clean-up* and click **Clean up …**.
 2. Wait until the sizes are shown (*Calculating sizes …* disappears).
 3. Keep the preselected items and, if you like, tick more under *Save space* – e.g. *Database backups* with *Keep newest:* `3`.
 4. For old histories: tick *Orphaned scrollback* or *Orphaned chat histories* and switch on *Only history older than* … *days*.
@@ -321,7 +321,7 @@ All fields are optional; older versions ignore them, and missing fields mean the
 ![Confirmation “Delete permanently?” with the list of items and the delete button that unlocks after 3 seconds](../images/cleanup-confirm.png)
 
 ### How to reset Paneldeck completely
-1. Open *Settings → Data & backup → Clean up …*.
+1. Open *Settings → Data & backup → Care & clean-up → Clean up …*.
 2. Tick **Reset Paneldeck completely** (group *Everything*). All items are selected with it.
 3. Check the folder of the ZIP backup (*ZIP backup to:*, *Choose folder …*); it has to be outside the data folder.
 4. Click **Reset …**, type `DELETE` (German interface: `LÖSCHEN`) and click **Reset** once the button unlocks.
@@ -349,4 +349,4 @@ The database, sessions/layout and the complete reset cannot be deleted while Pan
 ## Moving or copying the data
 Quit Paneldeck, then copy the whole data folder. To use it from another place, start Paneldeck with `--data-dir <folder>` or set `PANELDECK_DATA`.
 
-API keys of [chat servers](chat.md#api-key) are encrypted for your Windows user: on another user account or computer they cannot be decrypted – enter them again in *Settings → Models*.
+API keys of [chat servers](chat.md#api-key) are encrypted for your Windows user: on another user account or computer they cannot be decrypted – enter them again in *Settings → Models → Servers & models*.

@@ -280,8 +280,8 @@ fn agent_env_of(args: &Value, chat: bool, allowed: bool, allow: &[String]) -> Re
         Some(_) if !allowed => Err(er(
             "forbidden",
             tr(
-                "Umgebungsvariablen setzen Agenten nur, wenn der Nutzer es erlaubt (Einstellungen → Agenten → „Agenten dürfen Umgebungsvariablen setzen“).",
-                "Agents set environment variables only when the user allows it (Settings → Agents → “Agents may set environment variables”).",
+                "Umgebungsvariablen setzen Agenten nur, wenn der Nutzer es erlaubt (Einstellungen → Agenten → Zugriff → „Umgebungsvariablen setzen“).",
+                "Agents set environment variables only when the user allows it (Settings → Agents → Access → “Set environment variables”).",
             ),
         )),
         Some(v) => crate::session_env::agent_vars(v, allow).map_err(|(d, e)| er("bad_args", if de() { d } else { e })),
@@ -641,7 +641,7 @@ fn name_list(names: &[String]) -> String {
 /// Fehlermeldungen nennen nur Namen und Kennungen – nie Adressen oder Schlüssel.
 fn resolve_chat_model(servers: &[LlmServer], last: Option<&state::ChatMeta>, server: Option<&str>, model: Option<&str>) -> Result<state::ChatMeta, (String, String)> {
     if servers.is_empty() {
-        return Err(er("no_model", tr("Es ist kein LLM-Server eingerichtet (Einstellungen → Modelle).", "No LLM server is configured (Settings → Models).")));
+        return Err(er("no_model", tr("Es ist kein LLM-Server eingerichtet (Einstellungen → Modelle → Server & Modelle).", "No LLM server is configured (Settings → Models → Servers & models).")));
     }
     let label = |s: &LlmServer| if s.name.trim().is_empty() { s.id.clone() } else { s.name.clone() };
     let labels: Vec<String> = servers.iter().map(|s| format!("{} ({})", label(s), s.id)).collect();
@@ -665,9 +665,9 @@ fn resolve_chat_model(servers: &[LlmServer], last: Option<&state::ChatMeta>, ser
                 return Err(er(
                     "bad_args",
                     if de() {
-                        format!("Unbekanntes Modell „{m}“ auf dem Server „{}“. Bekannt: {} (neue Modelle erscheinen nach „Verbinden“ in Einstellungen → Modelle; siehe list_models)", label(srv), name_list(&names))
+                        format!("Unbekanntes Modell „{m}“ auf dem Server „{}“. Bekannt: {} (neue Modelle erscheinen nach „Verbinden“ in Einstellungen → Modelle → Server & Modelle; siehe list_models)", label(srv), name_list(&names))
                     } else {
-                        format!("Unknown model “{m}” on server “{}”. Known: {} (new models appear after “Connect” in Settings → Models; see list_models)", label(srv), name_list(&names))
+                        format!("Unknown model “{m}” on server “{}”. Known: {} (new models appear after “Connect” in Settings → Models → Servers & models; see list_models)", label(srv), name_list(&names))
                     },
                 ));
             }
@@ -676,7 +676,7 @@ fn resolve_chat_model(servers: &[LlmServer], last: Option<&state::ChatMeta>, ser
         None => match last.filter(|l| l.server == srv.id && names.contains(&l.model)) {
             Some(l) => l.model.clone(),
             None => names.first().cloned().ok_or_else(|| {
-                er("no_model", if de() { format!("Für den Server „{}“ ist noch kein Modell bekannt – in Einstellungen → Modelle „Verbinden“ klicken.", label(srv)) } else { format!("No model is known for the server “{}” yet – click “Connect” in Settings → Models.", label(srv)) })
+                er("no_model", if de() { format!("Für den Server „{}“ ist noch kein Modell bekannt – in Einstellungen → Modelle → Server & Modelle „Verbinden“ klicken.", label(srv)) } else { format!("No model is known for the server “{}” yet – click “Connect” in Settings → Models → Servers & models.", label(srv)) })
             })?,
         },
     };
@@ -1709,7 +1709,7 @@ impl App {
             None => asked.for_agent(&self.settings.claude_defaults),
         };
         if claude && !self.settings.claude_mode {
-            return Err(er("claude_mode_off", tr("Der Claude-Modus ist in den Einstellungen ausgeschaltet.", "Claude mode is switched off in the settings.")));
+            return Err(er("claude_mode_off", tr("Der Claude-Modus ist ausgeschaltet (Einstellungen → Claude → Allgemein).", "Claude mode is switched off (Settings → Claude → General).")));
         }
         let shell = match s("shell") {
             Some(id) => {
@@ -1978,7 +1978,7 @@ impl App {
         }
         let meta = e.meta.chat.clone().unwrap_or_default();
         if !chat_model_usable(&self.settings.llm_servers, &meta) {
-            return Err(er("no_model", tr("Server oder Modell dieses Chats ist nicht (mehr) eingerichtet (Einstellungen → Modelle).", "This chat's server or model is not configured (any more) (Settings → Models).")));
+            return Err(er("no_model", tr("Server oder Modell dieses Chats ist nicht (mehr) eingerichtet (Einstellungen → Modelle → Server & Modelle).", "This chat's server or model is not configured (any more) (Settings → Models → Servers & models).")));
         }
         // Wer hat gesendet? Name der aufrufenden Sitzung, sonst „externer Agent“ (Hinweis unter der Nachricht und Meldung).
         let who = caller.and_then(|id| self.entries.get(&id)).map(|c| c.display_name().trim().to_string()).filter(|n| !n.is_empty());
@@ -2139,7 +2139,7 @@ impl App {
                 return Err(er("busy", tr("In dieser Sitzung läuft schon ein run_command.", "A run_command is already running in this session.")));
             }
             if !self.settings.shell_integration {
-                return Err(er("no_shell_integration", tr("Die Shell-Integration ist ausgeschaltet (Einstellungen → Allgemein); ohne sie sind Befehlsenden nicht erkennbar.", "Shell integration is switched off (Settings → General); without it command ends cannot be detected.")));
+                return Err(er("no_shell_integration", tr("Die Shell-Integration ist ausgeschaltet (Einstellungen → Terminal → Shell & Umgebung); ohne sie sind Befehlsenden nicht erkennbar.", "Shell integration is switched off (Settings → Terminal → Shell & environment); without it command ends cannot be detected.")));
             }
             if s.alt_screen() {
                 return Err(er("fullscreen_program", tr("In der Sitzung läuft ein Vollbildprogramm – dort ist run_command nicht möglich.", "A full-screen program is running in the session – run_command is not possible there.")));
@@ -2404,7 +2404,7 @@ impl App {
         let id = self.mcp_target(args, caller, true)?;
         let mine = self.mcp.created.get(&id).is_some_and(|creator| creator.is(caller));
         if !mine && !self.settings.mcp_close_any {
-            return Err(er("forbidden", tr("Ein Agent darf nur Sitzungen schließen, die er selbst angelegt hat (Einstellungen → Agenten → „Agenten dürfen auch fremde Sitzungen schließen“ erlaubt mehr).", "An agent may only close sessions it created itself (Settings → Agents → “Agents may also close other sessions” allows more).")));
+            return Err(er("forbidden", tr("Ein Agent darf nur Sitzungen schließen, die er selbst angelegt hat (Einstellungen → Agenten → Zugriff → „Fremde Sitzungen schließen“ erlaubt mehr).", "An agent may only close sessions it created itself (Settings → Agents → Access → “Agents may also close other sessions” allows more).")));
         }
         if self.entries.get(&id).is_some_and(|e| e.meta.worktree.is_some()) {
             return Err(er("forbidden", tr("Sitzungen mit Git-Worktree müssen im Fenster geschlossen werden (dort fragt Paneldeck, was mit dem Worktree geschehen soll).", "Sessions with a Git worktree must be closed in the window (Paneldeck asks there what to do with the worktree).")));

@@ -74,7 +74,7 @@ pub(super) struct State {
     pub data_dir: PathBuf,
     /// Wiederherstellung einer Sicherung/geretteten Datei anfordern (die Anwendung zeigt ihren Dialog).
     pub request_restore: Option<PathBuf>,
-    /// Aus „Einstellungen → Daten“: Datenbankpflege öffnen (im nächsten Bild der Projektansicht).
+    /// Aus „Einstellungen → Daten & Sicherung“: Datenbankpflege öffnen (im nächsten Bild der Projektansicht).
     pub request_db: bool,
 }
 
@@ -164,7 +164,7 @@ pub(super) fn build_action(fix: Fix, findings: &[&Finding], comment: String, due
 }
 
 impl PlanUi {
-    /// Aus „Einstellungen → Daten“: die Datenbankpflege der Wartungsseite anfordern (Expertenmodus wird eingeschaltet).
+    /// Aus „Einstellungen → Daten & Sicherung“: die Datenbankpflege der Wartungsseite anfordern (Expertenmodus wird eingeschaltet).
     pub(in crate::app) fn request_maintenance_db(&mut self) {
         self.maint.request_db = true;
     }

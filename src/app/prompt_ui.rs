@@ -1,4 +1,4 @@
-//! Einstellungen → Modelle: Schalter für die Teile des Master-Prompts der Chats (#341) – global mit Vorschau und
+//! Einstellungen → Modelle → Server & Modelle: Schalter für die Teile des Master-Prompts der Chats (#341) – global mit Vorschau und
 //! Token-Zähler, je Modell als eigene Auswahl samt Wahl des Familienzusatzes.
 //!
 //! Der Zähler nimmt den Tokenizer des Servers, wo es einen gibt (`llm::count_tokens`: llama.cpp-Server und vLLM über

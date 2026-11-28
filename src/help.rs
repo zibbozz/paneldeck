@@ -93,7 +93,7 @@ Details and examples:
 
   --backup-dir <folder>
     Writes database backups to <folder> for this start (the folder in
-    Settings > Data & backup is then locked).
+    Settings > Data & backup > Backup is then locked).
       paneldeck.exe --backup-dir "E:\Backups\Paneldeck"
 
   --lang en|de
@@ -109,7 +109,7 @@ Details and examples:
 
   --no-update-check
     Skips the automatic update check for this start, even if "Check automatically"
-    is switched on in Settings > About (useful for offline or scripted starts). The
+    is switched on in Settings > About > Updates (useful for offline or scripted starts). The
     setting itself stays; "Check for updates" still works by hand.
       paneldeck.exe --no-update-check
 
@@ -125,7 +125,7 @@ Details and examples:
     Runs the MCP server for AI agents over stdin/stdout and talks to the running
     Paneldeck. It finds the hub in this order: --data-dir/--profile, the Paneldeck
     terminal it was started from, then the data folder lookup above. The agent
-    interface must be enabled in Settings > Agents.
+    interface must be enabled in Settings > Agents > Access.
       claude mcp add paneldeck --scope user -- "C:\Program Files\Paneldeck\paneldeck.exe" mcp
       paneldeck.exe mcp --profile work
 "#;
@@ -214,7 +214,7 @@ Einzelheiten und Beispiele:
 
   --backup-dir <ordner>
     Schreibt Datenbank-Sicherungen für diesen Start nach <ordner> (die Ordnerwahl unter
-    Einstellungen > Daten & Sicherung ist dann gesperrt).
+    Einstellungen > Daten & Sicherung > Sicherung ist dann gesperrt).
       paneldeck.exe --backup-dir "E:\Sicherungen\Paneldeck"
 
   --lang en|de
@@ -230,7 +230,7 @@ Einzelheiten und Beispiele:
 
   --no-update-check
     Überspringt die automatische Update-Prüfung für diesen Start, auch wenn unter
-    Einstellungen > Info „Automatisch prüfen“ eingeschaltet ist (z. B. offline oder bei
+    Einstellungen > Info > Updates „Automatisch prüfen“ eingeschaltet ist (z. B. offline oder bei
     Starts aus Skripten). Die Einstellung bleibt; „Nach Updates suchen“ geht weiter von Hand.
       paneldeck.exe --no-update-check
 
@@ -246,7 +246,7 @@ Einzelheiten und Beispiele:
     Startet den MCP-Server für KI-Agenten über stdin/stdout und spricht mit dem
     laufenden Paneldeck. Den Hub sucht er in dieser Reihenfolge: --data-dir/--profile,
     das Paneldeck-Terminal, aus dem er gestartet wurde, dann die Datenordner-Suche oben.
-    Die Agenten-Schnittstelle muss unter Einstellungen > Agenten eingeschaltet sein.
+    Die Agenten-Schnittstelle muss unter Einstellungen > Agenten > Zugriff eingeschaltet sein.
       claude mcp add paneldeck --scope user -- "C:\Program Files\Paneldeck\paneldeck.exe" mcp
       paneldeck.exe mcp --profile arbeit
 "#;

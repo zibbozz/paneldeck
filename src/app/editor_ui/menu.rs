@@ -202,7 +202,7 @@ pub(super) fn menus(ed: &mut EditorUi, g: u64, prefs: &super::EditorPrefs, lang:
     ];
 
     // ---- Auswahl (#394, wie Sublime Text): die Befehle der mehreren Cursor wirken nur mit dem Schalter.
-    let multi_off = || need_text().or_else(|| (!prefs.multi.on).then(|| lang.t("Mehrere Cursor sind aus (Einstellungen → Editor → Mehrere Cursor).", "Multiple cursors are off (Settings → Editor → Multiple cursors).").to_string()));
+    let multi_off = || need_text().or_else(|| (!prefs.multi.on).then(|| lang.t("Mehrere Cursor sind aus (Einstellungen → Editor → Allgemein → Mehrere Cursor).", "Multiple cursors are off (Settings → Editor → General → Multiple cursors).").to_string()));
     let mop = |id: &'static str, label: &str, k: &str, o: EdOp| Entry::Item(item(id, label.to_string(), key(prefs, lang, k), f(Cmd::EditOp(g, o))).off(multi_off()));
     let selection_menu = vec![
         mop("next_occurrence", lang.t("Nächstes Vorkommen dazu", "Add next occurrence"), "ed_next_occurrence", EdOp::SelectNextOccurrence),

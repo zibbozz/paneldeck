@@ -26,7 +26,7 @@ pub(super) use marks::{spot_rect, spot_since, Spot, TutMark};
 use super::*;
 use steps::{Need, Prep, Probe, Step, Txt};
 
-/// Befehle aus der Hilfe (Befehls-Palette, Einstellungen → Info, leerer Terminal Hub, Hinweis in der Fußzeile).
+/// Befehle aus der Hilfe (Befehls-Palette, Einstellungen → Info → Tutorial, leerer Terminal Hub, Hinweis in der Fußzeile).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum Cmd {
     /// Tour von vorn starten (Kennung aus `steps::TOURS`).

@@ -1045,7 +1045,7 @@ pub struct App {
     chat_backend: std::sync::Arc<dyn ChatBackend>,
     /// Modelllisten der LLM-Server im Hintergrund abrufen („Verbinden“).
     llm_conn: models_ui::Connector,
-    /// Zustand des Reiters Einstellungen → Modelle. Bewusst für alle Fenster gemeinsam (nicht in `view_fields!`): Er
+    /// Zustand der Seiten von Einstellungen → Modelle. Bewusst für alle Fenster gemeinsam (nicht in `view_fields!`): Er
     /// bearbeitet die globalen Einstellungen, und `dirty_since` steuert das verzögerte Speichern im Hauptdurchgang
     /// (`models_save_tick`) – je Fenster getauscht, bliebe eine Änderung in einem gerade nicht gezeichneten Fenster
     /// ungespeichert. Folge: Ein offenes Server-Formular erscheint in jedem Fenster, das diesen Reiter zeigt.
@@ -1535,8 +1535,8 @@ impl App {
         }
         if restore_resets_access {
             app.notify_text(lang.t(
-                "Die Sicherung stammt von vor 3.2.0: Der Zugriff der Agenten auf Ticket-Projekte steht auf den Standards (wie global, für alle) – prüfe Einstellungen → Agenten.",
-                "The backup is from before 3.2.0: agent access to ticket projects was reset to the defaults (as global, for all) – check Settings → Agents.",
+                "Die Sicherung stammt von vor 3.2.0: Der Zugriff der Agenten auf Ticket-Projekte steht auf den Standards (wie global, für alle) – prüfe Einstellungen → Agenten → Zugriff.",
+                "The backup is from before 3.2.0: agent access to ticket projects was reset to the defaults (as global, for all) – check Settings → Agents → Access.",
             ).to_string());
         }
         if let Some(e) = app.db_error.clone() {
@@ -4765,8 +4765,8 @@ impl eframe::App for App {
         if crate::platform::conpty::take_fallback_hint() {
             self.push_toast(
                 state::t(
-                    "Der mitgelieferte Konsolen-Host (OpenConsole) ließ sich mehrmals nicht starten – neue Sitzungen laufen auf dem Konsolen-Host von Windows. Ein Virenscanner kann OpenConsole.exe blockieren; abschalten lässt er sich unter Einstellungen → Darstellung.",
-                    "The bundled console host (OpenConsole) failed to start several times – new sessions run on the console host built into Windows. An antivirus may block OpenConsole.exe; it can be turned off under Settings → Appearance.",
+                    "Der mitgelieferte Konsolen-Host (OpenConsole) ließ sich mehrmals nicht starten – neue Sitzungen laufen auf dem Konsolen-Host von Windows. Ein Virenscanner kann OpenConsole.exe blockieren; abschalten lässt er sich unter Einstellungen → Terminal → Verhalten.",
+                    "The bundled console host (OpenConsole) failed to start several times – new sessions run on the console host built into Windows. An antivirus may block OpenConsole.exe; it can be turned off under Settings → Terminal → Behaviour.",
                 )
                 .to_string(),
                 toasts::ToastKind::Warning,

@@ -275,7 +275,7 @@ fn step(id: &str) -> &'static Step {
 }
 
 /// #393: Der Schritt zur Stufe eines Modells erklärt die Werkzeugliste mit genau dem Kennzeichen, das die Liste in
-/// *Einstellungen → Modelle* neben standardmäßig ausgeschalteten Werkzeugen zeigt.
+/// *Einstellungen → Modelle → Server & Modelle* neben standardmäßig ausgeschalteten Werkzeugen zeigt.
 #[test]
 fn the_model_level_step_names_the_off_by_default_mark() {
     let s = step("chat.levels");

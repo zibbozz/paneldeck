@@ -1,5 +1,5 @@
 //! Oberfläche des Updates: Knopf in der Fensterleiste (links neben Minimieren), Update-Dialog, Neustart-Abfrage und der Abschnitt
-//! „Updates“ unter *Einstellungen → Info*. Eingebunden mit je einer Zeile in `titlebar.rs`, `settings.rs` und `App::update`.
+//! „Updates“ unter *Einstellungen → Info → Updates*. Eingebunden mit je einer Zeile in `titlebar.rs`, `settings.rs` und `App::update`.
 
 use super::release::{Flavor, NoInstall, Plan};
 use super::version::Version;

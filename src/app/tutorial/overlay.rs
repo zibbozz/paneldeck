@@ -218,8 +218,8 @@ pub(super) fn card(ctx: &egui::Context, lang: Lang) -> Option<CardClick> {
             ui.label(RichText::new(lang.t("Kurze Tour (3 Min.)?", "Short tour (3 min)?")).strong().size(16.0));
             ui.add_space(S1);
             ui.label(lang.t(
-                "Paneldeck zeigt dir die wichtigsten Teile direkt im Fenster. Die Tour nutzt ein eigenes Projekt; deine Sitzungen bleiben unberührt. Später findest du sie in der Befehls-Palette und unter Einstellungen → Info.",
-                "Paneldeck shows you the main parts right in the window. The tour uses its own project; your sessions stay untouched. Later you find it in the command palette and under Settings → About.",
+                "Paneldeck zeigt dir die wichtigsten Teile direkt im Fenster. Die Tour nutzt ein eigenes Projekt; deine Sitzungen bleiben unberührt. Später findest du sie in der Befehls-Palette und unter Einstellungen → Info → Tutorial.",
+                "Paneldeck shows you the main parts right in the window. The tour uses its own project; your sessions stay untouched. Later you find it in the command palette and under Settings → About → Tutorial.",
             ));
             ui.add_space(S3);
             ui.horizontal(|ui| {
@@ -248,8 +248,8 @@ pub(super) fn end_ask(ctx: &egui::Context, lang: Lang, finished: bool, what: &st
         ui.add_space(S1);
         if !finished {
             ui.label(RichText::new(lang.t(
-                "Dein Fortschritt bleibt erhalten: „Fortsetzen“ in der Befehls-Palette („Tutorial“) oder unter Einstellungen → Info macht dort weiter.",
-                "Your progress is kept: “Continue” in the command palette (“Tutorial”) or under Settings → About picks up where you left off.",
+                "Dein Fortschritt bleibt erhalten: „Fortsetzen“ in der Befehls-Palette („Tutorial“) oder unter Einstellungen → Info → Tutorial macht dort weiter.",
+                "Your progress is kept: “Continue” in the command palette (“Tutorial”) or under Settings → About → Tutorial picks up where you left off.",
             )).color(style::dim(ui)));
             ui.add_space(S1);
         }

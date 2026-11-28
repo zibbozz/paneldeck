@@ -30,7 +30,7 @@ pub const CONTEXT_KEYS: [&str; 4] = [
 ];
 
 /// Explorer-Kontextmenü „In Paneldeck-Editor öffnen“ für alle Dateien (#54, 3.0.0; Standard aus, Schalter unter
-/// *Einstellungen → Fenster*). Ein Schlüssel unter `*\shell` (gilt für jede Dateiart), Befehl `"<exe>" [Instanz] --edit "%1"`.
+/// *Einstellungen → Allgemein → Windows-Integration*). Ein Schlüssel unter `*\shell` (gilt für jede Dateiart), Befehl `"<exe>" [Instanz] --edit "%1"`.
 pub const EDIT_CONTEXT_KEY: &str = r"Software\Classes\*\shell\PaneldeckEdit";
 pub const EDIT_CONTEXT_PROBE: &str = r"Software\Classes\*\shell\PaneldeckEdit\command";
 

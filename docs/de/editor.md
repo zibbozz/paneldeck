@@ -9,7 +9,7 @@ Der Reiter **Editor** ist ein einfacher Texteditor in Paneldeck, unabhängig von
 ## Dateien und Ordner
 - **Ordner öffnen …** (**Strg+Umschalt+O**) zeigt einen Ordner links als Baum (**Ordnerbaum ein/aus** blendet ihn aus); **Ordner schließen** schließt ihn wieder. Im Baum öffnet ein Klick die Datei in der fokussierten Teilung; das Kontextmenü hat *Rechts daneben öffnen*, *Pfad kopieren*, *Im Explorer anzeigen* und *Als Wurzel öffnen*.
 - **Datei öffnen …**, **Neue Datei** und **Zuletzt geöffnet** (*Zuletzt geöffnete Dateien* / *Zuletzt geöffnete Ordner*, *Liste leeren*).
-- **Explorer:** Mit dem Schalter *In Paneldeck-Editor öffnen* unter *Einstellungen → Fenster* öffnet ein Rechtsklick auf jede Datei sie hier ([Windows-Integration](windows-integration.md#in-paneldeck-editor-öffnen)); von der Kommandozeile: [`paneldeck.exe --edit <datei>`](command-line.md#--edit-datei).
+- **Explorer:** Mit dem Schalter *In Paneldeck-Editor öffnen* unter *Einstellungen → Allgemein → Windows-Integration* öffnet ein Rechtsklick auf jede Datei sie hier ([Windows-Integration](windows-integration.md#in-paneldeck-editor-öffnen)); von der Kommandozeile: [`paneldeck.exe --edit <datei>`](command-line.md#--edit-datei).
 - Paneldeck merkt sich den offenen Ordner, die Tabs (mit Cursor und Scrollposition), die Teilungen und die Listen „zuletzt geöffnet“ (`editor-state.json` im Datenordner).
 - **Dateien in WSL:** Du kannst Dateien in einer WSL-Distribution öffnen und speichern (`\\wsl.localhost\<Distro>\…`, z. B. über *Datei öffnen …* oder Strg+Klick auf einen Linux-Pfad im Terminal); sie werden im Hintergrund geladen. Für solche Dateien bieten die Kontextmenüs auch *Als Linux-Pfad kopieren*. `paneldeck.exe --edit /home/ich/x` aus einer WSL-Sitzung öffnet die Datei dieser Distribution. Agenten bleiben auf lokale Windows-Dateien beschränkt (siehe [Agenten](#agenten)).
 
@@ -29,7 +29,7 @@ Der Reiter **Editor** ist ein einfacher Texteditor in Paneldeck, unabhängig von
 - **WSL-Dateien:** Der Server läuft in der Distribution (`wsl.exe -d <Distribution> --cd <Wurzel> --exec <Server>`, ohne Shell dazwischen) und wird im Linux-PATH der Distribution gesucht (Login-Shell, damit `~/.cargo/bin` u. Ä. zählen); für den Server sind die Pfade Linux-Pfade. Wurzel und Server werden im Hintergrund ermittelt. Ein WSL- oder Netzwerkordner gilt nur als genau dieser Ordner. Die Speicher-Spalte im Fenster *Language Server* bleibt bei WSL-Servern leer. Vergleichs-Reiter und unbenannte Tabs haben keinen Smart-Modus.
 
 ## Mehrere Cursor
-*(Seit 3.3.0; vorher waren Alt+Klick und Strg+D immer an.)* Wie in Sublime Text – alles ist **standardmäßig aus** und wird unter *Einstellungen → Editor* eingeschaltet:
+*(Seit 3.3.0; vorher waren Alt+Klick und Strg+D immer an.)* Wie in Sublime Text – alles ist **standardmäßig aus** und wird unter *Einstellungen → Editor → Allgemein* eingeschaltet:
 - **Mehrere Cursor** (Kürzel und Befehle): **Strg+D** nimmt das nächste Vorkommen der Auswahl dazu (mit leerem Cursor zuerst das Wort dort; reiner Text, nicht nur ganze Wörter), **Strg+Umschalt+D** markiert alle Vorkommen (nur im Editor-Reiter – im Terminal Hub teilt Strg+Umschalt+D weiter rechts), **Strg+U** nimmt die letzte Änderung der Cursor oder Auswahl zurück, ohne den Text zu ändern. Alle drei stehen im Menü *Auswahl* und in der Befehls-Palette und lassen sich unter *Einstellungen → Tastenkürzel* ändern oder entfernen.
 - **Mittlere Maustaste**: Ziehen markiert eine Spalte und ersetzt alle Cursor; mit **Strg** kommt die Spalte zu den vorhandenen Cursorn dazu. Mit Zeilenumbruch zählt die Spalte Bildschirmzeilen. Zu kurze Zeilen – auch leere – bekommen einen Cursor an ihrem Ende. Ein Klick ohne Ziehen setzt den Cursor (wie die linke Taste), **Strg+Klick** setzt einen weiteren. Ein Mittelklick auf einen Reiter schließt ihn weiterhin.
 - **Alt+Klick** setzt einen weiteren Cursor; Alt+Klick auf einen vorhandenen Cursor nimmt ihn weg (der letzte bleibt immer). Strg+Klick bleibt frei.
@@ -43,7 +43,7 @@ Der Reiter **Editor** ist ein einfacher Texteditor in Paneldeck, unabhängig von
 - **Ansicht:** Zeilenumbruch, Minimap, Ordnerbaum, Rechts teilen, Unten teilen, Modus *Text* / *Syntax*, Sprache (eingebaute Sprachen; alle Sprachen in der Statusleiste), [Änderungsmarken](#vergleich-und-änderungsmarken) und ihre Grundlage, Nächste/Vorige Änderung (**F7** / **Umschalt+F7**), Befehle (Palette). Im Vergleichs-Reiter gilt *Datei* der fokussierten Seite; *Bearbeiten* und *Format* sind ausgegraut.
 - **Format:** die [Befehle zum Formatieren](#json-und-xml-formatieren) und *Beim Speichern formatieren …* (öffnet den Regel-Dialog, siehe [Aktionen beim Speichern](#aktionen-beim-speichern)).
 
-Einträge, die gerade nicht passen, sind **ausgegraut**; beim Überfahren steht, warum (z. B. *Weder JSON noch XML* bei einer Textdatei, *Nichts rückgängig zu machen*). In einer schmalen Teilung klappen die Menüs zu einem **Menü ▾** zusammen. Die Menüleiste lässt sich unter *Einstellungen → Editor → Menüleiste* abschalten (standardmäßig an). Die Befehls-Palette (**Strg+Umschalt+P**) geht auch im Reiter Editor und listet die Format-Befehle als *Format: …*.
+Einträge, die gerade nicht passen, sind **ausgegraut**; beim Überfahren steht, warum (z. B. *Weder JSON noch XML* bei einer Textdatei, *Nichts rückgängig zu machen*). In einer schmalen Teilung klappen die Menüs zu einem **Menü ▾** zusammen. Die Menüleiste lässt sich unter *Einstellungen → Editor → Allgemein → Menüleiste* abschalten (standardmäßig an). Die Befehls-Palette (**Strg+Umschalt+P**) geht auch im Reiter Editor und listet die Format-Befehle als *Format: …*.
 
 ## Bearbeiten
 - **Mehrere Cursor:** siehe [Mehrere Cursor](#mehrere-cursor) (seit 3.3.0 standardmäßig aus). Esc kehrt zu einem Cursor zurück.
@@ -63,10 +63,10 @@ Einträge, die gerade nicht passen, sind **ausgegraut**; beim Überfahren steht,
 
 Einschalten:
 - **Für eine Datei:** Klick auf den Modus in der Statusleiste → *Diese Datei: Syntax*. Die Wahl wird mit dem Tab gemerkt.
-- **Für alle Dateien einer Sprache:** im selben Menü *Alle Dateien: Rust → Syntax* oder unter *Einstellungen → Editor → Sprachen → Modus je Sprache*.
-- **Für alle Dateien:** *Standard für alle übrigen Dateien → Syntax* im Menü oder *Einstellungen → Editor → Standard-Modus*.
+- **Für alle Dateien einer Sprache:** im selben Menü *Alle Dateien: Rust → Syntax* oder unter *Einstellungen → Editor → Sprachen & Syntax → Modus je Sprache*.
+- **Für alle Dateien:** *Standard für alle übrigen Dateien → Syntax* im Menü oder *Einstellungen → Editor → Sprachen & Syntax → Standard-Modus*.
 
-**Spracherkennung:** zuerst deine eigenen Zuordnungen (*Einstellungen → Editor → Eigene Zuordnungen*, z. B. `*.tpl` → HTML oder `Jenkinsfile` → Groovy), dann der Dateiname (`Makefile`, `CMakeLists.txt`, `Dockerfile`, `Gemfile` …) und die Endung, dann eine Shebang-Zeile (`#!/usr/bin/env python3`) oder eine Modeline (`vim: ft=yaml`, `-*- mode: ruby -*-`). Ein Klick auf die Sprache in der Statusleiste wählt für diese Datei eine andere (Tippen filtert, Enter nimmt den ersten Treffer; *Automatisch erkennen* stellt zurück). Die Wahl wird mit dem Tab gemerkt.
+**Spracherkennung:** zuerst deine eigenen Zuordnungen (*Einstellungen → Editor → Sprachen & Syntax → Eigene Zuordnungen*, z. B. `*.tpl` → HTML oder `Jenkinsfile` → Groovy), dann der Dateiname (`Makefile`, `CMakeLists.txt`, `Dockerfile`, `Gemfile` …) und die Endung, dann eine Shebang-Zeile (`#!/usr/bin/env python3`) oder eine Modeline (`vim: ft=yaml`, `-*- mode: ruby -*-`). Ein Klick auf die Sprache in der Statusleiste wählt für diese Datei eine andere (Tippen filtert, Enter nimmt den ersten Treffer; *Automatisch erkennen* stellt zurück). Die Wahl wird mit dem Tab gemerkt.
 
 **Sprachen:** AutoIt, Batch, BibTeX, C, C#, C++, CMake, CSS, Diff, Dockerfile, Go, HTML, INI, Inno Setup, Java, JavaScript, JSON, Kotlin, LaTeX, Less, Lua, Makefile, Markdown, NSIS, Pascal / Delphi, Perl, PHP, PowerShell, Python, Ruby, Rust, SCSS, Shell (Bash), SQL, Swift, TeX, TOML, TypeScript, TSX/JSX, Visual Basic (VB.NET, VBA, VBScript), XML, YAML – dazu alle weiteren Grammatiken aus [bat](https://github.com/sharkdp/bat) (Haskell, Kotlin, Terraform, Zig, …; in der Auswahl unter *Weitere Grammatiken*). AutoIt, Inno Setup, Visual Basic und PowerShell nutzen kleine eigene Grammatiken von Paneldeck.
 
@@ -106,7 +106,7 @@ Das Einfärben arbeitet schrittweise und im Hintergrund, Tippen und Rollen warte
 ## Speichern und Hot Exit
 - **Strg+S** speichert. Gespeichert wird **atomar**: Paneldeck schreibt eine temporäre Datei neben die Datei und ersetzt sie dann – ein Absturz hinterlässt nie eine halb geschriebene Datei. Schreibgeschützte Dateien werden nicht überschrieben.
 - **Automatisch speichern** (standardmäßig aus) speichert vorhandene Dateien nach kurzer Verzögerung ([Einstellungen](#einstellungen)); unbenannte Tabs nie.
-- **Hot Exit:** Ungespeicherte Änderungen überstehen Schließen und Neustart von Paneldeck – sie liegen als reiner Text im Datenordner (`hot-exit\`) und werden gelöscht, sobald der Tab gespeichert oder geschlossen ist. *Einstellungen → Daten & Sicherung → Aufräumen* zeigt sie als *Editor: ungespeicherte Puffer*.
+- **Hot Exit:** Ungespeicherte Änderungen überstehen Schließen und Neustart von Paneldeck – sie liegen als reiner Text im Datenordner (`hot-exit\`) und werden gelöscht, sobald der Tab gespeichert oder geschlossen ist. *Einstellungen → Daten & Sicherung → Pflege & Aufräumen → Aufräumen* zeigt sie als *Editor: ungespeicherte Puffer*.
 
 ## Aktionen beim Speichern
 *(Seit 3.2.0.)* Regeln, die beim Speichern einer Datei im Editor-Reiter laufen – je **Datei**, je **Ordner** (mit allen Unterordnern) oder je **Muster**. Verwaltet werden sie unter *Einstellungen → Editor → Aktionen beim Speichern*; ein Rechtsklick auf eine Datei oder einen Ordner im Ordnerbaum (*Aktionen beim Speichern für diese Datei/diesen Ordner …*) oder *Datei → Aktionen beim Speichern …* öffnet den Regel-Dialog mit vorbelegtem Pfad.
@@ -170,7 +170,7 @@ Paneldeck bemerkt, wenn ein anderes Programm eine offene Datei ändert (z. B. Cl
 
 ![Vergleichs-Reiter nebeneinander mit Änderungen innerhalb der Zeilen, Füllzeilen und Blockpfeilen](../images/de/editor-diff.png)
 
-**Änderungsmarken** (*Ansicht → Änderungsmarken*, *Einstellungen → Editor*, **standardmäßig aus**) markieren Zeilen am linken Rand des normalen Editors: ein dünner Balken für **hinzugefügte** und **geänderte** Zeilen, ein Dreieck, wo Zeilen **entfernt** wurden, dazu Marken in der Bildlaufleiste und in der Minimap.
+**Änderungsmarken** (*Ansicht → Änderungsmarken*, *Einstellungen → Editor → Vergleich*, **standardmäßig aus**) markieren Zeilen am linken Rand des normalen Editors: ein dünner Balken für **hinzugefügte** und **geänderte** Zeilen, ein Dreieck, wo Zeilen **entfernt** wurden, dazu Marken in der Bildlaufleiste und in der Minimap.
 - In einem git-Repository vergleichen die Marken **mit dem Index und HEAD zugleich**: **nicht gestagte** Änderungen (Datei ↔ Index) in Grün/Gelb/Rot, **gestagte** Änderungen (Index ↔ HEAD) in Türkis/Blau/Violett. Außerhalb eines Repositorys – oder mit *Grundlage der Marken: Gespeicherte Datei* – zeigen sie die ungespeicherten Änderungen gegenüber der Datei auf der Platte.
 - Ein **Klick auf eine Marke** öffnet ein kleines Fenster unter der Zeile: die alten Zeilen, **Zurücksetzen** (ein Rückgängig-Schritt), vorige/nächste Änderung und **Im Vergleich öffnen**.
 - **F7** / **Umschalt+F7** springen zwischen den Marken. In großen Dateien gibt es keine Marken.
@@ -181,7 +181,7 @@ Paneldeck bemerkt, wenn ein anderes Programm eine offene Datei ändert (z. B. Cl
 ## Suche in Dateien
 **Strg+Umschalt+F** öffnet im Editor-Reiter das Fenster *In Dateien suchen*; es durchsucht alle Dateien des offenen Ordners. **F4** / **Umschalt+F4** springen zum nächsten / vorigen Treffer.
 - beachtet **`.gitignore`** (auch verschachtelte und die der Elternordner), `.git/info/exclude`, die globale Git-Ausschlussdatei und `.ignore` – auch außerhalb eines Git-Repositorys; **Ignorierte einbeziehen** schaltet das für eine Suche ab (die Vorgabe steht in den Einstellungen);
-- deine eigenen **Ausschlussmuster** (*Einstellungen → Editor*, Syntax wie `.gitignore`, z. B. `node_modules`, `*.min.js`, `dist/`) gelten immer; `.git`, `.hg` und `.svn` werden nie durchsucht;
+- deine eigenen **Ausschlussmuster** (*Einstellungen → Editor → Suche & Formatieren*, Syntax wie `.gitignore`, z. B. `node_modules`, `*.min.js`, `dist/`) gelten immer; `.git`, `.hg` und `.svn` werden nie durchsucht;
 - überspringt **Binärdateien** und Dateien über der Schwelle für große Dateien (die Zusammenfassung zählt sie);
 - *Groß-/Kleinschreibung beachten*, *Nur ganze Wörter*, *Regulärer Ausdruck*; gesucht wird zeilenweise;
 - die Treffer erscheinen schon während der Suche, nach Dateien gruppiert mit Zeilennummern und hervorgehobenen Stellen; **Abbrechen** hält sie an. Ein Klick öffnet die Datei an der Fundstelle. Höchstens 20 000 Treffer in 5 000 Dateien (1 000 Zeilen je Datei) – dann die Suche eingrenzen.
@@ -189,10 +189,10 @@ Paneldeck bemerkt, wenn ein anderes Programm eine offene Datei ändert (z. B. Cl
 ![Suche in Dateien mit den Treffern nach Dateien gruppiert](../images/de/editor-search.png)
 
 ## Große Dateien
-Dateien ab **20 MB** (*Einstellungen → Editor → Große Dateien ab*) öffnen im Modus für große Dateien: Der Editor bleibt auch bei mehreren hundert Megabyte flüssig, aber **Minimap, Zeilenumbruch und Syntaxfarben sind aus** (die [waagerechte Bildlaufleiste](#bearbeiten) bleibt), und eine Infoleiste sagt das. Die Suche in Dateien überspringt sie; Agenten können sie lesen, aber nicht bearbeiten.
+Dateien ab **20 MB** (*Einstellungen → Editor → Allgemein → Große Dateien ab*) öffnen im Modus für große Dateien: Der Editor bleibt auch bei mehreren hundert Megabyte flüssig, aber **Minimap, Zeilenumbruch und Syntaxfarben sind aus** (die [waagerechte Bildlaufleiste](#bearbeiten) bleibt), und eine Infoleiste sagt das. Die Suche in Dateien überspringt sie; Agenten können sie lesen, aber nicht bearbeiten.
 
 ## Einstellungen
-*Einstellungen → Editor*:
+*Einstellungen → Editor* (Seiten *Allgemein*, *Suche & Formatieren* und *Sprachen & Syntax*):
 
 | Einstellung | Standard | Bedeutung |
 |---|---|---|
@@ -217,12 +217,12 @@ Dateien ab **20 MB** (*Einstellungen → Editor → Große Dateien ab*) öffnen 
 
 Gespeichert in `settings.json` als `editor` ([Datenformat](data-and-backups.md#neue-felder-in-300), [neu in 3.1.0](data-and-backups.md#neue-felder-in-310), [neu in 3.2.0](data-and-backups.md#neue-felder-in-320); für Vergleich und Änderungsmarken: `change_markers`, `marker_base`, `diff_context`, `diff_ignore_whitespace`, `diff_layout`; seit 3.3.0 `multi_cursor`, `multi_cursor_alt_click`, `multi_cursor_middle`, `agent_selections`).
 
-![Einstellungen, Reiter Editor](../images/de/editor-settings.png)
+![Einstellungen, Seite Editor → Allgemein](../images/de/editor-settings.png)
 
 ## Agenten
 Agenten (Claude Code und andere über die [Agenten-Schnittstelle](agent-interface.md#editor) sowie [Chats mit lokalen Modellen](chat.md)) können den Editor benutzen:
-- **Lesen** (`editor_list`, `editor_read`) geht ab der Stufe *Nur lesen* – auch ungespeicherte Änderungen. Ebenso das **Prüfen** von JSON/XML (`format_file` mit `op: validate`, seit 3.2.0). **`editor_diff`** (seit 3.2.0, Stufe *Nur lesen* wie `editor_read`) vergleicht ein Dokument mit seiner gespeicherten Datei, git HEAD/Index oder einem anderen offenen Dokument. Für [Chats](chat.md#werkzeuge-in-kleinen-kontexten) sind `format_file`, `editor_diff` und `list_save_actions` standardmäßig aus: je Modell unter *Einstellungen → Modelle* anhaken; dann gelten dieselben Regeln wie für externe Agenten.
-- Vier Schalter unter *Einstellungen → Editor → Agenten*, **alle standardmäßig aus** und nur bei der Stufe **Steuern** wirksam (für Chats: die Stufe des Modells):
+- **Lesen** (`editor_list`, `editor_read`) geht ab der Stufe *Nur lesen* – auch ungespeicherte Änderungen. Ebenso das **Prüfen** von JSON/XML (`format_file` mit `op: validate`, seit 3.2.0). **`editor_diff`** (seit 3.2.0, Stufe *Nur lesen* wie `editor_read`) vergleicht ein Dokument mit seiner gespeicherten Datei, git HEAD/Index oder einem anderen offenen Dokument. Für [Chats](chat.md#werkzeuge-in-kleinen-kontexten) sind `format_file`, `editor_diff` und `list_save_actions` standardmäßig aus: je Modell unter *Einstellungen → Modelle → Server & Modelle* anhaken; dann gelten dieselben Regeln wie für externe Agenten.
+- Vier Schalter unter *Einstellungen → Agenten → Editor*, **alle standardmäßig aus** und nur bei der Stufe **Steuern** wirksam (für Chats: die Stufe des Modells):
   - **Agenten dürfen Dateien öffnen** – in einem neuen Tab; nur lokale Pfade, nie Netzwerk-/UNC-Pfade (`\\server\freigabe`, `\\wsl.localhost\…`, Netzlaufwerke) oder Geräte. Ein Agent darf auch einen unbenannten Tab mit Text öffnen.
   - **Agenten dürfen offene Dateien bearbeiten** – die Änderung bleibt **ungespeichert**, ist als Änderung des Agenten markiert (*Von einem Agenten geöffnet oder geändert*) und lässt sich rückgängig machen.
   - **Agenten dürfen speichern** – nur Dateien, die offen sind und schon existieren; unbenannte Tabs speicherst nur du.
