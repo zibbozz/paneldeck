@@ -461,23 +461,23 @@ impl CompactError {
                 .t("Noch nichts zu kompaktieren – die letzten zwei Runden bleiben immer wörtlich erhalten.", "Nothing to compact yet – the last two rounds are always kept as they are.")
                 .into(),
             CompactError::Busy => lang.t("Gerade nicht möglich – erst die laufende Antwort abwarten oder stoppen.", "Not possible right now – wait for the running answer or stop it first.").into(),
-            CompactError::NoServer => lang.t("Server oder Modell dieses Chats fehlen (Einstellungen → Modelle).", "This chat's server or model is missing (Settings → Models).").into(),
+            CompactError::NoServer => lang.t("Server oder Modell dieses Chats fehlen (Einstellungen → Modelle → Server & Modelle).", "This chat's server or model is missing (Settings → Models → Servers & models).").into(),
             CompactError::ContextTooSmall(ctx) => match lang {
-                Lang::De => format!("Der Kontext ({ctx} Tokens) ist zu klein zum Kompaktieren – Kontextlänge in Einstellungen → Modelle erhöhen."),
-                Lang::En => format!("The context ({ctx} tokens) is too small for compaction – raise the context length in Settings → Models."),
+                Lang::De => format!("Der Kontext ({ctx} Tokens) ist zu klein zum Kompaktieren – Kontextlänge in Einstellungen → Modelle → Server & Modelle erhöhen."),
+                Lang::En => format!("The context ({ctx} tokens) is too small for compaction – raise the context length in Settings → Models → Servers & models."),
             },
             CompactError::Changed => lang.t("Der Verlauf hat sich währenddessen geändert.", "The history changed in the meantime.").into(),
             CompactError::Empty => lang.t("Das Modell hat keine Zusammenfassung geliefert.", "The model returned no summary.").into(),
             CompactError::CutOff { thought: false } => lang
                 .t(
-                    "Die Zusammenfassung wurde an der Token-Grenze abgeschnitten – Sicherheitsfenster (Einstellungen → Modelle → Kompaktieren der Chats) oder Kontextlänge erhöhen.",
-                    "The summary was cut off at the token limit – raise the safety window (Settings → Models → Compacting chats) or the context length.",
+                    "Die Zusammenfassung wurde an der Token-Grenze abgeschnitten – Sicherheitsfenster (Einstellungen → Modelle → Kompaktieren) oder Kontextlänge erhöhen.",
+                    "The summary was cut off at the token limit – raise the safety window (Settings → Models → Compacting) or the context length.",
                 )
                 .into(),
             CompactError::CutOff { thought: true } => lang
                 .t(
-                    "Das Modell hat seinen Platz für die Antwort mit Nachdenken verbraucht – Sicherheitsfenster (Einstellungen → Modelle → Kompaktieren der Chats) oder Kontextlänge erhöhen.",
-                    "The model used up its room for the answer on thinking – raise the safety window (Settings → Models → Compacting chats) or the context length.",
+                    "Das Modell hat seinen Platz für die Antwort mit Nachdenken verbraucht – Sicherheitsfenster (Einstellungen → Modelle → Kompaktieren) oder Kontextlänge erhöhen.",
+                    "The model used up its room for the answer on thinking – raise the safety window (Settings → Models → Compacting) or the context length.",
                 )
                 .into(),
             CompactError::Overflow(n, ctx) => match lang {

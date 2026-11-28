@@ -119,6 +119,12 @@ pub(super) enum Op {
     SelectLine,
     DeleteLine,
     MoveLines(bool),
+    /// Kommentar umschalten mit diesem Zeilenkommentar (#394).
+    ToggleComment(&'static str),
+    /// Letzte Änderung der Cursor/Auswahlen zurücknehmen (#394, Strg+U) – führt die Ansicht aus, nicht [`run`].
+    SoftUndo,
+    /// Nur den Hauptcursor behalten (Esc).
+    SingleCursor,
 }
 
 pub(crate) struct DocEntry {
@@ -573,6 +579,23 @@ impl DocEntry {
         l
     }
 
+    /// Sprache ohne neue Erkennung (gewählt oder zuletzt erkannt) – für Stellen ohne `&mut` (Befehlspalette, #394).
+    pub fn language_cached(&self) -> Option<String> {
+        self.syntax.lang.clone().or_else(|| self.syntax.detected.as_ref().and_then(|(_, l)| l.clone()))
+    }
+
+    /// Zeilenkommentar der Sprache für *Kommentar umschalten* (#394) – eine Quelle für Menü, Kürzel und Befehlspalette.
+    /// Erkennt vorher neu (wie die Statusleiste).
+    pub fn line_comment(&mut self, prefs: &super::EditorPrefs) -> Option<&'static str> {
+        self.language(prefs);
+        self.line_comment_cached()
+    }
+
+    /// Wie [`Self::line_comment`] ohne neue Erkennung (Befehlspalette ohne `&mut`; die Statusleiste erkennt in jedem Bild).
+    pub fn line_comment_cached(&self) -> Option<&'static str> {
+        self.language_cached().as_deref().and_then(crate::editor::syntax::languages::line_comment)
+    }
+
     /// Modus: gewählt, sonst die Einstellung der Sprache, sonst der Standard (Text).
     pub fn mode(&mut self, prefs: &super::EditorPrefs) -> Mode {
         if let Some(m) = self.syntax.mode {
@@ -592,7 +615,7 @@ impl DocEntry {
             None => lang.t("Reiner Text", "Plain text").to_string(),
         };
         let has_grammar = l.as_deref().is_some_and(syntax::engine::has_grammar) && !self.syntax.hl.as_ref().is_some_and(|h| h.failed());
-        SyntaxStatus { lang: l, lang_name, lang_chosen: self.syntax.lang.is_some(), mode, mode_chosen: self.syntax.mode.is_some(), active: mode == Mode::Syntax && has_grammar && !large, large }
+        SyntaxStatus { lang: l, lang_name, lang_chosen: self.syntax.lang.is_some(), mode, mode_chosen: self.syntax.mode.is_some(), active: mode.colours() && has_grammar && !large, large }
     }
 
     /// Sprache wählen (`None` = wieder erkennen).
@@ -609,7 +632,7 @@ impl DocEntry {
     /// Syntaxfarben bereitstellen, wenn sie an sind (Modus Syntax, Sprache mit Grammatik, keine große Datei), sonst
     /// verwerfen. Danach liegen sie in `self.syntax` für das Zeichnen.
     pub fn ensure_highlight(&mut self, prefs: &super::EditorPrefs) {
-        let want = if self.doc.is_some() && !self.is_large(prefs) && self.mode(prefs) == Mode::Syntax { self.language(prefs) } else { None };
+        let want = if self.doc.is_some() && !self.is_large(prefs) && self.mode(prefs).colours() { self.language(prefs) } else { None };
         match (want, &self.syntax.hl) {
             (Some(l), Some(h)) if h.lang == l => {}
             (Some(l), _) => self.syntax.hl = self.doc.as_ref().and_then(|d| DocHighlight::new(&l, d)),
@@ -1044,6 +1067,25 @@ pub(super) fn clip(doc: &mut Document, sels: &mut Selections, cut: bool) -> (Str
     (text, doc.revision() != before)
 }
 
+/// *Alle Vorkommen markieren* (#394): höchstens [`core::MAX_CURSORS`]; liefert, ob es mehr gab (dann
+/// „Nur die ersten 10 000 Cursor.“). Gekürzt bleibt das Vorkommen des Hauptcursors immer dabei.
+pub(super) fn select_all_occurrences(doc: &mut Document, sels: &mut Selections) -> bool {
+    // Eins mehr suchen: dann weiß die Ansicht, dass es mehr gibt.
+    if doc.select_all_occurrences(sels, core::MAX_CURSORS + 1) <= core::MAX_CURSORS {
+        return false;
+    }
+    let pi = sels.primary_index();
+    let mut v: Vec<core::Selection> = sels.iter().take(core::MAX_CURSORS).copied().collect();
+    let p = if pi < core::MAX_CURSORS {
+        pi
+    } else {
+        v[core::MAX_CURSORS - 1] = sels.primary();
+        core::MAX_CURSORS - 1
+    };
+    sels.replace(v, p);
+    true
+}
+
 /// Tastenbefehl ausführen. Liefert, ob der Text geändert wurde.
 pub(super) fn run(doc: &mut Document, sels: &mut Selections, op: Op, _tab: usize) -> bool {
     let u = EditOrigin::User;
@@ -1074,7 +1116,7 @@ pub(super) fn run(doc: &mut Document, sels: &mut Selections, op: Op, _tab: usize
             false
         }
         Op::SelectAllOccurrences => {
-            doc.select_all_occurrences(sels, 10_000);
+            select_all_occurrences(doc, sels);
             false
         }
         Op::SelectLine => {
@@ -1083,6 +1125,12 @@ pub(super) fn run(doc: &mut Document, sels: &mut Selections, op: Op, _tab: usize
         }
         Op::DeleteLine => doc.delete_lines(sels, u),
         Op::MoveLines(down) => doc.move_lines(sels, down, u),
+        Op::ToggleComment(prefix) => doc.toggle_comment(sels, prefix, u),
+        Op::SoftUndo => false,
+        Op::SingleCursor => {
+            sels.collapse_to_primary();
+            false
+        }
     }
 }
 

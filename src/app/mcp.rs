@@ -280,8 +280,8 @@ fn agent_env_of(args: &Value, chat: bool, allowed: bool, allow: &[String]) -> Re
         Some(_) if !allowed => Err(er(
             "forbidden",
             tr(
-                "Umgebungsvariablen setzen Agenten nur, wenn der Nutzer es erlaubt (Einstellungen → Agenten → „Agenten dürfen Umgebungsvariablen setzen“).",
-                "Agents set environment variables only when the user allows it (Settings → Agents → “Agents may set environment variables”).",
+                "Umgebungsvariablen setzen Agenten nur, wenn der Nutzer es erlaubt (Einstellungen → Agenten → Zugriff → „Umgebungsvariablen setzen“).",
+                "Agents set environment variables only when the user allows it (Settings → Agents → Access → “Set environment variables”).",
             ),
         )),
         Some(v) => crate::session_env::agent_vars(v, allow).map_err(|(d, e)| er("bad_args", if de() { d } else { e })),
@@ -641,7 +641,7 @@ fn name_list(names: &[String]) -> String {
 /// Fehlermeldungen nennen nur Namen und Kennungen – nie Adressen oder Schlüssel.
 fn resolve_chat_model(servers: &[LlmServer], last: Option<&state::ChatMeta>, server: Option<&str>, model: Option<&str>) -> Result<state::ChatMeta, (String, String)> {
     if servers.is_empty() {
-        return Err(er("no_model", tr("Es ist kein LLM-Server eingerichtet (Einstellungen → Modelle).", "No LLM server is configured (Settings → Models).")));
+        return Err(er("no_model", tr("Es ist kein LLM-Server eingerichtet (Einstellungen → Modelle → Server & Modelle).", "No LLM server is configured (Settings → Models → Servers & models).")));
     }
     let label = |s: &LlmServer| if s.name.trim().is_empty() { s.id.clone() } else { s.name.clone() };
     let labels: Vec<String> = servers.iter().map(|s| format!("{} ({})", label(s), s.id)).collect();
@@ -665,9 +665,9 @@ fn resolve_chat_model(servers: &[LlmServer], last: Option<&state::ChatMeta>, ser
                 return Err(er(
                     "bad_args",
                     if de() {
-                        format!("Unbekanntes Modell „{m}“ auf dem Server „{}“. Bekannt: {} (neue Modelle erscheinen nach „Verbinden“ in Einstellungen → Modelle; siehe list_models)", label(srv), name_list(&names))
+                        format!("Unbekanntes Modell „{m}“ auf dem Server „{}“. Bekannt: {} (neue Modelle erscheinen nach „Verbinden“ in Einstellungen → Modelle → Server & Modelle; siehe list_models)", label(srv), name_list(&names))
                     } else {
-                        format!("Unknown model “{m}” on server “{}”. Known: {} (new models appear after “Connect” in Settings → Models; see list_models)", label(srv), name_list(&names))
+                        format!("Unknown model “{m}” on server “{}”. Known: {} (new models appear after “Connect” in Settings → Models → Servers & models; see list_models)", label(srv), name_list(&names))
                     },
                 ));
             }
@@ -676,7 +676,7 @@ fn resolve_chat_model(servers: &[LlmServer], last: Option<&state::ChatMeta>, ser
         None => match last.filter(|l| l.server == srv.id && names.contains(&l.model)) {
             Some(l) => l.model.clone(),
             None => names.first().cloned().ok_or_else(|| {
-                er("no_model", if de() { format!("Für den Server „{}“ ist noch kein Modell bekannt – in Einstellungen → Modelle „Verbinden“ klicken.", label(srv)) } else { format!("No model is known for the server “{}” yet – click “Connect” in Settings → Models.", label(srv)) })
+                er("no_model", if de() { format!("Für den Server „{}“ ist noch kein Modell bekannt – in Einstellungen → Modelle → Server & Modelle „Verbinden“ klicken.", label(srv)) } else { format!("No model is known for the server “{}” yet – click “Connect” in Settings → Models → Servers & models.", label(srv)) })
             })?,
         },
     };
@@ -1709,7 +1709,7 @@ impl App {
             None => asked.for_agent(&self.settings.claude_defaults),
         };
         if claude && !self.settings.claude_mode {
-            return Err(er("claude_mode_off", tr("Der Claude-Modus ist in den Einstellungen ausgeschaltet.", "Claude mode is switched off in the settings.")));
+            return Err(er("claude_mode_off", tr("Der Claude-Modus ist ausgeschaltet (Einstellungen → Claude → Allgemein).", "Claude mode is switched off (Settings → Claude → General).")));
         }
         let shell = match s("shell") {
             Some(id) => {
@@ -1978,7 +1978,7 @@ impl App {
         }
         let meta = e.meta.chat.clone().unwrap_or_default();
         if !chat_model_usable(&self.settings.llm_servers, &meta) {
-            return Err(er("no_model", tr("Server oder Modell dieses Chats ist nicht (mehr) eingerichtet (Einstellungen → Modelle).", "This chat's server or model is not configured (any more) (Settings → Models).")));
+            return Err(er("no_model", tr("Server oder Modell dieses Chats ist nicht (mehr) eingerichtet (Einstellungen → Modelle → Server & Modelle).", "This chat's server or model is not configured (any more) (Settings → Models → Servers & models).")));
         }
         // Wer hat gesendet? Name der aufrufenden Sitzung, sonst „externer Agent“ (Hinweis unter der Nachricht und Meldung).
         let who = caller.and_then(|id| self.entries.get(&id)).map(|c| c.display_name().trim().to_string()).filter(|n| !n.is_empty());
@@ -2139,7 +2139,7 @@ impl App {
                 return Err(er("busy", tr("In dieser Sitzung läuft schon ein run_command.", "A run_command is already running in this session.")));
             }
             if !self.settings.shell_integration {
-                return Err(er("no_shell_integration", tr("Die Shell-Integration ist ausgeschaltet (Einstellungen → Allgemein); ohne sie sind Befehlsenden nicht erkennbar.", "Shell integration is switched off (Settings → General); without it command ends cannot be detected.")));
+                return Err(er("no_shell_integration", tr("Die Shell-Integration ist ausgeschaltet (Einstellungen → Terminal → Shell & Umgebung); ohne sie sind Befehlsenden nicht erkennbar.", "Shell integration is switched off (Settings → Terminal → Shell & environment); without it command ends cannot be detected.")));
             }
             if s.alt_screen() {
                 return Err(er("fullscreen_program", tr("In der Sitzung läuft ein Vollbildprogramm – dort ist run_command nicht möglich.", "A full-screen program is running in the session – run_command is not possible there.")));
@@ -2404,7 +2404,7 @@ impl App {
         let id = self.mcp_target(args, caller, true)?;
         let mine = self.mcp.created.get(&id).is_some_and(|creator| creator.is(caller));
         if !mine && !self.settings.mcp_close_any {
-            return Err(er("forbidden", tr("Ein Agent darf nur Sitzungen schließen, die er selbst angelegt hat (Einstellungen → Agenten → „Agenten dürfen auch fremde Sitzungen schließen“ erlaubt mehr).", "An agent may only close sessions it created itself (Settings → Agents → “Agents may also close other sessions” allows more).")));
+            return Err(er("forbidden", tr("Ein Agent darf nur Sitzungen schließen, die er selbst angelegt hat (Einstellungen → Agenten → Zugriff → „Fremde Sitzungen schließen“ erlaubt mehr).", "An agent may only close sessions it created itself (Settings → Agents → Access → “Close other sessions” allows more).")));
         }
         if self.entries.get(&id).is_some_and(|e| e.meta.worktree.is_some()) {
             return Err(er("forbidden", tr("Sitzungen mit Git-Worktree müssen im Fenster geschlossen werden (dort fragt Paneldeck, was mit dem Worktree geschehen soll).", "Sessions with a Git worktree must be closed in the window (Paneldeck asks there what to do with the worktree).")));
@@ -2450,38 +2450,35 @@ impl App {
         });
     }
 
-    /// Einstellungen → Agenten (MCP). Scrollt, weil der Inhalt höher werden kann als das Einstellungsfenster.
-    pub(super) fn mcp_settings_ui(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
-        let h = (ctx.content_rect().height() - 240.0).max(160.0);
-        egui::ScrollArea::vertical().max_height(h).id_salt("mcp_tab").auto_shrink([false, true]).show(ui, |ui| {
-            self.mcp_settings_inner(ui, ctx);
-        });
-    }
-
-    fn mcp_settings_inner(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
-        let lang = self.settings.language;
-        ui.label(RichText::new(lang.t("Agenten-Schnittstelle (MCP)", "Agent interface (MCP)")).heading());
-        ui.label(
-            RichText::new(lang.t(
-                "Lässt KI-Agenten wie Claude Code deine Sitzungen sehen und steuern. Standardmäßig aus. Der Agent startet dafür `paneldeck.exe mcp`; der Zugriff läuft nur lokal über diese laufende Instanz.",
-                "Lets AI agents such as Claude Code see and control your sessions. Off by default. The agent starts `paneldeck.exe mcp`; access is local only, through this running instance.",
-            ))
-            .small()
-            .color(style::dim(ui)),
-        );
-        ui.add_space(S2);
-        let before = self.settings.mcp_level;
+    /// Einstellungen → Agenten → Zugriff: Stufe, Schalter, Zugriff je Projekt, Papierkorb.
+    pub(super) fn agents_access_page(&mut self, ui: &mut egui::Ui, cx: &super::settings_items::RowCx) {
+        use super::settings_items::{block, note};
+        let lang = cx.lang;
         let top = ui.cursor().min.y;
-        level_selector(ui, &mut self.settings.mcp_level, lang);
+        block(ui, cx, "mcp_level", true, |ui| {
+            ui.label(
+                RichText::new(lang.t(
+                    "Der Agent startet dafür `paneldeck.exe mcp`; der Zugriff läuft nur lokal über diese laufende Instanz.",
+                    "The agent starts `paneldeck.exe mcp`; access is local only, through this running instance.",
+                ))
+                .small()
+                .color(style::dim(ui)),
+            );
+            ui.add_space(S1);
+            let before = self.settings.mcp_level;
+            level_selector(ui, &mut self.settings.mcp_level, lang);
+            if self.settings.mcp_level != before {
+                // Sofort sichern: die Stufe ist eine Sicherheitseinstellung und darf nicht bis zum nächsten Zeitgeber warten.
+                state::save_json(&self.dir.join("settings.json"), &self.settings);
+            }
+            if self.settings.mcp_level == McpLevel::Control {
+                ui.label(RichText::new(lang.t("Achtung: Terminalinhalt kann Anweisungen enthalten, denen ein Agent fälschlich folgt. Nutze „Steuern“ nur mit Agenten, denen du vertraust.", "Warning: terminal content may contain instructions an agent follows by mistake. Use “Control” only with agents you trust.")).small().color(crate::style::ui().warning));
+            }
+        });
         super::tutorial::spot_since(ui, Spot::McpLevel, top);
-        if self.settings.mcp_level != before {
-            // Sofort sichern: die Stufe ist eine Sicherheitseinstellung und darf nicht bis zum nächsten Zeitgeber warten.
-            state::save_json(&self.dir.join("settings.json"), &self.settings);
+        if !cx.plain() {
+            return self.agents_access_rows(ui, cx);
         }
-        if self.settings.mcp_level == McpLevel::Control {
-            ui.label(RichText::new(lang.t("Achtung: Terminalinhalt kann Anweisungen enthalten, denen ein Agent fälschlich folgt. Nutze „Steuern“ nur mit Agenten, denen du vertraust.", "Warning: terminal content may contain instructions an agent follows by mistake. Use “Control” only with agents you trust.")).small().color(crate::style::ui().warning));
-        }
-        ui.add_space(S1);
         // Welche Werkzeug-Gruppe für Aufgaben gerade gilt: der Agent hat immer nur die Möglichkeiten des eingestellten Modus.
         let (group, hint) = if self.plan.expert {
             (
@@ -2500,36 +2497,48 @@ impl App {
                 ),
             )
         };
-        ui.label(RichText::new(format!("{}: {}", lang.t("Aktive Werkzeug-Gruppe", "Active tool group"), group)).strong());
-        ui.label(RichText::new(hint).small().color(style::dim(ui)));
-        ui.label(RichText::new(lang.t("Der Modus wird mit dem Schalter „Expertenmodus“ im Reiter „Todo-Liste“ umgestellt.", "The mode is switched with the “Expert mode” toggle in the “Todo list” tab.")).small().color(style::dim(ui)));
-        ui.add_space(S1);
         ui.horizontal(|ui| {
-            style::toggle(ui, &mut self.settings.mcp_close_any);
-            ui.label(RichText::new(lang.t("Agenten dürfen auch fremde Sitzungen schließen (nicht nur selbst angelegte)", "Agents may also close sessions they did not create")).small());
+            ui.add_space(super::settings_items::GUTTER);
+            ui.vertical(|ui| {
+                ui.label(RichText::new(format!("{}: {}", lang.t("Aktive Werkzeug-Gruppe", "Active tool group"), group)).strong());
+                ui.label(RichText::new(hint).small().color(style::dim(ui)));
+            });
+        });
+        note(ui, cx, lang.t("Der Modus wird mit dem Schalter „Expertenmodus“ im Reiter „Todo-Liste“ umgestellt.", "The mode is switched with the “Expert mode” toggle in the “Todo list” tab."));
+        ui.add_space(S1);
+        self.agents_access_rows(ui, cx);
+    }
+
+    /// Schalter der Seite *Agenten › Zugriff* (ohne die Erklärung der Werkzeug-Gruppe).
+    fn agents_access_rows(&mut self, ui: &mut egui::Ui, cx: &super::settings_items::RowCx) {
+        use super::settings_items::{block, srow};
+        let lang = cx.lang;
+        srow(ui, cx, "mcp_close_any", |ui| {
+            if style::toggle(ui, &mut self.settings.mcp_close_any).changed() {
+                // Sicherheitseinstellung: sofort sichern.
+                state::save_json(&self.dir.join("settings.json"), &self.settings);
+            }
         });
         // Umgebungsvariablen (#384): Schalter (Standard aus), eigene Muster.
         let top = ui.cursor().min.y;
-        ui.horizontal(|ui| {
+        srow(ui, cx, "mcp_session_env", |ui| {
             if style::toggle(ui, &mut self.settings.mcp_session_env).changed() {
                 // Sicherheitseinstellung: sofort sichern.
                 state::save_json(&self.dir.join("settings.json"), &self.settings);
             }
-            ui.label(RichText::new(lang.t("Agenten dürfen Umgebungsvariablen setzen (nur in Sitzungen, die sie selbst anlegen)", "Agents may set environment variables (only in sessions they create themselves)")).small());
         });
         if self.settings.mcp_session_env {
-            ui.label(
-                RichText::new(lang.t(
+            super::settings_items::note(
+                ui,
+                cx,
+                lang.t(
                     "Über create_session mit env, Stufe Steuern: höchstens 20 Variablen, nie geheim, nie in bestehenden Sitzungen. Pfad-, Start-, Lade-, Proxy-, Git-, Claude- und Paneldeck-Variablen (PATH, NODE_OPTIONS, LD_PRELOAD …) sind immer gesperrt. Agenten sehen nur Namen, nie Werte.",
                     "Via create_session with env, level Control: at most 20 variables, never secret, never in existing sessions. Path, startup, loader, proxy, Git, Claude and Paneldeck variables (PATH, NODE_OPTIONS, LD_PRELOAD …) are always blocked. Agents only see names, never values.",
-                ))
-                .small()
-                .color(style::dim(ui)),
+                ),
             );
-            ui.horizontal(|ui| {
-                ui.label(RichText::new(lang.t("Erlaubte Namen", "Allowed names")).small());
+            srow(ui, cx, "mcp_env_allow", |ui| {
                 let mut text = self.settings.mcp_env_allow.join(", ");
-                let r = ui.add(egui::TextEdit::singleline(&mut text).desired_width(260.0).hint_text(lang.t("leer = alle außer gesperrten, z. B. APP_*, *_URL", "empty = all but blocked, e.g. APP_*, *_URL")));
+                let r = ui.add(egui::TextEdit::singleline(&mut text).desired_width(220.0).hint_text(lang.t("leer = alle außer gesperrten, z. B. APP_*, *_URL", "empty = all but blocked, e.g. APP_*, *_URL")));
                 if r.changed() {
                     self.settings.mcp_env_allow = text.split(',').map(|p| p.trim().to_string()).filter(|p| !p.is_empty()).collect();
                     if text.trim_end().ends_with(',') {
@@ -2545,14 +2554,28 @@ impl App {
         }
         super::tutorial::spot_since(ui, Spot::McpSessionEnv, top);
         // Zugriff je Projekt, Schalter für Projekte/Löschen, Papierkorb (#386).
-        self.access_settings_ui(ui);
-        ui.add_space(S1);
-        egui::CollapsingHeader::new(lang.t("Papierkorb", "Trash")).id_salt("agent_trash").show(ui, |ui| self.trash_ui(ui));
-        ui.add_space(S2);
-        ui.separator();
-        ui.add_space(S1);
+        self.access_settings_ui(ui, cx);
+        block(ui, cx, "agent_trash", false, |ui| {
+            egui::CollapsingHeader::new(lang.t("Papierkorb", "Trash")).id_salt("agent_trash").show(ui, |ui| self.trash_ui(ui));
+        });
+        super::settings_items::link(ui, cx, lang.t("Was Agenten im Editor dürfen:", "What agents may do in the editor:"), super::settings_nav::Page::AgentsEditor);
+    }
+
+    /// Einstellungen → Agenten → Einrichten & Systemprompt.
+    pub(super) fn agents_setup_page(&mut self, ui: &mut egui::Ui, cx: &super::settings_items::RowCx) {
+        use super::settings_items::block;
+        let lang = cx.lang;
+        let ctx = ui.ctx().clone();
         let top = ui.cursor().min.y;
-        ui.label(RichText::new(lang.t("In Claude Code einrichten", "Set up in Claude Code")).strong());
+        block(ui, cx, "mcp_register", true, |ui| self.mcp_register_ui(ui, &ctx, lang));
+        super::tutorial::spot_since(ui, Spot::McpRegister, top);
+        let top = ui.cursor().min.y;
+        block(ui, cx, "mcp_sysprompt", false, |ui| self.sysprompt_settings_ui(ui));
+        super::tutorial::spot_since(ui, Spot::McpSysprompt, top);
+    }
+
+    /// Einrichten in Claude Code: Befehl, Registrieren, Entfernen, JSON.
+    fn mcp_register_ui(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, lang: Lang) {
         let inst_args = crate::launch::instance_args();
         let server = crate::launch::mcp_server_name(&crate::launch::Instance::from_args(&inst_args));
         ui.label(RichText::new(format!("{}: {server}", lang.t("Servername dieser Instanz", "Server name of this instance"))).small());
@@ -2583,7 +2606,6 @@ impl App {
                 ctx.copy_text(serde_json::to_string_pretty(&v).unwrap_or_default());
             }
         });
-        super::tutorial::spot_since(ui, Spot::McpRegister, top);
         let msg = self.mcp.msg.lock().unwrap_or_else(|e| e.into_inner()).clone();
         if !msg.is_empty() {
             ui.label(RichText::new(msg).small().color(style::dim(ui)));
@@ -2596,15 +2618,18 @@ impl App {
             .small()
             .color(style::dim(ui)),
         );
-        let top = ui.cursor().min.y;
-        self.sysprompt_settings_ui(ui);
-        super::tutorial::spot_since(ui, Spot::McpSysprompt, top);
-        ui.add_space(S2);
-        ui.separator();
-        ui.add_space(S1);
+    }
+
+    /// Einstellungen → Agenten → Aufrufprotokoll.
+    pub(super) fn agents_log_page(&mut self, ui: &mut egui::Ui, cx: &super::settings_items::RowCx) {
+        let lang = cx.lang;
         let log_top = ui.cursor().min.y;
+        super::settings_items::block(ui, cx, "mcp_log", false, |ui| self.mcp_log_ui(ui, lang));
+        super::tutorial::spot_since(ui, Spot::McpLog, log_top);
+    }
+
+    fn mcp_log_ui(&mut self, ui: &mut egui::Ui, lang: Lang) {
         ui.horizontal(|ui| {
-            ui.label(RichText::new(lang.t("Aufrufprotokoll", "Call log")).strong());
             if ui.small_button(lang.t("Leeren", "Clear")).clicked() {
                 self.mcp.log.clear();
             }
@@ -2615,7 +2640,7 @@ impl App {
         if self.mcp.log.is_empty() {
             ui.label(RichText::new(lang.t("Noch keine Aufrufe.", "No calls yet.")).small().color(style::dim(ui)));
         }
-        egui::ScrollArea::vertical().max_height(150.0).id_salt("mcp_log").stick_to_bottom(true).show(ui, |ui| {
+        egui::ScrollArea::vertical().max_height((ui.ctx().content_rect().height() - 220.0).max(150.0)).id_salt("mcp_log").stick_to_bottom(true).show(ui, |ui| {
             for e in self.mcp.log.iter() {
                 let age = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs().saturating_sub(e.ts)).unwrap_or(0);
                 let col = if e.ok { style::dim(ui) } else { crate::style::ui().error };
@@ -2623,7 +2648,6 @@ impl App {
                 ui.label(RichText::new(format!("{}s  {}{}  {}", age, e.tool, sess, e.info)).small().monospace().color(col));
             }
         });
-        super::tutorial::spot_since(ui, Spot::McpLog, log_top);
     }
 
     /// MCP-Status in der Fensterleiste links neben Update/Einstellungen (#240), solange die Schnittstelle an ist; leuchtet
@@ -2650,12 +2674,11 @@ impl App {
             return right;
         }
         let r = Rect::from_min_size(Pos2::new(right - w, ui.max_rect().top() + 4.0), Vec2::new(w, super::titlebar::BAR_HEIGHT - 8.0));
-        let active_tab = self.settings_open && self.settings_tab == 7;
+        let active_tab = self.settings_open && self.settings_nav.page == super::settings_nav::Page::AgentsAccess;
         let resp = super::titlebar::title_button(ui, r, Id::new("titlebar_mcp"), &tip, active_tab);
         ui.painter().galley(Pos2::new(r.left() + 10.0, r.center().y - g.size().y / 2.0), g, col);
         if resp.clicked() {
-            self.settings_open = true;
-            self.settings_tab = 7;
+            self.open_settings(super::settings_nav::Page::AgentsAccess);
         }
         r.left() - 4.0
     }
@@ -2679,7 +2702,8 @@ pub(super) fn level_selector(ui: &mut egui::Ui, level: &mut McpLevel, lang: Lang
     ] {
         ui.horizontal(|ui| {
             afford::choice_value(ui, level, lvl, title, 96.0); // gleich breite Knöpfe untereinander
-            ui.label(RichText::new(hint).small().color(style::dim(ui)));
+            // Umbrechen statt den Block zu verbreitern: sonst wird auch die Warnung darunter abgeschnitten.
+            ui.add(egui::Label::new(RichText::new(hint).small().color(style::dim(ui))).wrap());
         });
     }
 }

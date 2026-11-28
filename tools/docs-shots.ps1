@@ -56,7 +56,7 @@ $AllViews = @(
   # README / Terminals / Claude Code / Agenten
   @{ Name = 'app';                 Spec = 'app';                 W = 1400; H = 860;  Wait = 4; Rename = $false }
   @{ Name = 'kosten';              Spec = 'kosten';              W = 1240; H = 860;  Wait = 4; Rename = $false }
-  @{ Name = 'agenten';             Spec = 'agenten';             W = 1100; H = 1060 }
+  @{ Name = 'agenten';             Spec = 'settings:agents.access'; W = 1100; H = 1060 }
   @{ Name = 'session-env';         Spec = 'session-env';         W = 1300; H = 900;  Wait = 5 }
   # Todo-Liste (Demo-Datenbank "Acme Shop")
   @{ Name = 'todo-tickets';        Spec = 'tickets:{TICKET}';    W = 1300; H = 1260 }
@@ -77,7 +77,7 @@ $AllViews = @(
   @{ Name = 'editor-search';       Spec = 'editor-search';       W = 1400; H = 860; Wait = 3 }
   @{ Name = 'editor-syntax';       Spec = 'editor-syntax';       W = 1400; H = 860; Wait = 3 }
   @{ Name = 'editor-format';       Spec = 'editor-format';       W = 1400; H = 860; Wait = 3 }
-  @{ Name = 'editor-settings';     Spec = 'editor-settings';     W = 1100; H = 900 }
+  @{ Name = 'editor-settings';     Spec = 'editor-settings';     W = 1100; H = 900 }   # Einstellungen bei editor.general (#395)
   # Reiter Zeit (#164)
   @{ Name = 'time-alarms';         Spec = 'time-alarms';         W = 1300; H = 820; Wait = 2 }
   @{ Name = 'time-timers';         Spec = 'time-timers';         W = 1300; H = 820; Wait = 2 }

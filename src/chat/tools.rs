@@ -2,7 +2,7 @@
 //! Ausführungszeit und die Ergebnis-Nachricht für das Modell. Kennt weder egui noch die App; ausgeführt wird im Hub
 //! (`App::mcp_call_chat`) mit dem Chat als Aufrufer.
 //!
-//! Die Stufe des Modells (Einstellungen → Modelle) gilt unabhängig von der globalen MCP-Stufe für externe Agenten; die
+//! Die Stufe des Modells (Einstellungen → Modelle → Server & Modelle) gilt unabhängig von der globalen MCP-Stufe für externe Agenten; die
 //! Schutzregeln des Hubs (nie die eigene Sitzung, keine Administrator-Profile, nur eigene Kinder schließen …) gelten
 //! unverändert, weil derselbe Ausführer läuft.
 
@@ -84,7 +84,7 @@ pub struct ToolPolicy {
 /// ist **kein** Grund für einen Eintrag hier (Entscheidung des Nutzers: nichts kürzen, nichts aus Platzgründen ausschließen).
 pub const NOT_FOR_CHATS: &[&str] = &[];
 
-/// Werkzeuge, die Chats nur bekommen, wenn der Nutzer sie für das Modell anhakt (*Einstellungen → Modelle*, Liste der
+/// Werkzeuge, die Chats nur bekommen, wenn der Nutzer sie für das Modell anhakt (*Einstellungen → Modelle → Server & Modelle*, Liste der
 /// Werkzeuge; `LlmModel::enabled_tools`, #393). Alle neu in 3.2.0; die Stelle, an der ein Standard umgestellt wird – ein
 /// Werkzeug aus der Liste nehmen = für alle Modelle an (abwählbar wie jedes andere über `disabled_tools`).
 ///
@@ -112,7 +112,7 @@ pub const CHAT_DEFAULT_OFF: &[&str] = &[
     "format_file",
     "editor_diff",
     "list_save_actions",
-    // Projekte anlegen, Papierkorb, Kommentare von Agenten (#386; dazu ihre Schalter in *Einstellungen → Agenten*)
+    // Projekte anlegen, Papierkorb, Kommentare von Agenten (#386; dazu ihre Schalter in *Einstellungen → Agenten → Zugriff*)
     "create_project",
     "delete_ticket",
     "update_comment",
@@ -124,7 +124,7 @@ pub fn default_off(name: &str) -> bool {
     CHAT_DEFAULT_OFF.contains(&name)
 }
 
-/// Ist das Werkzeug für dieses Modell angehakt (*Einstellungen → Modelle*)? Abgewählt (`disabled_tools`) geht vor; ein
+/// Ist das Werkzeug für dieses Modell angehakt (*Einstellungen → Modelle → Server & Modelle*)? Abgewählt (`disabled_tools`) geht vor; ein
 /// Werkzeug aus [`CHAT_DEFAULT_OFF`] nur, wenn es in `enabled_tools` steht; alle anderen, solange sie nicht abgewählt sind.
 /// Sagt nichts über Stufe, Modus oder Schalter (die prüft [`ToolPolicy`]).
 pub fn tool_checked(cfg: &LlmModel, name: &str) -> bool {
@@ -134,7 +134,7 @@ pub fn tool_checked(cfg: &LlmModel, name: &str) -> bool {
     !default_off(name) || cfg.enabled_tools.iter().any(|t| t == name)
 }
 
-/// Häkchen eines Werkzeugs setzen (Liste in *Einstellungen → Modelle*): bei Standard-aus-Werkzeugen über `enabled_tools`,
+/// Häkchen eines Werkzeugs setzen (Liste in *Einstellungen → Modelle → Server & Modelle*): bei Standard-aus-Werkzeugen über `enabled_tools`,
 /// sonst über `disabled_tools`. Anhaken nimmt das Werkzeug immer auch aus `disabled_tools`.
 pub fn set_tool_checked(cfg: &mut LlmModel, name: &str, on: bool) {
     if on {
@@ -245,7 +245,7 @@ impl ToolPolicy {
     fn allowed(&self, def: &mcp::ToolDef) -> bool {
         def.level <= self.paneldeck_level()
             && def.group.available(self.expert)
-            // Angehakt (Einstellungen → Modelle): nicht abgewählt, Standard-aus-Werkzeuge nur eingeschaltet (#393).
+            // Angehakt (Einstellungen → Modelle → Server & Modelle): nicht abgewählt, Standard-aus-Werkzeuge nur eingeschaltet (#393).
             && tool_checked(&self.cfg, def.name)
             // Editor (#54): schreibende Werkzeuge nur, wenn ihr Schalter an ist (geprüft wird beim Ausführen ohnehin).
             && crate::editor_svc::tools::offered_to_chats(def.name, self.editor_switches)
@@ -293,7 +293,7 @@ impl ToolPolicy {
         // `more_tools` (#393): liest nur – ab Stufe Lesen, ohne Freigabe; was es nennt, folgt `specs`.
         if call.name == super::more_tools::NAME {
             if !self.enabled() {
-                return Err((ToolStatus::Denied, error_json("forbidden", "This tool is not allowed for this model (Settings → Models).")));
+                return Err((ToolStatus::Denied, error_json("forbidden", "This tool is not allowed for this model (Settings → Models → Servers & models).")));
             }
             if let Err(msg) = super::repair::validate(&call.name, &super::more_tools::schema(), &call.arguments) {
                 return Err((ToolStatus::Error, error_json("bad_args", &msg)));
@@ -311,22 +311,22 @@ impl ToolPolicy {
         // Nicht angehakt (abgewählt oder standardmäßig aus und nicht eingeschaltet, #393): verboten, auch wenn das Modell
         // den Namen errät oder ihn aus einem früheren Verlauf kennt.
         if !tool_checked(&self.cfg, def.name) {
-            return Err((ToolStatus::Denied, error_json("forbidden", "This tool is not allowed for this model (Settings → Models).")));
+            return Err((ToolStatus::Denied, error_json("forbidden", "This tool is not allowed for this model (Settings → Models → Servers & models).")));
         }
         // `format_file` (#381) wie bei externen Agenten: `validate` ohne Schalter, alles andere nur mit „Agenten dürfen
         // formatieren“ – geprüft vor der Freigabe-Frage (der Hub prüft beim Ausführen noch einmal).
         if def.name == "format_file" && level >= McpLevel::Control && self.editor_switches & crate::editor_svc::settings::FORMAT == 0 {
-            return Err((ToolStatus::Denied, error_json("forbidden", "The user has not allowed this (Settings -> Editor -> Agents: \"Agents may format\"); only op validate works without it.")));
+            return Err((ToolStatus::Denied, error_json("forbidden", "The user has not allowed this (Settings -> Agents -> Editor: \"Agents may format\"); only op validate works without it.")));
         }
         if !crate::access::allowed_for_chats(def.name, self.access_switches) {
-            return Err((ToolStatus::Denied, error_json("forbidden", "The user has not allowed this (Settings -> Agents: \"Agents may create projects\" / \"Agents may delete tickets/comments\").")));
+            return Err((ToolStatus::Denied, error_json("forbidden", "The user has not allowed this (Settings -> Agents -> Access: \"Create projects\" / \"Delete\").")));
         }
         // Das Projekt des Chats begrenzt die Paneldeck-Werkzeuge (#386): gesperrt = `project_locked`, sonst `forbidden`.
         if self.enabled() && level <= self.cfg.level && level > self.project_cap {
             let (code, msg) = if self.project_cap == McpLevel::Off {
-                (crate::access::LOCKED_CODE, "The project of this chat is locked for agents: no Paneldeck tools (only the user can release it in Settings -> Agents).")
+                (crate::access::LOCKED_CODE, "The project of this chat is locked for agents: no Paneldeck tools (only the user can release it in Settings -> Agents -> Access).")
             } else {
-                ("forbidden", "The project of this chat only allows reading for agents (Settings -> Agents).")
+                ("forbidden", "The project of this chat only allows reading for agents (Settings -> Agents -> Access).")
             };
             return Err((ToolStatus::Denied, error_json(code, msg)));
         }
@@ -334,15 +334,15 @@ impl ToolPolicy {
         // mit `op` ≠ `validate` braucht Steuern auch dort).
         if self.enabled() && level <= self.paneldeck_level() && level > self.general_cap && crate::access::tool_scope(def.name, &call.arguments) == crate::access::ToolScope::General {
             let (code, msg) = if self.general_cap == McpLevel::Off {
-                (crate::access::LOCKED_CODE, "The area General (tools without a project: editor, time, themes, models, history) is locked for agents (only the user can release it in Settings -> Agents).")
+                (crate::access::LOCKED_CODE, "The area General (tools without a project: editor, time, themes, models, history) is locked for agents (only the user can release it in Settings -> Agents -> Access).")
             } else {
-                ("forbidden", "The area General (tools without a project: editor, time, themes, models, history) only allows reading for agents (Settings -> Agents).")
+                ("forbidden", "The area General (tools without a project: editor, time, themes, models, history) only allows reading for agents (Settings -> Agents -> Access).")
             };
             return Err((ToolStatus::Denied, error_json(code, msg)));
         }
         // Listung spielt keine Rolle (#393): ein erlaubtes Werkzeug läuft auch, wenn die Kurzfassung es nicht nennt.
         if !self.enabled() || level > self.paneldeck_level() || NOT_FOR_CHATS.contains(&def.name) {
-            return Err((ToolStatus::Denied, error_json("forbidden", "This tool is not allowed for this model (Settings → Models).")));
+            return Err((ToolStatus::Denied, error_json("forbidden", "This tool is not allowed for this model (Settings → Models → Servers & models).")));
         }
         if !def.group.available(self.expert) {
             let msg = if self.expert {
@@ -376,7 +376,7 @@ impl ToolPolicy {
             return Err((ToolStatus::Error, error_json("unknown_tool", &self.unknown_tool_message(&call.name))));
         };
         if !self.enabled() || !self.agent_allowed(&def) {
-            return Err((ToolStatus::Denied, error_json("forbidden", "This tool is not allowed for this model (Settings → Models).")));
+            return Err((ToolStatus::Denied, error_json("forbidden", "This tool is not allowed for this model (Settings → Models → Servers & models).")));
         }
         if let Err(why) = agent::offered(&def, &self.agent) {
             return Err((ToolStatus::Error, error_json("not_available", &why)));
@@ -832,7 +832,7 @@ mod tests {
         use crate::editor_svc::settings::{DOCS_OPEN, FORMAT};
         let fc = |op: &str| call("format_file", json!({"path": "C:\\a.json", "op": op}));
         // standardmäßig aus
-        assert!(policy(McpLevel::Control, &[], false).with_editor_switches(DOCS_OPEN | FORMAT).check(&fc("validate")).unwrap_err().1.contains("Settings → Models"));
+        assert!(policy(McpLevel::Control, &[], false).with_editor_switches(DOCS_OPEN | FORMAT).check(&fc("validate")).unwrap_err().1.contains("Settings → Models → Servers & models"));
         assert!(!names(&policy(McpLevel::Read, &[], false).with_editor_switches(DOCS_OPEN)).contains(&"format_file".to_string()));
         // angehakt, ohne Schalter: Prüfen ab Lesen, angeboten mit offenem Dokument
         let read = all_checked(policy(McpLevel::Read, &[], false)).with_editor_switches(DOCS_OPEN);
@@ -946,7 +946,7 @@ mod tests {
             assert!(!off.contains(&t.to_string()), "{t}: standardmäßig aus");
             let p = policy(McpLevel::Control, &[], true);
             let r = p.check(&call(t, json!({})));
-            assert!(matches!(&r, Err((ToolStatus::Denied, b)) if b.contains("forbidden") && b.contains("Settings → Models")), "{t}: {r:?}");
+            assert!(matches!(&r, Err((ToolStatus::Denied, b)) if b.contains("forbidden") && b.contains("Settings → Models → Servers & models")), "{t}: {r:?}");
             assert!(super::super::more_tools::run(&p, &json!({"name": t})).unwrap_err().0 == "forbidden", "{t}: more_tools beschreibt es nicht");
         }
         // Häkchen setzen/wegnehmen

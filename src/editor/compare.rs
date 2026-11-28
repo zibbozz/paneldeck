@@ -588,6 +588,58 @@ pub fn map_line(hunks: &[Hunk], i: usize, from_old: bool) -> Option<usize> {
     usize::try_from(i as isize + off).ok()
 }
 
+/// Blocks after an edit on one side, without comparing again (#391: typing in the diff tab shows the text at once, the
+/// real comparison follows after a pause). The lines `edit` of the edited side (`on_new` = right/new side) became
+/// `new_len` lines. Blocks touching the edit merge with it into one block (the other side keeps its lines), later
+/// blocks move by the difference in lines. The result is a valid, not necessarily minimal, comparison: everything
+/// outside the blocks is still equal. Also returns the indices of the old blocks that were merged (`start` is the index
+/// of the merged block in the result, if there is one).
+pub fn edit_hunks(hunks: &[Hunk], on_new: bool, edit: Range<usize>, new_len: usize) -> (Vec<Hunk>, Range<usize>) {
+    let side = |h: &Hunk| if on_new { h.new.clone() } else { h.old.clone() };
+    let other = |h: &Hunk| if on_new { h.old.clone() } else { h.new.clone() };
+    let end = edit.end.max(edit.start);
+    let (mut lo, mut hi) = (edit.start, end);
+    let i0 = hunks.partition_point(|h| side(h).end < lo);
+    let mut i1 = i0;
+    while i1 < hunks.len() && side(&hunks[i1]).start <= hi {
+        let s = side(&hunks[i1]);
+        lo = lo.min(s.start);
+        hi = hi.max(s.end);
+        i1 += 1;
+    }
+    // Zwischen dem Block davor und `lo` ist alles gleich: die Zeilen entsprechen sich eins zu eins.
+    let olo = match i0.checked_sub(1).map(|i| &hunks[i]) {
+        Some(p) => other(p).end + (lo - side(p).end),
+        None => lo,
+    };
+    let (s_len, o_len) = hunks[i0..i1].iter().fold((0usize, 0usize), |(a, b), h| (a + side(h).len(), b + other(h).len()));
+    let ohi = olo + (hi - lo) - s_len + o_len;
+    let delta = new_len as isize - (end - edit.start) as isize;
+    let shift = |r: Range<usize>| (r.start as isize + delta) as usize..(r.end as isize + delta) as usize;
+    let new_side = lo..(hi as isize + delta) as usize;
+    let mk = |s: Range<usize>, o: Range<usize>| if on_new { Hunk { old: o, new: s } } else { Hunk { old: s, new: o } };
+    let mut out: Vec<Hunk> = Vec::with_capacity(hunks.len() + 1);
+    out.extend_from_slice(&hunks[..i0]);
+    if !(new_side.is_empty() && olo == ohi) {
+        out.push(mk(new_side, olo..ohi));
+    }
+    out.extend(hunks[i1..].iter().map(|h| mk(shift(side(h)), other(h))));
+    (out, i0..i1)
+}
+
+/// Lines `a..b` of `old` became lines `a..a + n` of `new`: common head and tail lines (`a + tail <= min(len)`).
+pub fn changed_lines<S: AsRef<str>, T: AsRef<str>>(old: &[S], new: &[T]) -> (Range<usize>, usize) {
+    changed_lines_by(old.len(), new.len(), |i, j| old[i].as_ref() == new[j].as_ref())
+}
+
+/// Wie [`changed_lines`] mit `eq(i, j)` = Zeile `i` alt gleich Zeile `j` neu.
+pub fn changed_lines_by(n_old: usize, n_new: usize, eq: impl Fn(usize, usize) -> bool) -> (Range<usize>, usize) {
+    let max = n_old.min(n_new);
+    let head = (0..max).take_while(|&i| eq(i, i)).count();
+    let tail = (0..max - head).take_while(|&k| eq(n_old - 1 - k, n_new - 1 - k)).count();
+    (head..n_old - tail, n_new - tail - head)
+}
+
 /// Unified diff (`diff -u`, with `git` also the `diff --git` header) of the blocks with `context` lines.
 pub fn unified(old: &Lines, new: &Lines, hunks: &[Hunk], context: usize, old_name: &str, new_name: &str, git: bool) -> String {
     let hunks = patch_hunks(hunks, old, new);
@@ -966,5 +1018,61 @@ mod tests {
         assert!(looks_binary(b"PK\x03\x04\0\0"));
         assert!(!looks_binary(b"plain text"));
         assert!(!looks_binary(&[0xFF, 0xFE, b'a', 0]), "UTF-16 mit BOM ist Text");
+    }
+
+    #[test]
+    fn edited_blocks_stay_a_correct_comparison_without_comparing_again() {
+        // Tippen in einer gleichen Zeile: neuer Block genau dort, spätere Blöcke unverändert.
+        let old = ["a", "b", "c", "d"];
+        let new = ["a", "b", "c", "D"];
+        let hunks = compare(&old, &new, &Options::default(), None).hunks;
+        assert_eq!(hunks, vec![Hunk { old: 3..4, new: 3..4 }]);
+        let (h, merged) = edit_hunks(&hunks, true, 1..2, 1);
+        assert_eq!(h, vec![Hunk { old: 1..2, new: 1..2 }, Hunk { old: 3..4, new: 3..4 }]);
+        assert_eq!(merged, 0..0);
+        // Zeilen einfügen links: der Block rechts davon wandert links mit.
+        let (h, _) = edit_hunks(&hunks, false, 0..0, 2);
+        assert_eq!(h, vec![Hunk { old: 0..2, new: 0..0 }, Hunk { old: 5..6, new: 3..4 }]);
+        // Am Block: verschmilzt mit ihm.
+        let (h, merged) = edit_hunks(&hunks, true, 3..4, 3);
+        assert_eq!(h, vec![Hunk { old: 3..4, new: 3..6 }]);
+        assert_eq!(merged, 0..1);
+        // Eingefügte Zeilen wieder entfernt: kein Block mehr.
+        let ins = vec![Hunk { old: 2..2, new: 2..4 }];
+        assert_eq!(edit_hunks(&ins, true, 2..4, 0).0, vec![]);
+        assert_eq!(changed_lines(&["a", "b", "c"], &["a", "x", "y", "c"]), (1..2, 2));
+        assert_eq!(changed_lines(&["a", "a"], &["a"]), (1..2, 0));
+        assert_eq!(changed_lines::<&str, &str>(&[], &["a"]), (0..0, 1));
+        // Zufällig: alte Blöcke + Änderung auf einer Seite ergeben immer einen korrekten Vergleich.
+        let mut seed = 11u64;
+        for _ in 0..400 {
+            let gen_lines = |seed: &mut u64, n: u64| -> Vec<String> { (0..(lcg(seed) % n)).map(|_| ["a", "b", "c", "}", ""][(lcg(seed) % 5) as usize].to_string()).collect() };
+            let a = gen_lines(&mut seed, 25);
+            let b = gen_lines(&mut seed, 25);
+            let (ar, br): (Vec<&str>, Vec<&str>) = (a.iter().map(|s| s.as_str()).collect(), b.iter().map(|s| s.as_str()).collect());
+            let hunks = compare(&ar, &br, &Options::default(), None).hunks;
+            let on_new = lcg(&mut seed) % 2 == 0;
+            let side = if on_new { &br } else { &ar };
+            let s = (lcg(&mut seed) as usize) % (side.len() + 1);
+            let e = s + (lcg(&mut seed) as usize) % (side.len() - s + 1);
+            let ins = gen_lines(&mut seed, 4);
+            let mut edited: Vec<&str> = side[..s].to_vec();
+            edited.extend(ins.iter().map(|x| x.as_str()));
+            edited.extend_from_slice(&side[e..]);
+            let (ed_range, n) = changed_lines(side, &edited);
+            let (h, _) = edit_hunks(&hunks, on_new, ed_range, n);
+            let (o2, n2) = if on_new { (ar.clone(), edited.clone()) } else { (edited.clone(), br.clone()) };
+            assert_eq!(apply(&o2, &n2, &h), n2.iter().map(|s| s.to_string()).collect::<Vec<_>>(), "{a:?} {b:?} {on_new} {s}..{e} {ins:?}");
+            for w in h.windows(2) {
+                assert!(w[0].old.end <= w[1].old.start && w[0].new.end <= w[1].new.start, "{h:?}");
+            }
+            assert!(h.iter().all(|x| !(x.old.is_empty() && x.new.is_empty())));
+            // Außerhalb der Blöcke sind die Zeilen gleich (nicht nur das Ergebnis): jede Zeile außerhalb passt zur anderen Seite.
+            for i in 0..o2.len() {
+                if let Some(j) = map_line(&h, i, true) {
+                    assert_eq!(o2[i], n2[j], "{h:?}");
+                }
+            }
+        }
     }
 }

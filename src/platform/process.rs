@@ -1481,3 +1481,14 @@ mod idle_tests {
         assert!(!shell_idle(&[], 10, none, name));
     }
 }
+
+/// Arbeitsspeicher (Working Set, Bytes) eines Prozesses über sein Handle (Fenster „Language Server“, #367).
+#[cfg(windows)]
+pub fn working_set(process: std::os::windows::io::RawHandle) -> Option<u64> {
+    use windows_sys::Win32::System::ProcessStatus::{K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
+    let mut pmc: PROCESS_MEMORY_COUNTERS = unsafe { std::mem::zeroed() };
+    pmc.cb = std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32;
+    // SAFETY: gültiges Prozess-Handle (Child), Puffer in der angegebenen Größe.
+    let ok = unsafe { K32GetProcessMemoryInfo(process as windows_sys::Win32::Foundation::HANDLE, &mut pmc, pmc.cb) };
+    (ok != 0).then_some(pmc.WorkingSetSize as u64)
+}

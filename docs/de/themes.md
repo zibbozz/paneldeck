@@ -16,10 +16,10 @@ Bei Namensgleichheit (Import, Duplizieren, Als Kopie bearbeiten) wird nie etwas 
 
 Eine Theme-Datei, die sich nicht laden lässt, steht mit dem Grund unter der Theme-Wahl (z. B. `Ungültige Farbe in „fg“: „white“`). Sie kann erst gewählt werden, wenn du sie korrigiert und *Neu laden* (Zeile *Eigene Themes*) geklickt hast; ist das gewählte Theme ungültig, nimmt Paneldeck das Standard-Theme (One Dark).
 
-![Reiter Darstellung mit der Theme-Auswahl, Theme bearbeiten …, Neues Theme …, dem Menüknopf ⋯ und einer ungültigen Theme-Datei darunter](../images/de/theme-appearance.png)
+![Einstellungen, Seite Darstellung → Theme mit der Theme-Auswahl, Theme bearbeiten …, Neues Theme …, dem Menüknopf ⋯ und einer ungültigen Theme-Datei darunter](../images/de/theme-appearance.png)
 
 ## So änderst du eine Farbe eines Themes
-1. Öffne *Einstellungen → Darstellung* und wähle das Theme unter **Theme**.
+1. Öffne *Einstellungen → Darstellung → Theme* und wähle das Theme unter **Theme**.
 2. Klicke auf **Theme bearbeiten …** (bei einem eingebauten Theme: **Als Kopie bearbeiten …**). Der Editor öffnet sich.
 3. Such die Farbe: Tippe in *Farbe suchen …* (z. B. `accent`) oder klicke das Element in der Vorschau an.
 4. Ändere sie mit dem Farbwähler oder tippe einen Wert in das Hex-Feld.
@@ -27,7 +27,7 @@ Eine Theme-Datei, die sich nicht laden lässt, steht mit dem Grund unter der The
 6. Klicke auf **Speichern**. Die App nutzt jetzt das Theme; die Kopie eines eingebauten Themes wird als neue Datei in `themes/` gespeichert.
 
 ## So erzeugst du ein neues Theme aus zwei Farben
-1. Öffne *Einstellungen → Darstellung* und klicke auf **Neues Theme …**. Der Editor öffnet sich mit *Aus wenigen Farben erzeugen*.
+1. Öffne *Einstellungen → Darstellung → Theme* und klicke auf **Neues Theme …**. Der Editor öffnet sich mit *Aus wenigen Farben erzeugen*.
 2. Wähle *Hintergrund* und *Akzent* und unter *Art* *Dunkel* oder *Hell*. Der Balken darunter zeigt die 16 berechneten ANSI-Farben.
 3. Klicke auf **Erzeugen**.
 4. Gib oben im Editor einen **Namen** ein und passe bei Bedarf einzelne Farben an.
@@ -93,10 +93,10 @@ Seit 3.2.0 kann ein Theme einen **eigenen Hintergrund** hinter dem ganzen Fenste
 - **Farbe:** eine Farbe (Hex oder Verweis) über der Grundfarbe.
 - **Muster:** eingebaute Muster in den Theme-Farben – Punkte, Linien, Raster, Karo, schräge Linien, Rauschen – mit einer Farbe (Standard `@text/12`) oder ein eigenes Kachelbild (*Eigene Kachel …*); Größe 25–400 % und ein Versatz. Es werden keine Bilddateien mitgeliefert und nichts heruntergeladen.
 - **Für jede Art:** ein **Abstand** je Seite (oben, rechts, unten, links, in Punkten; außerhalb die Grundfarbe), die **Deckkraft** des ganzen Hintergrunds (unter 100 % scheint der Desktop durch; sonst deckt der Hintergrund ihn ab), **Helligkeit** −100 … +100 % (mischt zu Schwarz bzw. Weiß), **Unschärfe** 0–40 pt und eine **Überlagerung** (Farbe und Deckkraft über dem Bild, unter allen Flächen).
-- **Bereiche:** *Terminals*, *Editor*, *To-do und Planung*, *Chat* und *Seitenleiste* (Titelleiste und Reiter folgen der Seitenleiste) haben je einen Schalter und eine Deckkraft: an = die Fläche lässt den Hintergrund mit dieser Deckkraft durchscheinen (multipliziert mit *Deckkraft* unter *Einstellungen → Darstellung*), aus = die Fläche bleibt deckend. Dialoge, Menüs, Tooltips und Eingabefelder bleiben immer deckend. In Terminals ist nur der Standardhintergrund durchscheinend – von Programmen gesetzte Farben, Auswahl und Cursor bleiben deckend, und der Mindestkontrast der Schrift wird gegen die Fläche über dem Bild gerechnet.
+- **Bereiche:** *Terminals*, *Editor*, *To-do und Planung*, *Chat* und *Seitenleiste* (Titelleiste und Reiter folgen der Seitenleiste) haben je einen Schalter und eine Deckkraft: an = die Fläche lässt den Hintergrund mit dieser Deckkraft durchscheinen (multipliziert mit *Deckkraft* unter *Einstellungen → Darstellung → Transparenz & Animation*), aus = die Fläche bleibt deckend. Dialoge, Menüs, Tooltips und Eingabefelder bleiben immer deckend. In Terminals ist nur der Standardhintergrund durchscheinend – von Programmen gesetzte Farben, Auswahl und Cursor bleiben deckend, und der Mindestkontrast der Schrift wird gegen die Fläche über dem Bild gerechnet.
 - **Hintergrund übernehmen von …** kopiert den Hintergrund eines anderen Themes (seine Bilder werden beim *Speichern* kopiert). Das Theme eines Profils färbt nur dessen Terminals; der Hintergrund kommt immer vom gewählten Theme.
 
-Der Hintergrund ist ein durchgehendes Bild über das ganze Fenster – jeder Bereich zeigt seinen Ausschnitt, beim Teilen springt nichts. Jedes Fenster berechnet ihn für seine eigene Größe. Er wird einmal im Hintergrund berechnet (in physischen Pixeln) und zwischengespeichert; nach dem Ändern der Fenstergröße wartet Paneldeck eine Viertelsekunde und streckt so lange das alte Bild. Es gibt kein zusätzliches Neuzeichnen. **Transparenz reduzieren** unter *Einstellungen → Darstellung* (Standard aus) macht alle Flächen deckend und blendet den Hintergrund aus.
+Der Hintergrund ist ein durchgehendes Bild über das ganze Fenster – jeder Bereich zeigt seinen Ausschnitt, beim Teilen springt nichts. Jedes Fenster berechnet ihn für seine eigene Größe. Er wird einmal im Hintergrund berechnet (in physischen Pixeln) und zwischengespeichert; nach dem Ändern der Fenstergröße wartet Paneldeck eine Viertelsekunde und streckt so lange das alte Bild. Es gibt kein zusätzliches Neuzeichnen. **Transparenz reduzieren** unter *Einstellungen → Darstellung → Transparenz & Animation* (Standard aus) macht alle Flächen deckend und blendet den Hintergrund aus.
 
 Fehlt die Bilddatei oder ist sie ungültig (z. B. ein Pfad statt eines bloßen Dateinamens), erscheint die Grundfarbe, und das Theme bleibt gültig. Umbenennen behält den Ordner; *Duplizieren* kopiert ihn, *Löschen* entfernt ihn.
 
@@ -218,6 +218,10 @@ Die Namen gehören zur öffentlichen Schnittstelle (sie kommen nur dazu, werden 
 | `code_heading` | Editor: Syntaxfarben | Code: Überschrift, Abschnitt | `@code_function` |
 | `code_variable` | Editor: Syntaxfarben | Code: Variable, Parameter | `@code_tag` |
 | `code_invalid` | Editor: Syntaxfarben | Code: ungültig | `@error` |
+| `diag_error` | Editor: Syntaxfarben | Smart-Modus: Fehler (Wellenlinie) | `@error` |
+| `diag_warning` | Editor: Syntaxfarben | Smart-Modus: Warnung (Wellenlinie) | `@warning` |
+| `diag_info` | Editor: Syntaxfarben | Smart-Modus: Information (Wellenlinie) | `@info` |
+| `diag_hint` | Editor: Syntaxfarben | Smart-Modus: Hinweis (gepunktet) | `@text_dim/80` |
 | `diff_add_bg` | Editor: Vergleich und Änderungsmarken | Vergleich: Hintergrund hinzugefügter Zeilen | `@diff_add/15` |
 | `diff_remove_bg` | Editor: Vergleich und Änderungsmarken | Vergleich: Hintergrund entfernter Zeilen | `@diff_remove/15` |
 | `diff_add_word` | Editor: Vergleich und Änderungsmarken | Vergleich: hinzugefügte Wörter in der Zeile | `@diff_add/40` |

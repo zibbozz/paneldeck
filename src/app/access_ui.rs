@@ -1,4 +1,4 @@
-//! Oberfläche „Zugriff für Agenten“ (#386): Tabelle in Einstellungen → Agenten (alle Projekte, „Allgemein“, Ticket-Projekte,
+//! Oberfläche „Zugriff für Agenten“ (#386): Tabelle in Einstellungen → Agenten → Zugriff (alle Projekte, „Allgemein“, Ticket-Projekte,
 //! Schalter), Dialog „Zugriff für Agenten“ (Kontextmenü eines Projekts, Hinweis „Freigeben …“) und der Papierkorb.
 
 use super::*;
@@ -33,61 +33,58 @@ fn rules_hint(ui: &mut Ui, lang: Lang) {
 }
 
 impl App {
-    /// Teil von Einstellungen → Agenten: Schalter und Tabelle „Zugriff je Projekt“.
-    pub(super) fn access_settings_ui(&mut self, ui: &mut Ui) {
-        let lang = self.settings.language;
+    /// Teil von Einstellungen → Agenten → Zugriff: Schalter und Tabelle „Zugriff je Projekt“.
+    pub(super) fn access_settings_ui(&mut self, ui: &mut Ui, cx: &super::settings_items::RowCx) {
+        use super::settings_items::{block, srow};
+        let lang = cx.lang;
         let mut dirty_settings = false;
-        ui.add_space(S1);
-        ui.horizontal(|ui| {
+        srow(ui, cx, "agent_create_projects", |ui| {
             dirty_settings |= style::toggle(ui, &mut self.settings.agent_create_projects).changed();
-            ui.label(RichText::new(lang.t("Agenten dürfen Projekte anlegen (nur Ticket-Projekte, verknüpft mit ihrem Projekt)", "Agents may create projects (ticket projects only, linked to their project)")).small());
         });
-        ui.horizontal(|ui| {
+        srow(ui, cx, "agent_delete", |ui| {
             dirty_settings |= style::toggle(ui, &mut self.settings.agent_delete).changed();
-            ui.label(RichText::new(lang.t("Agenten dürfen Tickets/Kommentare löschen (in den Papierkorb; nur Kommentare von Agenten)", "Agents may delete tickets/comments (to the trash; only comments written by agents)")).small());
         });
-        ui.horizontal(|ui| {
+        srow(ui, cx, "todo_new_private", |ui| {
             dirty_settings |= style::toggle(ui, &mut self.settings.todo_new_private).changed();
-            ui.label(RichText::new(lang.t("Neue Karten privat (nie für Agenten sichtbar)", "New cards private (never visible to agents)")).small());
         });
-        ui.add_space(S2);
-        let top = ui.cursor().min.y;
-        ui.label(RichText::new(lang.t("Zugriff je Projekt", "Access per project")).strong());
-        rules_hint(ui, lang);
         let mut dirty_state = false;
-        egui::Grid::new("agent_access_grid").num_columns(2).spacing([12.0, 4.0]).show(ui, |ui| {
-            let mut projects = std::mem::take(&mut self.projects);
-            for p in projects.iter_mut() {
-                ui.label(&p.name);
-                ui.horizontal(|ui| dirty_state |= access_row(ui, ("p", p.id), &mut p.agent_access, lang));
+        let top = ui.cursor().min.y;
+        block(ui, cx, "agent_access", true, |ui| {
+            rules_hint(ui, lang);
+            egui::Grid::new("agent_access_grid").num_columns(2).spacing([12.0, 4.0]).show(ui, |ui| {
+                let mut projects = std::mem::take(&mut self.projects);
+                for p in projects.iter_mut() {
+                    ui.label(&p.name);
+                    ui.horizontal(|ui| dirty_state |= access_row(ui, ("p", p.id), &mut p.agent_access, lang));
+                    ui.end_row();
+                }
+                self.projects = projects;
+                ui.label(RichText::new(lang.t("Allgemein (ohne Projekt)", "General (no project)")).italics());
+                ui.horizontal(|ui| dirty_settings |= access_row(ui, "general", &mut self.settings.agent_general, lang));
                 ui.end_row();
+            });
+            // Ticket-Projekte (Datenbank): eigene Stufe oder verknüpft mit einem Seitenleisten-Projekt.
+            if let Some(db) = self.db.as_ref() {
+                let list = crate::planning::projects::list_projects(&db.conn).unwrap_or_default();
+                if !list.is_empty() {
+                    ui.add_space(S1);
+                    ui.label(RichText::new(lang.t("Ticket-Projekte", "Ticket projects")).strong());
+                    let names: Vec<(u64, String)> = self.projects.iter().map(|p| (p.id, p.name.clone())).collect();
+                    egui::Grid::new("agent_access_tickets").num_columns(2).spacing([12.0, 4.0]).show(ui, |ui| {
+                        for p in list {
+                            let Ok((mut acc, mut link)) = crate::planning::access::project_access(&db.conn, p.id) else { continue };
+                            ui.label(if p.system { format!("{} ({})", p.key, lang.t("Todo-Liste", "to-do list")) } else { format!("{} – {}", p.key, p.display(lang)) });
+                            let changed = ui.horizontal(|ui| ticket_access_row(ui, p.id, &mut acc, &mut link, &names, lang)).inner;
+                            if changed {
+                                let _ = crate::planning::access::set_project_access(&db.conn, p.id, acc, link);
+                            }
+                            ui.end_row();
+                        }
+                    });
+                }
             }
-            self.projects = projects;
-            ui.label(RichText::new(lang.t("Allgemein (ohne Projekt)", "General (no project)")).italics());
-            ui.horizontal(|ui| dirty_settings |= access_row(ui, "general", &mut self.settings.agent_general, lang));
-            ui.end_row();
         });
         super::tutorial::spot_since(ui, Spot::AgentAccess, top);
-        // Ticket-Projekte (Datenbank): eigene Stufe oder verknüpft mit einem Seitenleisten-Projekt.
-        if let Some(db) = self.db.as_ref() {
-            let list = crate::planning::projects::list_projects(&db.conn).unwrap_or_default();
-            if !list.is_empty() {
-                ui.add_space(S1);
-                ui.label(RichText::new(lang.t("Ticket-Projekte", "Ticket projects")).strong());
-                let names: Vec<(u64, String)> = self.projects.iter().map(|p| (p.id, p.name.clone())).collect();
-                egui::Grid::new("agent_access_tickets").num_columns(2).spacing([12.0, 4.0]).show(ui, |ui| {
-                    for p in list {
-                        let Ok((mut acc, mut link)) = crate::planning::access::project_access(&db.conn, p.id) else { continue };
-                        ui.label(if p.system { format!("{} ({})", p.key, lang.t("Todo-Liste", "to-do list")) } else { format!("{} – {}", p.key, p.display(lang)) });
-                        let changed = ui.horizontal(|ui| ticket_access_row(ui, p.id, &mut acc, &mut link, &names, lang)).inner;
-                        if changed {
-                            let _ = crate::planning::access::set_project_access(&db.conn, p.id, acc, link);
-                        }
-                        ui.end_row();
-                    }
-                });
-            }
-        }
         if dirty_state {
             self.save_state();
         }

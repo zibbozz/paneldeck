@@ -195,13 +195,13 @@ pub const DOCS: &[ToolDoc] = &[
     },
     ToolDoc {
         name: "list_models",
-        purpose: "Lists the LLM servers and models set up for chats (Settings → Models), with the tool level of each model and whether it can call tools.",
+        purpose: "Lists the LLM servers and models set up for chats (Settings → Models → Servers & models), with the tool level of each model and whether it can call tools.",
         usage: &["Use the server and model names with create_session and `kind` = \"chat\". API keys and full addresses are never returned."],
         examples: &[("{}", "all servers and models")],
     },
     ToolDoc {
         name: "cleanup_sizes",
-        purpose: "Read-only overview of how much space Paneldeck's data uses per area, as in its Clean up window (Settings → Data & backup → Clean up).",
+        purpose: "Read-only overview of how much space Paneldeck's data uses per area, as in its Clean up window (Settings → Data & backup → Care & clean-up → Clean up).",
         usage: &["There is no tool to delete anything: only the user can clean up, in the Clean up window."],
         examples: &[("{}", "the overview")],
     },
@@ -404,7 +404,7 @@ pub const DOCS: &[ToolDoc] = &[
         name: "create_project",
         purpose: "Creates a ticket project (key of 2-10 letters/digits, name, optional description and colour) linked to the sidebar project of this chat; it follows that project's access level.",
         usage: &[
-            "Only works when the user turned on \"Agents may create projects\" (Settings → Agents) and you have Control in this chat's project; otherwise `forbidden`. Sidebar projects are created only by the user.",
+            "Only works when the user turned on \"Create projects\" (Settings → Agents → Access) and you have Control in this chat's project; otherwise `forbidden`. Sidebar projects are created only by the user.",
             "Agents never delete projects.",
         ],
         examples: &[(r#"{"key": "API", "name": "Public API", "description": "Tickets for the REST API"}"#, "create the project API")],
@@ -412,7 +412,7 @@ pub const DOCS: &[ToolDoc] = &[
     ToolDoc {
         name: "delete_ticket",
         purpose: "Moves a ticket to the trash: it disappears from all lists. Only the user can restore it or delete it permanently.",
-        usage: &["Only works when the user turned on \"Agents may delete tickets/comments\" (Settings → Agents) and you have Control in the ticket's project; otherwise `forbidden`. Make sure the user asked for it."],
+        usage: &["Only works when the user turned on \"Delete\" (Settings → Agents → Access) and you have Control in the ticket's project; otherwise `forbidden`. Make sure the user asked for it."],
         examples: &[(r#"{"ticket": "PAN-12"}"#, "move PAN-12 to the trash")],
     },
     ToolDoc {
@@ -424,7 +424,7 @@ pub const DOCS: &[ToolDoc] = &[
     ToolDoc {
         name: "delete_comment",
         purpose: "Moves a comment written by an agent (origin agent) to the trash. Only the user can restore it or delete it permanently.",
-        usage: &["Only works when the user turned on \"Agents may delete tickets/comments\" (Settings → Agents); comments of the user cannot be deleted (`forbidden`). Take the comment id from get_ticket."],
+        usage: &["Only works when the user turned on \"Delete\" (Settings → Agents → Access); comments of the user cannot be deleted (`forbidden`). Take the comment id from get_ticket."],
         examples: &[(r#"{"comment": 41}"#, "move comment 41 to the trash")],
     },
     // ---- Reiter „Zeit“ (#164): Einträge für Vollständigkeit; Chats bekommen diese Werkzeuge nicht (8192-Token-Budget,
@@ -527,7 +527,7 @@ pub const DOCS: &[ToolDoc] = &[
         name: "editor_open",
         purpose: "Opens a local file in a new tab of the Editor tab, or a new untitled tab with some text.",
         usage: &[
-            "Needs the user's switch \"Agents may open files\" (Settings → Editor → Agents), otherwise `forbidden`.",
+            "Needs the user's switch \"Agents may open files\" (Settings → Agents → Editor), otherwise `forbidden`.",
             "`path` must be an absolute local path of an existing file; network/UNC paths and devices are refused (`forbidden`), a missing file gives `not_found`. An open file is not opened twice (`already_open`).",
             "`untitled` = true opens a new tab with `text`; only the user can save it.",
         ],
@@ -1074,7 +1074,7 @@ const ABOUT: &str = concat!(
     "\n",
     "### Chats\n",
     "- A chat is a session that talks to a local language model on an Ollama or OpenAI-compatible server (LM Studio, llama.cpp, vLLM) on this computer or in the private network – this conversation is such a chat. Chats live in the sidebar like terminals.\n",
-    "- The model's tool level and its tools are set per model in *Settings → Models* (Level, Tools, Ask before write actions, Max steps, Tool calling, Context length). The chat's history is stored until the chat is closed; closing a chat deletes its history.\n",
+    "- The model's tool level and its tools are set per model in *Settings → Models → Servers & models* (Level, Tools, Ask before write actions, Max steps, Tool calling, Context length). The chat's history is stored until the chat is closed; closing a chat deletes its history.\n",
     "- When the history no longer fits into the context, the oldest messages are left out; tool results are shortened.\n",
     "\n",
     "### To-do list, projects and tickets\n",
@@ -1092,11 +1092,11 @@ const ABOUT: &str = concat!(
     "The *Processes* section in the Terminal Hub sidebar runs long-running programs such as dev servers and watchers (`npm run dev`, `cargo watch`) apart from the terminals, with their output in their own pane. Entries can form groups that start and stop together. Only the user can add, change or delete entries; agents can read them and start, stop or restart them.\n",
     "\n",
     "### Tool levels\n",
-    "Every chat model has a tool level, set by the user under *Settings → Models*:\n",
+    "Every chat model has a tool level, set by the user under *Settings → Models → Servers & models*:\n",
     "- **Off**: no tools – chat only.\n",
     "- **Read**: read sessions, terminal content, chats, the Claude history and costs, the to-do list or tickets, the process list and themes. Nothing is changed.\n",
     "- **Control**: additionally type text, send keys, run commands, send messages to other chats, create, rename, show and close sessions, change the to-do list or tickets, and start, stop and restart process-list entries. By default every write action waits for the user's approval in the chat.\n",
-    "This level is independent of the MCP level under *Settings → Agents*, which applies only to external agents (programs that connect to Paneldeck through its MCP interface).\n",
+    "This level is independent of the MCP level under *Settings → Agents → Access*, which applies only to external agents (programs that connect to Paneldeck through its MCP interface).\n",
     "\n",
     "### Simple and expert mode for tools\n",
     "The to-do tools follow the Expert mode switch: in simple mode you get list_todos, add_todo and set_todo_done; in expert mode you get the project and ticket tools, and list_todos is read-only. A tool of the other mode returns `wrong_mode`.\n",
@@ -1105,7 +1105,7 @@ const ABOUT: &str = concat!(
     "- **Sidebar** (left, Terminal Hub): sessions and chats in projects and folders, *New session …* (Ctrl+Shift+T), the spark button for a new Claude session, the speech-bubble button for a new chat, the \"Waiting for you\" inbox, the cost overview, the *Processes* section and the *Templates* section.\n",
     "- **Title bar**: the tabs *Terminal Hub* (Ctrl+1) and *Todo list* (Ctrl+2); Ctrl+click opens a tab in a new window.\n",
     "- **Command palette**: Ctrl+Shift+P (also finds tickets).\n",
-    "- **Settings**: *Settings → Models* (chat servers, models, levels), *Settings → Agents* (MCP interface for external agents, call log), *Settings → Claude* (Claude mode, hooks, defaults), *Settings → General* (shell integration, confirm close), *Settings → Appearance*, *Settings → Data & backup* (Clean up window).\n",
+    "- **Settings**: *Settings → Models → Servers & models* (chat servers, models, levels), *Settings → Agents → Access* (MCP interface for external agents, call log), *Settings → Claude* (Claude mode, defaults for new sessions, costs, hooks), *Settings → Terminal → Shell & environment* (shell integration), *Settings → General* (notifications, window & tray, confirm close), *Settings → Appearance*, *Settings → Data & backup → Care & clean-up* (Clean up window).\n",
     "- **Chat pane**: Enter sends, Shift+Enter adds a line, Stop ends an answer, ↻ regenerates the last answer, ✎ edits the last message; approval prompts appear in the chat with Allow, Always for this chat and Deny; questions from ask_user appear as a small form with Submit and Cancel. Messages that start with [Paneldeck] come from Paneldeck itself (for example when a background command ended), not from the user.\n",
 );
 
@@ -1141,7 +1141,7 @@ pub const ERRORS: &[(&str, &str)] = &[
     ("status_unavailable", "No status is available (Claude mode or its hooks are off)."),
     ("no_shell_integration", "Shell integration is off (Settings → General), so run_command cannot see where a command ends. Use send_text and read_terminal instead."),
     ("fullscreen_program", "A full-screen program runs in the session; run_command does not work there. Use read_terminal with screen = true and send_keys."),
-    ("no_model", "No LLM server or model is set up for that chat (Settings → Models)."),
+    ("no_model", "No LLM server or model is set up for that chat (Settings → Models → Servers & models)."),
     ("window_hidden", "The Paneldeck window is minimized or in the tray; screenshots need a visible window."),
     ("not_visible", "The session is not shown in the main window; call focus_session first."),
     ("screenshot_timeout", "No image came from the window."),
@@ -1228,9 +1228,9 @@ fn error_scope(code: &str) -> &'static [&'static str] {
 fn project_limit_note(policy: &ToolPolicy) -> String {
     let level = policy.prompt_level();
     if level == McpLevel::Off {
-        "- This chat's project is locked for agents: you have no Paneldeck tools here (only the user can release it in Settings → Agents); your own file and command tools are not affected.\n".to_string()
+        "- This chat's project is locked for agents: you have no Paneldeck tools here (only the user can release it in Settings → Agents → Access); your own file and command tools are not affected.\n".to_string()
     } else {
-        format!("- This chat's project limits the Paneldeck tools to **{}** (the model's level is {}); only the user can change it in Settings → Agents.\n", level_name(level), level_name(policy.cfg.level))
+        format!("- This chat's project limits the Paneldeck tools to **{}** (the model's level is {}); only the user can change it in Settings → Agents → Access.\n", level_name(level), level_name(policy.cfg.level))
     }
 }
 
@@ -1315,7 +1315,7 @@ pub fn render_with(policy: &ToolPolicy, spec: &Spec) -> String {
                 out.push_str("- The user switched off approvals for this model: write tools run at once. Be careful.\n");
             }
         } else {
-            out.push_str("- You can only read; you cannot change anything. If the user wants a change, explain how to do it in Paneldeck or that the level Control is needed (Settings → Models).\n");
+            out.push_str("- You can only read; you cannot change anything. If the user wants a change, explain how to do it in Paneldeck or that the level Control is needed (Settings → Models → Servers & models).\n");
         }
         out.push_str(&format!("- At most {} tool calls per answer (every call counts, also failed ones); then the answer stops and the user can press Continue.\n", policy.cfg.max_steps));
         out.push_str(access_note(&defs, false));
@@ -1324,7 +1324,7 @@ pub fn render_with(policy: &ToolPolicy, spec: &Spec) -> String {
         }
     } else {
         let about = if spec.on(PromptPart::About) { " and from what Paneldeck is (above)" } else { "" };
-        out.push_str(&format!("- You have **no tools** in this chat (tool level Off, or the model cannot call tools). Do not try to call tools or pretend to run commands. Answer from your knowledge{about}. If the user wants you to look at terminals or tickets, explain that the tool level can be set per model under *Settings → Models*.\n"));
+        out.push_str(&format!("- You have **no tools** in this chat (tool level Off, or the model cannot call tools). Do not try to call tools or pretend to run commands. Answer from your knowledge{about}. If the user wants you to look at terminals or tickets, explain that the tool level can be set per model under *Settings → Models → Servers & models*.\n"));
         out.push_str("- You have no access to the file system or the internet.\n");
     }
     if tools_on {
@@ -1591,7 +1591,7 @@ pub fn render_compact_with(policy: &ToolPolicy, spec: &Spec) -> String {
             "## Paneldeck\n\n",
             "Paneldeck keeps terminal sessions (PowerShell, cmd, Git Bash, WSL; some run Claude Code) and chats with local models in one window, organised in projects and folders. ",
             "The Todo list tab is a simple to-do list, or with the Expert mode switch projects with tickets, workflows, sprints and versions. ",
-            "The process list runs dev servers. The tool level of each chat model (Off, Read, Control) is set in Settings → Models.\n\n",
+            "The process list runs dev servers. The tool level of each chat model (Off, Read, Control) is set in Settings → Models → Servers & models.\n\n",
         ));
     }
     out.push_str("## Your access\n\n");
@@ -1642,7 +1642,7 @@ pub fn render_compact_with(policy: &ToolPolicy, spec: &Spec) -> String {
             out.push_str(&format!("\n## Notes for {name} models\n\n{note}\n"));
         }
     } else {
-        out.push_str("- You have **no tools** in this chat. Do not try to call tools; the tool level can be set per model under Settings → Models.\n");
+        out.push_str("- You have **no tools** in this chat. Do not try to call tools; the tool level can be set per model under Settings → Models → Servers & models.\n");
     }
     out.trim_end().to_string()
 }
@@ -1699,7 +1699,7 @@ mod tests {
 
     /// #386: Die neuen Werkzeuge (Projekte anlegen, Papierkorb, Kommentare von Agenten) ändern etwas – im Plan-Modus
     /// gesperrt, im Chat freigabepflichtig – und der Prompt erklärt Zugriff je Projekt, private Einträge und Papierkorb.
-    /// Für Chats sind die vier standardmäßig aus (#393): erst angehakt (*Einstellungen → Modelle*) und mit ihrem Schalter
+    /// Für Chats sind die vier standardmäßig aus (#393): erst angehakt (*Einstellungen → Modelle → Server & Modelle*) und mit ihrem Schalter
     /// stehen sie in der Liste und im Prompt.
     #[test]
     fn project_access_tools_are_writes_and_the_rules_are_explained() {

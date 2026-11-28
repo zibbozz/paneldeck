@@ -16,10 +16,10 @@ Name conflicts (import, duplicate, edit as copy) never overwrite anything: a num
 
 A theme file that cannot be loaded is listed under the theme choice with the reason (for example `Invalid colour in "fg": "white"`). It cannot be selected until you fix it and click *Reload* (row *Custom themes*); if the selected theme is invalid, Paneldeck uses the default theme (One Dark).
 
-![Appearance tab with the theme dropdown, Edit theme …, New theme …, the ⋯ menu button and one invalid theme file listed below](../images/theme-appearance.png)
+![Settings, Appearance → Theme page with the theme dropdown, Edit theme …, New theme …, the ⋯ menu button and one invalid theme file listed below](../images/theme-appearance.png)
 
 ## How to change a colour of a theme
-1. Open *Settings → Appearance* and choose the theme under **Theme**.
+1. Open *Settings → Appearance → Theme* and choose the theme under **Theme**.
 2. Click **Edit theme …** (for a built-in theme: **Edit as copy …**). The editor opens.
 3. Find the colour: type into *Search colours …* (e.g. `accent`), or click the element in the preview.
 4. Change it with the colour picker or type a value into the hex field.
@@ -27,7 +27,7 @@ A theme file that cannot be loaded is listed under the theme choice with the rea
 6. Click **Save**. The app now uses the theme; a copy of a built-in theme is saved as a new file in `themes/`.
 
 ## How to make a new theme from two colours
-1. Open *Settings → Appearance* and click **New theme …**. The editor opens with *Generate from a few colours*.
+1. Open *Settings → Appearance → Theme* and click **New theme …**. The editor opens with *Generate from a few colours*.
 2. Choose *Background* and *Accent*, and under *Kind* *Dark* or *Light*. The bar below shows the 16 calculated ANSI colours.
 3. Click **Generate**.
 4. Type a **Name** at the top of the editor and fine-tune colours if you like.
@@ -93,10 +93,10 @@ Since 3.2.0 a theme can have its **own background** behind the whole window: an 
 - **Colour:** one colour (hex or link) over the base colour.
 - **Pattern:** built-in patterns drawn in theme colours – dots, lines, grid, checks, diagonal lines, noise – with a colour (default `@text/12`), or your own tile image (*Own tile …*); size 25–400 % and an offset. No image files are bundled and nothing is downloaded.
 - **For every kind:** a **margin** per side (top, right, bottom, left, in points; outside it the base colour), **opacity** of the whole background (below 100 % the desktop shows through; otherwise the background covers it), **brightness** −100 … +100 % (mixes towards black or white), **blur** 0–40 pt and an **overlay** (colour and opacity above the image, below all surfaces).
-- **Areas:** *Terminals*, *Editor*, *To-do and planning*, *Chat* and *Sidebar* (title bar and tabs follow the sidebar) each have a switch and an opacity: on = the surface lets the background show through at this opacity (multiplied with *Opacity* under *Settings → Appearance*), off = the surface stays opaque. Dialogs, menus, tooltips and input fields always stay opaque. In terminals only the default background is see-through – colours set by programs, the selection and the cursor stay opaque, and the minimum contrast of the text is computed against the surface over the image.
+- **Areas:** *Terminals*, *Editor*, *To-do and planning*, *Chat* and *Sidebar* (title bar and tabs follow the sidebar) each have a switch and an opacity: on = the surface lets the background show through at this opacity (multiplied with *Opacity* under *Settings → Appearance → Transparency & animation*), off = the surface stays opaque. Dialogs, menus, tooltips and input fields always stay opaque. In terminals only the default background is see-through – colours set by programs, the selection and the cursor stay opaque, and the minimum contrast of the text is computed against the surface over the image.
 - **Take background from …** copies the background of another theme (its images are copied on *Save*). The theme of a profile only colours its terminals; the background always comes from the selected theme.
 
-The background is one continuous picture across the whole window – each area shows its part, nothing jumps when panes are split. Every window renders it for its own size. It is computed once in the background (in physical pixels) and cached; after resizing a window Paneldeck waits a quarter of a second and meanwhile stretches the old picture. There are no extra redraws. **Reduce transparency** under *Settings → Appearance* (off by default) makes every surface opaque and hides the background.
+The background is one continuous picture across the whole window – each area shows its part, nothing jumps when panes are split. Every window renders it for its own size. It is computed once in the background (in physical pixels) and cached; after resizing a window Paneldeck waits a quarter of a second and meanwhile stretches the old picture. There are no extra redraws. **Reduce transparency** under *Settings → Appearance → Transparency & animation* (off by default) makes every surface opaque and hides the background.
 
 If the image file is missing or not valid (for example a path instead of a bare file name), the base colour is shown and the theme stays valid. Renaming a theme keeps its folder; *Duplicate* copies it and *Delete* removes it.
 
@@ -218,6 +218,10 @@ The names are part of the public interface (they are only ever added, never rena
 | `code_heading` | Editor: syntax colours | Code: heading, section | `@code_function` |
 | `code_variable` | Editor: syntax colours | Code: variable, parameter | `@code_tag` |
 | `code_invalid` | Editor: syntax colours | Code: invalid | `@error` |
+| `diag_error` | Editor: syntax colours | Smart mode: error (squiggle) | `@error` |
+| `diag_warning` | Editor: syntax colours | Smart mode: warning (squiggle) | `@warning` |
+| `diag_info` | Editor: syntax colours | Smart mode: information (squiggle) | `@info` |
+| `diag_hint` | Editor: syntax colours | Smart mode: hint (dotted) | `@text_dim/80` |
 | `diff_add_bg` | Editor: comparison and change markers | Comparison: background of added lines | `@diff_add/15` |
 | `diff_remove_bg` | Editor: comparison and change markers | Comparison: background of removed lines | `@diff_remove/15` |
 | `diff_add_word` | Editor: comparison and change markers | Comparison: added words within a line | `@diff_add/40` |

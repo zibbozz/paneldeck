@@ -879,6 +879,8 @@ impl App {
             return Ok(());
         }
         self.sa_after_write(after);
+        // Smart-Modus (#367): `didSave` (z. B. für die Prüfung beim Speichern von rust-analyzer).
+        self.ed.smart_saved(id);
         Ok(())
     }
 

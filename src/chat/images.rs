@@ -637,8 +637,8 @@ pub fn is_rejection(e: &LlmError) -> bool {
 /// Fehlertext, wenn der Server das Bild abgelehnt hat (Paneldeck sendet dem Modell dann keine Bilder mehr).
 pub fn rejected_text(lang: Lang) -> &'static str {
     lang.t(
-        "Der Server hat das Bild abgelehnt – dieses Modell kann vermutlich keine Bilder lesen. Paneldeck sendet ihm keine Bilder mehr (änderbar in Einstellungen → Modelle → Bilder) und wiederholt die Antwort ohne Bild.",
-        "The server rejected the image – this model probably cannot read images. Paneldeck no longer sends images to it (change in Settings → Models → Images) and retries the answer without the image.",
+        "Der Server hat das Bild abgelehnt – dieses Modell kann vermutlich keine Bilder lesen. Paneldeck sendet ihm keine Bilder mehr (änderbar in Einstellungen → Modelle → Server & Modelle → Bilder) und wiederholt die Antwort ohne Bild.",
+        "The server rejected the image – this model probably cannot read images. Paneldeck no longer sends images to it (change in Settings → Models → Servers & models → Images) and retries the answer without the image.",
     )
 }
 

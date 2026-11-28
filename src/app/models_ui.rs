@@ -1,4 +1,4 @@
-//! Einstellungen → Modelle (LLM-Server und Einstellungen je Modell) und der Dialog „Neuer Chat“ (#63).
+//! Einstellungen → Modelle → Server & Modelle (LLM-Server und Einstellungen je Modell) und der Dialog „Neuer Chat“ (#63).
 //!
 //! Die Oberfläche besteht aus freien Funktionen über den Einstellungsdaten (headless testbar); `App` verbindet sie mit
 //! `Settings::llm_servers`, dem Speichern und dem [`Connector`] (Modellliste im Hintergrund abrufen).
@@ -438,8 +438,8 @@ fn row(ui: &mut Ui, label: &str, add: impl FnOnce(&mut Ui)) {
 pub(super) fn models_tab(ui: &mut Ui, lang: Lang, all: &mut LlmServers, st: &mut ModelsUi, conn: &Connector, expert: bool) -> ModelsOut {
     let mut out = ModelsOut::default();
     ui.label(RichText::new(lang.t(
-        "Lokale Modelle (Ollama oder OpenAI-kompatible Server) antworten in Chats. Erlaubt sind nur dieser Rechner und private Netze. Die Stufe je Modell legt fest, was ein Modell in seinen Chats darf – sie ist unabhängig von der MCP-Stufe für externe Agenten (Reiter „Agenten“).",
-        "Local models (Ollama or OpenAI-compatible servers) answer in chats. Only this computer and private networks are allowed. The level per model decides what a model may do in its chats – it is independent of the MCP level for external agents (“Agents” tab).",
+        "Lokale Modelle (Ollama oder OpenAI-kompatible Server) antworten in Chats. Erlaubt sind nur dieser Rechner und private Netze. Die Stufe je Modell legt fest, was ein Modell in seinen Chats darf – sie ist unabhängig von der MCP-Stufe für externe Agenten (Agenten › Zugriff).",
+        "Local models (Ollama or OpenAI-compatible servers) answer in chats. Only this computer and private networks are allowed. The level per model decides what a model may do in its chats – it is independent of the MCP level for external agents (Agents › Access).",
     )).small().color(style::dim(ui)));
     ui.add_space(S2);
     if super::prompt_ui::global_section(ui, lang, all, &mut st.prompt, expert) {
@@ -899,8 +899,8 @@ pub(super) fn new_chat_body(ui: &mut Ui, d: &mut NewChatDlg, servers: &[LlmServe
     let mut out = DlgOut::default();
     if servers.is_empty() {
         ui.label(lang.t(
-            "Für Chats brauchst du einen Server mit lokalen Modellen, z. B. Ollama. Richte ihn in Einstellungen → Modelle ein.",
-            "Chats need a server with local models, e.g. Ollama. Set it up in Settings → Models.",
+            "Für Chats brauchst du einen Server mit lokalen Modellen, z. B. Ollama. Richte ihn in Einstellungen → Modelle → Server & Modelle ein.",
+            "Chats need a server with local models, e.g. Ollama. Set it up in Settings → Models → Servers & models.",
         ));
         ui.add_space(S2);
         ui.horizontal(|ui| {
@@ -956,7 +956,7 @@ pub(super) fn new_chat_body(ui: &mut Ui, d: &mut NewChatDlg, servers: &[LlmServe
         if busy {
             ui.spinner();
         }
-        if ui.link(lang.t("Einstellungen → Modelle", "Settings → Models")).clicked() {
+        if ui.link(lang.t("Einstellungen → Modelle → Server & Modelle", "Settings → Models → Servers & models")).clicked() {
             out.open_settings = true;
         }
     });
@@ -1007,9 +1007,6 @@ pub(super) fn release_focus(ctx: &egui::Context) {
 // ---------------------------------------------------------------------------------------------------------------
 // Anbindung an die App
 
-/// Index des Reiters „Modelle“ in den Einstellungen (am Ende angehängt, damit feste Indizes gültig bleiben).
-pub(super) const SETTINGS_TAB: usize = 10;
-
 impl super::App {
     fn llm_repaint(ctx: &egui::Context) -> Arc<dyn Fn() + Send + Sync> {
         let c = ctx.clone();
@@ -1023,20 +1020,50 @@ impl super::App {
         }
     }
 
-    /// Reiter Einstellungen → Modelle. Änderungen werden gleich gespeichert (Schlüssel und Stufen sind
+    /// Einstellungen → Modelle → Server & Modelle. Änderungen werden gleich gespeichert (Schlüssel und Stufen sind
     /// Sicherheitseinstellungen) – während gezogen wird (Zahlenfelder) erst beim Loslassen bzw. höchstens alle 500 ms.
-    pub(super) fn models_settings_ui(&mut self, ui: &mut Ui, ctx: &egui::Context) {
-        let lang = self.settings.language;
-        self.models_ui.prompt.global = self.settings.chat_prompt_parts;
-        self.models_ui.prompt.repaint = Some(Self::llm_repaint(ctx));
-        let out = models_tab(ui, lang, &mut self.settings.llm_servers, &mut self.models_ui, &self.llm_conn, crate::mcp::expert_mode());
-        self.settings.chat_prompt_parts = self.models_ui.prompt.global;
-        for id in &out.connect {
-            self.llm_connect(ctx, id);
-        }
-        let agent_changed = agent_tools_section(ui, lang, &mut self.settings.agent_tools, &mut self.models_ui);
-        let compact_changed = compact_section(ui, lang, &mut self.settings.chat_compact);
-        if out.changed || agent_changed || compact_changed {
+    pub(super) fn models_servers_page(&mut self, ui: &mut Ui, cx: &super::settings_items::RowCx) {
+        let lang = cx.lang;
+        let ctx = ui.ctx().clone();
+        let mut changed = false;
+        super::settings_items::block(ui, cx, "llm_servers", false, |ui| {
+            self.models_ui.prompt.global = self.settings.chat_prompt_parts;
+            self.models_ui.prompt.repaint = Some(Self::llm_repaint(&ctx));
+            let out = models_tab(ui, lang, &mut self.settings.llm_servers, &mut self.models_ui, &self.llm_conn, crate::mcp::expert_mode());
+            self.settings.chat_prompt_parts = self.models_ui.prompt.global;
+            for id in &out.connect {
+                self.llm_connect(&ctx, id);
+            }
+            changed = out.changed;
+        });
+        self.models_page_done(&ctx, changed);
+        super::settings_items::link(ui, cx, lang.t("MCP-Stufe für externe Agenten:", "MCP level for external agents:"), super::settings_nav::Page::AgentsAccess);
+    }
+
+    /// Einstellungen → Modelle → Werkzeuge der Chats.
+    pub(super) fn models_tools_page(&mut self, ui: &mut Ui, cx: &super::settings_items::RowCx) {
+        let lang = cx.lang;
+        let ctx = ui.ctx().clone();
+        let mut changed = false;
+        super::settings_items::block(ui, cx, "agent_tools", false, |ui| {
+            changed = agent_tools_section(ui, lang, &mut self.settings.agent_tools, &mut self.models_ui);
+        });
+        self.models_page_done(&ctx, changed);
+    }
+
+    /// Einstellungen → Modelle → Kompaktieren.
+    pub(super) fn models_compact_page(&mut self, ui: &mut Ui, cx: &super::settings_items::RowCx) {
+        let lang = cx.lang;
+        let ctx = ui.ctx().clone();
+        let mut changed = false;
+        super::settings_items::block(ui, cx, "chat_compact", false, |ui| {
+            changed = compact_section(ui, lang, &mut self.settings.chat_compact);
+        });
+        self.models_page_done(&ctx, changed);
+    }
+
+    fn models_page_done(&mut self, ctx: &egui::Context, changed: bool) {
+        if changed {
             self.models_ui.dirty_since.get_or_insert_with(std::time::Instant::now);
         }
         self.models_save_tick(ctx);
@@ -1063,8 +1090,7 @@ impl super::App {
             self.llm_connect(ctx, id);
         }
         if out.open_settings {
-            self.settings_open = true;
-            self.settings_tab = SETTINGS_TAB;
+            self.open_settings(super::settings_nav::Page::ModelsServers);
             return;
         }
         if out.create {
@@ -1522,7 +1548,7 @@ mod tests {
             let mut d = NewChatDlg::default();
             let mut h = H::new();
             h.run(vec![], |ui| new_chat_body(ui, &mut d, &[], &conn, lang));
-            assert!(h.has(lang.t("Einstellungen → Modelle", "Settings → Models")), "{:?}", h.texts);
+            assert!(h.has(lang.t("Einstellungen → Modelle → Server & Modelle", "Settings → Models → Servers & models")), "{:?}", h.texts);
             let o = h.click(lang.t("Einstellungen öffnen", "Open settings"), |ui| new_chat_body(ui, &mut d, &[], &conn, lang), merge_dlg);
             assert!(o.open_settings && !o.create);
         }

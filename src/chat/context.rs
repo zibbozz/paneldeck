@@ -175,8 +175,8 @@ impl ContextFill {
             ),
             FillLevel::Full if p.dropped => lines.push(
                 lang.t(
-                    "Ältere Nachrichten passen nicht mehr in den Kontext und fallen heraus (Kontextlänge in Einstellungen → Modelle erhöhen).",
-                    "Older messages no longer fit into the context and drop out (raise the context length in Settings → Models).",
+                    "Ältere Nachrichten passen nicht mehr in den Kontext und fallen heraus (Kontextlänge in Einstellungen → Modelle → Server & Modelle erhöhen).",
+                    "Older messages no longer fit into the context and drop out (raise the context length in Settings → Models → Servers & models).",
                 )
                 .into(),
             ),

@@ -482,7 +482,7 @@ pub fn offered(d: &AgentDef, env: &AgentEnv) -> Result<(), String> {
         Needs::Root if env.has_root() => Ok(()),
         Needs::Root => Err(format!("{} needs a project folder, and this chat has none.", d.name)),
         Needs::WebFetch if env.settings.web_fetch => Ok(()),
-        Needs::WebFetch => Err("web_fetch is switched off in Settings → Models → Agent tools.".into()),
+        Needs::WebFetch => Err("web_fetch is switched off in Settings → Models → Tools in chats.".into()),
         Needs::WebSearch => web::search_ready(&env.settings),
         Needs::Background if env.background => Ok(()),
         Needs::Background => Err(format!("{} works on background commands, and this chat has none – start one with run_command and background: true.", d.name)),

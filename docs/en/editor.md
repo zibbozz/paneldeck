@@ -9,7 +9,7 @@ The **Editor** tab is a plain text editor inside Paneldeck, independent of the t
 ## Files and folders
 - **Open folder …** (**Ctrl+Shift+O**) shows a folder as a tree on the left (**Toggle folder tree** hides it); **Close folder** closes it again. In the tree, a click opens a file in the focused split; the context menu has *Open to the side*, *Copy path*, *Show in Explorer* and *Open as root folder*.
 - **Open file …**, **New file** and **Recent** (*Recent files* / *Recent folders*, *Clear list*).
-- **Explorer:** with the switch *Open in Paneldeck editor* in *Settings → Window* a right-click on any file opens it here ([Windows integration](windows-integration.md#open-in-paneldeck-editor)); from the command line: [`paneldeck.exe --edit <file>`](command-line.md#--edit-file).
+- **Explorer:** with the switch *Open in Paneldeck editor* in *Settings → General → Windows integration* a right-click on any file opens it here ([Windows integration](windows-integration.md#open-in-paneldeck-editor)); from the command line: [`paneldeck.exe --edit <file>`](command-line.md#--edit-file).
 - Paneldeck remembers the open folder, the tabs (with cursor and scroll position), the split layout and the recent lists (`editor-state.json` in the data folder).
 - **Files in WSL:** you can open and save files in a WSL distribution (`\\wsl.localhost\<distro>\…`, e.g. via *Open file …* or Ctrl+click on a Linux path in a terminal); they are loaded in the background. For such files the context menus also offer *Copy as Linux path*. `paneldeck.exe --edit /home/me/x` from a WSL session opens the file of that distribution. Agents stay limited to local Windows files (see [Agents](#agents)).
 
@@ -18,17 +18,36 @@ The **Editor** tab is a plain text editor inside Paneldeck, independent of the t
 - **Split right** / **Split down** like in the Terminals tab, sizes by dragging; **Ctrl+Alt+arrow keys** move the focus between splits.
 - The **same file in two splits** is one document: edits appear in both at once, each split keeps its own scroll position and cursors.
 
+## Smart mode
+*(Since 3.3.0.)* Choose **Smart** in the mode picker of the status bar (for the file, for all files of the language or as the default). On top of the syntax colours a **language server** then provides completion and diagnostics. The hover, go-to-definition, rename and similar features follow in 3.4.0.
+- **Servers:** from PATH (Windows' current PATH, never a program inside the project folder) or an own path per language in *Settings → Editor → Smart mode → Servers per language*, where each built-in server can be switched off. Built in: rust-analyzer, basedpyright/pyright/pylsp, typescript-language-server/tsgo, clangd, gopls, lua-language-server, csharp-ls, vscode-json/html/css-language-server, yaml-language-server, taplo, bash-language-server, texlab, phpactor, ruby-lsp, neocmakelsp, marksman, docker-langserver, jdtls, kotlin-language-server, perlnavigator, lemminx, sourcekit-lsp; PowerShell, NSIS and SQL with an own path only. Without a server the status bar says *Smart: no server* and Syntax mode runs.
+- **Folder trust:** a language server reads and runs files of the project (build scripts, macros). For a folder you have not trusted yet, a bar above the text offers **Trust** (the detected project root), **Trust parent folder …** and **Not now**; until then Syntax mode runs. Revoke trust in *Settings → Editor → Smart mode → Trusted folders* – the servers there stop at once. Agents can never change it.
+- **Completion:** opens after the server's trigger characters (e.g. `.`) and after two typed word characters, and with **Ctrl+Space** (changeable, e.g. for IME users). **Tab**/**Enter** accept, **Esc** closes, the arrow keys select; up to 12 rows with kind, name and detail, the documentation beside it. Snippets have tab stops: **Tab** jumps to the next, **Esc** ends; the whole insertion is one undo step.
+- **Diagnostics:** squiggles (errors, warnings, information; hints dotted, deprecated code struck through) with the message on hover; the status bar shows the counter (✖ errors, ⚠ warnings) and the message of the cursor line. The counter or **Ctrl+Shift+M** opens the **problem list** at the bottom; **F8**/**Shift+F8** jump to the next/previous problem. Diagnostics appear about 500 ms after the last change.
+- **Language servers** window (click the server name in the status bar; with message trace on it warns that the log is visible in screenshots, also those of agents): status, PID, *Restart*, *Stop* and the log of each server – in memory only (1 MB), never on disk; message trace in the settings (off by default).
+- Limits (*Settings → Editor → Smart mode*, all configurable): at most 6 servers, completion timeout 5 s, 1000 diagnostics per file, messages up to 64 MB, smart mode up to 5 MB per file, a server without open documents ends after 10 minutes, diagnostics after a 500 ms typing pause. After 3 crashes within 5 minutes smart mode is off for that language until Paneldeck restarts; a bar offers **Retry** and **Show log**. Requests of a server to edit files, run commands or open documents are refused, and a server never starts programs from the project folder (e.g. a `node.exe` placed there). Own servers take arguments (for `.cmd`/`.bat` wrappers without the cmd special characters `& | < > ( ) % ! ^ "`); `initializationOptions` per language are set in `settings.json` (`editor.smart.init_options`).
+- **WSL files:** the server runs inside the distribution (`wsl.exe -d <distro> --cd <root> --exec <server>`, no shell in between) and is found in the distribution's Linux PATH (login shell, so `~/.cargo/bin` and similar count); paths are Linux paths for the server. Root and server are looked up in the background. A WSL or network folder is only trusted as exactly that folder. The memory column of the *Language servers* window stays empty for WSL servers. The comparison tab and untitled tabs have no smart mode.
+
+## Multiple cursors
+*(Since 3.3.0; before, Alt+click and Ctrl+D were always on.)* Like Sublime Text – everything is **off by default** and switched on in *Settings → Editor → General*:
+- **Multiple cursors** (the shortcuts and commands): **Ctrl+D** adds the next occurrence of the selection (with an empty cursor first the word there; plain text, not only whole words), **Ctrl+Shift+D** selects all occurrences (only in the Editor tab – in the Terminal Hub Ctrl+Shift+D still splits right), **Ctrl+U** takes back the last cursor or selection change without touching the text. All three are in the *Selection* menu and in the command palette and can be changed or removed under *Settings → Shortcuts*.
+- **Middle mouse button**: dragging selects a column and replaces all cursors; with **Ctrl** the column is added to the existing cursors. With word wrap the column counts screen rows. Lines that are too short – empty ones too – get a cursor at their end. A click without dragging places the cursor (like the left button), **Ctrl+click** adds a single cursor. A middle-click on a tab still closes it.
+- **Alt+click** adds a cursor; Alt+click on an existing cursor removes it (the last one always stays). Ctrl+click stays free.
+- Everything you type, delete or paste goes to every cursor; **paste** always inserts the whole clipboard at every cursor. **Esc** keeps only the main cursor. All cursors look the same and blink together; the status bar shows *3 cursors* or *3 selections* instead of line and column. At most **10 000** cursors (*Only the first 10 000 cursors.*). There is no column selection from the keyboard and no cursor above/below (Alt+Shift+Up/Down and Alt+Shift+drag were removed in 3.3.0); **Ctrl+Alt+arrow keys** move the focus between splits. Hot exit keeps only the main cursor. The comparison tab has one cursor.
+
 ## Menu bar
-*(Since 3.2.0.)* Every split has a slim **menu bar** above its tab bar: **File · Edit · View · Format**. The commands act on the active tab of that split, and the shortcuts are shown on the right of each entry:
+*(Since 3.2.0.)* Every split has a slim **menu bar** above its tab bar: **File · Edit · Selection · View · Format** (*Selection* since 3.3.0). The commands act on the active tab of that split, and the shortcuts are shown on the right of each entry:
 - **File:** New file, Open file …, Open folder …, Save, Save as …, Save all (all unsaved files with a name; untitled tabs need *Save as*), the [actions on save](#actions-on-save) (*Actions on save …*, *Save without actions*, *Pause*), [Compare with …](#comparison-and-change-markers) (file, saved file, HEAD, index, revision, clipboard), Close tab.
-- **Edit:** Undo, Redo, Cut, Copy, Paste, Select all, Find …, Replace …, Find in files …, Go to line …, Add next occurrence, Select all occurrences, Select line, Delete line, Move line up/down.
+- **Edit:** Undo, Redo, Cut, Copy, Paste, Select all, Find …, Replace …, Find in files …, Go to line …, Toggle comment, Delete line, Move line up/down.
+- **Selection** *(since 3.3.0)*: Add next occurrence, Select all occurrences, Undo cursor/selection change (these three need [*Multiple cursors*](#multiple-cursors)), Single cursor, Select line.
 - **View:** Word wrap, Minimap, Folder tree, Split right, Split down, mode *Text* / *Syntax*, Language (built-in languages; all languages in the status bar), [Change markers](#comparison-and-change-markers) and what they compare with, Next/Previous change (**F7** / **Shift+F7**), Commands (palette). In a comparison tab *File* applies to the focused side; *Edit* and *Format* are greyed out.
 - **Format:** the [formatting commands](#formatting-json-and-xml) and *Format on save …* (opens the rule dialog, see [Actions on save](#actions-on-save)).
 
-Entries that do not apply right now are **greyed out**, and hovering says why (e.g. *Not JSON or XML* for a text file, *Nothing to undo*). In a narrow split the four menus fold into one **Menu ▾**. The menu bar can be switched off under *Settings → Editor → Menu bar* (on by default). The command palette (**Ctrl+Shift+P**) also works in the Editor tab and lists the format commands as *Format: …*.
+Entries that do not apply right now are **greyed out**, and hovering says why (e.g. *Not JSON or XML* for a text file, *Nothing to undo*). In a narrow split the menus fold into one **Menu ▾**. The menu bar can be switched off under *Settings → Editor → General → Menu bar* (on by default). The command palette (**Ctrl+Shift+P**) also works in the Editor tab and lists the format commands as *Format: …*.
 
 ## Editing
-- **Multiple cursors:** Ctrl+Alt+Up/Down adds a cursor above/below, **Ctrl+D** selects the next occurrence, **Ctrl+Shift+L** all occurrences, **Alt+drag** selects a column; Esc goes back to one cursor.
+- **Multiple cursors:** see [Multiple cursors](#multiple-cursors) (off by default since 3.3.0). Esc goes back to one cursor.
+- **Toggle comment** *(since 3.3.0)*: **Ctrl+/** (also *Edit* menu and command palette) comments out the lines of every cursor with the line comment of the file's language (`//` for Rust, C, JavaScript …, `#` for Python, shell, PowerShell, YAML, TOML …, `--` for Lua and SQL, `;` for INI, AutoIt, Inno Setup, NSIS, `%` for LaTeX, `'` for Visual Basic, `REM` for batch files) at the smallest indentation – or removes it if every line is already commented. Blank lines stay as they are; one undo step. Languages without line comments (HTML, XML, CSS, JSON, Markdown) grey it out. On a German keyboard `/` is Shift+7: set a second binding (*Editor: toggle comment (alternative)*, e.g. Ctrl+#) under *Settings → Shortcuts*.
 - **Ctrl+L** selects the line; moving, duplicating and deleting lines; Tab/Shift+Tab indent and outdent.
 - **Go to line** (*line[:column]*).
 - **Find and replace** in the open file: *Match case*, *Whole word*, *Regular expression* (Rust `regex` syntax; in the replacement `$1`, `${name}`), *Replace*, *Replace all*; Enter / Shift+Enter jump to the next / previous match.
@@ -44,10 +63,10 @@ Entries that do not apply right now are **greyed out**, and hovering says why (e
 
 Switching it on:
 - **For one file:** click the mode in the status bar → *This file: Syntax*. The choice is remembered with the tab.
-- **For all files of a language:** in the same menu *All files: Rust → Syntax*, or in *Settings → Editor → Languages → Mode per language*.
-- **For all files:** *Default for all other files → Syntax* in the menu, or *Settings → Editor → Default mode*.
+- **For all files of a language:** in the same menu *All files: Rust → Syntax*, or in *Settings → Editor → Languages & syntax → Mode per language*.
+- **For all files:** *Default for all other files → Syntax* in the menu, or *Settings → Editor → Languages & syntax → Default mode*.
 
-**Language detection:** your own mappings first (*Settings → Editor → Own mappings*, e.g. `*.tpl` → HTML or `Jenkinsfile` → Groovy), then the file name (`Makefile`, `CMakeLists.txt`, `Dockerfile`, `Gemfile` …) and the extension, then a shebang line (`#!/usr/bin/env python3`) or a modeline (`vim: ft=yaml`, `-*- mode: ruby -*-`). A click on the language in the status bar picks another one for this file (type to filter, Enter takes the first match; *Detect automatically* goes back). The choice is remembered with the tab.
+**Language detection:** your own mappings first (*Settings → Editor → Languages & syntax → Own mappings*, e.g. `*.tpl` → HTML or `Jenkinsfile` → Groovy), then the file name (`Makefile`, `CMakeLists.txt`, `Dockerfile`, `Gemfile` …) and the extension, then a shebang line (`#!/usr/bin/env python3`) or a modeline (`vim: ft=yaml`, `-*- mode: ruby -*-`). A click on the language in the status bar picks another one for this file (type to filter, Enter takes the first match; *Detect automatically* goes back). The choice is remembered with the tab.
 
 **Languages:** AutoIt, Batch, BibTeX, C, C#, C++, CMake, CSS, Diff, Dockerfile, Go, HTML, INI, Inno Setup, Java, JavaScript, JSON, Kotlin, LaTeX, Less, Lua, Makefile, Markdown, NSIS, Pascal / Delphi, Perl, PHP, PowerShell, Python, Ruby, Rust, SCSS, Shell (Bash), SQL, Swift, TeX, TOML, TypeScript, TSX/JSX, Visual Basic (VB.NET, VBA, VBScript), XML, YAML – plus every other grammar bundled from [bat](https://github.com/sharkdp/bat) (Haskell, Kotlin, Terraform, Zig, …; listed under *More grammars* in the picker). AutoIt, Inno Setup, Visual Basic and PowerShell use small grammars of Paneldeck's own.
 
@@ -87,7 +106,7 @@ Colouring is incremental and runs in the background, so typing and scrolling nev
 ## Saving and hot exit
 - **Ctrl+S** saves. Saving is **atomic**: Paneldeck writes a temporary file next to the file and then replaces it, so a crash never leaves a half-written file. Read-only files are not overwritten.
 - **Autosave** (off by default) saves files that already exist after a short delay ([settings](#settings)); untitled tabs are never saved automatically.
-- **Hot exit:** unsaved changes survive closing and restarting Paneldeck – they are stored as plain text in the data folder (`hot-exit\`) and deleted once the tab is saved or closed. *Settings → Data & backup → Clean up* lists them as *Editor: unsaved buffers*.
+- **Hot exit:** unsaved changes survive closing and restarting Paneldeck – they are stored as plain text in the data folder (`hot-exit\`) and deleted once the tab is saved or closed. *Settings → Data & backup → Care & clean-up → Clean up* lists them as *Editor: unsaved buffers*.
 
 ## Actions on save
 *(Since 3.2.0.)* Rules that run when you save a file in the Editor tab – per **file**, per **folder** (with all subfolders) or per **pattern**. Manage them in *Settings → Editor → Actions on save*; right-click a file or folder in the folder tree (*Actions on save for this file/folder …*) or use *File → Actions on save …* to open the rule dialog with the path filled in.
@@ -140,8 +159,9 @@ Paneldeck notices when an open file is changed by another program (for example b
 - Changes within a line are highlighted **word by word** (short words down to single characters); lines with very many changes are marked as a whole. Syntax colours and line numbers on both sides (unified: old and new column); word wrap follows the editor (**Alt+Z**) with aligned rows.
 - Unchanged regions are **collapsed** with 3 context lines (number in the toolbar, default in the settings); **↓ 20**, **↑ 20** and **Show all** expand them.
 - **Block arrows** between the sides copy a block to the other side (**→** / **←**, also **Alt+→** / **Alt+←** for the current block). A side is editable when it is a file; git states, the saved file and the clipboard are read-only. Each arrow is **one undo step** in the same document as the normal tab (shared undo, unsaved dot, **Ctrl+S** saves the focused side). **⇄** swaps the sides.
+- **Typing in the comparison** (since 3.3.0): click into an editable side and type – deleting, pasting, cutting and copying a selection, Enter and Tab work as in the editor; the arrow keys, Home/End and Page Up/Down move the cursor (with Shift they select), Ctrl+A selects the whole side. The cursor skips filler lines (a click on one puts it at the end of the line above); typing in a collapsed region expands it. The text appears at once, the differences follow after a short pause. Typing shares the undo history of the document with the block arrows and the normal tab. A click into a read-only side removes the cursor, and the arrow keys scroll again. One cursor only (no multiple cursors in the comparison yet).
 - **F7** / **Shift+F7** jump to the next / previous change (configurable in *Settings → Shortcuts*). A double-click on a line opens it in the file's tab.
-- The comparison updates about 250 ms after typing; git states are read again after saving, when the window gets the focus and when `.git/index` or `HEAD` change.
+- The comparison updates about 300 ms after the last key; git states are read again after saving, when the window gets the focus and when `.git/index` or `HEAD` change.
 - **Ignore whitespace** (off by default). Differences in **line endings, encoding/BOM and the final newline** are shown in an info bar above the comparison, not as changed lines.
 - **Revision …** compares with HEAD, the index, a branch, a tag or one of the last 50 commits of the file (with search), or any revision you type (checked before use).
 - The menu **⋯**: *Copy diff*, *Copy block*, *Save as patch …* (git-compatible, `git apply` takes it), *Show all lines*.
@@ -150,7 +170,7 @@ Paneldeck notices when an open file is changed by another program (for example b
 
 ![Comparison tab side by side with changes within the lines, filler lines and block arrows](../images/editor-diff.png)
 
-**Change markers** (*View → Change markers*, *Settings → Editor*, **off by default**) mark lines in the gutter of the normal editor: a thin bar for **added** and **modified** lines, a triangle where lines were **removed**, plus marks in the scrollbar and the minimap.
+**Change markers** (*View → Change markers*, *Settings → Editor → Comparison*, **off by default**) mark lines in the gutter of the normal editor: a thin bar for **added** and **modified** lines, a triangle where lines were **removed**, plus marks in the scrollbar and the minimap.
 - In a git repository the markers compare with the **index and HEAD at the same time**: **unstaged** changes (file ↔ index) in green/yellow/red, **staged** changes (index ↔ HEAD) in teal/blue/violet. Outside a repository – or with *Markers compare with: Saved file* – they show the unsaved changes against the file on disk.
 - A **click on a marker** opens a small window below the line: the old lines, **Revert** (one undo step), previous/next change and **Open in diff**.
 - **F7** / **Shift+F7** jump between the markers. No markers in large files.
@@ -161,7 +181,7 @@ Paneldeck notices when an open file is changed by another program (for example b
 ## Search in files
 **Ctrl+Shift+F** in the Editor tab opens the window *Search in files*; it searches all files of the open folder. **F4** / **Shift+F4** jump to the next / previous result.
 - respects **`.gitignore`** (also nested ones and those of parent folders), `.git/info/exclude`, the global Git exclude file and `.ignore` – also outside a Git repository; **Include ignored** switches that off for one search (the default is set in the settings);
-- your own **exclude patterns** (*Settings → Editor*, gitignore syntax, e.g. `node_modules`, `*.min.js`, `dist/`) always apply; `.git`, `.hg` and `.svn` are never searched;
+- your own **exclude patterns** (*Settings → Editor → Search & formatting*, gitignore syntax, e.g. `node_modules`, `*.min.js`, `dist/`) always apply; `.git`, `.hg` and `.svn` are never searched;
 - skips **binary files** and files over the large-file threshold (the summary counts them);
 - *Match case*, *Whole word*, *Regular expression*; matches are searched line by line;
 - results arrive while the search runs, grouped by file with line numbers and highlighted matches; **Cancel** stops it. A click opens the file at the match. At most 20 000 matches in 5 000 files (1 000 lines per file) – then narrow the search.
@@ -169,10 +189,10 @@ Paneldeck notices when an open file is changed by another program (for example b
 ![Find in files with the matches grouped by file](../images/editor-search.png)
 
 ## Large files
-Files from **20 MB** (*Settings → Editor → Large files from*) open in large-file mode: the editor stays smooth with files of several hundred megabytes, but **minimap, word wrap and syntax colours are off** (the [horizontal scrollbar](#editing) stays), and an info bar says so. Search in files skips them; agents can read but not edit them.
+Files from **20 MB** (*Settings → Editor → General → Large files from*) open in large-file mode: the editor stays smooth with files of several hundred megabytes, but **minimap, word wrap and syntax colours are off** (the [horizontal scrollbar](#editing) stays), and an info bar says so. Search in files skips them; agents can read but not edit them.
 
 ## Settings
-*Settings → Editor*:
+*Settings → Editor* (pages *General*, *Search & formatting* and *Languages & syntax*):
 
 | Setting | Default | Meaning |
 |---|---|---|
@@ -185,6 +205,9 @@ Files from **20 MB** (*Settings → Editor → Large files from*) open in large-
 | Mode per language | Default | Text or Syntax for all files of one language |
 | Own mappings | – | file name or extension → language, before the built-in detection |
 | Menu bar | on | the [menu bar](#menu-bar) above every split |
+| Multiple cursors | off | shortcuts and commands of [multiple cursors](#multiple-cursors) |
+| Alt+click | off | adds or removes a cursor |
+| Middle mouse button | off | column selection and cursors with the middle button |
 | Change markers in the gutter | off | [change markers](#comparison-and-change-markers) |
 | Markers compare with | git (index and HEAD) | or the saved file |
 | Comparison layout | Automatic | side by side, unified below ~700 px |
@@ -192,18 +215,19 @@ Files from **20 MB** (*Settings → Editor → Large files from*) open in large-
 | Ignore whitespace | off | default for new comparisons |
 | **Agents** | all off | see [Agents](#agents) |
 
-Stored in `settings.json` as `editor` ([data format](data-and-backups.md#new-fields-in-300), [new in 3.1.0](data-and-backups.md#new-fields-in-310), [new in 3.2.0](data-and-backups.md#new-fields-in-320); for comparison and change markers: `change_markers`, `marker_base`, `diff_context`, `diff_ignore_whitespace`, `diff_layout`).
+Stored in `settings.json` as `editor` ([data format](data-and-backups.md#new-fields-in-300), [new in 3.1.0](data-and-backups.md#new-fields-in-310), [new in 3.2.0](data-and-backups.md#new-fields-in-320); for comparison and change markers: `change_markers`, `marker_base`, `diff_context`, `diff_ignore_whitespace`, `diff_layout`; since 3.3.0 `multi_cursor`, `multi_cursor_alt_click`, `multi_cursor_middle`, `agent_selections`).
 
-![Settings, Editor tab](../images/editor-settings.png)
+![Settings, Editor → General page](../images/editor-settings.png)
 
 ## Agents
 Agents (Claude Code and others via the [agent interface](agent-interface.md#editor), and [chats with local models](chat.md)) can use the editor:
-- **Reading** (`editor_list`, `editor_read`) works from level *Read only* – including unsaved changes. So does **validating** JSON/XML (`format_file` with `op: validate`, since 3.2.0). **`editor_diff`** (since 3.2.0, level *Read only* like `editor_read`) compares a document with its saved file, git HEAD/index or another open document. For [chats](chat.md#tools-in-small-contexts) `format_file`, `editor_diff` and `list_save_actions` are off by default: check them per model under *Settings → Models*; then the same rules apply as for external agents.
-- Four switches in *Settings → Editor → Agents*, **all off by default** and only effective at level **Control** (for chats: the level of the model):
+- **Reading** (`editor_list`, `editor_read`) works from level *Read only* – including unsaved changes. So does **validating** JSON/XML (`format_file` with `op: validate`, since 3.2.0). **`editor_diff`** (since 3.2.0, level *Read only* like `editor_read`) compares a document with its saved file, git HEAD/index or another open document. For [chats](chat.md#tools-in-small-contexts) `format_file`, `editor_diff` and `list_save_actions` are off by default: check them per model under *Settings → Models → Servers & models*; then the same rules apply as for external agents.
+- Four switches in *Settings → Agents → Editor*, **all off by default** and only effective at level **Control** (for chats: the level of the model):
   - **Agents may open files** – in a new tab; only local paths, never network/UNC paths (`\\server\share`, `\\wsl.localhost\…`, mapped network drives) or devices. An agent may also open an untitled tab with text.
   - **Agents may edit open files** – the change stays **unsaved**, is marked as made by the agent (*Opened or changed by an agent*) and can be undone.
   - **Agents may save** – only files that are open and already exist; untitled tabs are saved by you only.
   - **Agents may format** *(since 3.2.0)* – `format_file` formats, minifies or sorts the keys of an open JSON/XML document with the built-in formatter; like an edit the change stays unsaved, is marked as made by the agent and can be undone.
+  - **Agents see the selections** *(since 3.3.0)* – `editor_read` also returns your cursors and selections (`selections`); from level *Read only*.
 - Agents never take the keyboard focus: a file an agent opens or shows is not focused, so what you are typing never lands in it by accident.
 - These rules apply to text mode and to the later hex mode alike.
 

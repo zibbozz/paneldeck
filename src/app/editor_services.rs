@@ -1,5 +1,5 @@
-//! Dienste des Editor-Reiters in der App (#54): *Einstellungen → Editor*, der Schalter für den Explorer-Eintrag unter
-//! *Einstellungen → Fenster*, die MCP-Werkzeuge `editor_*` (Ausführung im Hauptdurchlauf), das Beobachten offener
+//! Dienste des Editor-Reiters in der App (#54): die Seiten *Einstellungen → Editor* (und *Agenten › Editor*), der Schalter
+//! für den Explorer-Eintrag unter *Einstellungen → Allgemein → Windows-Integration*, die MCP-Werkzeuge `editor_*` (Ausführung im Hauptdurchlauf), das Beobachten offener
 //! Dateien auf der Platte und die Warteschlange für `--edit`.
 //!
 //! Die eigentliche Logik steht ohne egui in `crate::editor_svc`. Die Verbindung zum Editor (Dokumente, Tabs) läuft
@@ -7,15 +7,14 @@
 //! (Abschnitt „Brücke zum Editor“), die die Oberfläche des Editors bedient.
 
 use super::*;
+use super::settings_items::{block, link, note, srow, srow_hint, RowCx};
+use super::settings_nav::Page;
 use crate::editor_svc::settings::EditorSettings;
 use crate::editor_svc::tools::{self, DocInfo, EditorHost, TextEdit};
 use crate::editor_svc::watch::{DiskEvent, DiskWatch};
 use crate::editor_svc::find;
 use serde_json::Value;
 use std::path::Path;
-
-/// Index des Einstellungs-Tabs „Editor“ (am Ende angehängt, damit die übrigen Indizes gelten).
-pub(super) const SETTINGS_TAB: usize = 13;
 
 /// Zustand der Editor-Dienste in der App.
 pub(super) struct EditorServices {
@@ -25,10 +24,10 @@ pub(super) struct EditorServices {
     pub find: find::Results,
     /// Dateien, die im Editor geöffnet werden sollen (`--edit` beim Start und von einer zweiten Instanz).
     pub open_queue: Vec<PathBuf>,
-    /// Explorer-Eintrag „In Paneldeck-Editor öffnen“ (Stand der Registry, unter *Einstellungen → Fenster*).
+    /// Explorer-Eintrag „In Paneldeck-Editor öffnen“ (Stand der Registry, unter *Einstellungen → Allgemein → Windows-Integration*).
     pub edit_context: crate::integration::Status,
     /// Text des Feldes „Ausschlussmuster“, solange der Tab offen ist (gespeichert wird bereinigt).
-    excludes_buf: Option<String>,
+    pub(super) excludes_buf: Option<String>,
     /// Zeilen der eigenen Sprach-Zuordnungen (Muster, Sprache), solange sie bearbeitet werden (#312).
     map_buf: Option<Vec<(String, String)>>,
     /// Fenster „In Dateien suchen“ offen und seine Eingaben.
@@ -43,6 +42,11 @@ impl Default for EditorServices {
 }
 
 impl EditorServices {
+    /// Zwischenstand der eigenen Sprachzuordnungen verwerfen (Zurücksetzen).
+    pub(super) fn reset_map_buf(&mut self) {
+        self.map_buf = None;
+    }
+
     /// Beim Start: `--edit <datei>` vormerken.
     pub fn from_cli() -> EditorServices {
         let mut s = EditorServices::default();
@@ -51,24 +55,6 @@ impl EditorServices {
         }
         s
     }
-}
-
-/// Zeile wie in den übrigen Einstellungs-Tabs: Beschriftung (+ Erklärung) links, Steuerelement rechts.
-fn row(ui: &mut Ui, label: &str, hint: &str, add: impl FnOnce(&mut Ui)) {
-    let w = ui.available_width();
-    ui.allocate_ui_with_layout(Vec2::new(w, 42.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
-        let x0 = ui.cursor().min.x;
-        ui.allocate_ui_with_layout(Vec2::new(240.0, 42.0), egui::Layout::top_down(egui::Align::LEFT).with_main_align(egui::Align::Center), |ui| {
-            ui.label(label);
-            if !hint.is_empty() {
-                ui.label(RichText::new(hint).small().color(style::dim(ui)));
-            }
-        });
-        let used = ui.cursor().min.x - x0;
-        ui.add_space((250.0 - used).max(0.0));
-        add(ui);
-    });
-    ui.add_space(4.0);
 }
 
 /// Zeilen der eigenen Sprach-Zuordnungen bereinigt als Einstellung (leere/ungültige Muster fallen weg; bei doppelten
@@ -234,11 +220,11 @@ impl App {
         tools::format_reply(&after, op, &done)
     }
 
-    /// *Einstellungen → Editor*.
-    pub(super) fn editor_settings_ui(&mut self, ui: &mut Ui) {
-        let lang = self.settings.language;
-        ui.label(RichText::new(lang.t("Editor", "Editor")).strong());
-        row(ui, lang.t("Schrift", "Font"), lang.t("Standard: die Terminalschrift", "Default: the terminal font"), |ui| {
+    /// *Einstellungen → Editor → Allgemein*.
+    pub(super) fn editor_general_page(&mut self, ui: &mut Ui, cx: &RowCx) {
+        let lang = cx.lang;
+        let top = ui.cursor().min.y;
+        srow(ui, cx, "editor_font", |ui| {
             let ed = &mut self.settings.editor;
             let term = self.settings.terminal_font.clone();
             let shown = if ed.font.is_empty() { format!("{} ({term})", lang.t("Terminalschrift", "Terminal font")) } else { ed.font.clone() };
@@ -257,230 +243,335 @@ impl App {
                 }
             });
         });
-        row(
-            ui,
-            lang.t("Große Dateien ab", "Large files from"),
-            lang.t("Ohne Minimap, Umbruch und Syntaxfarben; die Suche in Dateien überspringt sie", "Without minimap, wrapping and syntax colours; search in files skips them"),
-            |ui| {
-                ui.add(egui::DragValue::new(&mut self.settings.editor.large_file_mb).range(crate::editor_svc::settings::LARGE_FILE_MB_RANGE.0..=crate::editor_svc::settings::LARGE_FILE_MB_RANGE.1).speed(1.0).suffix(" MB"));
-            },
-        );
-        row(ui, lang.t("Automatisch speichern", "Autosave"), lang.t("Nur Dateien, die es schon gibt; unbenannte Tabs nie", "Only files that already exist; never untitled tabs"), |ui| {
+        srow(ui, cx, "large_file_mb", |ui| {
+            ui.add(egui::DragValue::new(&mut self.settings.editor.large_file_mb).range(crate::editor_svc::settings::LARGE_FILE_MB_RANGE.0..=crate::editor_svc::settings::LARGE_FILE_MB_RANGE.1).speed(1.0).suffix(" MB"));
+        });
+        srow(ui, cx, "autosave", |ui| {
             style::toggle(ui, &mut self.settings.editor.autosave);
         });
         let (lo, hi) = crate::editor_svc::settings::AUTOSAVE_MS_RANGE;
-        row(ui, lang.t("Verzögerung", "Delay"), lang.t("Nach der letzten Eingabe", "After the last change"), |ui| {
+        srow(ui, cx, "autosave_delay", |ui| {
             let mut secs = self.settings.editor.autosave_delay_ms as f64 / 1000.0;
             let r = ui.add_enabled(self.settings.editor.autosave, egui::DragValue::new(&mut secs).range(lo as f64 / 1000.0..=hi as f64 / 1000.0).speed(0.1).max_decimals(1).suffix(" s"));
             if r.changed() {
                 self.settings.editor.autosave_delay_ms = ((secs * 1000.0).round() as u32).clamp(lo, hi);
             }
         });
-        row(ui, lang.t("Menüleiste", "Menu bar"), lang.t("Datei · Bearbeiten · Ansicht · Format über jeder Teilung", "File · Edit · View · Format above every split"), |ui| {
+        srow(ui, cx, "menu_bar", |ui| {
             style::toggle(ui, &mut self.settings.editor.menu_bar);
         });
-        ui.add_space(S2);
-        self.editor_format_settings_ui(ui);
-        ui.add_space(S2);
-        self.editor_languages_ui(ui);
-        ui.add_space(S2);
-        self.save_actions_settings_ui(ui);
-        self.editor_compare_ui(ui);
+        // Mehrere Cursor (#394): alles standardmäßig aus, Mausgesten mit eigenen Schaltern.
+        let (next, all, soft) = (self.binding_text("ed_next_occurrence"), self.binding_text("ed_all_occurrences"), self.binding_text("ed_soft_undo"));
+        let k = |s: &str| if s.is_empty() { lang.t("(kein Kürzel)", "(no shortcut)").to_string() } else { crate::keys::pretty(s, lang == crate::state::Lang::De) };
+        let hint = if lang == crate::state::Lang::De {
+            format!("Nächstes Vorkommen ({}), alle Vorkommen ({}), Cursor/Auswahl zurücknehmen ({}); Menü Auswahl und Palette", k(&next), k(&all), k(&soft))
+        } else {
+            format!("Next occurrence ({}), all occurrences ({}), undo cursor/selection change ({}); Selection menu and palette", k(&next), k(&all), k(&soft))
+        };
+        srow_hint(ui, cx, "multi_cursor", Some(&hint), |ui| {
+            style::toggle(ui, &mut self.settings.editor.multi_cursor);
+        });
+        srow(ui, cx, "multi_cursor_alt_click", |ui| {
+            style::toggle(ui, &mut self.settings.editor.multi_cursor_alt_click);
+        });
+        srow(ui, cx, "multi_cursor_middle", |ui| {
+            style::toggle(ui, &mut self.settings.editor.multi_cursor_middle);
+        });
+        // Tutorial (#143): Ziel „Editor-Einstellungen“ liegt im Baum; hier nur der Inhalt der Seite.
+        let _ = top;
+        link(ui, cx, lang.t("Explorer: „In Paneldeck-Editor öffnen“:", "Explorer: “Open in Paneldeck editor”:"), Page::GeneralIntegration);
+        link(ui, cx, lang.t("Was Agenten im Editor dürfen:", "What agents may do in the editor:"), Page::AgentsEditor);
+    }
+
+    /// *Einstellungen → Editor → Suche & Formatieren*: Hinweis zum Formatieren (#381, ohne eigene Einstellung – formatiert
+    /// wird nie von allein) und die Suche in Dateien.
+    pub(super) fn editor_search_format_page(&mut self, ui: &mut Ui, cx: &RowCx) {
+        let lang = cx.lang;
+        block(ui, cx, "format_info", true, |ui| {
+            let (f, m, v) = (self.binding_text("ed_format"), self.binding_text("ed_minify"), self.binding_text("ed_validate"));
+            let text = match lang {
+                Lang::De => format!("Menü Format bzw. {f} (formatieren), {m} (minifizieren), {v} (prüfen); änderbar unter Tastenkürzel. Alles läuft lokal. Eingerückt wird nach .editorconfig bzw. der Einrückung der Datei."),
+                Lang::En => format!("Format menu or {f} (format), {m} (minify), {v} (validate); changeable under Shortcuts. Everything runs locally. Indentation follows .editorconfig or the file's indentation."),
+            };
+            ui.label(RichText::new(text).small().color(style::dim(ui)));
+            ui.label(RichText::new(lang.t("Formatiert wird nie von allein: nur auf Knopfdruck oder beim Speichern über eine Regel mit der Aktion Formatieren (Seite „Aktionen beim Speichern“; Menü Format → Beim Speichern formatieren …).", "Nothing is ever formatted automatically: only on demand, or on save through a rule with the Format action (page “Actions on save”; Format menu → Format on save …).")).small().color(style::dim(ui)));
+        });
+        link(ui, cx, lang.t("Regeln beim Speichern:", "Rules on save:"), Page::EditorOnSave);
         ui.add_space(S2);
         let top = ui.cursor().min.y;
-        ui.label(RichText::new(lang.t("Suche in Dateien", "Search in files")).strong());
-        row(
-            ui,
-            lang.t("Ignorierte einbeziehen", "Include ignored"),
-            lang.t("Vorgabe des Schalters in der Suche: auch Dateien, die .gitignore ausschließt", "Default of the switch in the search: also files excluded by .gitignore"),
-            |ui| {
-                style::toggle(ui, &mut self.settings.editor.search_include_ignored);
-            },
-        );
-        ui.label(lang.t("Ausschlussmuster", "Exclude patterns"));
-        ui.label(
-            RichText::new(lang.t(
-                "Eines je Zeile, Syntax wie .gitignore (z. B. node_modules, *.min.js, dist/). Gilt immer, auch mit „Ignorierte einbeziehen“. Die Ordner .git, .hg und .svn werden nie durchsucht.",
-                "One per line, syntax as in .gitignore (e.g. node_modules, *.min.js, dist/). Always applies, also with “Include ignored”. The folders .git, .hg and .svn are never searched.",
-            ))
-            .small()
-            .color(style::dim(ui)),
-        );
-        let buf = self.editor_svc.excludes_buf.get_or_insert_with(|| self.settings.editor.excludes_text());
-        let r = ui.add(egui::TextEdit::multiline(buf).desired_rows(4).desired_width(f32::INFINITY).font(egui::TextStyle::Monospace).hint_text("node_modules\n*.min.js"));
-        if r.changed() {
-            self.settings.editor.set_excludes_from_text(buf);
-        }
-        if r.lost_focus() {
-            self.editor_svc.excludes_buf = Some(self.settings.editor.excludes_text());
-        }
-        super::tutorial::spot_since(ui, Spot::EditorSearchSettings, top);
-        ui.add_space(S2);
-        self.editor_agents_ui(ui);
-    }
-
-    /// Abschnitt „Formatieren“ der Editor-Einstellungen (#381): nur ein Hinweis – es gibt keine Einstellung dafür, formatiert wird nie von allein.
-    fn editor_format_settings_ui(&mut self, ui: &mut Ui) {
-        let lang = self.settings.language;
-        ui.label(RichText::new(lang.t("Formatieren (JSON, XML)", "Formatting (JSON, XML)")).strong());
-        let (f, m, v) = (self.binding_text("ed_format"), self.binding_text("ed_minify"), self.binding_text("ed_validate"));
-        let text = match lang {
-            Lang::De => format!("Menü Format bzw. {f} (formatieren), {m} (minifizieren), {v} (prüfen); änderbar unter Tastenkürzel. Alles läuft lokal. Eingerückt wird nach .editorconfig bzw. der Einrückung der Datei."),
-            Lang::En => format!("Format menu or {f} (format), {m} (minify), {v} (validate); changeable under Shortcuts. Everything runs locally. Indentation follows .editorconfig or the file's indentation."),
-        };
-        ui.label(RichText::new(text).small().color(style::dim(ui)));
-        ui.label(RichText::new(lang.t("Formatiert wird nie von allein: nur auf Knopfdruck oder beim Speichern über eine Regel mit der Aktion Formatieren (Abschnitt „Aktionen beim Speichern“; Menü Format → Beim Speichern formatieren …).", "Nothing is ever formatted automatically: only on demand, or on save through a rule with the Format action (section “Actions on save”; Format menu → Format on save …).")).small().color(style::dim(ui)));
-    }
-
-    /// Abschnitt „Sprachen“ der Editor-Einstellungen (#312): Standard-Modus, Modus je Sprache, eigene Zuordnungen.
-    fn editor_languages_ui(&mut self, ui: &mut Ui) {
-        use crate::editor::syntax::{self, Mode};
-        let lang = self.settings.language;
-        let mode_name = |m: Mode| match m {
-            Mode::Text => lang.t("Text", "Text"),
-            Mode::Syntax => lang.t("Syntax (Farben)", "Syntax (colours)"),
-        };
-        ui.label(RichText::new(lang.t("Sprachen", "Languages")).strong());
-        ui.label(
-            RichText::new(lang.t(
-                "Text = schlichter Editor, Syntax = Sprache erkennen und einfärben (Farben aus dem Theme). Die Statusleiste zeigt Modus und Sprache; beides lässt sich dort je Datei ändern. Smart (Sprachserver) kommt in einer späteren Version.",
-                "Text = plain editor, Syntax = detect the language and colour it (colours from the theme). The status bar shows mode and language; both can be changed there per file. Smart (language server) comes in a later version.",
-            ))
-            .small()
-            .color(style::dim(ui)),
-        );
-        row(ui, lang.t("Standard-Modus", "Default mode"), lang.t("Für Sprachen ohne eigene Einstellung; Standard: Text", "For languages without their own setting; default: Text"), |ui| {
-            let ed = &mut self.settings.editor;
-            egui::ComboBox::from_id_salt("editor_default_mode").selected_text(mode_name(ed.default_mode)).show_ui(ui, |ui| {
-                for m in [Mode::Text, Mode::Syntax] {
-                    ui.selectable_value(&mut ed.default_mode, m, mode_name(m));
-                }
-            });
+        note(ui, cx, lang.t("Suche in Dateien", "Search in files"));
+        srow(ui, cx, "search_include_ignored", |ui| {
+            style::toggle(ui, &mut self.settings.editor.search_include_ignored);
         });
-        egui::CollapsingHeader::new(lang.t("Modus je Sprache", "Mode per language")).id_salt("editor_lang_modes").show(ui, |ui| {
-            let ed = &mut self.settings.editor;
-            let dflt = format!("{} ({})", lang.t("Standard", "Default"), mode_name(ed.default_mode));
-            egui::Grid::new("editor_lang_mode_grid").num_columns(3).spacing([12.0, 4.0]).striped(true).show(ui, |ui| {
-                for l in syntax::languages::LANGUAGES.iter().filter(|l| l.id != "plaintext") {
-                    ui.label(l.name);
-                    let cur = ed.language_modes.get(l.id).copied();
-                    let mut sel = cur;
-                    egui::ComboBox::from_id_salt(("editor_lang_mode", l.id)).width(150.0).selected_text(cur.map(|m| mode_name(m).to_string()).unwrap_or_else(|| dflt.clone())).show_ui(ui, |ui| {
-                        ui.selectable_value(&mut sel, None, dflt.as_str());
-                        for m in [Mode::Text, Mode::Syntax] {
-                            ui.selectable_value(&mut sel, Some(m), mode_name(m));
-                        }
-                    });
-                    if sel != cur {
-                        match sel {
-                            Some(m) => {
-                                ed.language_modes.insert(l.id.to_string(), m);
-                            }
-                            None => {
-                                ed.language_modes.remove(l.id);
-                            }
-                        }
-                    }
-                    let exts: Vec<String> = l.exts.iter().take(6).map(|e| format!(".{e}")).chain(l.names.iter().take(2).map(|n| n.to_string())).collect();
-                    ui.label(RichText::new(exts.join(" ")).small().color(style::dim(ui)));
-                    ui.end_row();
-                }
-            });
-            let others: Vec<String> = ed.language_modes.keys().filter(|k| syntax::languages::language(k).is_none()).cloned().collect();
-            for k in others {
-                ui.horizontal(|ui| {
-                    let name = syntax::language_name(&k).unwrap_or(&k).to_string();
-                    ui.label(format!("{name}: {}", ed.language_modes.get(&k).map(|m| mode_name(*m)).unwrap_or("")));
-                    if ui.small_button("✕").on_hover_text(lang.t("Einstellung entfernen", "Remove setting")).clicked() {
-                        ed.language_modes.remove(&k);
-                    }
-                });
-            }
-        });
-        egui::CollapsingHeader::new(lang.t("Eigene Zuordnungen", "Own mappings")).id_salt("editor_lang_map").show(ui, |ui| {
+        block(ui, cx, "search_exclude", true, |ui| {
             ui.label(
                 RichText::new(lang.t(
-                    "Gehen vor der eingebauten Erkennung. Muster: eine Endung (*.tpl oder .tpl) oder ein Dateiname (Jenkinsfile), ohne Groß/Klein.",
-                    "Take precedence over the built-in detection. Pattern: an extension (*.tpl or .tpl) or a file name (Jenkinsfile), case-insensitive.",
+                    "Eines je Zeile, Syntax wie .gitignore (z. B. node_modules, *.min.js, dist/). Gilt immer, auch mit „Ignorierte einbeziehen“. Die Ordner .git, .hg und .svn werden nie durchsucht.",
+                    "One per line, syntax as in .gitignore (e.g. node_modules, *.min.js, dist/). Always applies, also with “Include ignored”. The folders .git, .hg and .svn are never searched.",
                 ))
                 .small()
                 .color(style::dim(ui)),
             );
-            let settings_rows: Vec<(String, String)> = self.settings.editor.language_map.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-            let buf = self.editor_svc.map_buf.get_or_insert_with(|| settings_rows.clone());
-            if clean_map(buf) != self.settings.editor.language_map {
-                *buf = settings_rows;
+            let buf = self.editor_svc.excludes_buf.get_or_insert_with(|| self.settings.editor.excludes_text());
+            let r = ui.add(egui::TextEdit::multiline(buf).desired_rows(4).desired_width(f32::INFINITY).font(egui::TextStyle::Monospace).hint_text("node_modules\n*.min.js"));
+            if r.changed() {
+                self.settings.editor.set_excludes_from_text(buf);
             }
-            let mut changed = false;
-            let mut remove = None;
-            for (i, (pat, id)) in buf.iter_mut().enumerate() {
-                ui.horizontal(|ui| {
-                    changed |= ui.add(egui::TextEdit::singleline(pat).desired_width(170.0).hint_text("*.tpl")).changed();
-                    let shown = syntax::language_name(id).map(|n| super::editor_ui::lang_label(id, n, lang)).unwrap_or_else(|| id.clone());
-                    egui::ComboBox::from_id_salt(("editor_lang_map_lang", i)).width(220.0).height(320.0).selected_text(shown).show_ui(ui, |ui| {
-                        for l in syntax::all_languages() {
-                            if ui.selectable_label(*id == l.id, super::editor_ui::lang_label(&l.id, &l.name, lang)).clicked() {
-                                *id = l.id.clone();
-                                changed = true;
+            if r.lost_focus() {
+                self.editor_svc.excludes_buf = Some(self.settings.editor.excludes_text());
+            }
+        });
+        super::tutorial::spot_since(ui, Spot::EditorSearchSettings, top);
+    }
+
+    /// *Einstellungen → Editor → Smart-Modus* (#367); `initializationOptions` je Sprache nur über `settings.json`
+    /// (`editor.smart.init_options`): Vervollständigen, Grenzen, Server je Sprache (eingebaute abwählen, eigener Pfad),
+    /// vertrauenswürdige Ordner (entziehen beendet die Server dort sofort).
+    pub(super) fn editor_smart_page(&mut self, ui: &mut Ui, cx: &RowCx) {
+        use crate::lsp::{self, servers};
+        let lang = cx.lang;
+        note(ui, cx, lang.t(
+            "Modus „Smart“ in der Statusleiste: Vervollständigen und Diagnosen von einem Sprachserver aus dem PATH oder einem eigenen Pfad – nur in vertrauenswürdigen Ordnern, nie aus dem Projektordner selbst.",
+            "Mode “Smart” in the status bar: completion and diagnostics from a language server in PATH or an own path – only in trusted folders, never from the project folder itself.",
+        ));
+        let s = &mut self.settings.editor.smart;
+        srow(ui, cx, "smart_auto_complete", |ui| {
+            style::toggle(ui, &mut s.auto_complete);
+        });
+        srow(ui, cx, "smart_trace", |ui| {
+            style::toggle(ui, &mut s.trace);
+        });
+        let num = |ui: &mut Ui, v: &mut u32, (lo, hi): (u32, u32), suffix: &str| {
+            ui.add(egui::DragValue::new(v).range(lo..=hi).suffix(suffix.to_string()));
+        };
+        srow(ui, cx, "smart_max_servers", |ui| num(ui, &mut s.max_servers, lsp::MAX_SERVERS_RANGE, ""));
+        srow(ui, cx, "smart_completion_timeout", |ui| num(ui, &mut s.completion_timeout_ms, lsp::COMPLETION_TIMEOUT_RANGE, " ms"));
+        srow(ui, cx, "smart_max_diagnostics", |ui| num(ui, &mut s.max_diagnostics, lsp::MAX_DIAGNOSTICS_RANGE, ""));
+        srow(ui, cx, "smart_max_message", |ui| num(ui, &mut s.max_message_mb, lsp::MAX_MESSAGE_MB_RANGE, " MB"));
+        srow(ui, cx, "smart_max_file", |ui| num(ui, &mut s.max_file_mb, lsp::MAX_FILE_MB_RANGE, " MB"));
+        srow(ui, cx, "smart_idle", |ui| num(ui, &mut s.idle_minutes, lsp::IDLE_MINUTES_RANGE, " min"));
+        srow(ui, cx, "smart_typing_pause", |ui| num(ui, &mut s.typing_pause_ms, lsp::TYPING_PAUSE_RANGE, " ms"));
+        srow(ui, cx, "smart_crash", |ui| {
+            num(ui, &mut s.crash_max, lsp::CRASH_MAX_RANGE, "");
+            ui.label(lang.t("in", "in"));
+            num(ui, &mut s.crash_window_minutes, lsp::CRASH_WINDOW_RANGE, " min");
+        });
+        block(ui, cx, "smart_servers", false, |ui| {
+            egui::CollapsingHeader::new(lang.t("Server je Sprache", "Servers per language")).id_salt("editor_smart_servers").show(ui, |ui| {
+                ui.label(RichText::new(lang.t("Häkchen = eingebauter Server darf genutzt werden (der erste gefundene gewinnt); ein eigener Pfad (absolut, ohne Argumente) geht vor.", "Checked = the built-in server may be used (the first one found wins); an own path (absolute, without arguments) comes first.")).small().color(style::dim(ui)));
+                egui::Grid::new("editor_smart_grid").num_columns(3).spacing([12.0, 4.0]).striped(true).show(ui, |ui| {
+                    for l in crate::editor::syntax::languages::LANGUAGES.iter().filter(|l| !servers::known(l.id).is_empty() || servers::OWN_PATH_ONLY.contains(&l.id)) {
+                        ui.label(l.name);
+                        ui.horizontal(|ui| {
+                            for k in servers::known(l.id) {
+                                let dis = s.disabled.entry(l.id.to_string()).or_default();
+                                let mut on = !dis.iter().any(|d| d == k.id);
+                                if ui.checkbox(&mut on, k.id).changed() {
+                                    if on {
+                                        dis.retain(|d| d != k.id);
+                                    } else {
+                                        dis.push(k.id.to_string());
+                                    }
+                                }
                             }
-                        }
-                    });
-                    if !syntax::languages::is_known(id) {
-                        ui.label(RichText::new(lang.t("unbekannte Sprache", "unknown language")).small().color(style::ui().warning));
-                    }
-                    if ui.small_button("✕").on_hover_text(lang.t("Zuordnung entfernen", "Remove mapping")).clicked() {
-                        remove = Some(i);
+                            if servers::known(l.id).is_empty() {
+                                ui.label(RichText::new(lang.t("nur eigener Pfad", "own path only")).small().color(style::dim(ui)));
+                            }
+                        });
+                        // Untereinander, damit die Tabelle auch im Einstellungsfenster (~900 px) nicht rechts übersteht.
+                        // Beide Felder tippen in einen Puffer (solange sie den Fokus haben): „E“ ist noch kein absoluter
+                        // Pfad, und ein Leerzeichen am Ende verschwände beim Zerlegen der Argumente (Klicktest 3.3.0).
+                        ui.vertical(|ui| {
+                            let shown = s.own_paths.get(l.id).map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
+                            if let Some(txt) = buffered_edit(ui, ("smart_own_path", l.id), shown, lang.t("eigener Pfad …", "own path …")) {
+                                let p = std::path::PathBuf::from(txt.trim());
+                                if txt.trim().is_empty() {
+                                    s.own_paths.remove(l.id);
+                                } else if p.is_absolute() {
+                                    s.own_paths.insert(l.id.to_string(), p);
+                                }
+                            }
+                            // Argumente durch Leerzeichen getrennt (ein Argument mit Leerzeichen: in "…").
+                            let shown = s.own_args.get(l.id).map(|a| a.iter().map(|x| if x.contains(' ') { format!("\"{x}\"") } else { x.clone() }).collect::<Vec<_>>().join(" ")).unwrap_or_default();
+                            if let Some(args) = buffered_edit(ui, ("smart_own_args", l.id), shown, lang.t("Argumente", "arguments")) {
+                                let v = split_args(&args);
+                                if v.is_empty() {
+                                    s.own_args.remove(l.id);
+                                } else {
+                                    s.own_args.insert(l.id.to_string(), v);
+                                }
+                            }
+                        });
+                        ui.end_row();
                     }
                 });
-            }
-            if let Some(i) = remove {
-                buf.remove(i);
-                changed = true;
-            }
-            if buf.len() < crate::editor_svc::settings::MAX_LANGUAGE_ENTRIES && ui.button(lang.t("+ Zuordnung", "+ Mapping")).clicked() {
-                buf.push((String::new(), "plaintext".to_string()));
-            }
-            if changed {
-                self.settings.editor.language_map = clean_map(buf);
-            }
+                s.disabled.retain(|_, v| !v.is_empty());
+            });
+        });
+        let dir = self.dir.clone();
+        let folders: Vec<std::path::PathBuf> = self.ed.smart.trust(&dir).folders().to_vec();
+        block(ui, cx, "smart_trust", false, |ui| {
+            egui::CollapsingHeader::new(format!("{} ({})", lang.t("Vertrauenswürdige Ordner", "Trusted folders"), folders.len())).id_salt("editor_smart_trust").show(ui, |ui| {
+                if folders.is_empty() {
+                    ui.label(RichText::new(lang.t("Noch keiner – die Hinweisleiste über einer Datei im Smart-Modus fragt.", "None yet – the bar above a file in smart mode asks.")).small().color(style::dim(ui)));
+                }
+                let mut revoke = None;
+                for f in &folders {
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(f.display().to_string()).small());
+                        if ui.small_button(lang.t("Entziehen", "Revoke")).on_hover_text(lang.t("Server dort enden sofort", "Servers there stop at once")).clicked() {
+                            revoke = Some(f.clone());
+                        }
+                    });
+                }
+                if let Some(f) = revoke
+                    && let Err(e) = self.ed.smart_revoke(&f, &dir)
+                {
+                    self.ed.set_hint(e);
+                }
+            });
         });
     }
 
-    /// Abschnitt „Vergleich und Änderungsmarken“ (#385): Marken am Rand (Standard aus) und ihre Grundlage, Vorgaben
-    /// neuer Vergleichs-Reiter.
-    fn editor_compare_ui(&mut self, ui: &mut Ui) {
-        use crate::editor_svc::settings::{DiffLayout, MarkerBase, DIFF_CONTEXT_RANGE};
-        let lang = self.settings.language;
-        ui.label(RichText::new(lang.t("Vergleich und Änderungsmarken", "Comparison and change markers")).strong());
-        let (next, prev) = (self.binding_text("ed_next_change"), self.binding_text("ed_prev_change"));
-        let ed = &mut self.settings.editor;
-        row(
-            ui,
-            lang.t("Änderungsmarken am Rand", "Change markers in the gutter"),
-            lang.t("Hinzugefügte, geänderte und entfernte Zeilen; nicht in großen Dateien", "Added, modified and removed lines; not in large files"),
-            |ui| {
-                style::toggle(ui, &mut ed.change_markers);
-            },
-        );
-        row(
-            ui,
-            lang.t("Grundlage der Marken", "Markers compare with"),
-            lang.t("git: nicht gestagt und gestagt in eigenen Farben; außerhalb eines Repositorys die gespeicherte Datei", "git: unstaged and staged in their own colours; outside a repository the saved file"),
-            |ui| {
-                let label = |b: MarkerBase| match b {
-                    MarkerBase::Git => lang.t("git (Index und HEAD)", "git (index and HEAD)"),
-                    MarkerBase::Disk => lang.t("Gespeicherte Datei", "Saved file"),
-                };
-                ui.add_enabled_ui(ed.change_markers, |ui| {
-                    egui::ComboBox::from_id_salt("editor_marker_base").selected_text(label(ed.marker_base)).show_ui(ui, |ui| {
-                        for b in [MarkerBase::Git, MarkerBase::Disk] {
-                            ui.selectable_value(&mut ed.marker_base, b, label(b));
+    /// *Einstellungen → Editor → Sprachen & Syntax* (#312): Standard-Modus, Modus je Sprache, eigene Zuordnungen.
+    pub(super) fn editor_languages_page(&mut self, ui: &mut Ui, cx: &RowCx) {
+        use crate::editor::syntax::{self, Mode};
+        let lang = cx.lang;
+        let mode_name = |m: Mode| match m {
+            Mode::Text => lang.t("Text", "Text"),
+            Mode::Syntax => lang.t("Syntax (Farben)", "Syntax (colours)"),
+            Mode::Smart => lang.t("Smart (Sprachserver)", "Smart (language server)"),
+        };
+        note(ui, cx, lang.t(
+            "Text = schlichter Editor, Syntax = Sprache erkennen und einfärben (Farben aus dem Theme). Die Statusleiste zeigt Modus und Sprache; beides lässt sich dort je Datei ändern. Smart = zusätzlich ein Sprachserver (Vervollständigen, Diagnosen) in vertrauenswürdigen Ordnern.",
+            "Text = plain editor, Syntax = detect the language and colour it (colours from the theme). The status bar shows mode and language; both can be changed there per file. Smart = a language server on top (completion, diagnostics) in trusted folders.",
+        ));
+        srow(ui, cx, "default_mode", |ui| {
+            let ed = &mut self.settings.editor;
+            egui::ComboBox::from_id_salt("editor_default_mode").selected_text(mode_name(ed.default_mode)).show_ui(ui, |ui| {
+                for m in Mode::ALL {
+                    ui.selectable_value(&mut ed.default_mode, m, mode_name(m));
+                }
+            });
+        });
+        block(ui, cx, "language_modes", false, |ui| {
+            egui::CollapsingHeader::new(lang.t("Modus je Sprache", "Mode per language")).id_salt("editor_lang_modes").show(ui, |ui| {
+                let ed = &mut self.settings.editor;
+                let dflt = format!("{} ({})", lang.t("Standard", "Default"), mode_name(ed.default_mode));
+                egui::Grid::new("editor_lang_mode_grid").num_columns(3).spacing([12.0, 4.0]).striped(true).show(ui, |ui| {
+                    for l in syntax::languages::LANGUAGES.iter().filter(|l| l.id != "plaintext") {
+                        ui.label(l.name);
+                        let cur = ed.language_modes.get(l.id).copied();
+                        let mut sel = cur;
+                        egui::ComboBox::from_id_salt(("editor_lang_mode", l.id)).width(150.0).selected_text(cur.map(|m| mode_name(m).to_string()).unwrap_or_else(|| dflt.clone())).show_ui(ui, |ui| {
+                            ui.selectable_value(&mut sel, None, dflt.as_str());
+                            for m in Mode::ALL {
+                                ui.selectable_value(&mut sel, Some(m), mode_name(m));
+                            }
+                        });
+                        if sel != cur {
+                            match sel {
+                                Some(m) => {
+                                    ed.language_modes.insert(l.id.to_string(), m);
+                                }
+                                None => {
+                                    ed.language_modes.remove(l.id);
+                                }
+                            }
+                        }
+                        let exts: Vec<String> = l.exts.iter().take(6).map(|e| format!(".{e}")).chain(l.names.iter().take(2).map(|n| n.to_string())).collect();
+                        ui.label(RichText::new(exts.join(" ")).small().color(style::dim(ui)));
+                        ui.end_row();
+                    }
+                });
+                let others: Vec<String> = ed.language_modes.keys().filter(|k| syntax::languages::language(k).is_none()).cloned().collect();
+                for k in others {
+                    ui.horizontal(|ui| {
+                        let name = syntax::language_name(&k).unwrap_or(&k).to_string();
+                        ui.label(format!("{name}: {}", ed.language_modes.get(&k).map(|m| mode_name(*m)).unwrap_or("")));
+                        if ui.small_button("✕").on_hover_text(lang.t("Einstellung entfernen", "Remove setting")).clicked() {
+                            ed.language_modes.remove(&k);
                         }
                     });
+                }
+            });
+        });
+        block(ui, cx, "language_map", false, |ui| {
+            egui::CollapsingHeader::new(lang.t("Eigene Zuordnungen", "Own mappings")).id_salt("editor_lang_map").show(ui, |ui| {
+                ui.label(
+                    RichText::new(lang.t(
+                        "Gehen vor der eingebauten Erkennung. Muster: eine Endung (*.tpl oder .tpl) oder ein Dateiname (Jenkinsfile), ohne Groß/Klein.",
+                        "Take precedence over the built-in detection. Pattern: an extension (*.tpl or .tpl) or a file name (Jenkinsfile), case-insensitive.",
+                    ))
+                    .small()
+                    .color(style::dim(ui)),
+                );
+                let settings_rows: Vec<(String, String)> = self.settings.editor.language_map.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+                let buf = self.editor_svc.map_buf.get_or_insert_with(|| settings_rows.clone());
+                if clean_map(buf) != self.settings.editor.language_map {
+                    *buf = settings_rows;
+                }
+                let mut changed = false;
+                let mut remove = None;
+                for (i, (pat, id)) in buf.iter_mut().enumerate() {
+                    ui.horizontal(|ui| {
+                        changed |= ui.add(egui::TextEdit::singleline(pat).desired_width(170.0).hint_text("*.tpl")).changed();
+                        let shown = syntax::language_name(id).map(|n| super::editor_ui::lang_label(id, n, lang)).unwrap_or_else(|| id.clone());
+                        egui::ComboBox::from_id_salt(("editor_lang_map_lang", i)).width(220.0).height(320.0).selected_text(shown).show_ui(ui, |ui| {
+                            for l in syntax::all_languages() {
+                                if ui.selectable_label(*id == l.id, super::editor_ui::lang_label(&l.id, &l.name, lang)).clicked() {
+                                    *id = l.id.clone();
+                                    changed = true;
+                                }
+                            }
+                        });
+                        if !syntax::languages::is_known(id) {
+                            ui.label(RichText::new(lang.t("unbekannte Sprache", "unknown language")).small().color(style::ui().warning));
+                        }
+                        if ui.small_button("✕").on_hover_text(lang.t("Zuordnung entfernen", "Remove mapping")).clicked() {
+                            remove = Some(i);
+                        }
+                    });
+                }
+                if let Some(i) = remove {
+                    buf.remove(i);
+                    changed = true;
+                }
+                if buf.len() < crate::editor_svc::settings::MAX_LANGUAGE_ENTRIES && ui.button(lang.t("+ Zuordnung", "+ Mapping")).clicked() {
+                    buf.push((String::new(), "plaintext".to_string()));
+                }
+                if changed {
+                    self.settings.editor.language_map = clean_map(buf);
+                }
+            });
+        });
+        link(ui, cx, lang.t("Sprachserver:", "Language servers:"), Page::EditorSmart);
+    }
+
+    /// *Einstellungen → Editor → Vergleich* (#385): Marken am Rand (Standard aus) und ihre Grundlage, Vorgaben neuer
+    /// Vergleichs-Reiter.
+    pub(super) fn editor_compare_page(&mut self, ui: &mut Ui, cx: &RowCx) {
+        use crate::editor_svc::settings::{DiffLayout, MarkerBase, DIFF_CONTEXT_RANGE};
+        let lang = cx.lang;
+        let (next, prev) = (self.binding_text("ed_next_change"), self.binding_text("ed_prev_change"));
+        let ed = &mut self.settings.editor;
+        srow(ui, cx, "change_markers", |ui| {
+            style::toggle(ui, &mut ed.change_markers);
+        });
+        srow(ui, cx, "marker_base", |ui| {
+            let label = |b: MarkerBase| match b {
+                MarkerBase::Git => lang.t("git (Index und HEAD)", "git (index and HEAD)"),
+                MarkerBase::Disk => lang.t("Gespeicherte Datei", "Saved file"),
+            };
+            ui.add_enabled_ui(ed.change_markers, |ui| {
+                egui::ComboBox::from_id_salt("editor_marker_base").selected_text(label(ed.marker_base)).show_ui(ui, |ui| {
+                    for b in [MarkerBase::Git, MarkerBase::Disk] {
+                        ui.selectable_value(&mut ed.marker_base, b, label(b));
+                    }
                 });
-            },
-        );
-        row(ui, lang.t("Darstellung im Vergleich", "Comparison layout"), lang.t("Automatisch: nebeneinander, unter 700 px untereinander", "Automatic: side by side, unified below 700 px"), |ui| {
+            });
+        });
+        srow(ui, cx, "diff_layout", |ui| {
             let label = |l: DiffLayout| match l {
                 DiffLayout::Auto => lang.t("Automatisch", "Automatic"),
                 DiffLayout::Split => lang.t("Nebeneinander", "Side by side"),
@@ -492,89 +583,88 @@ impl App {
                 }
             });
         });
-        row(ui, lang.t("Kontextzeilen", "Context lines"), lang.t("Unveränderte Zeilen um jede Änderung, der Rest ist eingeklappt", "Unchanged lines around each change, the rest is collapsed"), |ui| {
+        srow(ui, cx, "diff_context", |ui| {
             ui.add(egui::DragValue::new(&mut ed.diff_context).range(DIFF_CONTEXT_RANGE.0..=DIFF_CONTEXT_RANGE.1).speed(0.2));
         });
-        row(ui, lang.t("Leerraum ignorieren", "Ignore whitespace"), lang.t("Vorgabe für neue Vergleiche (umschaltbar im Vergleich)", "Default for new comparisons (switchable in the comparison)"), |ui| {
+        srow(ui, cx, "diff_ignore_whitespace", |ui| {
             style::toggle(ui, &mut ed.diff_ignore_whitespace);
         });
-        ui.label(
-            RichText::new(if lang == Lang::De {
-                format!("Nächste/vorige Änderung: {next} / {prev} (Einstellungen → Tastenkürzel). Vergleichen: Kontextmenü eines Reiters oder einer Datei im Ordnerbaum, Befehlspalette.")
+        note(
+            ui,
+            cx,
+            &if lang == Lang::De {
+                format!("Nächste/vorige Änderung: {next} / {prev} (Seite Tastenkürzel). Vergleichen: Kontextmenü eines Reiters oder einer Datei im Ordnerbaum, Befehlspalette.")
             } else {
-                format!("Next/previous change: {next} / {prev} (Settings → Shortcuts). Compare: context menu of a tab or of a file in the folder tree, command palette.")
-            })
-            .small()
-            .color(style::dim(ui)),
+                format!("Next/previous change: {next} / {prev} (page Shortcuts). Compare: context menu of a tab or of a file in the folder tree, command palette.")
+            },
         );
     }
 
-    /// Abschnitt „Agenten“ der Editor-Einstellungen: die drei Schalter (Standard aus, nur bei Stufe Steuern wirksam).
-    fn editor_agents_ui(&mut self, ui: &mut Ui) {
-        let lang = self.settings.language;
+    /// *Einstellungen → Agenten → Editor* (früher Abschnitt „Agenten“ der Editor-Einstellungen): die Schalter (Standard
+    /// aus, nur bei Stufe Steuern wirksam).
+    pub(super) fn editor_agents_page(&mut self, ui: &mut Ui, cx: &RowCx) {
+        let lang = cx.lang;
         let top = ui.cursor().min.y;
-        ui.label(RichText::new(lang.t("Agenten", "Agents")).strong());
-        let control = self.settings.mcp_level == crate::mcp::McpLevel::Control;
-        ui.label(
-            RichText::new(lang.t(
-                "Lesen geht ab der Stufe „Nur lesen“ (editor_list, editor_read, format_file mit validate). Die Schalter gelten nur bei der Stufe „Steuern“ – für externe Agenten unter Einstellungen → Agenten, für Chats die Stufe des Modells. Änderungen eines Agenten bleiben ungespeichert, sind als „vom Agenten“ markiert und lassen sich rückgängig machen.",
-                "Reading works from level “Read only” (editor_list, editor_read, format_file with validate). The switches only apply at level “Control” – for external agents under Settings → Agents, for chats the level of the model. Changes by an agent stay unsaved, are marked “by agent” and can be undone.",
-            ))
-            .small()
-            .color(style::dim(ui)),
-        );
-        if !control {
-            ui.label(RichText::new(lang.t("Externe Agenten haben gerade nicht die Stufe „Steuern“ – die Schalter wirken für sie erst dann.", "External agents are not at level “Control” right now – the switches only take effect for them at that level.")).small().color(crate::style::ui().warning));
+        note(ui, cx, lang.t(
+            "Lesen geht ab der Stufe „Nur lesen“ (editor_list, editor_read, format_file mit validate). Die Schalter gelten nur bei der Stufe „Steuern“ – für externe Agenten unter Agenten › Zugriff, für Chats die Stufe des Modells. Änderungen eines Agenten bleiben ungespeichert, sind als „vom Agenten“ markiert und lassen sich rückgängig machen.",
+            "Reading works from level “Read only” (editor_list, editor_read, format_file with validate). The switches only apply at level “Control” – for external agents under Agents › Access, for chats the level of the model. Changes by an agent stay unsaved, are marked “by agent” and can be undone.",
+        ));
+        if self.settings.mcp_level != crate::mcp::McpLevel::Control && cx.plain() {
+            ui.horizontal_wrapped(|ui| {
+                ui.add_space(super::settings_items::GUTTER);
+                ui.label(RichText::new(lang.t("Externe Agenten haben gerade nicht die Stufe „Steuern“ – die Schalter wirken für sie erst dann.", "External agents are not at level “Control” right now – the switches only take effect for them at that level.")).small().color(crate::style::ui().warning));
+            });
         }
         let ed: &mut EditorSettings = &mut self.settings.editor;
-        row(ui, lang.t("Agenten dürfen Dateien öffnen", "Agents may open files"), lang.t("Neuer Tab; nur lokale Pfade, nie Netzwerk-/UNC-Pfade oder Geräte", "New tab; local paths only, never network/UNC paths or devices"), |ui| {
+        srow(ui, cx, "agent_open", |ui| {
             style::toggle(ui, &mut ed.agent_open);
         });
-        row(ui, lang.t("Agenten dürfen offene Dateien bearbeiten", "Agents may edit open files"), lang.t("Ungespeichert, als „vom Agenten“ markiert, rückgängig machbar", "Unsaved, marked “by agent”, can be undone"), |ui| {
+        srow(ui, cx, "agent_edit", |ui| {
             style::toggle(ui, &mut ed.agent_edit);
         });
-        row(ui, lang.t("Agenten dürfen speichern", "Agents may save"), lang.t("Nur offene Dateien, die es schon gibt; unbenannte Tabs speichert nur du", "Only open files that already exist; only you save untitled tabs"), |ui| {
+        srow(ui, cx, "agent_save", |ui| {
             style::toggle(ui, &mut ed.agent_save);
         });
-        row(ui, lang.t("Agenten dürfen formatieren", "Agents may format"), lang.t("format_file: offene JSON/XML-Dateien; Prüfen geht ab „Nur lesen“ ohne Schalter", "format_file: open JSON/XML files; validating works from “Read only” without a switch"), |ui| {
+        srow(ui, cx, "agent_format", |ui| {
             style::toggle(ui, &mut ed.agent_format);
         });
+        // #394: ab Stufe „Nur lesen“ (editor_read), Standard aus.
+        srow(ui, cx, "agent_selections", |ui| {
+            style::toggle(ui, &mut ed.agent_selections);
+        });
         super::tutorial::spot_since(ui, Spot::EditorAgentSwitches, top);
+        link(ui, cx, lang.t("Stufe der Agenten-Schnittstelle:", "Level of the agent interface:"), Page::AgentsAccess);
     }
 
-    /// Zeile „In Paneldeck-Editor öffnen“ unter *Einstellungen → Fenster* (nur Windows). Fehler gehen an den Aufrufer.
-    pub(super) fn edit_context_row(&mut self, ui: &mut Ui, exe: &Path) -> Option<String> {
+    /// Zeile „In Paneldeck-Editor öffnen“ unter *Einstellungen → Allgemein → Windows-Integration* (nur Windows). Fehler
+    /// gehen an den Aufrufer.
+    pub(super) fn edit_context_row(&mut self, ui: &mut Ui, cx: &RowCx, exe: &Path) -> Option<String> {
         if !cfg!(windows) {
             return None;
         }
-        let lang = self.settings.language;
+        let lang = cx.lang;
         let mut err = None;
-        row(
-            ui,
-            lang.t("Explorer: „In Paneldeck-Editor öffnen“", "Explorer: “Open in Paneldeck editor”"),
-            lang.t("Rechtsklick auf eine Datei öffnet sie in einem neuen Editor-Tab (alle Dateiarten)", "Right-click a file to open it in a new editor tab (all file types)"),
-            |ui| {
-                let mut v = self.editor_svc.edit_context.is_mine();
-                if style::toggle(ui, &mut v).changed() {
-                    // Der Menütext landet in der Registry: in der gespeicherten Sprache, nicht in der von `--lang`.
-                    let shown = state::lang();
-                    state::set_lang(state::persisted_lang(self.settings.language));
-                    let r = crate::integration::set_edit_context(v, exe);
-                    state::set_lang(shown);
-                    match r {
-                        Ok(()) => self.editor_svc.edit_context = if v { crate::integration::Status::Mine } else { crate::integration::Status::Off },
-                        Err(e) => err = Some(e),
-                    }
+        srow(ui, cx, "edit_context", |ui| {
+            let mut v = self.editor_svc.edit_context.is_mine();
+            if style::toggle(ui, &mut v).changed() {
+                // Der Menütext landet in der Registry: in der gespeicherten Sprache, nicht in der von `--lang`.
+                let shown = state::lang();
+                state::set_lang(state::persisted_lang(self.settings.language));
+                let r = crate::integration::set_edit_context(v, exe);
+                state::set_lang(shown);
+                match r {
+                    Ok(()) => self.editor_svc.edit_context = if v { crate::integration::Status::Mine } else { crate::integration::Status::Off },
+                    Err(e) => err = Some(e),
                 }
-                if let Some(cmd) = self.editor_svc.edit_context.other() {
-                    let text = match lang {
-                        Lang::De => format!("Der Eintrag zeigt auf ein anderes Paneldeck:\n{cmd}\n\nEinschalten übernimmt ihn für diese Instanz."),
-                        Lang::En => format!("The entry points to another Paneldeck:\n{cmd}\n\nTurning it on takes it over for this instance."),
-                    };
-                    ui.label(RichText::new(lang.t("→ anderes Paneldeck", "→ another Paneldeck")).small().color(crate::style::ui().warning)).on_hover_text(text);
-                }
-            },
-        );
+            }
+            if let Some(cmd) = self.editor_svc.edit_context.other() {
+                let text = match lang {
+                    Lang::De => format!("Der Eintrag zeigt auf ein anderes Paneldeck:\n{cmd}\n\nEinschalten übernimmt ihn für diese Instanz."),
+                    Lang::En => format!("The entry points to another Paneldeck:\n{cmd}\n\nTurning it on takes it over for this instance."),
+                };
+                ui.label(RichText::new(lang.t("→ anderes Paneldeck", "→ another Paneldeck")).small().color(crate::style::ui().warning)).on_hover_text(text);
+            }
+        });
         err
     }
 
@@ -618,6 +708,8 @@ impl App {
             diff_context: e.diff_context as usize,
             diff_layout: e.diff_layout,
             diff_ignore_ws: e.diff_ignore_whitespace,
+            multi: super::editor_ui::MultiPrefs { on: e.multi_cursor, alt_click: e.multi_cursor_alt_click, middle: e.multi_cursor_middle },
+            smart_auto: e.smart.auto_complete,
         }
     }
 
@@ -796,6 +888,10 @@ impl EditorHost for BridgeHost<'_> {
         self.app.editor_focus(doc);
     }
 
+    fn selections(&mut self, doc: u64) -> Option<Vec<((usize, usize), (usize, usize))>> {
+        self.app.editor_selections(doc)
+    }
+
     fn base_text(&mut self, doc: u64, base: &str) -> Result<Option<String>, String> {
         let info = self.app.editor_list().into_iter().find(|d| d.id == doc).ok_or_else(|| state::t("Das Dokument ist nicht mehr offen.", "The document is no longer open.").to_string())?;
         let path = info.path.ok_or_else(|| state::t("Ein unbenannter Tab hat keinen gespeicherten Stand.", "An untitled tab has no saved state.").to_string())?;
@@ -825,5 +921,60 @@ impl EditorHost for BridgeHost<'_> {
 
     fn hidden(&self, path: &Path) -> bool {
         super::mcp::access_gate::path_hidden(path, &self.hidden)
+    }
+}
+
+/// Einzeiliges Feld, das beim Tippen einen eigenen Puffer behält (egui-Speicher, solange es den Fokus hat) und den
+/// Text bei jeder Änderung zurückgibt. Ohne Fokus zeigt es `shown` (den gespeicherten Wert) – so überlebt auch eine
+/// Zwischeneingabe, die der Aufrufer (noch) nicht übernimmt.
+fn buffered_edit(ui: &mut Ui, key: (&str, &str), shown: String, hint: &str) -> Option<String> {
+    let id = ui.make_persistent_id(key);
+    let buf_id = id.with("buf");
+    let focused = ui.memory(|m| m.has_focus(id));
+    let mut buf = if focused { ui.data(|d| d.get_temp::<String>(buf_id)).unwrap_or(shown) } else { shown };
+    let r = ui.add(egui::TextEdit::singleline(&mut buf).id(id).desired_width(220.0).hint_text(hint));
+    let changed = r.changed().then(|| buf.clone());
+    if r.has_focus() {
+        ui.data_mut(|d| d.insert_temp(buf_id, buf));
+    } else {
+        ui.data_mut(|d| d.remove_temp::<String>(buf_id));
+    }
+    changed
+}
+
+/// Argumente aus einer Zeile (Leerzeichen trennen, `"…"` hält zusammen) – für den eigenen Server (#367).
+fn split_args(s: &str) -> Vec<String> {
+    let mut v = Vec::new();
+    let mut cur = String::new();
+    let mut quoted = false;
+    let mut any = false;
+    for c in s.chars() {
+        match c {
+            '"' => {
+                quoted = !quoted;
+                any = true;
+            }
+            ' ' | '\t' if !quoted => {
+                if any || !cur.is_empty() {
+                    v.push(std::mem::take(&mut cur));
+                }
+                any = false;
+            }
+            c => cur.push(c),
+        }
+    }
+    if any || !cur.is_empty() {
+        v.push(cur);
+    }
+    v
+}
+
+#[cfg(test)]
+mod smart_settings_tests {
+    #[test]
+    fn own_server_arguments_split_on_spaces_and_keep_quotes_together() {
+        assert_eq!(super::split_args(r#"-NoLogo -File "C:\a b\x.ps1"  --stdio"#), vec!["-NoLogo", "-File", r"C:\a b\x.ps1", "--stdio"]);
+        assert!(super::split_args("  ").is_empty());
+        assert_eq!(super::split_args("\"\""), vec![String::new()]);
     }
 }

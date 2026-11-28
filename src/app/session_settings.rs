@@ -734,7 +734,7 @@ pub(super) fn session_form_ui(ctx: &egui::Context, f: &mut SessionForm, shells: 
                     let prof = profiles.iter().find(|p| p.id == f.v.profile);
                     let start_note = match prof {
                         Some(p) if !p.startup.trim().is_empty() || !p.env.trim().is_empty() => format!("{} {} {}", lang.t("Startbefehl und Umgebungsvariablen kommen aus dem Profil", "Start command and environment variables come from the profile"), lang.q(&p.name), lang.t("– eigene Variablen der Sitzung im Reiter „Umgebung“.", "– the session's own variables are in the “Environment” tab.")),
-                        _ => lang.t("Den Startbefehl legt ein Profil fest (Einstellungen → Profile); eigene Umgebungsvariablen stehen im Reiter „Umgebung“.", "A profile sets the start command (Settings → Profiles); the session's own environment variables are in the “Environment” tab.").to_string(),
+                        _ => lang.t("Den Startbefehl legt ein Profil fest (Einstellungen → Terminal → Profile); eigene Umgebungsvariablen stehen im Reiter „Umgebung“.", "A profile sets the start command (Settings → Terminal → Profiles); the session's own environment variables are in the “Environment” tab.").to_string(),
                     };
                     super::dialogs::hint_label(ui, &start_note, style::dim(ui));
                     ui.end_row();
@@ -798,12 +798,12 @@ pub(super) fn resume_mode_tip(m: ResumeMode, lang: Lang) -> &'static str {
             "Every start (also reload, restart and program start) begins a new conversation.",
         ),
         ResumeMode::Continue => lang.t(
-            "Der erste Start beginnt neu. Ab dem ersten Neu laden/Neustart (und beim Programmstart, wenn das in den Einstellungen an ist) setzt Claude immer die neueste Konversation im Arbeitsordner fort (claude --continue). Die kann einer anderen Sitzung, einem von Hand gestarteten Claude oder einem claude -p gehören; mehrere Sitzungen im selben Ordner setzen beim Programmstart dieselbe fort. Gibt es noch keine, beginnt eine neue. Zum Wählen: „Konversation auswählen“.",
-            "The first start begins a new conversation. From the first reload/restart on (and at program start, if that is on in Settings) Claude always continues the most recent conversation in the working folder (claude --continue). It can belong to another session, to a Claude started by hand or to a claude -p; several sessions in the same folder continue the same one at program start. If there is none yet, a new one begins. To choose: “Pick conversation”.",
+            "Der erste Start beginnt neu. Ab dem ersten Neu laden/Neustart (und beim Programmstart, wenn das unter Einstellungen → Claude → Allgemein an ist) setzt Claude immer die neueste Konversation im Arbeitsordner fort (claude --continue). Die kann einer anderen Sitzung, einem von Hand gestarteten Claude oder einem claude -p gehören; mehrere Sitzungen im selben Ordner setzen beim Programmstart dieselbe fort. Gibt es noch keine, beginnt eine neue. Zum Wählen: „Konversation auswählen“.",
+            "The first start begins a new conversation. From the first reload/restart on (and at program start, if that is on in Settings → Claude → General) Claude always continues the most recent conversation in the working folder (claude --continue). It can belong to another session, to a Claude started by hand or to a claude -p; several sessions in the same folder continue the same one at program start. If there is none yet, a new one begins. To choose: “Pick conversation”.",
         ),
         ResumeMode::Pick => lang.t(
-            "Der erste Start beginnt neu. Vor jedem Neu laden/Neustart (und beim Programmstart, wenn das in den Einstellungen an ist) zeigt Paneldeck die Konversationen des Arbeitsordners zur Auswahl, dazu „Neue Konversation“. Gibt es keine, startet Claude ohne Rückfrage neu.",
-            "The first start begins a new conversation. Before every reload/restart (and at program start, if that is on in Settings) Paneldeck lists the conversations of the working folder to choose from, plus “New conversation”. If there are none, Claude starts a new one without asking.",
+            "Der erste Start beginnt neu. Vor jedem Neu laden/Neustart (und beim Programmstart, wenn das unter Einstellungen → Claude → Allgemein an ist) zeigt Paneldeck die Konversationen des Arbeitsordners zur Auswahl, dazu „Neue Konversation“. Gibt es keine, startet Claude ohne Rückfrage neu.",
+            "The first start begins a new conversation. Before every reload/restart (and at program start, if that is on in Settings → Claude → General) Paneldeck lists the conversations of the working folder to choose from, plus “New conversation”. If there are none, Claude starts a new one without asking.",
         ),
     }
 }

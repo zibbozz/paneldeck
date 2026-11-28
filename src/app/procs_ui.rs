@@ -408,7 +408,7 @@ impl App {
     }
 
     /// Unerwartetes Ende bzw. fehlgeschlagener Start: roter Hinweis im Fenster, ohne Fokus zusätzlich eine
-    /// Benachrichtigung von Windows (wie bei Claude, Einstellungen → Benachrichtigungen).
+    /// Benachrichtigung von Windows (wie bei Claude, Einstellungen → Allgemein → Benachrichtigungen).
     fn proc_notify(&mut self, ctx: &egui::Context, id: u64) {
         let lang = self.settings.language;
         let Some(d) = self.procs.defs.iter().find(|d| d.id == id) else { return };

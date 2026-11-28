@@ -130,7 +130,7 @@ fn exists(name: &str) -> bool {
 /// liefert `forbidden` (ohne Schema), ein unbekannter Name `unknown_tool`.
 pub fn run(policy: &ToolPolicy, args: &Value) -> ToolResult {
     if !policy.enabled() {
-        return Err(("forbidden".into(), "This chat has no tools (tool level Off, Settings → Models).".into()));
+        return Err(("forbidden".into(), "This chat has no tools (tool level Off, Settings → Models → Servers & models).".into()));
     }
     let all = policy.specs();
     let Some(want) = wanted(args) else {
@@ -146,7 +146,7 @@ pub fn run(policy: &ToolPolicy, args: &Value) -> ToolResult {
         Some(s) => Ok(card(policy, s)),
         None if exists(&want) => Err((
             "forbidden".into(),
-            format!("{want} is not available in this chat (tool level, to-do mode, a switch or the user's selection in Settings → Models). Do not call it; tell the user if it is needed."),
+            format!("{want} is not available in this chat (tool level, to-do mode, a switch or the user's selection in Settings → Models → Servers & models). Do not call it; tell the user if it is needed."),
         )),
         None => Err(("unknown_tool".into(), format!("There is no tool named “{}”. Call more_tools without name for the list.", mcp::short(&want, 80)))),
     }

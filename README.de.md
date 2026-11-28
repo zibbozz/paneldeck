@@ -47,7 +47,7 @@ Installer und `paneldeck.exe` sind **nicht code-signiert**. Ein Zertifikat koste
 2. Paneldeck startet mit einem leeren Terminal Hub: **Strg+Umschalt+T** öffnet eine neue Sitzung, **Strg+Umschalt+P** die Befehls-Palette, **Strg+Umschalt+D/E** teilt einen Bereich.
 3. Für Claude: Button mit dem Funken-Symbol, Ordner wählen, fertig.
 4. **Strg+2** (oder der Reiter *Todo-Liste* in der Fensterleiste) öffnet die Todo-Liste, **Strg+1** führt zurück zum Terminal Hub. **Strg+Klick** auf einen Reiter öffnet ihn in einem neuen Fenster.
-5. Beim ersten Start bietet Paneldeck eine **kurze Tour** (etwa 3 Minuten) direkt im Fenster an; sie und ihre Kapitel stehen jederzeit in der Befehls-Palette (*Tutorial*) und unter *Einstellungen → Info* – siehe [Tutorial](docs/de/tutorial.md).
+5. Beim ersten Start bietet Paneldeck eine **kurze Tour** (etwa 3 Minuten) direkt im Fenster an; sie und ihre Kapitel stehen jederzeit in der Befehls-Palette (*Tutorial*) und unter *Einstellungen → Info → Tutorial* – siehe [Tutorial](docs/de/tutorial.md).
 
 Alle Kürzel lassen sich unter *Einstellungen → Tastenkürzel* ändern.
 
@@ -81,7 +81,7 @@ Den Changelog gibt es auf Deutsch ([`Changelog.de.md`](Changelog.de.md)) und Eng
 Dieses Programm überträgt keine Informationen an andere Systeme im Netzwerk, außer der Nutzer oder die Person, die es installiert oder bedient, verlangt das ausdrücklich. (This program will not transfer any information to other networked systems unless specifically requested by the user or the person installing or operating it.)
 
 - Paneldeck sendet keine Telemetrie. Es liest lokal Claude-Transkripte (`~/.claude`) für Verlauf und Kostenschätzung; alles bleibt auf deinem Rechner, auch deine Todo-Liste und deine Tickets (lokale Datenbank `paneldeck.db`).
-- **Update-Prüfung:** Paneldeck fragt GitHub nur dann nach dem neuesten Release, wenn du auf *Nach Updates suchen* klickst (*Einstellungen → Info*) oder dort die automatische Prüfung einschaltest (standardmäßig aus; beim Start, höchstens einmal am Tag). Die Anfrage geht an die öffentliche GitHub-API (`api.github.com`), Downloads kommen von `github.com` und den Download-Servern von GitHub – alles über HTTPS, ohne Anmeldung. GitHub sieht dabei deine IP-Adresse und die Paneldeck-Version (im `User-Agent`, z. B. `Paneldeck/2.1.0`); weitere Daten werden nicht gesendet. Siehe [Updates](docs/de/updates.md).
+- **Update-Prüfung:** Paneldeck fragt GitHub nur dann nach dem neuesten Release, wenn du auf *Nach Updates suchen* klickst (*Einstellungen → Info → Updates*) oder dort die automatische Prüfung einschaltest (standardmäßig aus; beim Start, höchstens einmal am Tag). Die Anfrage geht an die öffentliche GitHub-API (`api.github.com`), Downloads kommen von `github.com` und den Download-Servern von GitHub – alles über HTTPS, ohne Anmeldung. GitHub sieht dabei deine IP-Adresse und die Paneldeck-Version (im `User-Agent`, z. B. `Paneldeck/2.1.0`); weitere Daten werden nicht gesendet. Siehe [Updates](docs/de/updates.md).
 - Die Agenten-Schnittstelle (MCP) ist standardmäßig aus und nur vom eigenen Rechner aus erreichbar (`127.0.0.1`).
 - **Chats mit lokalen Modellen** verbinden sich nur mit den Modell-Servern, die du selbst einrichtest, und nur auf diesem Rechner oder in privaten Netzen (siehe [Chats](docs/de/chat.md#datenschutz)).
 - Links in Terminals und Tickets öffnen sich nur auf Klick im Browser.

@@ -1,4 +1,5 @@
-//! Menüleiste je Teilung (#381, 3.2.0): *Datei · Bearbeiten · Ansicht · Format* (wie Notepad++/Sublime Text) über der
+//! Menüleiste je Teilung (#381, 3.2.0): *Datei · Bearbeiten · Auswahl (#394, 3.3.0) · Ansicht · Format* (wie
+//! Notepad++/Sublime Text) über der
 //! Reiterleiste jeder Teilung. Die Einträge rufen die vorhandenen Befehle des Editors auf; Kürzel stehen rechtsbündig,
 //! nicht passende Einträge sind ausgegraut und sagen beim Überfahren warum. In schmalen Teilungen klappen die vier Menüs
 //! zu einem einzigen *Menü ▾* zusammen. Abschaltbar unter *Einstellungen → Editor* (`menu_bar`, Standard an).
@@ -110,6 +111,7 @@ pub(super) fn menus(ed: &mut EditorUi, g: u64, prefs: &super::EditorPrefs, lang:
     };
     let running = doc_id.is_some_and(|d| ed.fmt.job_for(d).is_some());
     let syn = doc_id.and_then(|id| ed.docs.get_mut(&id)).filter(|d| d.doc.is_some()).map(|d| d.syntax_status(prefs, lang));
+    let comment = doc_id.and_then(|id| ed.docs.get_mut(&id)).filter(|d| d.doc.is_some()).and_then(|d| d.line_comment(prefs));
     let d = doc_id.and_then(|id| ed.docs.get(&id));
     let loaded = d.and_then(|d| d.doc.as_ref());
     let kind = d.and_then(|d| d.format_kind());
@@ -194,12 +196,22 @@ pub(super) fn menus(ed: &mut EditorUi, g: u64, prefs: &super::EditorPrefs, lang:
         Entry::Item(item("find_files", lang.t("In Dateien suchen …", "Find in files …"), fixed("Ctrl+Shift+F", lang), f(Cmd::FindInFiles))),
         Entry::Item(item("goto", lang.t("Gehe zu Zeile …", "Go to line …"), fixed("Ctrl+G", lang), f(Cmd::GotoLineAsk)).off(need_text())),
         Entry::Sep,
-        op("next_occurrence", lang.t("Nächstes Vorkommen dazu", "Add next occurrence"), "Ctrl+D", EdOp::SelectNextOccurrence),
-        op("all_occurrences", lang.t("Alle Vorkommen markieren", "Select all occurrences"), "Ctrl+Shift+L", EdOp::SelectAllOccurrences),
-        op("select_line", lang.t("Zeile markieren", "Select line"), "Ctrl+L", EdOp::SelectLine),
+        Entry::Item(toggle_comment(g, comment, need_text(), prefs, lang)),
         op("delete_line", lang.t("Zeile löschen", "Delete line"), "Ctrl+Shift+K", EdOp::DeleteLine),
         op("line_up", lang.t("Zeile nach oben", "Move line up"), "Alt+Up", EdOp::MoveLines(false)),
         op("line_down", lang.t("Zeile nach unten", "Move line down"), "Alt+Down", EdOp::MoveLines(true)),
+    ];
+
+    // ---- Auswahl (#394, wie Sublime Text): die Befehle der mehreren Cursor wirken nur mit dem Schalter.
+    let multi_off = || need_text().or_else(|| (!prefs.multi.on).then(|| lang.t("Mehrere Cursor sind aus (Einstellungen → Editor → Allgemein → Mehrere Cursor).", "Multiple cursors are off (Settings → Editor → General → Multiple cursors).").to_string()));
+    let mop = |id: &'static str, label: &str, k: &str, o: EdOp| Entry::Item(item(id, label.to_string(), key(prefs, lang, k), f(Cmd::EditOp(g, o))).off(multi_off()));
+    let selection_menu = vec![
+        mop("next_occurrence", lang.t("Nächstes Vorkommen dazu", "Add next occurrence"), "ed_next_occurrence", EdOp::SelectNextOccurrence),
+        mop("all_occurrences", lang.t("Alle Vorkommen markieren", "Select all occurrences"), "ed_all_occurrences", EdOp::SelectAllOccurrences),
+        mop("soft_undo", lang.t("Cursor/Auswahl zurücknehmen", "Undo cursor/selection change"), "ed_soft_undo", EdOp::SoftUndo),
+        op("single_cursor", lang.t("Nur ein Cursor", "Single cursor"), "Escape", EdOp::SingleCursor),
+        Entry::Sep,
+        op("select_line", lang.t("Zeile markieren", "Select line"), "Ctrl+L", EdOp::SelectLine),
     ];
 
     // ---- Ansicht
@@ -258,9 +270,39 @@ pub(super) fn menus(ed: &mut EditorUi, g: u64, prefs: &super::EditorPrefs, lang:
     vec![
         Menu { id: "file", title: lang.t("Datei", "File"), entries: file },
         Menu { id: "edit", title: lang.t("Bearbeiten", "Edit"), entries: edit },
+        Menu { id: "selection", title: lang.t("Auswahl", "Selection"), entries: selection_menu },
         Menu { id: "view", title: lang.t("Ansicht", "View"), entries: view },
         Menu { id: "format", title: lang.t("Format", "Format"), entries: format },
     ]
+}
+
+/// *Kommentar umschalten* (#394) mit dem Zeilenkommentar der Sprache; ohne einen ausgegraut.
+fn toggle_comment(g: u64, prefix: Option<&'static str>, need_text: Option<String>, prefs: &super::EditorPrefs, lang: Lang) -> Item {
+    let it = item("toggle_comment", lang.t("Kommentar umschalten", "Toggle comment"), key(prefs, lang, "ed_toggle_comment"), prefix.map(|p| vec![Cmd::FocusGroup(g), Cmd::EditOp(g, EdOp::ToggleComment(p))]).unwrap_or_default());
+    it.off(need_text.or_else(|| prefix.is_none().then(|| lang.t("Die Sprache hat keinen Zeilenkommentar (Sprache in der Statusleiste wählen).", "The language has no line comment (choose the language in the status bar).").to_string())))
+}
+
+/// Befehle der Auswahl und *Kommentar umschalten* für die Befehlspalette (#394): (Text, Kürzel, Befehl), nur in einem
+/// Text-Reiter und nur, was gerade geht (wie im Menü).
+pub(super) fn palette_entries(ed: &EditorUi, prefs: &super::EditorPrefs, lang: Lang) -> Vec<(String, String, Cmd)> {
+    let g = ed.panes.focused;
+    let Some(t) = ed.panes.groups.get(&g).and_then(|grp| grp.active_tab()) else { return Vec::new() };
+    if t.diff.is_some() || ed.docs.get(&t.doc).is_none_or(|d| d.doc.is_none()) {
+        return Vec::new();
+    }
+    let mut v = Vec::new();
+    let e = |label: &str, k: String, o: EdOp| (label.to_string(), k, Cmd::EditOp(g, o));
+    if prefs.multi.on {
+        v.push(e(lang.t("Auswahl: nächstes Vorkommen dazu", "Selection: add next occurrence"), key(prefs, lang, "ed_next_occurrence"), EdOp::SelectNextOccurrence));
+        v.push(e(lang.t("Auswahl: alle Vorkommen markieren", "Selection: select all occurrences"), key(prefs, lang, "ed_all_occurrences"), EdOp::SelectAllOccurrences));
+        v.push(e(lang.t("Auswahl: Cursor/Auswahl zurücknehmen", "Selection: undo cursor/selection change"), key(prefs, lang, "ed_soft_undo"), EdOp::SoftUndo));
+    }
+    v.push(e(lang.t("Auswahl: nur ein Cursor", "Selection: single cursor"), fixed("Escape", lang), EdOp::SingleCursor));
+    v.push(e(lang.t("Auswahl: Zeile markieren", "Selection: select line"), fixed("Ctrl+L", lang), EdOp::SelectLine));
+    if let Some(p) = ed.docs.get(&t.doc).and_then(|d| d.line_comment_cached()) {
+        v.push(e(lang.t("Kommentar umschalten", "Toggle comment"), key(prefs, lang, "ed_toggle_comment"), EdOp::ToggleComment(p)));
+    }
+    v
 }
 
 /// Kennungen der Einträge aus [`super::diff_menu::file_entries`] bzw. [`super::diff_menu::view_entries`] (Tests, Tutorial).
@@ -306,8 +348,18 @@ impl EditorUi {
         let (Some(view), Some(d)) = self.view_doc_mut(g, idx) else { return };
         let Some(doc) = d.doc.as_mut() else { return };
         view.sync(doc);
+        // Cursor/Auswahl zurücknehmen (#394): ohne den Text zu ändern.
+        if op == EdOp::SoftUndo {
+            view.soft_undo(doc);
+            view.reveal = true;
+            return;
+        }
+        let before = view.sels.clone();
         let Some(sels) = view.sels.as_mut() else { return };
         let tab = doc.tab_width().max(1);
+        let before_len = sels.len();
+        let next = op == EdOp::SelectNextOccurrence;
+        let mut cut = false;
         let edited = match op {
             EdOp::Copy | EdOp::Cut => {
                 let (text, edited) = super::doc::clip(doc, sels, op == EdOp::Cut);
@@ -321,11 +373,23 @@ impl EditorUi {
                 Some(t) => super::doc::run(doc, sels, EdOp::Paste(t), tab),
                 None => false,
             },
+            // Hinweis nur, wenn wirklich gekürzt wurde (nicht schon bei genau 10 000 Vorkommen).
+            EdOp::SelectAllOccurrences => {
+                cut = super::doc::select_all_occurrences(doc, sels);
+                false
+            }
             o => super::doc::run(doc, sels, o, tab),
         };
+        let full = cut || (next && before_len >= crate::editor::MAX_CURSORS);
+        if !edited && let Some(b) = before {
+            view.note_selection_change(b);
+        }
         view.reveal = true;
         if edited {
             d.on_user_edit();
+        }
+        if full {
+            self.set_hint(crate::state::t("Nur die ersten 10 000 Cursor.", "Only the first 10 000 cursors.").to_string());
         }
     }
 }

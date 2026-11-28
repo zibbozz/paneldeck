@@ -12,6 +12,7 @@ use super::marks::{self, Spot};
 use super::overlay::{self, Bubble, CardClick, Click, EndClick};
 use super::steps::{self, Prep, Probe, Step, Txt, TOURS};
 use super::store;
+use super::super::settings_nav::Page;
 use crate::state::Lang;
 use eframe::egui::{self, Event, Modifiers, PointerButton, Pos2, RawInput, Rect, Vec2};
 
@@ -150,10 +151,10 @@ fn key_placeholders_name_known_shortcuts() {
     assert_eq!(super::fill_keys("kaputt {key:new", Lang::En, |_| "X".into()), "kaputt {key:new");
 }
 
-/// Wo ein Ziel liegt: Einstellungsreiter (Index) bzw. Bereich der Anwendung.
+/// Wo ein Ziel liegt: Seite der Einstellungen (#395) bzw. Bereich der Anwendung.
 #[derive(Debug, PartialEq)]
 enum Home {
-    Settings(usize),
+    Settings(Page),
     Hub,
     Tasks,
     Plan,
@@ -167,21 +168,34 @@ enum Home {
 fn home(s: Spot) -> Home {
     use Spot::*;
     match s {
-        TabEditor | EditorSearchSettings | EditorAgentSwitches | EditorSaveActions => Home::Settings(super::super::editor_services::SETTINGS_TAB),
+        TabEditor => Home::Settings(Page::EditorGeneral),
+        EditorSearchSettings => Home::Settings(Page::EditorSearchFormat),
+        EditorSaveActions => Home::Settings(Page::EditorOnSave),
+        // Die Schalter für Agenten im Editor stehen seit #395 unter Agenten › Editor.
+        EditorAgentSwitches => Home::Settings(Page::AgentsEditor),
         EditorTree => Home::Editor(false),
         EditorTabBar | EditorSplit | EditorText | EditorFind | EditorStatus | EditorMinimap | EditorSearchFiles | EditorMenuBar => Home::Editor(true),
         TitlebarEditor | TitlebarTime => Home::Hub,
         TimeSubTabs | TimeNewAlarm | TimeOptions => Home::Time(super::super::time_ui::Sub::Alarms),
         TimePresets => Home::Time(super::super::time_ui::Sub::Timers),
         CalendarViews => Home::Time(super::super::time_ui::Sub::Calendar),
-        ThemeManage | ReduceTransparency => Home::Settings(1),
-        ClaudeMode | ClaudeDefaults | ClaudeBudget => Home::Settings(2),
-        TabShortcuts => Home::Settings(5),
-        TabProfiles => Home::Settings(6),
-        McpLevel | McpRegister | McpSysprompt | McpSessionEnv | McpLog | AgentAccess => Home::Settings(7),
-        DataBackups | DataCleanup => Home::Settings(8),
-        AboutInfo | AboutUpdates | AboutTutorial => Home::Settings(9),
-        TabModels | ModelsServers | ModelsCommands => Home::Settings(super::super::models_ui::SETTINGS_TAB),
+        ThemeManage => Home::Settings(Page::AppearanceTheme),
+        ReduceTransparency => Home::Settings(Page::AppearanceTransparency),
+        ClaudeMode => Home::Settings(Page::ClaudeGeneral),
+        ClaudeDefaults => Home::Settings(Page::ClaudeSession),
+        ClaudeBudget => Home::Settings(Page::ClaudeCosts),
+        TabShortcuts => Home::Settings(Page::Shortcuts),
+        TabProfiles => Home::Settings(Page::TerminalProfiles),
+        McpLevel | McpSessionEnv | AgentAccess => Home::Settings(Page::AgentsAccess),
+        McpRegister | McpSysprompt => Home::Settings(Page::AgentsSetup),
+        McpLog => Home::Settings(Page::AgentsLog),
+        DataBackups => Home::Settings(Page::DataBackup),
+        DataCleanup => Home::Settings(Page::DataMaintenance),
+        AboutInfo => Home::Settings(Page::AboutVersion),
+        AboutUpdates => Home::Settings(Page::AboutUpdates),
+        AboutTutorial => Home::Settings(Page::AboutTutorial),
+        TabModels | ModelsServers => Home::Settings(Page::ModelsServers),
+        ModelsCommands => Home::Settings(Page::ModelsTools),
         TodoInput | TodoList | ExpertToggle => Home::Tasks,
         PlanProjects | PlanNewTicket | PlanTabBoards | PlanTabBacklog | PlanTabSearch | QueryBar => Home::Plan,
         Palette => Home::Palette,
@@ -199,7 +213,7 @@ fn preparations_open_the_home_of_each_target() {
         };
         let has = |p: Prep| s.prep.contains(&p);
         match home(spot) {
-            Home::Settings(tab) => assert!(has(Prep::Settings(tab)), "{}: Einstellungen Reiter {tab} öffnen", s.id),
+            Home::Settings(page) => assert!(has(Prep::Settings(page)), "{}: Einstellungen bei Seite {} öffnen", s.id, page.id()),
             Home::Hub => {
                 assert!(has(Prep::Terminals) && has(Prep::NoSettings), "{}: Terminal Hub ohne Einstellungen", s.id);
                 assert!(has(Prep::TutProject) || has(Prep::Session), "{}: im Tutorial-Projekt", s.id);
@@ -228,10 +242,11 @@ fn preparations_open_the_home_of_each_target() {
         if s.id == "editor.find" {
             assert!(has(Prep::EditorFind(false)), "{}: Suchleiste zu Beginn zu", s.id);
         }
-        for p in s.prep {
-            if let Prep::Settings(i) = p {
-                assert!(*i <= super::super::editor_services::SETTINGS_TAB, "{}: Reiter {i}", s.id);
-            }
+        // Höchstens eine Seite je Schritt; ihre Kennung ist gültig.
+        let pages: Vec<Page> = s.prep.iter().filter_map(|p| if let Prep::Settings(pg) = p { Some(*pg) } else { None }).collect();
+        assert!(pages.len() <= 1, "{}: mehrere Seiten {pages:?}", s.id);
+        for pg in pages {
+            assert_eq!(Page::from_id(pg.id()), Some(pg), "{}", s.id);
         }
     }
 }
@@ -260,7 +275,7 @@ fn step(id: &str) -> &'static Step {
 }
 
 /// #393: Der Schritt zur Stufe eines Modells erklärt die Werkzeugliste mit genau dem Kennzeichen, das die Liste in
-/// *Einstellungen → Modelle* neben standardmäßig ausgeschalteten Werkzeugen zeigt.
+/// *Einstellungen → Modelle → Server & Modelle* neben standardmäßig ausgeschalteten Werkzeugen zeigt.
 #[test]
 fn the_model_level_step_names_the_off_by_default_mark() {
     let s = step("chat.levels");
@@ -337,7 +352,7 @@ fn whats_new_lists_the_steps_since_a_version() {
     assert!(editor.contains(&"basics.editor") && editor.contains(&"editor.agents") && editor.contains(&"editor.search"), "{editor:?}");
     // Ab 3.2.0 kommen Schritte dazu (Menüleiste und Formatieren #381, Aktionen beim Speichern #383); die übrigen der
     // Tour sind von 3.0.0.
-    assert!(steps::tour("editor").is_some_and(|t| t.steps.iter().all(|s| s.since == "3.0.0" || s.since == "3.2.0")));
+    assert!(steps::tour("editor").is_some_and(|t| t.steps.iter().all(|s| ["3.0.0", "3.2.0", "3.3.0"].contains(&s.since))));
     let fmt = ids("3.1.0", "3.2.0");
     assert!(fmt.contains(&"editor.format") && !fmt.contains(&"editor.status"), "{fmt:?}");
     // Waagerechte Bildlaufleiste (#389) kam mit 3.2.0, Ziel ist das Textfeld.
@@ -348,6 +363,14 @@ fn whats_new_lists_the_steps_since_a_version() {
     // Vergleich und Änderungsmarken (#385) kamen mit 3.2.0.
     let diff = ids("3.1.0", "3.2.0");
     assert!(diff.contains(&"editor.diff") && diff.contains(&"editor.markers"), "{diff:?}");
+    // Tippen im Vergleich (#391) kam mit 3.3.0.
+    let typing = ids("3.2.0", "3.3.0");
+    assert!(typing.contains(&"editor.diff_type") && !typing.contains(&"editor.diff"), "{typing:?}");
+    // Menü Auswahl und Kommentar (#394) kamen mit 3.3.0, Ziel ist die Menüleiste.
+    assert!(typing.contains(&"editor.selection_menu") && !typing.contains(&"editor.cursors"), "{typing:?}");
+    // Smart-Modus (#367) kam mit 3.3.0, Ziel ist die Statusleiste.
+    assert!(typing.contains(&"editor.smart"), "{typing:?}");
+    assert_eq!(steps::tour("editor").and_then(|t| t.steps.iter().find(|s| s.id == "editor.selection_menu")).map(|s| s.spot), Some(Some(Spot::EditorMenuBar)));
     // Pfadarten des Ziels (#392) kamen mit 3.2.0, im Kapitel Werkzeuge hinter dem Dateibaum.
     assert!(fmt.contains(&"tools.paths") && !fmt.contains(&"tools.files"), "{fmt:?}");
     let tools = steps::tour("tools").map(|t| t.steps.iter().map(|s| s.id).collect::<Vec<_>>()).unwrap_or_default();

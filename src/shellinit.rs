@@ -312,7 +312,7 @@ if set -q PANELDECK_XDG
 end
 "#;
 
-/// Zum Einfügen auf entfernten Rechnern (Einstellungen → Terminal): nur die Befehlsmarken, kein Ordner (ein Pfad des
+/// Zum Einfügen auf entfernten Rechnern (Einstellungen → Terminal → Andere Rechner): nur die Befehlsmarken, kein Ordner (ein Pfad des
 /// anderen Rechners gehört nicht in den Dateibaum).
 pub const REMOTE_BASH: &str = r#"# Paneldeck shell integration (bash) - add to ~/.bashrc on the remote machine
 __paneldeck_prompt() { local ec=$?; printf '\033]133;D;%s\007\033]133;A\007' "$ec"; [[ $PS1 == *'133;B'* ]] || PS1="$PS1"'\[\e]133;B\a\]'; return $ec; }

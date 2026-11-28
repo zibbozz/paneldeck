@@ -76,8 +76,8 @@ pub fn clean_field(s: &str) -> String {
 /// Text für einen Chat, dessen Server es in den Einstellungen nicht (mehr) gibt.
 fn unknown_server(lang: Lang) -> String {
     lang.t(
-        "Der Server dieses Chats ist nicht mehr eingerichtet – in Einstellungen → Modelle wieder hinzufügen oder einen neuen Chat mit einem anderen Modell beginnen.",
-        "The server of this chat is no longer set up – add it again in Settings → Models or start a new chat with another model.",
+        "Der Server dieses Chats ist nicht mehr eingerichtet – in Einstellungen → Modelle → Server & Modelle wieder hinzufügen oder einen neuen Chat mit einem anderen Modell beginnen.",
+        "The server of this chat is no longer set up – add it again in Settings → Models → Servers & models or start a new chat with another model.",
     )
     .to_string()
 }
@@ -90,7 +90,7 @@ pub fn chat_notice(servers: &[crate::llm::config::LlmServer], meta: &ChatMeta, l
     }
     // Stufe „Aus“ bewusst gewählt (ungewählt fragt der Chat beim ersten Senden).
     let cfg = s.model_cfg(&meta.model);
-    (cfg.level == McpLevel::Off && cfg.level_chosen).then(|| lang.t("Werkzeuge sind für dieses Modell aus (Einstellungen → Modelle).", "Tools are off for this model (Settings → Models).").to_string())
+    (cfg.level == McpLevel::Off && cfg.level_chosen).then(|| lang.t("Werkzeuge sind für dieses Modell aus (Einstellungen → Modelle → Server & Modelle).", "Tools are off for this model (Settings → Models → Servers & models).").to_string())
 }
 
 /// Systemprompt eines Chats (#340): der Master-Prompt für Stufe, Modus, Werkzeuge und Modellfamilie (`policy`, `model`)
@@ -252,7 +252,7 @@ pub fn map_history_with(history: &[ChatMsg], imgs: Option<SendImages>) -> (Vec<C
 }
 
 /// Systemprompt und Werkzeuge einer Anfrage samt Kontextlänge und Fassung (#340/#341) – die eine Stelle für Anfrage,
-/// Füllstandsanzeige und die Vorschau in Einstellungen → Modelle.
+/// Füllstandsanzeige und die Vorschau in Einstellungen → Modelle → Server & Modelle.
 #[derive(Debug, Clone)]
 pub struct PromptPlan {
     /// Systemprompt (mit Kontextzeile) in der gewählten Fassung.
@@ -377,13 +377,13 @@ fn build(meta: &ChatMeta, history: &[ChatMsg], cx: &TurnContext, with_key: bool)
     let context_notice = (server.user_context(model).is_some() && policy.enabled() && llm::config::context_too_small(ctx_len, prompt_real)).then(|| context_notice(ctx_len, lang));
     let note = if sys_tokens > budget {
         Some(lang.t(
-            "Der Systemprompt ist größer als der Kontext des Modells – Kontextlänge in Einstellungen → Modelle erhöhen.",
-            "The system prompt is larger than the model's context – raise the context length in Settings → Models.",
+            "Der Systemprompt ist größer als der Kontext des Modells – Kontextlänge in Einstellungen → Modelle → Server & Modelle erhöhen.",
+            "The system prompt is larger than the model's context – raise the context length in Settings → Models → Servers & models.",
         ))
     } else if sys_tokens + tool_tokens > budget {
         Some(lang.t(
-            "Systemprompt und Werkzeug-Beschreibungen sind größer als der Kontext des Modells – Kontextlänge in Einstellungen → Modelle erhöhen oder Werkzeuge sperren.",
-            "The system prompt and tool descriptions are larger than the model's context – raise the context length in Settings → Models or disable tools.",
+            "Systemprompt und Werkzeug-Beschreibungen sind größer als der Kontext des Modells – Kontextlänge in Einstellungen → Modelle → Server & Modelle erhöhen oder Werkzeuge sperren.",
+            "The system prompt and tool descriptions are larger than the model's context – raise the context length in Settings → Models → Servers & models or disable tools.",
         ))
     } else {
         None
@@ -463,8 +463,8 @@ pub fn prepare_summary(meta: &ChatMeta, req: &super::compact::SummaryRequest, cx
 /// Hinweis: die eigene Kontextlänge reicht nicht für die Werkzeug-Stufe des Modells.
 pub fn context_notice(ctx: u32, lang: Lang) -> String {
     match lang {
-        Lang::De => format!("Der Kontext dieses Modells ({ctx} Tokens) ist zu klein für seine Werkzeug-Stufe – in Einstellungen → Modelle erhöhen oder die Stufe „Lesen“ nutzen."),
-        Lang::En => format!("This model's context ({ctx} tokens) is too small for its tool level – raise it in Settings → Models or use level Read."),
+        Lang::De => format!("Der Kontext dieses Modells ({ctx} Tokens) ist zu klein für seine Werkzeug-Stufe – in Einstellungen → Modelle → Server & Modelle erhöhen oder die Stufe „Lesen“ nutzen."),
+        Lang::En => format!("This model's context ({ctx} tokens) is too small for its tool level – raise it in Settings → Models → Servers & models or use level Read."),
     }
 }
 
@@ -476,8 +476,8 @@ pub fn cut_off_note(lang: Lang) -> String {
 /// Zusatz zu einem Serverfehler, wenn die Anfrage Werkzeuge enthielt.
 pub fn tools_hint(lang: Lang) -> &'static str {
     lang.t(
-        "(Kann das Modell keine Werkzeuge nutzen, in Einstellungen → Modelle „Werkzeugaufrufe“ ausschalten.)",
-        "(If the model cannot use tools, switch off “Tool calling” in Settings → Models.)",
+        "(Kann das Modell keine Werkzeuge nutzen, in Einstellungen → Modelle → Server & Modelle „Werkzeugaufrufe“ ausschalten.)",
+        "(If the model cannot use tools, switch off “Tool calling” in Settings → Models → Servers & models.)",
     )
 }
 
@@ -485,7 +485,7 @@ pub fn tools_hint(lang: Lang) -> &'static str {
 pub fn error_text(e: &LlmError, lang: Lang) -> String {
     let t = e.text(lang);
     if matches!(e, LlmError::Status { code: 404, .. }) {
-        format!("{t} {}", lang.t("(Einstellungen → Modelle → Verbinden zeigt die aktuellen Modelle.)", "(Settings → Models → Connect shows the current models.)"))
+        format!("{t} {}", lang.t("(Einstellungen → Modelle → Server & Modelle → Verbinden zeigt die aktuellen Modelle.)", "(Settings → Models → Servers & models → Connect shows the current models.)"))
     } else {
         t
     }
@@ -496,13 +496,13 @@ pub fn error_text(e: &LlmError, lang: Lang) -> String {
 pub fn empty_answer_text(thought: bool, cut: bool, lang: Lang) -> String {
     match (thought, cut) {
         (true, true) => lang.t(
-            "Das Modell hat nur nachgedacht und vor der Antwort seine Token-Grenze erreicht – Kontextlänge in Einstellungen → Modelle erhöhen oder erneut versuchen.",
-            "The model only produced thinking output and reached its token limit before answering – raise the context length in Settings → Models or try again.",
+            "Das Modell hat nur nachgedacht und vor der Antwort seine Token-Grenze erreicht – Kontextlänge in Einstellungen → Modelle → Server & Modelle erhöhen oder erneut versuchen.",
+            "The model only produced thinking output and reached its token limit before answering – raise the context length in Settings → Models → Servers & models or try again.",
         ),
         (true, false) => lang.t("Das Modell hat nur nachgedacht und keine Antwort geliefert – erneut versuchen.", "The model only produced thinking output and no answer – try again."),
         (false, true) => lang.t(
-            "Das Modell hat vor der Antwort seine Token-Grenze erreicht – Kontextlänge in Einstellungen → Modelle erhöhen.",
-            "The model reached its token limit before answering – raise the context length in Settings → Models.",
+            "Das Modell hat vor der Antwort seine Token-Grenze erreicht – Kontextlänge in Einstellungen → Modelle → Server & Modelle erhöhen.",
+            "The model reached its token limit before answering – raise the context length in Settings → Models → Servers & models.",
         ),
         (false, false) => lang.t("Das Modell hat eine leere Antwort geliefert – erneut versuchen.", "The model returned an empty answer – try again."),
     }
@@ -717,16 +717,16 @@ mod tests {
     fn router_errors_unknown_server_empty_model_bad_key() {
         let c = cx(vec![server("http://localhost:11434", ServerKind::Ollama)]);
         let e = prepare(&ChatMeta { server: "gone".into(), model: "m".into() }, &[], &c).unwrap_err();
-        assert!(e.contains("Settings → Models"), "{e}");
+        assert!(e.contains("Settings → Models → Servers & models"), "{e}");
         assert!(prepare(&ChatMeta { server: "s1".into(), model: " ".into() }, &[], &c).is_err());
         let mut s = server("http://localhost:11434", ServerKind::Ollama);
         s.api_key = "AAAA".into();
         let e = prepare(&meta(), &[], &cx(vec![s])).unwrap_err();
-        assert!(e.starts_with("API key could not be decrypted – enter it again in Settings → Models."), "{e}");
+        assert!(e.starts_with("API key could not be decrypted – enter it again in Settings → Models → Servers & models."), "{e}");
         // Über das Backend: der Fehler kommt als Ereignis.
         let b = LlmBackend::with_transport(Arc::new(crate::llm::http::fake::Fake::default()));
         let h = b.start(&ChatMeta { server: "gone".into(), model: "m".into() }, &[], &c, Arc::new(|| {}));
-        assert!(matches!(h.rx.recv_timeout(Duration::from_secs(5)), Ok(TurnEvent::Error(e)) if e.contains("Settings → Models")));
+        assert!(matches!(h.rx.recv_timeout(Duration::from_secs(5)), Ok(TurnEvent::Error(e)) if e.contains("Settings → Models → Servers & models")));
     }
 
     #[test]
@@ -743,8 +743,8 @@ mod tests {
         let mut v = v;
         v[0].set_model_cfg(LlmModel { level: McpLevel::Off, level_chosen: true, ..LlmModel::named("m2") });
         let m2 = ChatMeta { server: "s1".into(), model: "m2".into() };
-        assert_eq!(chat_notice(&v, &m2, Lang::En).as_deref(), Some("Tools are off for this model (Settings → Models)."));
-        assert_eq!(chat_notice(&v, &m2, Lang::De).as_deref(), Some("Werkzeuge sind für dieses Modell aus (Einstellungen → Modelle)."));
+        assert_eq!(chat_notice(&v, &m2, Lang::En).as_deref(), Some("Tools are off for this model (Settings → Models → Servers & models)."));
+        assert_eq!(chat_notice(&v, &m2, Lang::De).as_deref(), Some("Werkzeuge sind für dieses Modell aus (Einstellungen → Modelle → Server & Modelle)."));
     }
 
     #[test]
@@ -865,7 +865,7 @@ mod tests {
         s.set_model_cfg(LlmModel { context_length: Some(256), ..LlmModel::named("m1") });
         let mut c = cx(vec![s]);
         let p = prepare(&meta(), &[msg(store::Role::User, "q")], &c).unwrap();
-        assert_eq!(p.note.as_deref(), Some("The system prompt is larger than the model's context – raise the context length in Settings → Models."));
+        assert_eq!(p.note.as_deref(), Some("The system prompt is larger than the model's context – raise the context length in Settings → Models → Servers & models."));
         assert_eq!(p.request.messages.len(), 2, "die Frage geht trotzdem mit");
         c.lang = Lang::De;
         assert!(prepare(&meta(), &[msg(store::Role::User, "q")], &c).unwrap().note.unwrap().starts_with("Der Systemprompt ist größer"));
@@ -1410,7 +1410,7 @@ mod tests {
         let ev = collect(&b.start(&meta(), &[msg(store::Role::User, "hi")], &c, Arc::new(|| {})));
         match ev.last() {
             Some(TurnEvent::Error(e)) => {
-                assert!(e.starts_with("Nicht gefunden") && e.contains("model 'm1' not found") && e.contains("Einstellungen → Modelle → Verbinden"), "{e}");
+                assert!(e.starts_with("Nicht gefunden") && e.contains("model 'm1' not found") && e.contains("Einstellungen → Modelle → Server & Modelle → Verbinden"), "{e}");
             }
             other => panic!("{other:?}"),
         }
@@ -1605,7 +1605,7 @@ mod tests {
             assert!(all.iter().all(|s| !s.is_empty()));
             assert_eq!(all.iter().collect::<std::collections::HashSet<_>>().len(), 4, "vier verschiedene Texte");
         }
-        assert!(empty_answer_text(true, true, Lang::De).contains("Einstellungen → Modelle"));
+        assert!(empty_answer_text(true, true, Lang::De).contains("Einstellungen → Modelle → Server & Modelle"));
         assert!(empty_answer_text(false, false, Lang::En).contains("empty answer"));
     }
 
@@ -1663,7 +1663,7 @@ mod tests {
         s.set_model_cfg(LlmModel { level: McpLevel::Control, level_chosen: true, context_length: Some(4096), ..LlmModel::named("m1") });
         let p = prepare(&meta(), &[msg(store::Role::User, "q")], &cx(vec![s.clone()])).unwrap();
         assert_eq!(p.request.num_ctx, Some(4096));
-        assert_eq!(p.context_notice.as_deref(), Some("This model's context (4096 tokens) is too small for its tool level – raise it in Settings → Models or use level Read."));
+        assert_eq!(p.context_notice.as_deref(), Some("This model's context (4096 tokens) is too small for its tool level – raise it in Settings → Models → Servers & models or use level Read."));
         assert!(context_notice(8192, Lang::De).contains("zu klein"));
         // Stufe Aus: kein Hinweis
         s.set_model_cfg(LlmModel { level: McpLevel::Off, level_chosen: true, context_length: Some(8192), ..LlmModel::named("m1") });

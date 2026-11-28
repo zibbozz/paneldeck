@@ -256,7 +256,7 @@ impl App {
                 return Err(er("bad_args", "background and shell only work in the chat's own terminals – leave out session (or leave out background and shell to run in that session)."));
             }
             if !self.settings.shell_integration {
-                return Err(er("no_shell_integration", "Shell integration is switched off (Settings → General); without it the end of a command cannot be detected. Ask the user to switch it on."));
+                return Err(er("no_shell_integration", "Shell integration is switched off (Settings → Terminal → Shell & environment); without it the end of a command cannot be detected. Ask the user to switch it on."));
             }
             Ok((req, fixes))
         })();

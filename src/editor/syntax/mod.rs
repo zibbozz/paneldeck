@@ -32,6 +32,9 @@ pub enum Mode {
     Text,
     /// Language detected, syntax colours.
     Syntax,
+    /// Syntax colours plus a language server (#367, 3.3.0): completion and diagnostics; only in trusted folders, else
+    /// like `Syntax`.
+    Smart,
 }
 
 impl Mode {
@@ -40,16 +43,26 @@ impl Mode {
         match self {
             Mode::Text => "text",
             Mode::Syntax => "syntax",
+            Mode::Smart => "smart",
         }
     }
 
-    /// Read an id leniently: unknown values (also `smart` from newer versions) → `None`.
+    /// Read an id leniently: unknown values (from newer versions) → `None`.
     pub fn from_id(s: &str) -> Option<Mode> {
         match s.trim().to_ascii_lowercase().as_str() {
             "text" => Some(Mode::Text),
             "syntax" => Some(Mode::Syntax),
+            "smart" => Some(Mode::Smart),
             _ => None,
         }
+    }
+
+    /// All modes for the pickers.
+    pub const ALL: [Mode; 3] = [Mode::Text, Mode::Syntax, Mode::Smart];
+
+    /// Syntax colours (Syntax and Smart).
+    pub fn colours(self) -> bool {
+        self != Mode::Text
     }
 }
 

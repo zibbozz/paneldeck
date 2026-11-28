@@ -474,10 +474,10 @@ impl App {
                 self.shot_usage();
                 self.cost_open = true;
             }
-            "agenten" => {
-                self.settings_open = true;
-                self.settings_tab = 7;
-            }
+            // Einstellungen bei einer Seite (#395): `settings:<seiten-id>`, z. B. `settings:agents.access`.
+            "settings" => self.open_settings(super::settings_nav::Page::from_id(arg).unwrap_or(super::settings_nav::Page::START)),
+            // alter Name (Aufnahmen bis 3.2)
+            "agenten" => self.open_settings(super::settings_nav::Page::AgentsAccess),
             // ---- Prozesse
             "processes" | "process-output" => {
                 let pid = self.active_project;
@@ -571,8 +571,7 @@ impl App {
             }
             "editor-settings" => {
                 self.set_mode(titlebar::Mode::Editor);
-                self.settings_open = true;
-                self.settings_tab = editor_services::SETTINGS_TAB;
+                self.open_settings(super::settings_nav::Page::EditorGeneral);
             }
             // ---- Reiter „Zeit“ (#164): Beispieldaten in der Datenbank der Aufnahme
             "time-alarms" | "time-timers" | "time-clocks" => {
@@ -588,12 +587,10 @@ impl App {
                 let _ = std::fs::create_dir_all(self.themes_dir());
                 let _ = std::fs::write(&bad, "{\n  \"name\": \"Ocean night\",\n  \"colors\": { \"bg\": \"#0b1d2a\", \"fg\": \"#d8e6f0\", \"accent\": \"#3fa7ff\"\n");
                 self.reload_themes();
-                self.settings_open = true;
-                self.settings_tab = 1;
+                self.open_settings(super::settings_nav::Page::AppearanceTheme);
             }
             "theme-generate" => {
-                self.settings_open = true;
-                self.settings_tab = 1;
+                self.open_settings(super::settings_nav::Page::AppearanceTheme);
                 self.theme_new();
             }
             "theme-editor" => self.shot_theme_editor("accent", false),

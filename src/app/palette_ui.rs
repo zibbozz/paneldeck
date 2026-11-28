@@ -1,5 +1,5 @@
 //! Farbpaletten in der Oberfläche (seit 2.3.0, Issue #173): die Auswahl aus der Palette (mit Tooltip und
-//! „Eigene Farbe …“) für alle Farbmenüs und die Verwaltung unter Einstellungen → Farben.
+//! „Eigene Farbe …“) für alle Farbmenüs und die Verwaltung unter Einstellungen → Darstellung → Farbpaletten.
 //!
 //! Beides arbeitet ohne `App` (die Auswahl liest die veröffentlichte Palette `palette::colors`, die Verwaltung bekommt
 //! `&mut Palettes`), damit es sich ohne Fenster testen lässt.
@@ -12,7 +12,6 @@ use std::hash::Hash;
 
 /// Index des Reiters „Farben“ in den Einstellungen (angehängt, damit die festen Indizes der übrigen gültig bleiben;
 /// angezeigt wird er hinter „Darstellung“).
-pub(super) const SETTINGS_TAB: usize = 11;
 
 /// Form der Farbfelder.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -70,7 +69,7 @@ pub fn pick(ui: &mut Ui, salt: impl Hash, area: Area, current: Option<&str>, opt
     let colors = palette::colors(area);
     let mut out = None;
     if colors.is_empty() {
-        ui.label(RichText::new(lang.t("Die Palette ist leer (Einstellungen → Farben).", "The palette is empty (Settings → Colors).")).small().color(style::dim(ui)));
+        ui.label(RichText::new(lang.t("Die Palette ist leer (Einstellungen → Darstellung → Farbpaletten).", "The palette is empty (Settings → Appearance → Color palettes).")).small().color(style::dim(ui)));
     }
     let per_row = opts.per_row.max(1);
     let size = if opts.look == Look::Square { 18.0 } else { 22.0 };
@@ -167,7 +166,7 @@ pub fn custom(ui: &mut Ui, salt: Id, current: Option<&str>, lang: Lang) -> Optio
     out
 }
 
-// ------------------------------------------------------------------ Verwaltung (Einstellungen → Farben)
+// ------------------------------------------------------------------ Verwaltung (Einstellungen → Darstellung → Farbpaletten)
 
 /// Die Verwaltung: Schalter „Eigene Palette je Bereich“, ggf. Bereichswahl, Liste der Farben (ziehen zum Sortieren,
 /// Farbe/Hex/Name ändern, löschen), „Farbe hinzufügen“ und „Vorgaben wiederherstellen“.

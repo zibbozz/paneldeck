@@ -433,3 +433,163 @@ three
     assert!(o.hbar.is_none() && o.scroll_x == 0.0);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+fn key(k: egui::Key, m: Modifiers) -> Event {
+    Event::Key { key: k, physical_key: None, pressed: true, repeat: false, modifiers: m }
+}
+
+/// #391: Klick setzt den Cursor in der bearbeitbaren Seite, Tippen erscheint sofort (vorläufiger Vergleich), der
+/// richtige Vergleich folgt nach der Pause; Tippen und Blockpfeile sind ein Rückgängig-Verlauf.
+#[test]
+fn typing_in_the_editable_side_shows_at_once_and_recomputes_after_a_pause() {
+    let dir = test_dir("type");
+    let a = write(&dir, "a.txt", b"a\nb\nc\nd\ne\n");
+    let b = write(&dir, "b.txt", b"a\nB\nc\nd\ne\n");
+    let ctx = egui::Context::default();
+    let mut t = 0.0;
+    let prefs = EditorPrefs::default();
+    let mut ed = EditorUi::default();
+    ed.wrap = false;
+    let diff = ed.compare_paths(&a, &b, &prefs).unwrap();
+    settle(&ctx, &mut ed, &mut t, WIDE, &prefs, diff_settled);
+    let rb = ed.diffs[&diff].right.doc().unwrap();
+    assert!(ed.diffs[&diff].caret.is_none(), "ohne Klick kein Cursor");
+    // Klick rechts in Zeile 4 („d“) vor das Zeichen
+    let p = ed.diffs[&diff].point_at(false, 3, 0).unwrap();
+    frame(&ctx, &mut ed, click_at(p), &mut t, WIDE, &prefs);
+    assert_eq!(ed.diffs[&diff].caret_linecol(&ed.docs), Some((false, 3, 0)));
+    frame(&ctx, &mut ed, vec![], &mut t, WIDE, &prefs);
+    // Tippen: sofort im Dokument und in der Anzeige, der Vergleich ist vorläufig
+    frame(&ctx, &mut ed, vec![Event::Text("X".into()), Event::Text("Y".into())], &mut t, WIDE, &prefs);
+    assert_eq!(text_of(&ed, rb), "a\nB\nc\nXYd\ne\n");
+    let o = ed.diffs[&diff].out.clone().unwrap();
+    assert!(o.provisional, "noch nicht neu verglichen");
+    assert_eq!(o.right.line(3), "XYd", "die Anzeige zeigt schon den neuen Text");
+    assert_eq!(o.hunks.len(), 2);
+    assert_eq!(ed.diffs[&diff].caret_linecol(&ed.docs), Some((false, 3, 2)));
+    // nach der Pause: richtiger Vergleich
+    settle(&ctx, &mut ed, &mut t, WIDE, &prefs, diff_settled);
+    assert!(!ed.diffs[&diff].out.as_ref().unwrap().provisional);
+    assert_eq!(ed.diffs[&diff].hunk_count(), 2);
+    // Eingabe: neue Zeile sofort sichtbar
+    frame(&ctx, &mut ed, vec![key(egui::Key::Enter, Modifiers::NONE), Event::Text("n".into())], &mut t, WIDE, &prefs);
+    assert_eq!(text_of(&ed, rb), "a\nB\nc\nXY\nnd\ne\n");
+    assert_eq!(ed.diffs[&diff].out.as_ref().unwrap().right.len(), 6);
+    settle(&ctx, &mut ed, &mut t, WIDE, &prefs, diff_settled);
+    // Blockpfeil (links → rechts) und Strg+Z teilen den Verlauf des Dokuments
+    let la = ed.diffs[&diff].left.doc().unwrap();
+    let mut docs = std::mem::take(&mut ed.docs);
+    ed.diffs.get_mut(&diff).unwrap().apply(0, false, &mut docs, Lang::En).unwrap();
+    ed.docs = docs;
+    assert_eq!(text_of(&ed, rb), "a\nb\nc\nXY\nnd\ne\n");
+    frame(&ctx, &mut ed, vec![key(egui::Key::Z, Modifiers::CTRL)], &mut t, WIDE, &prefs);
+    assert_eq!(text_of(&ed, rb), "a\nB\nc\nXY\nnd\ne\n", "erst der Blockpfeil");
+    // dann „n“, die Eingabe und „XY“
+    for _ in 0..3 {
+        frame(&ctx, &mut ed, vec![key(egui::Key::Z, Modifiers::CTRL)], &mut t, WIDE, &prefs);
+    }
+    assert_eq!(text_of(&ed, rb), "a\nB\nc\nd\ne\n", "dann das Tippen");
+    assert_eq!(text_of(&ed, la), "a\nb\nc\nd\ne\n", "links unberührt");
+    // Auswahl mit Umschalt+Ende, Rücktaste löscht sie
+    frame(&ctx, &mut ed, vec![key(egui::Key::Home, Modifiers::NONE), key(egui::Key::End, Modifiers::SHIFT), key(egui::Key::Backspace, Modifiers::NONE)], &mut t, WIDE, &prefs);
+    let (_, line, _) = ed.diffs[&diff].caret_linecol(&ed.docs).unwrap();
+    let lines: Vec<String> = text_of(&ed, rb).lines().map(str::to_string).collect();
+    assert_eq!(lines[line], "", "Zeile geleert: {lines:?}");
+    // Strg+D legt hier keinen zweiten Cursor an
+    frame(&ctx, &mut ed, vec![key(egui::Key::D, Modifiers::CTRL)], &mut t, WIDE, &prefs);
+    assert!(!ed.diffs[&diff].caret.as_ref().unwrap().sels.is_multi());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// #391: Füllzeilen überspringt der Cursor (Klick → Ende der Zeile davor, Pfeil runter → nächste echte Zeile), Tippen in
+/// einem eingeklappten Bereich klappt ihn auf; eine schreibgeschützte Seite nimmt keinen Cursor und meldet Tippen.
+#[test]
+fn fillers_are_skipped_folds_unfold_on_edit_and_read_only_sides_refuse() {
+    let dir = test_dir("filler");
+    let base: Vec<String> = (0..30).map(|i| format!("l{i}")).collect();
+    let mut other = base.clone();
+    other.insert(2, "new1".into());
+    other.insert(3, "new2".into());
+    let a = write(&dir, "a.txt", format!("{}\n", base.join("\n")).as_bytes());
+    let b = write(&dir, "b.txt", format!("{}\n", other.join("\n")).as_bytes());
+    let ctx = egui::Context::default();
+    let mut t = 0.0;
+    let prefs = EditorPrefs::default();
+    let mut ed = EditorUi::default();
+    ed.wrap = false;
+    let diff = ed.compare_paths(&a, &b, &prefs).unwrap();
+    settle(&ctx, &mut ed, &mut t, WIDE, &prefs, diff_settled);
+    let la = ed.diffs[&diff].left.doc().unwrap();
+    // Klick links auf die Füllzeile: Ende der Zeile davor („l1“)
+    let p = ed.diffs[&diff].filler_point(true).unwrap();
+    frame(&ctx, &mut ed, click_at(p), &mut t, WIDE, &prefs);
+    assert_eq!(ed.diffs[&diff].caret_linecol(&ed.docs), Some((true, 1, 2)));
+    frame(&ctx, &mut ed, vec![], &mut t, WIDE, &prefs);
+    // Pfeil runter: nächste Zeile der linken Seite („l2“), die Füllzeilen gehören zu keiner
+    frame(&ctx, &mut ed, vec![key(egui::Key::ArrowDown, Modifiers::NONE)], &mut t, WIDE, &prefs);
+    assert_eq!(ed.diffs[&diff].caret_linecol(&ed.docs), Some((true, 2, 2)));
+    // In den eingeklappten Bereich (Zeile 16) und tippen: er klappt auf
+    assert!(ed.diffs[&diff].folds.iter().any(|(_, r)| r.contains(&17)), "eingeklappt: {:?}", ed.diffs[&diff].folds);
+    frame(&ctx, &mut ed, (0..13).map(|_| key(egui::Key::ArrowDown, Modifiers::NONE)).collect(), &mut t, WIDE, &prefs);
+    assert_eq!(ed.diffs[&diff].caret_linecol(&ed.docs).map(|c| c.1), Some(15));
+    assert!(ed.diffs[&diff].revealed.is_empty());
+    frame(&ctx, &mut ed, vec![key(egui::Key::End, Modifiers::NONE), Event::Text("!".into())], &mut t, WIDE, &prefs);
+    assert!(text_of(&ed, la).contains("\nl15!\n"));
+    assert!(!ed.diffs[&diff].revealed.is_empty(), "Bearbeiten klappt auf");
+    frame(&ctx, &mut ed, vec![], &mut t, WIDE, &prefs);
+    assert!(ed.diffs[&diff].folds.iter().all(|(_, r)| !r.contains(&17)), "{:?}", ed.diffs[&diff].folds);
+    // Schreibgeschützt: Vergleich mit der Platte, links ist die gespeicherte Datei
+    let mut ed = EditorUi::default();
+    ed.wrap = false;
+    let id = ed.open_path(&a, false);
+    ed.docs.get_mut(&id).unwrap().ensure_loaded_now(&prefs);
+    let before = text_of(&ed, id);
+    ed.docs.get_mut(&id).unwrap().apply_user_edit(crate::editor::compare::minimal_edit(&before, "x\n"));
+    let d2 = ed.compare(id, Target::Disk, &prefs, Lang::En).unwrap().unwrap();
+    settle(&ctx, &mut ed, &mut t, WIDE, &prefs, diff_settled);
+    let p = ed.diffs[&d2].point_at(true, 0, 0).unwrap();
+    frame(&ctx, &mut ed, click_at(p), &mut t, WIDE, &prefs);
+    assert!(ed.diffs[&d2].caret.is_none(), "kein Cursor in der gespeicherten Datei");
+    frame(&ctx, &mut ed, vec![], &mut t, WIDE, &prefs);
+    let cmds = frame(&ctx, &mut ed, vec![Event::Text("q".into())], &mut t, WIDE, &prefs);
+    assert!(cmds.iter().any(|c| matches!(c, Cmd::Hint(h) if h.contains("read-only"))), "Hinweis");
+    assert_eq!(text_of(&ed, id), "x\n");
+    // Ohne Cursor rollen die Pfeiltasten wie bisher
+    let y0 = ed.diffs[&d2].scroll_y;
+    frame(&ctx, &mut ed, vec![key(egui::Key::ArrowDown, Modifiers::NONE)], &mut t, Vec2::new(1500.0, 200.0), &prefs);
+    frame(&ctx, &mut ed, vec![], &mut t, Vec2::new(1500.0, 200.0), &prefs);
+    assert!(ed.diffs[&d2].scroll_y >= y0);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Rücktaste am Anfang der ersten Zeile nach einem eingeklappten Bereich ändert dessen letzte Zeile: der Bereich klappt
+/// auf (nicht unsichtbar bearbeiten).
+#[test]
+fn backspace_after_a_folded_region_unfolds_it() {
+    let dir = test_dir("foldbs");
+    let base: Vec<String> = (0..40).map(|i| format!("l{i}")).collect();
+    let mut other = base.clone();
+    other[1] = "x1".into();
+    other[36] = "x36".into();
+    let a = write(&dir, "a.txt", format!("{}\n", base.join("\n")).as_bytes());
+    let b = write(&dir, "b.txt", format!("{}\n", other.join("\n")).as_bytes());
+    let ctx = egui::Context::default();
+    let mut t = 0.0;
+    let prefs = EditorPrefs::default();
+    let mut ed = EditorUi::default();
+    ed.wrap = false;
+    let diff = ed.compare_paths(&a, &b, &prefs).unwrap();
+    settle(&ctx, &mut ed, &mut t, WIDE, &prefs, diff_settled);
+    let la = ed.diffs[&diff].left.doc().unwrap();
+    // erste sichtbare Zeile nach dem eingeklappten Bereich (links)
+    assert!(ed.diffs[&diff].point_at(true, 20, 0).is_none(), "Zeile 20 ist eingeklappt");
+    let line = (21..40).find(|l| ed.diffs[&diff].point_at(true, *l, 0).is_some()).unwrap();
+    assert!(ed.diffs[&diff].point_at(true, line - 1, 0).is_none(), "davor eingeklappt");
+    let p = ed.diffs[&diff].point_at(true, line, 0).unwrap();
+    frame(&ctx, &mut ed, click_at(p), &mut t, WIDE, &prefs);
+    frame(&ctx, &mut ed, vec![], &mut t, WIDE, &prefs);
+    frame(&ctx, &mut ed, vec![key(egui::Key::Home, Modifiers::NONE), key(egui::Key::Backspace, Modifiers::NONE)], &mut t, WIDE, &prefs);
+    assert!(text_of(&ed, la).contains(&format!("\nl{}l{line}\n", line - 1)), "Zeilen verbunden");
+    assert!(!ed.diffs[&diff].revealed.is_empty(), "der Bereich klappt auf");
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -57,7 +57,7 @@ Starts minimized to the tray icon (used by *Start with Windows*). If Paneldeck a
     paneldeck.exe --tray
 
 ### --no-tray
-Starts without a tray icon. *Close → tray* and *Minimize → tray* then behave like a normal window (close quits, minimize uses the taskbar); *Settings → Window* shows a hint.
+Starts without a tray icon. *Close → tray* and *Minimize → tray* then behave like a normal window (close quits, minimize uses the taskbar); *Settings → General → Window & tray* shows a hint.
 
     paneldeck.exe --no-tray
 
@@ -73,12 +73,12 @@ Uses `<data folder>\profiles\<name>` and runs as its own instance next to the de
     paneldeck.exe --data-dir "D:\PaneldeckData" --profile customer-a
 
 ### --backup-dir \<folder\>
-Writes database backups to `<folder>` for this start. *Settings → Data & backup* shows the folder with "(set by --backup-dir)" and locks the folder choice; the saved backup folder is not changed.
+Writes database backups to `<folder>` for this start. *Settings → Data & backup → Backup* shows the folder with "(set by --backup-dir)" and locks the folder choice; the saved backup folder is not changed.
 
     paneldeck.exe --backup-dir "E:\Backups\Paneldeck"
 
 ### --lang en|de
-Interface and message language for this start (also for `--help` and error messages). The saved language stays; texts that Paneldeck stores (e.g. default names) keep the saved language. If you choose a language in *Settings → General* during such a start, that choice is saved.
+Interface and message language for this start (also for `--help` and error messages). The saved language stays; texts that Paneldeck stores (e.g. default names) keep the saved language. If you choose a language in *Settings → General → Language & startup* during such a start, that choice is saved.
 
     paneldeck.exe --lang de
 
@@ -89,7 +89,7 @@ Renames `settings.json` to `settings.json.bak-<YYYYMMDD-HHMMSS>` and starts with
     paneldeck.exe --profile work --reset-settings
 
 ### --no-update-check
-Suppresses the automatic update check for this start, even if it is switched on in *Settings → About*. A manual check is still possible. See [Updates](updates.md).
+Suppresses the automatic update check for this start, even if it is switched on in *Settings → About → Updates*. A manual check is still possible. See [Updates](updates.md).
 
     paneldeck.exe --no-update-check
 
@@ -109,7 +109,7 @@ Exactly one argument without an option that is an existing folder works like `--
     paneldeck.exe "C:\Dev\my-app"
 
 ### mcp
-Runs the MCP server for AI agents over stdin/stdout and talks to the running Paneldeck. It finds the hub in this order: `--data-dir`/`--profile`, the Paneldeck terminal it was started from, then the data folder lookup below. Only `--data-dir`, `--profile`, `--lang` and `--help` are allowed after `mcp`. The agent interface must be enabled in *Settings → Agents* – see [Agent interface](agent-interface.md).
+Runs the MCP server for AI agents over stdin/stdout and talks to the running Paneldeck. It finds the hub in this order: `--data-dir`/`--profile`, the Paneldeck terminal it was started from, then the data folder lookup below. Only `--data-dir`, `--profile`, `--lang` and `--help` are allowed after `mcp`. The agent interface must be enabled in *Settings → Agents → Access* – see [Agent interface](agent-interface.md).
 
     claude mcp add paneldeck --scope user -- "C:\Program Files\Paneldeck\paneldeck.exe" mcp
     paneldeck.exe mcp --profile work
@@ -123,7 +123,7 @@ The data folder is chosen in this order (the first match wins):
 5. the current directory (fallback)
 
 `--profile <name>` then uses the subfolder `profiles\<name>` of that folder. If `--data-dir` or `PANELDECK_DATA` points to a folder that cannot be used, Paneldeck stops with an error instead of falling back.
-*Settings → About* and *Copy diagnostics* show the data folder, where it comes from (parameter, environment variable, portable, `%APPDATA%`), the profile and the active start options. See [Data folder and backups](data-and-backups.md).
+*Settings → About → Version* and *Settings → Data & backup → Diagnostics* (*Copy diagnostics*) show the data folder, where it comes from (parameter, environment variable, portable, `%APPDATA%`), the profile and the active start options. See [Data folder and backups](data-and-backups.md).
 
 ## Profiles and several instances
 - Only **one Paneldeck runs per data folder** (instance lock). A second start with the same folder hands over to the running one (and brings its window to the front).

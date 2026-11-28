@@ -148,7 +148,8 @@ impl App {
         let fg = if self.settings_open { style::accent() } else { ui.visuals().text_color() };
         style::paint_icon(ui.painter(), SIcon::Gear, r.center(), fg);
         if resp.clicked() {
-            self.settings_open = !self.settings_open;
+            // Öffnet immer bei der Startseite (#395).
+            self.toggle_settings();
         }
         r.left() - 4.0
     }

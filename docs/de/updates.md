@@ -14,9 +14,9 @@ Ab 2.1.0 kann sich Paneldeck selbst aus den [GitHub-Releases](https://github.com
 In der Fensterleiste erscheint rechts, direkt links vom Minimieren-Knopf, ein Knopf. Er zeigt die neue Version (Tooltip „Version X ist verfügbar“), beim Herunterladen den Fortschritt in Prozent und **Neu starten**, sobald das Update bereit ist. Ein Klick öffnet einen Dialog mit:
 - der neuen und der installierten Version,
 - **Was ist neu? (Release-Seite auf GitHub)** – öffnet die Release-Seite im Browser,
-- **Jetzt aktualisieren**, **Später** und **Diese Version überspringen** (die automatische Prüfung bietet sie nicht mehr an; eine Prüfung von Hand zeigt sie weiter, mit „(übersprungen)“; *Einstellungen → Info* zeigt die übersprungene Version mit *Zurücksetzen*).
+- **Jetzt aktualisieren**, **Später** und **Diese Version überspringen** (die automatische Prüfung bietet sie nicht mehr an; eine Prüfung von Hand zeigt sie weiter, mit „(übersprungen)“; *Einstellungen → Info → Updates* zeigt die übersprungene Version mit *Zurücksetzen*).
 
-**Später** blendet Dialog und Knopf aus; *Details …* unter *Einstellungen → Info* öffnet ihn wieder. Ein Klick auf *Später* während des Downloads lässt den Download im Hintergrund zu Ende laufen; danach bleibt nur der Knopf **Neu starten** in der Fensterleiste, ohne Nachfrage.
+**Später** blendet Dialog und Knopf aus; *Details …* unter *Einstellungen → Info → Updates* öffnet ihn wieder. Ein Klick auf *Später* während des Downloads lässt den Download im Hintergrund zu Ende laufen; danach bleibt nur der Knopf **Neu starten** in der Fensterleiste, ohne Nachfrage.
 
 Eine automatische Prüfung (etwa 3 Sekunden nach dem Start) zeigt nur den Knopf; eine Prüfung von Hand öffnet zusätzlich den Dialog.
 

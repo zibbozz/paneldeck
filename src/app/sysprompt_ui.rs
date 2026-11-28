@@ -1,4 +1,4 @@
-//! Einstellungen → Agenten, Abschnitt „Systemprompt“: Vorlage ansehen und bearbeiten (`system-prompt.md` im Datenordner),
+//! Einstellungen → Agenten → Zugriff, Abschnitt „Systemprompt“: Vorlage ansehen und bearbeiten (`system-prompt.md` im Datenordner),
 //! Sprache wählen, Vorschau für die aktuelle Stufe und den Modus, kopieren und als Datei speichern.
 //!
 //! Der Zustand des Editors liegt im egui-Speicher (nicht in `App`), die Logik in `crate::mcp::sysprompt`.
@@ -304,7 +304,7 @@ fn save_as(dir: &Path, text: &str, lang: Lang) -> Option<(String, bool)> {
 }
 
 impl App {
-    /// Abschnitt „Systemprompt“ in Einstellungen → Agenten.
+    /// Abschnitt „Systemprompt“ in Einstellungen → Agenten → Zugriff.
     pub(super) fn sysprompt_settings_ui(&mut self, ui: &mut egui::Ui) {
         let dir = self.dir.clone();
         let mut env = PromptEnv { lang: self.settings.language, dir: &dir, level: self.settings.mcp_level, expert: self.plan.expert, prompt_lang: &mut self.settings.mcp_prompt_lang };

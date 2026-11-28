@@ -398,7 +398,7 @@ impl PlanUi {
         }
         // Ticket aus dem Terminal Hub (Chip, Palette, Mini-Suche): vor dem Lesen des Expertenmodus öffnen, es kann ihn einschalten
         self.run_requested_open(&cx);
-        // Datenbankpflege aus „Einstellungen → Daten“ (#308)
+        // Datenbankpflege aus „Einstellungen → Daten & Sicherung“ (#308)
         self.run_maintenance_request(&cx);
         let fill = env.bg;
         let mut new_project = false;

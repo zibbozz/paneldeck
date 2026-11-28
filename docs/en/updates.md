@@ -14,9 +14,9 @@ From 2.1.0 on, Paneldeck can update itself from [GitHub Releases](https://github
 A button appears in the title bar, right-aligned directly left of the minimize button. It shows the new version (tooltip "Version X is available"), the progress in percent while downloading, and **Restart** once the update is ready. A click opens a dialog with:
 - the new and the installed version,
 - **What's new? (release page on GitHub)** – opens the release page in your browser,
-- **Update now**, **Later** and **Skip this version** (the automatic check no longer offers it; a manual check still shows it, marked "(skipped)"; *Settings → About* shows the skipped version with *Reset*).
+- **Update now**, **Later** and **Skip this version** (the automatic check no longer offers it; a manual check still shows it, marked "(skipped)"; *Settings → About → Updates* shows the skipped version with *Reset*).
 
-**Later** hides the dialog and the button; *Details …* in *Settings → About* reopens it. Clicking *Later* while the update is downloading lets the download finish in the background; afterwards only the **Restart** button stays in the title bar, without a question.
+**Later** hides the dialog and the button; *Details …* in *Settings → About → Updates* reopens it. Clicking *Later* while the update is downloading lets the download finish in the background; afterwards only the **Restart** button stays in the title bar, without a question.
 
 An automatic check (about 3 seconds after the start) only shows the button; a manual check also opens the dialog.
 

@@ -958,7 +958,7 @@ fn level_bar(ui: &mut Ui, lang: Lang, out: &mut ChatOut) {
                     out.level = Some(l);
                 }
             }
-            ui.label(RichText::new(lang.t("(später änderbar in Einstellungen → Modelle)", "(can be changed later in Settings → Models)")).small().color(style::dim(ui)));
+            ui.label(RichText::new(lang.t("(später änderbar in Einstellungen → Modelle → Server & Modelle)", "(can be changed later in Settings → Models → Servers & models)")).small().color(style::dim(ui)));
         });
     });
 }

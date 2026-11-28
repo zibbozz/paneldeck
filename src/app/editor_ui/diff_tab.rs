@@ -9,18 +9,24 @@
 //! feste Texte sind schreibgeschützt. Der Vergleich läuft im Hintergrund (~250 ms nach dem Tippen, Fortschritt und
 //! *Abbrechen* bei großen Dateien, Zeitgrenze mit gröberem Ergebnis); git-Stände werden nach dem Speichern, bei
 //! Fensterfokus und bei Änderungen an `.git/index`/`HEAD` neu gelesen.
+//!
+//! Ab 3.3.0 (#391) lässt sich in einer bearbeitbaren Seite direkt tippen: ein Cursor (eine Auswahl) im Dokument der
+//! Seite, Füllzeilen überspringt er, Bearbeiten in einem eingeklappten Bereich klappt ihn auf. Der Text erscheint sofort
+//! (`DiffTab::live_update`: neuer Stand der Seite, Blöcke über `compare::edit_hunks` verschoben bzw. zusammengelegt),
+//! der richtige Vergleich folgt ~300 ms nach der letzten Taste. Tippen und Blockpfeile teilen das Rückgängig des
+//! Dokuments.
 
-use super::doc::DocEntry;
+use super::doc::{DocEntry, Op};
 use super::view::Cmd;
 use crate::editor::compare::{self, Facts, Hunk, Item, Row, RowKind};
 use crate::editor::syntax::{DocHighlight, Span};
 use crate::editor::text as et;
-use crate::editor::{Document, TextEncoding};
+use crate::editor::{Document, Selection, Selections, TextEncoding};
 use crate::editor_svc::git_base::{self, Blob, RepoFile, Rev};
 use crate::editor_svc::settings::DiffLayout;
 use crate::state::Lang;
 use crate::style;
-use eframe::egui::{self, Align2, Color32, FontId, Id, Key, Pos2, Rect, Sense, Stroke, Ui, Vec2};
+use eframe::egui::{self, Align2, Color32, Event, FontId, Id, Key, Pos2, Rect, Sense, Stroke, Ui, Vec2};
 use std::collections::{BTreeMap, HashMap};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -28,8 +34,17 @@ use std::sync::atomic::Ordering;
 use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 
-/// So lange nach der letzten Änderung wird neu verglichen.
-pub(super) const LIVE_DELAY: Duration = Duration::from_millis(250);
+/// So lange nach der letzten Änderung (Tipp-Pause, #391) wird neu verglichen.
+pub(super) const LIVE_DELAY: Duration = Duration::from_millis(300);
+/// Ab dieser Größe einer Seite kopiert der vorläufige Stand ([`DiffTab::live_update`]) ihren Text höchstens alle
+/// [`LIVE_BIG_EVERY`] statt bei jedem Tastendruck.
+const LIVE_BIG_BYTES: usize = 1 << 20;
+const LIVE_BIG_EVERY: Duration = Duration::from_millis(250);
+
+/// Vorläufigen Stand jetzt bilden? Kleine Seiten immer, große höchstens alle [`LIVE_BIG_EVERY`].
+fn live_due(bytes: usize, last: Option<Instant>, now: Instant) -> bool {
+    bytes <= LIVE_BIG_BYTES || last.is_none_or(|t| now.saturating_duration_since(t) >= LIVE_BIG_EVERY)
+}
 /// So oft wird geprüft, ob sich ein fester Stand (Platte, git) geändert hat.
 const REFRESH: Duration = Duration::from_secs(2);
 /// Schmaler als das: automatisch untereinander.
@@ -427,6 +442,63 @@ pub(crate) struct DiffOut {
     intra: HashMap<(u32, u32), Option<(Vec<Range<usize>>, Vec<Range<usize>>)>>,
     pub big: Option<BigInfo>,
     key: JobKey,
+    /// Vorläufig (#391): nach dem Tippen ohne neuen Vergleich fortgeschrieben, der richtige folgt nach der Pause.
+    pub provisional: bool,
+    /// Breite der längsten Zeile beider Seiten (Tabbreite, Spalten) – einmal gemessen, beim Tippen fortgeschrieben.
+    cols: std::sync::OnceLock<(usize, usize)>,
+}
+
+impl DiffOut {
+    /// Breite der längsten Zeile beider Seiten in Spalten (#389).
+    fn max_cols(&self, tab: usize) -> usize {
+        if let Some((t, c)) = self.cols.get()
+            && *t == tab
+        {
+            return *c;
+        }
+        let c = [&self.left, &self.right].iter().map(|s| (0..s.len()).map(|i| str_cols(s.line(i), tab)).max().unwrap_or(0)).max().unwrap_or(0);
+        let _ = self.cols.set((tab, c));
+        c
+    }
+}
+
+/// Breite einer Zeile in visuellen Spalten (sehr lange Zeilen: ein Zeichen = eine Spalte).
+fn str_cols(line: &str, tab: usize) -> usize {
+    if line.bytes().all(|b| (0x20..0x7f).contains(&b)) {
+        return line.len();
+    }
+    if line.len() >= super::text::LONG_LINE {
+        return line.chars().count();
+    }
+    let mut v = 0;
+    for c in line.chars() {
+        v += et::char_width(c, v, tab);
+    }
+    v
+}
+
+/// Visuelle Spalte der Zeichenspalte `col` in `line`.
+fn str_vcol(line: &str, col: usize, tab: usize) -> usize {
+    let mut v = 0;
+    for c in line.chars().take(col) {
+        v += et::char_width(c, v, tab);
+    }
+    v
+}
+
+/// Zeichenspalte zur visuellen Spalte `v` in `line` (zur näheren Kante gerundet; hinter dem Ende = Länge).
+fn str_col_at(line: &str, v: usize, tab: usize) -> usize {
+    let mut x = 0;
+    let mut n = 0;
+    for (i, c) in line.chars().enumerate() {
+        let w = et::char_width(c, x, tab);
+        if v < x + w {
+            return if w > 1 && v - x > (w - 1) / 2 { i + 1 } else { i };
+        }
+        x += w;
+        n = i + 1;
+    }
+    n
 }
 
 enum SideIn {
@@ -466,6 +538,8 @@ pub(crate) struct DiffTab {
     job: Option<Job>,
     pub(super) out: Option<Arc<DiffOut>>,
     changed_at: Option<Instant>,
+    /// Letzter vorläufiger Stand (Drossel für große Seiten).
+    live_last: Option<Instant>,
     force: bool,
     cancelled: Option<JobKey>,
     cache: Option<Cache>,
@@ -474,6 +548,30 @@ pub(crate) struct DiffTab {
     pub(super) arrows: Vec<(Rect, usize, bool)>,
     pub(super) folds: Vec<(Rect, Range<u32>)>,
     pub(super) unified_shown: bool,
+    /// Cursor in einer bearbeitbaren Seite (#391); `None` = Pfeiltasten rollen wie bisher.
+    pub(super) caret: Option<Caret>,
+    /// Textflächen beider Seiten und Zeichenbreite im letzten Bild (Tests).
+    text_geo: Option<([Rect; 2], f32, f32)>,
+}
+
+/// Cursor im Vergleichs-Reiter (#391): eine Auswahl im Dokument einer Seite (mehrere Cursor kommen später, #394).
+#[derive(Clone, Debug)]
+pub(crate) struct Caret {
+    /// Linke Seite (sonst rechte).
+    pub left: bool,
+    pub sels: Selections,
+    /// Ziehen mit der Maus ab dieser Position.
+    drag: Option<usize>,
+    blink: f64,
+    preedit: String,
+    /// Nach Tastatur/Bearbeitung in den sichtbaren Bereich rollen.
+    reveal: bool,
+}
+
+impl Caret {
+    fn new(left: bool, doc: &Document, pos: usize, time: f64) -> Caret {
+        Caret { left, sels: doc.new_selections(pos), drag: None, blink: time, preedit: String::new(), reveal: false }
+    }
 }
 
 /// Zeilen und Höhen für die aktuelle Darstellung.
@@ -510,6 +608,7 @@ impl DiffTab {
             job: None,
             out: None,
             changed_at: None,
+            live_last: None,
             force: false,
             cancelled: None,
             cache: None,
@@ -517,6 +616,8 @@ impl DiffTab {
             arrows: Vec::new(),
             folds: Vec::new(),
             unified_shown: false,
+            caret: None,
+            text_geo: None,
         }
     }
 
@@ -613,6 +714,9 @@ impl DiffTab {
     pub(crate) fn swap(&mut self) {
         std::mem::swap(&mut self.left, &mut self.right);
         self.focus_left = !self.focus_left;
+        if let Some(c) = self.caret.as_mut() {
+            c.left = !c.left;
+        }
         self.out = None;
         self.cache = None;
         self.revealed.clear();
@@ -622,6 +726,9 @@ impl DiffTab {
     /// Den festen Stand der linken Seite ersetzen (z. B. andere Revision).
     pub(crate) fn set_left(&mut self, side: Side) {
         self.left = side;
+        if self.caret.as_ref().is_some_and(|c| c.left) {
+            self.caret = None;
+        }
         self.out = None;
         self.cache = None;
         self.current = None;
@@ -630,7 +737,7 @@ impl DiffTab {
     /// Ergebnis passt zum aktuellen Stand beider Seiten, nichts läuft (Tests).
     #[cfg(test)]
     pub(super) fn settled(&self, docs: &BTreeMap<u64, DocEntry>) -> bool {
-        self.job.is_none() && self.key(docs).is_some_and(|k| self.out.as_ref().is_some_and(|o| o.key == k)) && [&self.left, &self.right].iter().all(|s| !matches!(s, Side::Text(t) if t.load.is_some()))
+        self.job.is_none() && self.key(docs).is_some_and(|k| self.out.as_ref().is_some_and(|o| o.key == k && !o.provisional)) && [&self.left, &self.right].iter().all(|s| !matches!(s, Side::Text(t) if t.load.is_some()))
     }
 
     pub(crate) fn hunk_count(&self) -> usize {
@@ -722,8 +829,9 @@ impl DiffTab {
         if self.side_error(docs).is_some() {
             return busy;
         }
+        self.live_update(docs, now);
         let Some(key) = self.key(docs) else { return true };
-        let stale = self.out.as_ref().is_none_or(|o| o.key != key);
+        let stale = self.out.as_ref().is_none_or(|o| o.key != key || o.provisional);
         let running_same = self.job.as_ref().is_some_and(|j| j.key == key);
         if stale && !running_same && self.cancelled.as_ref() != Some(&key) {
             let since = *self.changed_at.get_or_insert(now);
@@ -737,6 +845,170 @@ impl DiffTab {
             busy = true;
         }
         busy
+    }
+
+    /// Geänderte Dokumente sofort zeigen (#391), ohne neu zu vergleichen: der Text der Seite kommt aus dem Dokument, die
+    /// Blöcke werden über [`compare::edit_hunks`] verschoben bzw. mit der Änderung zusammengelegt (ein gültiger, nicht
+    /// unbedingt kleinster Vergleich – Blockpfeile bleiben richtig). Der richtige Vergleich folgt [`LIVE_DELAY`] nach der
+    /// letzten Änderung; ein laufender für einen älteren Stand wird verworfen. Liefert, ob sich etwas geändert hat.
+    pub(super) fn live_update(&mut self, docs: &BTreeMap<u64, DocEntry>, now: Instant) -> bool {
+        let Some(out) = self.out.clone() else { return false };
+        if out.big.is_some() {
+            return false;
+        }
+        let mut w: Option<DiffOut> = None;
+        for left in [true, false] {
+            let Some(d) = (if left { self.left.doc() } else { self.right.doc() }) else { continue };
+            let Some(doc) = docs.get(&d).and_then(|e| e.doc.as_ref()) else { continue };
+            let cur = w.as_ref().unwrap_or(&out);
+            let seen = if left { cur.key.l } else { cur.key.r };
+            if seen.0 != d || seen.1 == doc.revision() {
+                continue;
+            }
+            // Große Seite: nicht bei jedem Tastendruck den ganzen Text kopieren (der Vergleich folgt ohnehin).
+            if !live_due(doc.rope().len_bytes(), self.live_last, now) {
+                continue;
+            }
+            let old = if left { cur.left.clone() } else { cur.right.clone() };
+            let new = Arc::new(Snap::new(Arc::new(doc.rope().to_string())));
+            let (edit, n) = compare::changed_lines_by(old.len(), new.len(), |i, j| old.line(i) == new.line(j));
+            let (hunks, merged) = compare::edit_hunks(&cur.hunks, !left, edit.clone(), n);
+            let delta = n as isize - edit.len() as isize;
+            // Änderungen in der Zeile: in den zusammengelegten Blöcken verworfen (der Vergleich folgt), danach verschoben.
+            let side_of = |h: &Hunk| if left { h.old.clone() } else { h.new.clone() };
+            let lo = cur.hunks[merged.clone()].first().map_or(edit.start, |h| side_of(h).start.min(edit.start));
+            let hi = cur.hunks[merged.clone()].last().map_or(edit.end, |h| side_of(h).end.max(edit.end));
+            let mut intra = HashMap::with_capacity(cur.intra.len());
+            for (&(a, b), v) in &cur.intra {
+                let s = if left { a } else { b } as usize;
+                if (lo..hi).contains(&s) {
+                    continue;
+                }
+                let moved = if s >= hi { (s as isize + delta) as u32 } else { s as u32 };
+                intra.insert(if left { (moved, b) } else { (a, moved) }, v.clone());
+            }
+            let tab = doc.tab_width().max(1);
+            let cols = std::sync::OnceLock::new();
+            if let Some((t, c)) = cur.cols.get()
+                && *t == tab
+            {
+                let fresh = (edit.start..edit.start + n).map(|i| str_cols(new.line(i), tab)).max().unwrap_or(0);
+                let _ = cols.set((tab, (*c).max(fresh)));
+            }
+            let mut key = cur.key.clone();
+            if left {
+                key.l = (d, doc.revision());
+            } else {
+                key.r = (d, doc.revision());
+            }
+            let pushed = hunks.len() + merged.len() > cur.hunks.len();
+            if let Some(c) = self.current {
+                self.current = if c < merged.start {
+                    Some(c)
+                } else if c < merged.end {
+                    pushed.then_some(merged.start)
+                } else {
+                    Some(c - merged.len() + pushed as usize)
+                };
+            }
+            if !left {
+                // Aufgeklappte Bereiche sind Zeilen der rechten Seite.
+                let map = |p: u32| -> u32 {
+                    let p = p as usize;
+                    (if p >= edit.end {
+                        (p as isize + delta) as usize
+                    } else if p > edit.start {
+                        (edit.start + n).min(p)
+                    } else {
+                        p
+                    }) as u32
+                };
+                for r in self.revealed.iter_mut() {
+                    *r = map(r.start)..map(r.end);
+                }
+                self.revealed.retain(|r| !r.is_empty());
+            }
+            let (l, r) = if left { (new, cur.right.clone()) } else { (cur.left.clone(), new) };
+            w = Some(DiffOut { left: l, right: r, hunks, coarse: cur.coarse, intra, big: None, key, provisional: true, cols });
+        }
+        let Some(w) = w else { return false };
+        if let Some(j) = self.job.take() {
+            j.progress.cancel.store(true, Ordering::Relaxed);
+        }
+        self.out = Some(Arc::new(w));
+        self.cache = None;
+        self.changed_at = Some(now);
+        self.live_last = Some(now);
+        true
+    }
+
+    /// Bearbeiten in einem eingeklappten Bereich klappt ihn auf (#391): Zeilen `lines` der Seite `left` (jeder
+    /// eingeklappte Bereich, der eine davon enthält).
+    fn unfold_lines(&mut self, left: bool, lines: std::ops::RangeInclusive<usize>) {
+        let Some(c) = &self.cache else { return };
+        let side = |r: &Row| if left { r.left } else { r.right };
+        let mut add = Vec::new();
+        for it in &c.items {
+            if let Item::Fold { rows } = it {
+                let (Some(a), Some(b)) = (side(&c.rows[rows.start]), side(&c.rows[rows.end - 1])) else { continue };
+                if (a as usize) <= *lines.end() && *lines.start() <= b as usize {
+                    let (Some(ra), Some(rb)) = (c.rows[rows.start].right, c.rows[rows.end - 1].right) else { continue };
+                    add.push(ra..rb + 1);
+                }
+            }
+        }
+        if !add.is_empty() {
+            self.revealed.extend(add);
+            self.cache = None;
+        }
+    }
+
+    /// Bearbeitbare Seite: ein geladenes Dokument.
+    fn editable(&self, left: bool, docs: &BTreeMap<u64, DocEntry>) -> bool {
+        let side = if left { &self.left } else { &self.right };
+        side.doc().is_some_and(|d| docs.get(&d).is_some_and(|e| e.doc.is_some()))
+    }
+
+    /// Seite, in die untereinander getippt wird: die rechte, wenn sie bearbeitbar ist, sonst die linke.
+    fn unified_side(&self, docs: &BTreeMap<u64, DocEntry>) -> Option<bool> {
+        if self.editable(false, docs) {
+            Some(false)
+        } else if self.editable(true, docs) {
+            Some(true)
+        } else {
+            None
+        }
+    }
+
+    /// Bildschirmpunkt in Zeile `line`, Zeichenspalte `col` einer Seite im letzten Bild (Tests; ohne Umbruch, nur ASCII).
+    #[cfg(test)]
+    pub(super) fn point_at(&self, left: bool, line: usize, col: usize) -> Option<Pos2> {
+        let (texts, body_top, cw) = self.text_geo?;
+        let c = self.cache.as_ref()?;
+        let side = |r: &Row| if left { r.left } else { r.right };
+        let i = c.items.iter().position(|it| matches!(it, Item::Row(r) if side(&c.rows[*r]) == Some(line as u32)))?;
+        let t = texts[if left || self.unified_shown { 0 } else { 1 }];
+        Some(Pos2::new(t.left() + (col as f32 + 0.3) * cw - self.scroll_x, body_top + c.ys[i] - self.scroll_y + 3.0))
+    }
+
+    /// Bildschirmpunkt der ersten Füllzeile einer Seite (Tests).
+    #[cfg(test)]
+    pub(super) fn filler_point(&self, left: bool) -> Option<Pos2> {
+        let (texts, body_top, cw) = self.text_geo?;
+        let c = self.cache.as_ref()?;
+        let i = c.items.iter().position(|it| matches!(it, Item::Row(r) if (if left { c.rows[*r].left } else { c.rows[*r].right }).is_none()))?;
+        let t = texts[if left { 0 } else { 1 }];
+        Some(Pos2::new(t.left() + cw, body_top + c.ys[i] - self.scroll_y + 3.0))
+    }
+
+    /// Cursor (Seite links?, Zeile, Spalte; ab 0) – Tests.
+    #[cfg(test)]
+    pub(super) fn caret_linecol(&self, docs: &BTreeMap<u64, DocEntry>) -> Option<(bool, usize, usize)> {
+        let c = self.caret.as_ref()?;
+        let d = if c.left { self.left.doc() } else { self.right.doc() }?;
+        let doc = docs.get(&d)?.doc.as_ref()?;
+        let lc = et::pos_to_linecol(doc.rope(), c.sels.primary().head.min(doc.len_chars()));
+        Some((c.left, lc.line, lc.col))
     }
 
     fn spawn(&mut self, docs: &BTreeMap<u64, DocEntry>, prefs: &super::EditorPrefs, key: JobKey) {
@@ -904,7 +1176,7 @@ impl DiffTab {
             };
             spans.push(n);
         }
-        let max_cols = [&out.left, &out.right].iter().map(|s| super::hscroll::longest_line_cols(&ropey::Rope::from_str(&s.text), tab)).max().unwrap_or(0);
+        let max_cols = out.max_cols(tab);
         self.cache = Some(Cache { key, max_cols, rows, items, ys: Vec::new(), spans });
     }
 }
@@ -935,7 +1207,7 @@ fn run_job(l: SideIn, r: SideIn, ws: bool, max: u64, progress: &compare::Progres
             }
         };
         let big = BigInfo { binary: lb || rb, left: sha(&l, &lt), right: sha(&r, &rt) };
-        return Some(DiffOut { left: Arc::new(Snap::new(Arc::new(String::new()))), right: Arc::new(Snap::new(Arc::new(String::new()))), hunks: Vec::new(), coarse: false, intra: HashMap::new(), big: Some(big), key });
+        return Some(DiffOut { left: Arc::new(Snap::new(Arc::new(String::new()))), right: Arc::new(Snap::new(Arc::new(String::new()))), hunks: Vec::new(), coarse: false, intra: HashMap::new(), big: Some(big), key, provisional: false, cols: Default::default() });
     }
     let (ls, rs) = (Snap::new(lt), Snap::new(rt));
     let (ll, rl) = (ls.lines(), rs.lines());
@@ -958,7 +1230,7 @@ fn run_job(l: SideIn, r: SideIn, ws: bool, max: u64, progress: &compare::Progres
         }
     }
     drop((ll, rl));
-    Some(DiffOut { left: Arc::new(ls), right: Arc::new(rs), hunks: o.hunks, coarse: o.coarse, intra, big: None, key })
+    Some(DiffOut { left: Arc::new(ls), right: Arc::new(rs), hunks: o.hunks, coarse: o.coarse, intra, big: None, key, provisional: false, cols: Default::default() })
 }
 
 /// Anfänge (Zeichenspalten) der Bildschirmzeilen bei Umbruch nach `cols` Spalten (bevorzugt nach Leerzeichen).
@@ -1073,7 +1345,9 @@ pub(super) fn show(ui: &mut Ui, rect: Rect, dt: &mut DiffTab, docs: &mut BTreeMa
     }
     out.focused = resp.has_focus();
     if out.focused {
-        ui.memory_mut(|m| m.set_focus_lock_filter(cx.id, egui::EventFilter { tab: false, horizontal_arrows: true, vertical_arrows: true, escape: false }));
+        // Mit Cursor rückt Tab ein (#391), sonst wandert der Fokus weiter.
+        let tab = dt.caret.is_some();
+        ui.memory_mut(|m| m.set_focus_lock_filter(cx.id, egui::EventFilter { tab, horizontal_arrows: true, vertical_arrows: true, escape: false }));
     }
     // ---- Fortschritt
     if let Some((pct, age)) = dt.computing()
@@ -1091,6 +1365,21 @@ pub(super) fn show(ui: &mut Ui, rect: Rect, dt: &mut DiffTab, docs: &mut BTreeMa
         ui.painter().text(body.center(), Align2::CENTER_CENTER, format!("{} {e}", lang.t("Nicht lesbar –", "Cannot be read –")), FontId::proportional(13.0), style::ui().error);
         return out;
     }
+    // ---- Cursor und Tippen (#391): vor dem Aufbau der Zeilen, damit dieses Bild schon den neuen Text zeigt
+    let (row_h, cw) = ui.fonts_mut(|f| (f.row_height(&cx.font), f.glyph_width(&cx.font, 'M')));
+    let cw = cw.max(1.0);
+    let unified = match dt.layout {
+        DiffLayout::Unified => true,
+        DiffLayout::Split => false,
+        DiffLayout::Auto => body.width() < AUTO_UNIFIED_W,
+    };
+    sync_caret(dt, docs);
+    if out.focused && dt.out.as_ref().is_some_and(|o| o.big.is_none()) {
+        let page = ((body.height() / row_h).floor() as usize).saturating_sub(1).max(1);
+        if edit_keys(ui, dt, docs, page, row_h, unified, lang, cmds) {
+            dt.live_update(docs, now);
+        }
+    }
     let Some(o) = dt.out.clone() else {
         let msg = if dt.cancelled.is_some() { lang.t("Abgebrochen.", "Cancelled.") } else { lang.t("wird verglichen …", "comparing …") };
         ui.painter().text(body.center(), Align2::CENTER_CENTER, msg, FontId::proportional(13.0), style::dim(ui));
@@ -1107,13 +1396,6 @@ pub(super) fn show(ui: &mut Ui, rect: Rect, dt: &mut DiffTab, docs: &mut BTreeMa
         return out;
     }
     // ---- Geometrie
-    let (row_h, cw) = ui.fonts_mut(|f| (f.row_height(&cx.font), f.glyph_width(&cx.font, 'M')));
-    let cw = cw.max(1.0);
-    let unified = match dt.layout {
-        DiffLayout::Unified => true,
-        DiffLayout::Split => false,
-        DiffLayout::Auto => body.width() < AUTO_UNIFIED_W,
-    };
     dt.unified_shown = unified;
     let tab = [dt.left.doc(), dt.right.doc()].into_iter().flatten().find_map(|d| docs.get(&d).and_then(|e| e.doc.as_ref()).map(|x| x.tab_width())).unwrap_or(4).max(1);
     let digits = o.left.len().max(o.right.len()).max(1).to_string().len().max(3) as f32;
@@ -1179,6 +1461,10 @@ pub(super) fn show(ui: &mut Ui, rect: Rect, dt: &mut DiffTab, docs: &mut BTreeMa
     if out.focused {
         keyboard(ui, dt, docs, body, row_h, total, lang, cmds);
     }
+    let scroll_x = if wrap.is_some() { 0.0 } else { dt.scroll_x };
+    let geo = CaretGeo { body, cols, center, unified, wrap, tab, row_h, cw, scroll_x, hview };
+    dt.text_geo = Some(([cols[0].text, cols[1].text], body.top(), cw));
+    caret_mouse(ui, &resp, dt, docs, &geo);
     if ui.rect_contains_pointer(body) {
         let (dy, dx, shift) = ui.input(|i| (i.smooth_scroll_delta.y, i.smooth_scroll_delta.x, i.modifiers.shift));
         let (dy, dx) = if shift && dx == 0.0 { (0.0, dy) } else { (dy, dx) };
@@ -1195,6 +1481,7 @@ pub(super) fn show(ui: &mut Ui, rect: Rect, dt: &mut DiffTab, docs: &mut BTreeMa
     {
         dt.scroll_y = c.ys[i] - body.height() / 3.0;
     }
+    caret_reveal(dt, docs, &geo);
     dt.scroll_y = dt.scroll_y.clamp(0.0, (total - body.height() + row_h * 2.0).max(0.0));
     // ---- Zeilen
     let pal = super::text::code_palette(&u);
@@ -1243,6 +1530,11 @@ pub(super) fn show(ui: &mut Ui, rect: Rect, dt: &mut DiffTab, docs: &mut BTreeMa
     let left_editable = dt.left.doc().is_some_and(|d| docs.get(&d).is_some_and(|e| e.doc.is_some()));
     let right_editable = dt.right.doc().is_some_and(|d| docs.get(&d).is_some_and(|e| e.doc.is_some()));
     let scroll_x = if wrap.is_some() { 0.0 } else { dt.scroll_x };
+    // Cursor und Auswahl (#391); untereinander mit Cursor links zeigen gleiche Zeilen den linken Text.
+    let docs_r: &BTreeMap<u64, DocEntry> = docs;
+    let cp = caret_paint(dt, docs_r, ui, out.focused, &o);
+    let uni_left = unified && dt.unified_side(docs_r) == Some(true);
+    let mut caret_at: Option<Pos2> = None;
     for (i, y) in &visible {
         let y = *y;
         match &c.items[*i] {
@@ -1255,6 +1547,19 @@ pub(super) fn show(ui: &mut Ui, rect: Rect, dt: &mut DiffTab, docs: &mut BTreeMa
                 let label = format!("⋯ {n} {}", if n == 1 { lang.t("unveränderte Zeile", "unchanged line") } else { lang.t("unveränderte Zeilen", "unchanged lines") });
                 painter.text(Pos2::new(r.left() + 12.0, r.center().y), Align2::LEFT_CENTER, label, FontId::proportional(12.0), dim);
                 folds.push((r, a..b));
+                // Cursor in einem eingeklappten Bereich: am Anfang des Balkens (Tippen klappt ihn auf).
+                if let Some(cp) = &cp {
+                    let side = |x: &Row| if cp.left { x.left } else { x.right };
+                    if let (Some(fa), Some(fb)) = (side(&c.rows[rows.start]), side(&c.rows[rows.end - 1]))
+                        && (fa as usize..=fb as usize).contains(&cp.line)
+                    {
+                        let at = Pos2::new(r.left() + 5.0, r.center().y - row_h / 2.0);
+                        if cp.on {
+                            painter.rect_filled(Rect::from_min_size(at, Vec2::new(2.0, row_h)), 0.0, cp.color);
+                        }
+                        caret_at = Some(at);
+                    }
+                }
             }
             Item::Row(ri) => {
                 let row = c.rows[*ri];
@@ -1283,6 +1588,7 @@ pub(super) fn show(ui: &mut Ui, rect: Rect, dt: &mut DiffTab, docs: &mut BTreeMa
                     let (bg, sign, word, line, snap, spans, which) = match row.kind {
                         RowKind::Delete => (Some(u.diff_remove_bg), "−", u.diff_remove_word, row.left, &o.left, &spans_l, 0),
                         RowKind::Insert => (Some(u.diff_add_bg), "+", u.diff_add_word, row.right, &o.right, &spans_r, 1),
+                        _ if uni_left => (None, " ", Color32::TRANSPARENT, row.left, &o.left, &spans_l, 0),
                         _ => (None, " ", Color32::TRANSPARENT, row.right, &o.right, &spans_r, 1),
                     };
                     if let Some(bg) = bg {
@@ -1299,7 +1605,17 @@ pub(super) fn show(ui: &mut Ui, rect: Rect, dt: &mut DiffTab, docs: &mut BTreeMa
                         let ranges = intra.map(|p| p.as_ref().map(|(a, b)| if which == 0 { a.as_slice() } else { b.as_slice() }));
                         let tp = painter.with_clip_rect(col.text.intersect(body));
                         let spans = spans.as_ref().and_then(|s| s.get(&(ln as usize)).map(Vec::as_slice));
+                        let mine = cp.as_ref().filter(|cp| cp.left == (which == 0));
+                        let lw = LineGeo { area: col.text, y, h, wrap: wrap.map(|w| w.0), tab, cw, row_h, scroll_x };
+                        if let Some(cp) = mine {
+                            paint_selection(&tp, &lw, snap.line(ln as usize), ln as usize, cp);
+                        }
                         paint_text(&tp, col.text, y, snap.line(ln as usize), wrap.map(|w| w.0), tab, cw, row_h, scroll_x, fg, &cx.font, spans.zip(Some(&pal)), ranges.filter(|_| bg.is_some()), word);
+                        if let Some(cp) = mine
+                            && let Some(at) = paint_caret(&tp, &lw, snap.line(ln as usize), ln as usize, snap.len(), cp)
+                        {
+                            caret_at = Some(at);
+                        }
                     }
                     if current {
                         painter.rect_filled(Rect::from_min_size(Pos2::new(inner.left(), y), Vec2::new(3.0, h)), 0.0, style::accent());
@@ -1331,7 +1647,17 @@ pub(super) fn show(ui: &mut Ui, rect: Rect, dt: &mut DiffTab, docs: &mut BTreeMa
                                 let spans = spans.as_ref().and_then(|m| m.get(&(ln as usize)).map(Vec::as_slice));
                                 let tp = painter.with_clip_rect(col.text.intersect(body));
                                 let cols_w = wrap.map(|w| if s == 0 { w.0 } else { w.1 });
+                                let mine = cp.as_ref().filter(|cp| cp.left == (s == 0));
+                                let lw = LineGeo { area: col.text, y, h, wrap: cols_w, tab, cw, row_h, scroll_x };
+                                if let Some(cp) = mine {
+                                    paint_selection(&tp, &lw, snap.line(ln as usize), ln as usize, cp);
+                                }
                                 paint_text(&tp, col.text, y, snap.line(ln as usize), cols_w, tab, cw, row_h, scroll_x, fg, &cx.font, spans.zip(Some(&pal)), ranges.filter(|_| bg.is_some()), word);
+                                if let Some(cp) = mine
+                                    && let Some(at) = paint_caret(&tp, &lw, snap.line(ln as usize), ln as usize, snap.len(), cp)
+                                {
+                                    caret_at = Some(at);
+                                }
                             }
                         }
                     }
@@ -1346,6 +1672,13 @@ pub(super) fn show(ui: &mut Ui, rect: Rect, dt: &mut DiffTab, docs: &mut BTreeMa
                 }
             }
         }
+    }
+    if out.focused
+        && let Some(at) = caret_at
+    {
+        let cursor_rect = Rect::from_min_size(at, Vec2::new(1.0, row_h));
+        let to_global = ui.ctx().layer_transform_to_global(ui.layer_id()).unwrap_or_default();
+        ui.ctx().output_mut(|o| o.ime = Some(egui::output::IMEOutput { rect: to_global * body, cursor_rect: to_global * cursor_rect }));
     }
     // Trennlinie zwischen den Seiten
     if !unified {
@@ -1775,17 +2108,21 @@ fn scrollbar(ui: &mut Ui, track: Rect, dt: &mut DiffTab, total: f32, view_h: f32
 #[allow(clippy::too_many_arguments)]
 fn keyboard(ui: &mut Ui, dt: &mut DiffTab, docs: &mut BTreeMap<u64, DocEntry>, body: Rect, row_h: f32, total: f32, lang: Lang, cmds: &mut Vec<Cmd>) {
     let events = ui.input(|i| i.events.clone());
+    // Mit Cursor (#391) bewegen Pfeile, Bild auf/ab, Pos1/Ende den Cursor, Strg+Z/Y und Kopieren einer Auswahl gehen an
+    // `edit_keys`.
+    let caret = dt.caret.is_some();
+    let selected = dt.caret.as_ref().is_some_and(|c| !c.sels.primary().is_empty());
     for e in events {
         match e {
             egui::Event::Key { key, pressed: true, modifiers: m, .. } => {
                 let ctrl = m.ctrl || m.command;
                 match key {
-                    Key::ArrowDown if !m.alt => dt.scroll_y += row_h * 3.0,
-                    Key::ArrowUp if !m.alt => dt.scroll_y -= row_h * 3.0,
-                    Key::PageDown => dt.scroll_y += body.height() - row_h * 2.0,
-                    Key::PageUp => dt.scroll_y -= body.height() - row_h * 2.0,
-                    Key::Home if ctrl => dt.scroll_y = 0.0,
-                    Key::End if ctrl => dt.scroll_y = total,
+                    Key::ArrowDown if !m.alt && !caret => dt.scroll_y += row_h * 3.0,
+                    Key::ArrowUp if !m.alt && !caret => dt.scroll_y -= row_h * 3.0,
+                    Key::PageDown if !caret => dt.scroll_y += body.height() - row_h * 2.0,
+                    Key::PageUp if !caret => dt.scroll_y -= body.height() - row_h * 2.0,
+                    Key::Home if ctrl && !caret => dt.scroll_y = 0.0,
+                    Key::End if ctrl && !caret => dt.scroll_y = total,
                     // Nur Alt (AltGr meldet Strg+Alt und darf keine Blöcke übernehmen).
                     Key::ArrowLeft if m.alt && !ctrl => {
                         if let Some(k) = dt.current
@@ -1801,9 +2138,9 @@ fn keyboard(ui: &mut Ui, dt: &mut DiffTab, docs: &mut BTreeMap<u64, DocEntry>, b
                             cmds.push(Cmd::Hint(e));
                         }
                     }
-                    Key::ArrowLeft if !ctrl => dt.scroll_x = (dt.scroll_x - 40.0).max(0.0),
-                    Key::ArrowRight if !ctrl => dt.scroll_x += 40.0,
-                    Key::Z | Key::Y if ctrl => {
+                    Key::ArrowLeft if !ctrl && !caret => dt.scroll_x = (dt.scroll_x - 40.0).max(0.0),
+                    Key::ArrowRight if !ctrl && !caret => dt.scroll_x += 40.0,
+                    Key::Z | Key::Y if ctrl && !caret => {
                         let redo = key == Key::Y || m.shift;
                         if let Some(d) = dt.focused_doc().and_then(|d| docs.get_mut(&d)) {
                             if redo {
@@ -1817,7 +2154,7 @@ fn keyboard(ui: &mut Ui, dt: &mut DiffTab, docs: &mut BTreeMap<u64, DocEntry>, b
                     _ => {}
                 }
             }
-            egui::Event::Copy => {
+            egui::Event::Copy if !selected => {
                 if let Some(b) = dt.block_text() {
                     ui.ctx().copy_text(b);
                 }
@@ -1825,6 +2162,434 @@ fn keyboard(ui: &mut Ui, dt: &mut DiffTab, docs: &mut BTreeMap<u64, DocEntry>, b
             _ => {}
         }
     }
+}
+
+// ------------------------------------------------------------------------------------------------ Cursor (#391)
+
+/// Cursor mit dem Dokument abgleichen (Änderungen über andere Ansichten); ohne bearbeitbare Seite fällt er weg.
+fn sync_caret(dt: &mut DiffTab, docs: &BTreeMap<u64, DocEntry>) {
+    let Some(left) = dt.caret.as_ref().map(|c| c.left) else { return };
+    let doc = (if left { dt.left.doc() } else { dt.right.doc() }).and_then(|d| docs.get(&d)).and_then(|e| e.doc.as_ref());
+    match (doc, dt.caret.as_mut()) {
+        (Some(doc), Some(c)) => {
+            doc.sync(&mut c.sels);
+            if c.sels.is_multi() {
+                c.sels.collapse_to_primary();
+            }
+        }
+        _ => dt.caret = None,
+    }
+}
+
+/// Tippen und Bewegen in der Seite des Cursors: Text, Einfügen, Ausschneiden/Kopieren einer Auswahl, Rücktaste/Entf,
+/// Eingabe, Tab, Pfeile/Pos1/Ende/Bild (mit Umschalt markieren), Strg+A/Z/Y, Esc. Bearbeiten in einem eingeklappten
+/// Bereich klappt ihn auf. Mehrere Cursor gibt es hier nicht (Strg+D usw. bleiben ohne Wirkung). Liefert, ob sich der
+/// Text geändert hat. Ohne Cursor meldet Tippen in einer schreibgeschützten Seite einen Hinweis.
+#[allow(clippy::too_many_arguments)]
+fn edit_keys(ui: &mut Ui, dt: &mut DiffTab, docs: &mut BTreeMap<u64, DocEntry>, page: usize, row_h: f32, unified: bool, lang: Lang, cmds: &mut Vec<Cmd>) -> bool {
+    use super::text::{KeyAct, key_op, move_in_doc};
+    let events = ui.input(|i| i.events.clone());
+    let Some(mut caret) = dt.caret.take() else {
+        let typed = events.iter().any(|e| matches!(e, Event::Text(_) | Event::Paste(_)));
+        let side_left = if unified { dt.unified_side(docs) } else { Some(dt.focus_left) };
+        if typed && side_left.is_none_or(|l| !dt.editable(l, docs)) {
+            cmds.push(Cmd::Hint(lang.t("Diese Seite ist schreibgeschützt.", "This side is read-only.").to_string()));
+        }
+        return false;
+    };
+    let Some(id) = (if caret.left { dt.left.doc() } else { dt.right.doc() }) else { return false };
+    let Some(e) = docs.get_mut(&id) else { return false };
+    let Some(doc) = e.doc.as_mut() else { return false };
+    let tab = doc.tab_width().max(1);
+    let time = ui.input(|i| i.time);
+    let (mut edited, mut undone) = (false, false);
+    let mut scroll = 0i32;
+    for ev in events {
+        let mut moved = true;
+        let op = match ev {
+            Event::Text(t) => caret.preedit.is_empty().then_some(Op::Type(t)),
+            Event::Paste(t) => Some(Op::Paste(t)),
+            Event::Cut => (!caret.sels.primary().is_empty()).then_some(Op::Cut),
+            Event::Copy => {
+                if !caret.sels.primary().is_empty() {
+                    let (t, _) = super::doc::clip(doc, &mut caret.sels, false);
+                    ui.ctx().copy_text(if cfg!(windows) { t.replace('\n', "\r\n") } else { t });
+                }
+                moved = false;
+                None
+            }
+            Event::Ime(egui::ImeEvent::Preedit(t)) => {
+                caret.preedit = t;
+                None
+            }
+            Event::Ime(egui::ImeEvent::Commit(t)) => {
+                caret.preedit.clear();
+                (!t.is_empty()).then_some(Op::Type(t))
+            }
+            Event::Ime(egui::ImeEvent::Disabled) => {
+                caret.preedit.clear();
+                None
+            }
+            Event::Key { key, pressed: true, modifiers: m, .. } => {
+                let ctrl = m.ctrl || m.command;
+                if m.alt && !ctrl && matches!(key, Key::ArrowLeft | Key::ArrowRight) {
+                    // Blockpfeile (`keyboard`)
+                    moved = false;
+                    None
+                } else {
+                    match key_op(key, m, page) {
+                        Some(KeyAct::Op(Op::SelectNextOccurrence | Op::SelectAllOccurrences | Op::SoftUndo)) | None => {
+                            moved = false;
+                            None
+                        }
+                        Some(KeyAct::Op(op)) => Some(op),
+                        Some(KeyAct::Move(mv, extend)) => {
+                            move_in_doc(doc, &mut caret.sels, mv, extend, tab);
+                            None
+                        }
+                        Some(KeyAct::ScrollLines(n)) => {
+                            scroll += n;
+                            moved = false;
+                            None
+                        }
+                        Some(KeyAct::Escape) => {
+                            let mut p = caret.sels.primary();
+                            p.anchor = p.head;
+                            caret.sels.set_primary(p);
+                            None
+                        }
+                    }
+                }
+            }
+            _ => {
+                moved = false;
+                None
+            }
+        };
+        if let Some(op) = op {
+            let undo = matches!(op, Op::Undo | Op::Redo);
+            let changes = !matches!(op, Op::SelectAll | Op::SelectLine | Op::Undo | Op::Redo);
+            if changes {
+                // Alle betroffenen Zeilen aufklappen: die der Auswahl, beim Löschen und Verschieben auch die Nachbarn
+                // (Rücktaste am Zeilenanfang ändert die Zeile davor, Entf am Ende die danach).
+                let r = caret.sels.primary().range();
+                let len = doc.len_chars();
+                let (mut a, mut b) = (doc.char_to_line(r.start.min(len)), doc.char_to_line(r.end.min(len)));
+                if matches!(op, Op::Backspace(_) | Op::Delete(_) | Op::DeleteLine | Op::MoveLines(_) | Op::Cut) {
+                    a = a.saturating_sub(1);
+                    b = (b + 1).min(doc.len_lines().saturating_sub(1));
+                }
+                dt.unfold_lines(caret.left, a..=b);
+            }
+            if super::doc::run(doc, &mut caret.sels, op, tab) {
+                edited = true;
+                undone |= undo;
+            }
+        }
+        if moved {
+            caret.reveal = true;
+            caret.blink = time;
+        }
+    }
+    if caret.sels.is_multi() {
+        caret.sels.collapse_to_primary();
+    }
+    dt.scroll_y += scroll as f32 * row_h;
+    dt.focus_left = caret.left;
+    dt.caret = Some(caret);
+    if edited {
+        e.on_user_edit();
+        if undone {
+            // Rückgängig/Wiederholen wie bisher sofort neu vergleichen, Tippen erst nach der Pause.
+            dt.recompute_now();
+        }
+    }
+    edited
+}
+
+/// Geometrie für Cursor und Maus.
+struct CaretGeo {
+    body: Rect,
+    cols: [Col; 2],
+    center: Rect,
+    unified: bool,
+    wrap: Option<(usize, usize)>,
+    tab: usize,
+    row_h: f32,
+    cw: f32,
+    scroll_x: f32,
+    hview: f32,
+}
+
+impl CaretGeo {
+    fn text(&self, left: bool) -> Rect {
+        if self.unified || left { self.cols[0].text } else { self.cols[1].text }
+    }
+
+    fn wrap_cols(&self, left: bool) -> Option<usize> {
+        self.wrap.map(|w| if self.unified || left { w.0 } else { w.1 })
+    }
+}
+
+/// Bildschirmzeilen-Anfänge (Zeichenspalten) einer Zeile.
+fn starts_of(line: &str, wrap: Option<usize>, tab: usize) -> Vec<usize> {
+    match wrap {
+        Some(c) => wrap_starts(line, c, tab),
+        None => vec![0],
+    }
+}
+
+/// Zeichen-Position im Dokument der Seite unter dem Zeiger `p`. Füllzeilen: Ende der Zeile davor (sonst Anfang der
+/// nächsten). Eingeklappte Bereiche: `None`.
+fn pos_in_side(dt: &DiffTab, doc: &Document, left: bool, g: &CaretGeo, p: Pos2) -> Option<usize> {
+    let c = dt.cache.as_ref()?;
+    if c.items.is_empty() {
+        return Some(0);
+    }
+    let side = |r: &Row| if left { r.left } else { r.right };
+    let yy = (p.y - g.body.top() + dt.scroll_y).max(0.0);
+    let idx = c.ys.partition_point(|y| *y <= yy).saturating_sub(1).min(c.items.len() - 1);
+    let last = doc.len_lines().saturating_sub(1);
+    let Item::Row(ri) = &c.items[idx] else { return None };
+    let Some(ln) = side(&c.rows[*ri]) else {
+        // Füllzeile: zur nächsten echten Zeile der Seite (zuerst nach oben).
+        let line_of = |i: usize| match &c.items[i] {
+            Item::Row(r) => side(&c.rows[*r]).map(|l| (l as usize).min(last)),
+            Item::Fold { .. } => None,
+        };
+        if let Some(l) = (0..idx).rev().find_map(line_of) {
+            return Some(et::line_end(doc.rope(), l));
+        }
+        return Some((idx..c.items.len()).find_map(line_of).map_or(0, |l| doc.line_to_char(l)));
+    };
+    let ln = (ln as usize).min(last);
+    let line: String = et::line_slice(doc.rope(), ln).to_string();
+    let starts = starts_of(&line, g.wrap_cols(left), g.tab);
+    let row_top = g.body.top() + c.ys[idx] - dt.scroll_y;
+    let sub = (((p.y - row_top) / g.row_h).floor().max(0.0) as usize).min(starts.len() - 1);
+    let vstart = str_vcol(&line, starts[sub], g.tab);
+    let v = (((p.x - g.text(left).left() + g.scroll_x) / g.cw).round().max(0.0) as usize) + vstart;
+    let n = line.chars().count();
+    let end = starts.get(sub + 1).copied().unwrap_or(n);
+    let mut col = str_col_at(&line, v, g.tab).clamp(starts[sub], end);
+    // Am Umbruch: das letzte Zeichen der Bildschirmzeile gehört schon zur nächsten.
+    if col == end && end < n && col > starts[sub] {
+        col -= 1;
+    }
+    Some(doc.line_to_char(ln) + col)
+}
+
+/// Maus im Text (#391): Klick setzt den Cursor in einer bearbeitbaren Seite (Umschalt+Klick dehnt die Auswahl), Ziehen
+/// markiert. Ein Klick in eine schreibgeschützte Seite nimmt den Cursor weg (Pfeiltasten rollen dann wieder).
+fn caret_mouse(ui: &Ui, resp: &egui::Response, dt: &mut DiffTab, docs: &mut BTreeMap<u64, DocEntry>, g: &CaretGeo) {
+    let (pressed, down, pos, time, mods) = ui.input(|i| (i.pointer.primary_pressed(), i.pointer.primary_down(), i.pointer.interact_pos(), i.time, i.modifiers));
+    let Some(p) = pos else { return };
+    if pressed && resp.hovered() && g.body.contains(p) {
+        if dt.arrows.iter().any(|(r, ..)| r.contains(p)) || dt.folds.iter().any(|(r, _)| r.contains(p)) {
+            return;
+        }
+        let left = if g.unified {
+            match dt.unified_side(docs) {
+                Some(l) => l,
+                None => {
+                    dt.caret = None;
+                    return;
+                }
+            }
+        } else if p.x < g.center.left() {
+            true
+        } else if p.x > g.center.right() {
+            false
+        } else {
+            return;
+        };
+        if !dt.editable(left, docs) {
+            dt.caret = None;
+            return;
+        }
+        let Some(id) = (if left { dt.left.doc() } else { dt.right.doc() }) else { return };
+        let Some(doc) = docs.get_mut(&id).and_then(|e| e.doc.as_mut()) else { return };
+        let Some(pos) = pos_in_side(dt, doc, left, g, p) else { return };
+        doc.break_undo_group();
+        match dt.caret.as_mut() {
+            Some(c) if c.left == left && mods.shift => {
+                let mut s = c.sels.primary();
+                s.head = pos;
+                s.goal = None;
+                c.sels.replace(vec![s], 0);
+                c.drag = Some(s.anchor);
+                c.blink = time;
+            }
+            _ => {
+                let mut c = Caret::new(left, doc, pos, time);
+                c.drag = Some(pos);
+                dt.caret = Some(c);
+            }
+        }
+        dt.focus_left = left;
+        return;
+    }
+    if !down {
+        if let Some(c) = dt.caret.as_mut() {
+            c.drag = None;
+        }
+        return;
+    }
+    let Some((left, anchor)) = dt.caret.as_ref().and_then(|c| c.drag.map(|a| (c.left, a))) else { return };
+    // Ziehen über den Rand: rollen
+    if p.y < g.body.top() {
+        dt.scroll_y -= ((g.body.top() - p.y) * 0.3).clamp(1.0, g.row_h * 3.0);
+        ui.ctx().request_repaint();
+    } else if p.y > g.body.bottom() {
+        dt.scroll_y += ((p.y - g.body.bottom()) * 0.3).clamp(1.0, g.row_h * 3.0);
+        ui.ctx().request_repaint();
+    }
+    let Some(doc) = (if left { dt.left.doc() } else { dt.right.doc() }).and_then(|d| docs.get(&d)).and_then(|e| e.doc.as_ref()) else { return };
+    let q = Pos2::new(p.x, p.y.clamp(g.body.top(), g.body.bottom() - 1.0));
+    if let Some(pos) = pos_in_side(dt, doc, left, g, q)
+        && let Some(c) = dt.caret.as_mut()
+    {
+        c.sels.replace(vec![Selection::new(anchor, pos)], 0);
+    }
+}
+
+/// Nach Tastatur/Bearbeitung den Cursor in den sichtbaren Bereich holen (senkrecht und ohne Umbruch waagerecht).
+fn caret_reveal(dt: &mut DiffTab, docs: &BTreeMap<u64, DocEntry>, g: &CaretGeo) {
+    let Some(c) = dt.caret.as_mut() else { return };
+    if !std::mem::take(&mut c.reveal) {
+        return;
+    }
+    let left = c.left;
+    let head = c.sels.primary().head;
+    let Some(doc) = (if left { dt.left.doc() } else { dt.right.doc() }).and_then(|d| docs.get(&d)).and_then(|e| e.doc.as_ref()) else { return };
+    let Some(cache) = dt.cache.as_ref() else { return };
+    let lc = et::pos_to_linecol(doc.rope(), head.min(doc.len_chars()));
+    let side = |r: &Row| if left { r.left } else { r.right };
+    // Die leere Zeile nach dem letzten Zeilenende hat keine eigene Reihe: die der Zeile davor.
+    let n_side = cache.rows.iter().rev().find_map(|r| side(r)).map_or(0, |l| l as usize + 1);
+    let target = lc.line.min(n_side.saturating_sub(1));
+    let Some(idx) = cache.items.iter().position(|it| match it {
+        Item::Row(r) => side(&cache.rows[*r]).is_some_and(|l| l as usize == target),
+        Item::Fold { rows } => matches!((side(&cache.rows[rows.start]), side(&cache.rows[rows.end - 1])), (Some(a), Some(b)) if (a as usize..=b as usize).contains(&target)),
+    }) else {
+        return;
+    };
+    let line: String = et::line_slice(doc.rope(), lc.line).to_string();
+    let starts = starts_of(&line, g.wrap_cols(left), g.tab);
+    let sub = if matches!(cache.items[idx], Item::Row(_)) && target == lc.line { starts.iter().rposition(|s| *s <= lc.col).unwrap_or(0) } else { 0 };
+    let extra = if target < lc.line { cache.ys[idx + 1] - cache.ys[idx] } else { 0.0 };
+    let y = cache.ys[idx] + sub as f32 * g.row_h + extra;
+    let view_h = g.body.height();
+    if y < dt.scroll_y {
+        dt.scroll_y = y;
+    } else if y + g.row_h > dt.scroll_y + view_h {
+        dt.scroll_y = y + g.row_h - view_h;
+    }
+    if g.wrap.is_none() {
+        let x = str_vcol(&line, lc.col, g.tab) as f32 * g.cw;
+        let margin = g.cw * 2.0;
+        if x < dt.scroll_x + margin {
+            dt.scroll_x = (x - margin).max(0.0);
+        } else if x > dt.scroll_x + g.hview - margin {
+            dt.scroll_x = (x - g.hview + margin).clamp(0.0, dt.hmax.max(0.0));
+        }
+    }
+}
+
+/// Was für Cursor und Auswahl gezeichnet wird.
+struct CaretPaint<'a> {
+    left: bool,
+    doc: &'a Document,
+    sel: Selection,
+    line: usize,
+    col: usize,
+    on: bool,
+    color: Color32,
+    sel_bg: Color32,
+}
+
+fn caret_paint<'a>(dt: &DiffTab, docs: &'a BTreeMap<u64, DocEntry>, ui: &Ui, focused: bool, _o: &DiffOut) -> Option<CaretPaint<'a>> {
+    let c = dt.caret.as_ref()?;
+    let d = if c.left { dt.left.doc() } else { dt.right.doc() }?;
+    let doc = docs.get(&d)?.doc.as_ref()?;
+    let head = c.sels.primary().head.min(doc.len_chars());
+    let lc = et::pos_to_linecol(doc.rope(), head);
+    let on = !focused || {
+        let t = ui.input(|i| i.time) - c.blink;
+        if t <= 30.0 {
+            ui.ctx().request_repaint_after(Duration::from_millis(530));
+        }
+        t > 30.0 || ((t / 0.53) as u64).is_multiple_of(2)
+    };
+    let u = style::ui();
+    let color = if focused { u.focus } else { style::dim(ui).gamma_multiply(0.6) };
+    Some(CaretPaint { left: c.left, doc, sel: c.sels.primary(), line: lc.line, col: lc.col, on, color, sel_bg: u.selection_bg })
+}
+
+/// Lage einer gezeichneten Zeile.
+struct LineGeo {
+    area: Rect,
+    y: f32,
+    /// Höhe der Reihe (alle Bildschirmzeilen).
+    h: f32,
+    wrap: Option<usize>,
+    tab: usize,
+    cw: f32,
+    row_h: f32,
+    scroll_x: f32,
+}
+
+/// Auswahl in einer Zeile (unter dem Text).
+fn paint_selection(p: &egui::Painter, g: &LineGeo, line: &str, ln: usize, cp: &CaretPaint) {
+    let s = cp.sel;
+    if s.is_empty() || ln >= cp.doc.len_lines() {
+        return;
+    }
+    let base = cp.doc.line_to_char(ln);
+    let n = line.chars().count();
+    let (a, b) = (s.start(), s.end());
+    if b < base || a > base + n {
+        return;
+    }
+    let (ca, cb) = (a.saturating_sub(base).min(n), (b - base).min(n));
+    let starts = starts_of(line, g.wrap, g.tab);
+    for (r, &rs) in starts.iter().enumerate() {
+        let re = starts.get(r + 1).copied().unwrap_or(n);
+        let beyond = r + 1 == starts.len() && b > base + n;
+        let (x0c, x1c) = (ca.max(rs), cb.min(re));
+        if x1c < x0c || (x1c == x0c && !beyond) {
+            continue;
+        }
+        let vs = str_vcol(line, rs, g.tab);
+        let x = |col: usize| g.area.left() + (str_vcol(line, col, g.tab) - vs) as f32 * g.cw - g.scroll_x;
+        let mut x1 = x(x1c);
+        if beyond {
+            x1 += g.cw * 0.6;
+        }
+        let y = g.y + r as f32 * g.row_h;
+        p.rect_filled(Rect::from_min_max(Pos2::new(x(x0c), y), Pos2::new(x1, y + g.row_h)), 0.0, cp.sel_bg);
+    }
+}
+
+/// Cursor in einer Zeile; die leere Zeile nach dem letzten Zeilenende (`side_len` = Zeilen der Seite) steht unter der
+/// letzten. Liefert die Position (oben links), wenn er hier steht.
+fn paint_caret(p: &egui::Painter, g: &LineGeo, line: &str, ln: usize, side_len: usize, cp: &CaretPaint) -> Option<Pos2> {
+    let at = if cp.line == ln {
+        let n = line.chars().count();
+        let col = cp.col.min(n);
+        let starts = starts_of(line, g.wrap, g.tab);
+        let r = starts.iter().rposition(|s| *s <= col).unwrap_or(0);
+        let x = g.area.left() + (str_vcol(line, col, g.tab) - str_vcol(line, starts[r], g.tab)) as f32 * g.cw - g.scroll_x - 1.0;
+        Pos2::new(x, g.y + r as f32 * g.row_h)
+    } else if cp.line == side_len && ln + 1 == side_len {
+        Pos2::new(g.area.left() - g.scroll_x - 1.0, g.y + g.h)
+    } else {
+        return None;
+    };
+    if cp.on {
+        p.rect_filled(Rect::from_min_size(at, Vec2::new(2.0, g.row_h)), 0.0, cp.color);
+    }
+    Some(at)
 }
 
 /// Sprache und Modus für die Syntaxfarben einer Seite: ein Dokument hat seine eigenen; ein fester Text nimmt die
@@ -1840,12 +2605,12 @@ fn side_highlight(side: &mut Side, docs: &mut BTreeMap<u64, DocEntry>, prefs: &s
         Side::Text(s) => {
             let lang = match other.and_then(|o| docs.get_mut(&o)) {
                 Some(e) => {
-                    let on = e.mode(prefs) == crate::editor::syntax::Mode::Syntax && !e.is_large(prefs);
+                    let on = e.mode(prefs).colours() && !e.is_large(prefs);
                     if on { e.language(prefs) } else { None }
                 }
                 None => {
                     let l = crate::editor::syntax::detect(s.path(), "", "", &prefs.syntax.user_map);
-                    l.filter(|l| prefs.syntax.mode_for(Some(l)) == crate::editor::syntax::Mode::Syntax)
+                    l.filter(|l| prefs.syntax.mode_for(Some(l)).colours())
                 }
             }?;
             if !crate::editor::syntax::engine::has_grammar(&lang) || s.binary || s.raw_len > prefs.large_file_bytes {
@@ -1889,6 +2654,16 @@ fn prepare_hl(lang: Option<String>, side: &mut Side, docs: &mut BTreeMap<u64, Do
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Große Seiten bilden den vorläufigen Stand gedrosselt, kleine bei jedem Tastendruck.
+    #[test]
+    fn live_update_is_throttled_for_big_sides() {
+        let now = Instant::now();
+        assert!(live_due(10, Some(now), now), "klein: immer");
+        assert!(live_due(LIVE_BIG_BYTES + 1, None, now), "groß: der erste sofort");
+        assert!(!live_due(LIVE_BIG_BYTES + 1, Some(now), now + Duration::from_millis(100)));
+        assert!(live_due(LIVE_BIG_BYTES + 1, Some(now), now + LIVE_BIG_EVERY));
+    }
 
     #[test]
     fn snapshots_split_lines_like_the_core() {

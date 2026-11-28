@@ -10,7 +10,7 @@ use std::io::{BufRead, Write};
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-/// Berechtigungsstufe der Agenten-Schnittstelle (Einstellungen → Agenten).
+/// Berechtigungsstufe der Agenten-Schnittstelle (Einstellungen → Agenten → Zugriff).
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Debug, Default)]
 pub enum McpLevel {
     /// Keine Verbindung (Standard).
@@ -98,13 +98,13 @@ pub fn check_access(tool: &str, level: McpLevel, expert: bool) -> Result<(), (St
     use crate::state::t;
     let e = |code: &str, msg: &str| Err((code.to_string(), msg.to_string()));
     if level == McpLevel::Off {
-        return e("mcp_disabled", t("Die Agenten-Schnittstelle ist in Paneldeck ausgeschaltet (Einstellungen → Agenten).", "The agent interface is switched off in Paneldeck (Settings → Agents)."));
+        return e("mcp_disabled", t("Die Agenten-Schnittstelle ist in Paneldeck ausgeschaltet (Einstellungen → Agenten → Zugriff).", "The agent interface is switched off in Paneldeck (Settings → Agents → Access)."));
     }
     let Some(def) = tools().into_iter().find(|d| d.name == tool) else {
         return e("not_found", t("Unbekanntes Werkzeug", "Unknown tool"));
     };
     if def.level > level {
-        return e("forbidden", t("Die Stufe „Nur lesen“ erlaubt dieses Werkzeug nicht (Einstellungen → Agenten → Steuern).", "The “Read only” level does not allow this tool (Settings → Agents → Control)."));
+        return e("forbidden", t("Die Stufe „Nur lesen“ erlaubt dieses Werkzeug nicht (Einstellungen → Agenten → Zugriff → Steuern).", "The “Read only” level does not allow this tool (Settings → Agents → Access → Control)."));
     }
     if !def.group.available(expert) {
         return match def.group {
@@ -243,7 +243,7 @@ pub fn tools() -> Vec<ToolDef> {
             name: "create_session",
             level: Control,
             group: Group::Always,
-            description: "Create a new terminal session (does not steal focus unless `placement` is given; with `placement` the new session is shown like focus_session does). Optionally start Claude Code in it, with the validated start options model/effort/permission_mode/agent (only with claude=true; omitted options use the user's defaults from Settings -> Claude; without any permission mode the session gets an explicit permission_mode default, so the user's own Claude settings cannot turn on bypassPermissions; permission_mode bypassPermissions is never allowed), plus claude_flags: switches without a value and without effect on rights, access or hooks (chrome, no-chrome, ide, verbose, brief, restricted, disable-slash-commands; added to the user's default switches; chrome is refused when the user turned Chrome off by default). No other arguments are possible: flags that widen rights or access, turn off hooks or that Paneldeck controls (--add-dir, --plugin-dir, --allowed-tools, --mcp-config, --strict-mcp-config, --system-prompt, --safe-mode, --settings, --dangerously-*, --resume, --print, ...) and value options such as add_dir, plugin_dir, mcp_config(s), system_prompt or append_system_prompt return bad_args - only the user can set value options in Paneldeck, and the ones that widen access (folders, plugin folders, allowed tools, MCP configs) as well as a replaced system prompt, --strict-mcp-config and --safe-mode never apply to sessions an agent creates. Administrator profiles are not allowed. With kind=\"chat\" a chat is created instead; it talks to a local model on an LLM server the user configured in Paneldeck (Settings -> Models; see list_models; `server` and `model` default to the model the user chose last, else the first one; shell/claude/prompt/effort/permission_mode/agent/claude_flags are not allowed then). Without `group`, a session created by an agent that runs in a Paneldeck terminal is placed in a sub-folder named after that session (tree view), so children are easy to find; the creating agent can control and close them. With `template` the session starts from a terminal template of the user's template library (its profile, shell, folder, tree folder, colour, tags, notes, Claude on/off with its start options and start prompt); parameters given in the call override the template, the template's claude_flags are added to yours like the user's default switches, a repeated start gets a counter in the name (API, API #2, API #3 ...). Without `group`, the template's tree folder is placed under your children's sub-folder (e.g. \"My session/Backend\"). The agent rules above also apply to templates: administrator profiles are refused (admin_profile), profiles with their own program, arguments or startup command are refused with bad_args unless it is the project's default profile (and always when they contain \"dangerously\" or \"bypassPermissions\"), and the template's extra folders, plugin folders, allowed tools, MCP configs, --strict-mcp-config, system prompt, appended system prompt, --safe-mode, bypassPermissions and \"continue the last conversation\" are never used; the result field template_ignored lists the ones that were left out (also \"env:NAME\").",
+            description: "Create a new terminal session (does not steal focus unless `placement` is given; with `placement` the new session is shown like focus_session does). Optionally start Claude Code in it, with the validated start options model/effort/permission_mode/agent (only with claude=true; omitted options use the user's defaults from Settings -> Claude; without any permission mode the session gets an explicit permission_mode default, so the user's own Claude settings cannot turn on bypassPermissions; permission_mode bypassPermissions is never allowed), plus claude_flags: switches without a value and without effect on rights, access or hooks (chrome, no-chrome, ide, verbose, brief, restricted, disable-slash-commands; added to the user's default switches; chrome is refused when the user turned Chrome off by default). No other arguments are possible: flags that widen rights or access, turn off hooks or that Paneldeck controls (--add-dir, --plugin-dir, --allowed-tools, --mcp-config, --strict-mcp-config, --system-prompt, --safe-mode, --settings, --dangerously-*, --resume, --print, ...) and value options such as add_dir, plugin_dir, mcp_config(s), system_prompt or append_system_prompt return bad_args - only the user can set value options in Paneldeck, and the ones that widen access (folders, plugin folders, allowed tools, MCP configs) as well as a replaced system prompt, --strict-mcp-config and --safe-mode never apply to sessions an agent creates. Administrator profiles are not allowed. With kind=\"chat\" a chat is created instead; it talks to a local model on an LLM server the user configured in Paneldeck (Settings -> Models -> Servers & models; see list_models; `server` and `model` default to the model the user chose last, else the first one; shell/claude/prompt/effort/permission_mode/agent/claude_flags are not allowed then). Without `group`, a session created by an agent that runs in a Paneldeck terminal is placed in a sub-folder named after that session (tree view), so children are easy to find; the creating agent can control and close them. With `template` the session starts from a terminal template of the user's template library (its profile, shell, folder, tree folder, colour, tags, notes, Claude on/off with its start options and start prompt); parameters given in the call override the template, the template's claude_flags are added to yours like the user's default switches, a repeated start gets a counter in the name (API, API #2, API #3 ...). Without `group`, the template's tree folder is placed under your children's sub-folder (e.g. \"My session/Backend\"). The agent rules above also apply to templates: administrator profiles are refused (admin_profile), profiles with their own program, arguments or startup command are refused with bad_args unless it is the project's default profile (and always when they contain \"dangerously\" or \"bypassPermissions\"), and the template's extra folders, plugin folders, allowed tools, MCP configs, --strict-mcp-config, system prompt, appended system prompt, --safe-mode, bypassPermissions and \"continue the last conversation\" are never used; the result field template_ignored lists the ones that were left out (also \"env:NAME\").",
             schema: schema(
                 json!({
                     "kind": {"type": "string", "enum": ["terminal", "chat"], "description": "Default terminal"},
@@ -348,14 +348,14 @@ pub fn tools() -> Vec<ToolDef> {
             name: "list_models",
             level: Read,
             group: Group::Always,
-            description: "List the LLM servers configured in Paneldeck (Settings -> Models) for chats: id, name, kind (ollama/openai), host:port, and their models with the tool level the user allows the model (Off/Read/Control; level_chosen = false means the user has not decided yet - the first message to such a chat makes Paneldeck ask the user, send_chat_message then returns permission_pending), whether it can call tools, and `last_used` for the model chosen last. Use the names with create_session kind=chat. API keys are never returned.",
+            description: "List the LLM servers configured in Paneldeck (Settings -> Models -> Servers & models) for chats: id, name, kind (ollama/openai), host:port, and their models with the tool level the user allows the model (Off/Read/Control; level_chosen = false means the user has not decided yet - the first message to such a chat makes Paneldeck ask the user, send_chat_message then returns permission_pending), whether it can call tools, and `last_used` for the model chosen last. Use the names with create_session kind=chat. API keys are never returned.",
             schema: schema(json!({}), &[]),
         },
         ToolDef {
             name: "cleanup_sizes",
             level: Read,
             group: Group::Always,
-            description: "Read-only overview of what Paneldeck's data uses, as shown in its Clean up window (Settings -> Data -> Clean up): per area an id (e.g. db_backups, clipboard_images, scrollback_orphaned, chats_all, mcp_log, database, sessions_layout, autostart, claude_json, factory_reset), its group (space/history/content/settings/integration/everything), bytes, files and entries (registry/JSON/settings entries), whether the window preselects it, needs typed confirmation or a restart; the total of the data folder; and the number, size and running count of other profiles. Never returns paths or names. There is no tool to delete anything: only the user can clean up, in the Paneldeck window.",
+            description: "Read-only overview of what Paneldeck's data uses, as shown in its Clean up window (Settings -> Data & backup -> Care & clean-up -> Clean up): per area an id (e.g. db_backups, clipboard_images, scrollback_orphaned, chats_all, mcp_log, database, sessions_layout, autostart, claude_json, factory_reset), its group (space/history/content/settings/integration/everything), bytes, files and entries (registry/JSON/settings entries), whether the window preselects it, needs typed confirmation or a restart; the total of the data folder; and the number, size and running count of other profiles. Never returns paths or names. There is no tool to delete anything: only the user can clean up, in the Paneldeck window.",
             schema: schema(json!({}), &[]),
         },
         // ---- Prozessliste (#243): Entwicklungsserver und Watcher; Einträge legt nur der Nutzer an
@@ -628,19 +628,19 @@ pub fn tools() -> Vec<ToolDef> {
             description: "Expert mode: link a ticket to a terminal session (stored as session:<id>) so the user sees which session works on it. Without `session` your own session is linked (see whoami); otherwise only a session you created yourself. This only records the link - it never types into a terminal.",
             schema: schema(json!({"ticket": ticket.clone(), "session": {"type": "integer", "description": "Session id; default: your own session"}}), &["ticket"]),
         },
-        // ---- #386 (3.2.0): Projekte anlegen, Papierkorb, eigene Kommentare (Schalter in Einstellungen → Agenten)
+        // ---- #386 (3.2.0): Projekte anlegen, Papierkorb, eigene Kommentare (Schalter in Einstellungen → Agenten → Zugriff)
         ToolDef {
             name: "create_project",
             level: Control,
             group: Group::Expert,
-            description: "Expert mode: create a ticket project (key 2-10 letters/digits, name). Only when the user allowed it (Settings -> Agents -> \"Agents may create projects\", else forbidden) and only for an agent running in a Paneldeck session with Control in that session's project: the new project is linked to that project and follows its access level. Sidebar projects are created only by the user; agents never delete projects.",
+            description: "Expert mode: create a ticket project (key 2-10 letters/digits, name). Only when the user allowed it (Settings -> Agents -> Access -> \"Create projects\", else forbidden) and only for an agent running in a Paneldeck session with Control in that session's project: the new project is linked to that project and follows its access level. Sidebar projects are created only by the user; agents never delete projects.",
             schema: schema(json!({"key": {"type": "string", "description": "Project key, e.g. API (2-10 characters)"}, "name": {"type": "string"}, "description": {"type": "string"}, "color": {"type": "string", "description": "#RRGGBB"}}), &["key", "name"]),
         },
         ToolDef {
             name: "delete_ticket",
             level: Control,
             group: Group::Expert,
-            description: "Expert mode: move a ticket to the trash. Only when the user allowed it (Settings -> Agents -> \"Agents may delete tickets/comments\", else forbidden) and with Control in the ticket's project. The ticket disappears from all lists; only the user can restore it or delete it permanently.",
+            description: "Expert mode: move a ticket to the trash. Only when the user allowed it (Settings -> Agents -> Access -> \"Delete\", else forbidden) and with Control in the ticket's project. The ticket disappears from all lists; only the user can restore it or delete it permanently.",
             schema: schema(json!({"ticket": ticket.clone()}), &["ticket"]),
         },
         ToolDef {
@@ -654,7 +654,7 @@ pub fn tools() -> Vec<ToolDef> {
             name: "delete_comment",
             level: Control,
             group: Group::Expert,
-            description: "Expert mode: move a comment written by an agent (origin agent) to the trash. Only when the user allowed it (Settings -> Agents -> \"Agents may delete tickets/comments\", else forbidden). Comments of the user cannot be deleted (forbidden); only the user can restore or permanently delete trashed comments.",
+            description: "Expert mode: move a comment written by an agent (origin agent) to the trash. Only when the user allowed it (Settings -> Agents -> Access -> \"Delete\", else forbidden). Comments of the user cannot be deleted (forbidden); only the user can restore or permanently delete trashed comments.",
             schema: schema(json!({"comment": {"type": "integer", "description": "Comment id from get_ticket"}}), &["comment"]),
         },
     ]
@@ -686,8 +686,8 @@ pub fn check_call_level(name: &str, args: &Value, level: McpLevel) -> Result<(),
         Some(l) if l > level => Err((
             "forbidden".to_string(),
             crate::state::t(
-                "Die Stufe „Nur lesen“ erlaubt nur op = validate (Einstellungen → Agenten → Steuern).",
-                "The “Read only” level only allows op = validate (Settings → Agents → Control).",
+                "Die Stufe „Nur lesen“ erlaubt nur op = validate (Einstellungen → Agenten → Zugriff → Steuern).",
+                "The “Read only” level only allows op = validate (Settings → Agents → Access → Control).",
             )
             .to_string(),
         )),

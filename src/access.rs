@@ -268,9 +268,9 @@ pub struct AgentView {
     pub home: Option<u64>,
     /// Stufe im Heimatprojekt.
     pub home_level: McpLevel,
-    /// Schalter „Agenten dürfen Projekte anlegen“.
+    /// Schalter „Projekte anlegen“.
     pub may_create_projects: bool,
-    /// Schalter „Agenten dürfen Tickets/Kommentare löschen“ (in den Papierkorb).
+    /// Schalter „Löschen“ (in den Papierkorb).
     pub may_delete: bool,
     /// Sitzungen, die der Agent sieht (Review 3.2.0: Terminal-Verknüpfungen nennen nur diese); `None` = keine Grenze
     /// (Tests, interne Aufrufe). Die App setzt sie immer.
@@ -325,8 +325,8 @@ pub fn locked_error() -> (String, String) {
     (
         LOCKED_CODE.to_string(),
         crate::state::t(
-            "Dieses Projekt ist für Agenten gesperrt (Einstellungen → Agenten → Zugriff je Projekt). Nur der Nutzer kann es freigeben.",
-            "This project is locked for agents (Settings → Agents → access per project). Only the user can release it.",
+            "Dieses Projekt ist für Agenten gesperrt (Einstellungen → Agenten → Zugriff → Zugriff je Projekt). Nur der Nutzer kann es freigeben.",
+            "This project is locked for agents (Settings → Agents → Access → Access per project). Only the user can release it.",
         )
         .to_string(),
     )
@@ -336,15 +336,15 @@ pub fn too_low_error() -> (String, String) {
     (
         "forbidden".to_string(),
         crate::state::t(
-            "Die Stufe dieses Projekts erlaubt das nicht (nur lesen) – der Nutzer kann sie in Paneldeck ändern (Einstellungen → Agenten).",
-            "The level of this project does not allow this (read only) – the user can change it in Paneldeck (Settings → Agents).",
+            "Die Stufe dieses Projekts erlaubt das nicht (nur lesen) – der Nutzer kann sie in Paneldeck ändern (Einstellungen → Agenten → Zugriff).",
+            "The level of this project does not allow this (read only) – the user can change it in Paneldeck (Settings → Agents → Access).",
         )
         .to_string(),
     )
 }
 
 /// Schalter der Einstellungen (#386) für die Chats, je Bild vom UI-Thread veröffentlicht (wie die Editor-Schalter):
-/// Bit [`SW_CREATE`] = „Agenten dürfen Projekte anlegen“, Bit [`SW_DELETE`] = „… Tickets/Kommentare löschen“.
+/// Bit [`SW_CREATE`] = „Projekte anlegen“, Bit [`SW_DELETE`] = „… Tickets/Kommentare löschen“.
 pub static AGENT_SWITCHES: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
 pub const SW_CREATE: u8 = 1;
 pub const SW_DELETE: u8 = 2;

@@ -2,7 +2,6 @@
 //! Die Daten liegen in `crate::tasks` (SQLite), die Historie in `crate::undo`; hier steht nur die Oberfläche.
 
 use super::*;
-use crate::state::UNDO_STEP_CHOICES;
 use crate::tasks::{self, Item, ItemFilter, Tag, TaskError, TaskOp};
 use crate::undo::History;
 use super::planning_ui::due_ui;
@@ -1672,26 +1671,6 @@ impl App {
         }
         let c = if self.mode == titlebar::Mode::Tasks { self.plan.accent() } else { None };
         style::set_accent(c.unwrap_or(style::brand()));
-    }
-
-    /// Auswahl „Änderungshistorie“ im Tab „Daten & Sicherung“.
-    pub(super) fn undo_steps_ui(&mut self, ui: &mut Ui) {
-        let lang = self.settings.language;
-        let dim = style::dim(ui);
-        ui.label(RichText::new(lang.t("Änderungshistorie (Rückgängig)", "Undo history")).strong());
-        ui.label(RichText::new(lang.t(
-            "Wie viele Änderungen der Todo-Liste sich mit Strg+Z zurücknehmen lassen. Die Historie gilt für die laufende Sitzung; Löschen bleibt endgültig.",
-            "How many changes to the to-do list Ctrl+Z can take back. The history lasts for the running session; deleting is final.",
-        )).small().color(dim));
-        ui.add_space(S1);
-        ui.horizontal(|ui| {
-            ui.label(lang.t("Schritte:", "Steps:"));
-            egui::ComboBox::from_id_salt("undo_steps").selected_text(self.settings.undo_steps.to_string()).width(80.0).show_ui(ui, |ui| {
-                for n in UNDO_STEP_CHOICES {
-                    ui.selectable_value(&mut self.settings.undo_steps, n, n.to_string());
-                }
-            });
-        });
     }
 }
 

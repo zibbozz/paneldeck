@@ -1,5 +1,5 @@
 //! Reiter der Sitzungsdialoge (#292): *Allgemein* | *Claude* | *Zugriff* | *Erweitert* | *Umgebung* (#384) – im Dialog „Neue Sitzung“, in
-//! den Einstellungen der Sitzung, im Vorlagen-Editor und (ohne *Allgemein*) unter Einstellungen → Claude → Standards.
+//! den Einstellungen der Sitzung, im Vorlagen-Editor und (ohne *Allgemein*) unter Einstellungen → Claude → Neue Sitzungen.
 //!
 //! - Alle Reiter haben dieselbe feste Höhe ([`body`]); nur auf sehr kleinen Bildschirmen scrollt der Inhalt (#241:
 //!   Erstellen/Abbrechen bleiben sichtbar).
@@ -55,9 +55,6 @@ pub(super) fn session_tabs_env(claude: bool, env: bool) -> Vec<Tab> {
     }
     v
 }
-
-/// Reiter der Standards (Einstellungen → Claude).
-pub(super) const DEFAULTS_TABS: [Tab; 3] = [Tab::Claude, Tab::Access, Tab::Advanced];
 
 /// Markierung eines Reiters.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -292,7 +289,7 @@ pub(super) fn overflowed(ctx: &egui::Context, salt: &str) -> bool {
 /// Knopf „Auf Standards zurücksetzen“ eines Reiters.
 pub(super) fn reset_button(ui: &mut Ui, lang: Lang, enabled: bool) -> bool {
     ui.add_enabled(enabled, egui::Button::new(lang.t("Auf Standards zurücksetzen", "Reset to defaults")).small())
-        .on_hover_text(lang.t("Setzt die Werte dieses Reiters auf deine Claude-Standards zurück (Einstellungen → Claude).", "Resets this tab's values to your Claude defaults (Settings → Claude)."))
+        .on_hover_text(lang.t("Setzt die Werte dieses Reiters auf deine Claude-Standards zurück (Einstellungen → Claude → Neue Sitzungen).", "Resets this tab's values to your Claude defaults (Settings → Claude → New sessions)."))
         .clicked()
 }
 

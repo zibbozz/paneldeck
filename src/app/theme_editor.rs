@@ -1,4 +1,4 @@
-//! Theme-Editor und Verwaltung eigener Themes (#309): *Einstellungen → Darstellung* (Bearbeiten, Als Kopie bearbeiten,
+//! Theme-Editor und Verwaltung eigener Themes (#309): *Einstellungen → Darstellung → Theme* (Bearbeiten, Als Kopie bearbeiten,
 //! Neu, Umbenennen, Duplizieren, Löschen, Im Explorer zeigen, Import/Export) und das Editor-Fenster mit Farbliste links
 //! (Gruppen, Suche, Markierung geänderter Werte, Zurücksetzen auf abgeleitet), Vorschau rechts (echte Bedienelemente)
 //! und Design-Prüfung unten. Die App ändert sich erst nach „Speichern“.
@@ -29,6 +29,14 @@ pub(super) struct ThemeUi {
     /// Laufende Datei-Arbeit (Import, Duplizieren, Export mit Bildern, #387) im Hintergrund; währenddessen sind diese
     /// Aktionen gesperrt.
     job: Option<JobSlot>,
+}
+
+impl ThemeUi {
+    /// Ist ein Fenster der Theme-Verwaltung offen (Editor, Umbenennen, Löschen)? Öffnet die Seite *Darstellung › Theme*
+    /// eines, kommt der Hub vor das Einstellungsfenster (#395).
+    pub(super) fn any_open(&self) -> bool {
+        self.editor.is_some() || self.rename.is_some() || self.delete_ask.is_some()
+    }
 }
 
 /// Ergebnis einer Datei-Arbeit im Hintergrund.
@@ -531,14 +539,18 @@ impl App {
         }
     }
 
-    /// Zeile unter der Theme-Wahl (*Einstellungen → Darstellung*): Bearbeiten, Neu, weitere Aktionen; ungültige Dateien.
+    /// Zeile unter der Theme-Wahl (*Einstellungen → Darstellung → Theme*): Bearbeiten, Neu, weitere Aktionen; ungültige Dateien.
     pub(super) fn theme_manage_ui(&mut self, ui: &mut Ui) {
         let lang = self.settings.language;
         let cur = self.themes.iter().find(|t| t.name == self.settings.theme).or(self.themes.first()).cloned();
         let Some(cur) = cur else { return };
         let editing = self.theme_ui.editor.is_some();
+        // Unter dem Bedienelement der Zeile „Theme“ (Spalte wie in `settings_items::srow`); beim Umbruch bleibt
+        // auch die zweite Zeile in dieser Spalte statt am linken Rand.
+        let indent = super::settings_items::label_width(ui.available_width()) + style::S3;
+        ui.horizontal(|ui| {
+        ui.add_space(indent - ui.spacing().item_spacing.x);
         ui.horizontal_wrapped(|ui| {
-            ui.add_space(248.0);
             let (label, tip) = if cur.builtin {
                 (lang.t("Als Kopie bearbeiten …", "Edit as copy …"), lang.t("Eingebaute Themes sind schreibgeschützt; bearbeitet wird eine Kopie.", "Built-in themes are read-only; you edit a copy."))
             } else {
@@ -585,6 +597,7 @@ impl App {
                     }
                 }
             });
+        });
         });
         if !self.theme_issues.is_empty() {
             ui.add_space(4.0);

@@ -860,8 +860,8 @@ impl ChatState {
         self.context_pause = true;
         self.pause(Some(
             state::t(
-                "Die Werkzeug-Ergebnisse passen nicht mehr in den Kontext des Modells – Kontextlänge in Einstellungen → Modelle erhöhen.",
-                "The tool results no longer fit into the model's context – raise the context length in Settings → Models.",
+                "Die Werkzeug-Ergebnisse passen nicht mehr in den Kontext des Modells – Kontextlänge in Einstellungen → Modelle → Server & Modelle erhöhen.",
+                "The tool results no longer fit into the model's context – raise the context length in Settings → Models → Servers & models.",
             )
             .to_string(),
         ));
@@ -2065,7 +2065,7 @@ mod tests {
         c.send(&tiny, &ChatMeta::default(), &TurnContext::default(), Arc::new(|| {}));
         assert!(drive(&mut c, &tiny, &p, &|_| panic!("ohne Platz läuft nichts")).is_empty());
         assert!(c.paused && !c.busy());
-        assert_eq!(c.pause_note.as_deref(), Some("The tool results no longer fit into the model's context – raise the context length in Settings → Models."));
+        assert_eq!(c.pause_note.as_deref(), Some("The tool results no longer fit into the model's context – raise the context length in Settings → Models → Servers & models."));
         assert_eq!(c.steps, 0, "nicht ausgeführt, nicht gezählt");
         let mut saved = c.file_for_save().into_owned().messages;
         assert_eq!(logic::close_orphans(&mut saved, tools::interrupted), 0);

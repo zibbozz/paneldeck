@@ -639,7 +639,7 @@ pub fn fetch_with(args: &Value, env: &AgentEnv, t: &dyn WebTransport) -> Result<
 
 /// Ist ein Suchdienst eingerichtet? `Err` = Hinweis für das Modell.
 pub fn search_ready(s: &AgentToolSettings) -> Result<(), String> {
-    let setup = "the user can set up a search service (own SearXNG, or an own Brave or Tavily API key) in Settings → Models → Agent tools";
+    let setup = "the user can set up a search service (own SearXNG, or an own Brave or Tavily API key) in Settings → Models → Tools in chats";
     match s.search {
         SearchProvider::Off => Err(format!("web_search is not set up: {setup}.")),
         SearchProvider::Searxng if s.searxng_url.trim().is_empty() => Err(format!("web_search has no SearXNG address: {setup}.")),
@@ -682,11 +682,11 @@ pub fn search_with(args: &Value, env: &AgentEnv, key: Option<&str>, t: &dyn WebT
     if let Some(k) = key
         && !crate::llm::http::bearer_ok(k)
     {
-        return Err(err("search_key", "The search API key contains invalid characters – enter it again in the settings."));
+        return Err(err("search_key", "The search API key contains invalid characters – enter it again in Settings → Models → Tools in chats."));
     }
     let (provider, resp) = match env.settings.search {
         SearchProvider::Searxng => {
-            let base = parse_url(env.settings.searxng_url.trim().trim_end_matches('/'), false).map_err(|e| err("search_setup", format!("The SearXNG address in the settings is invalid: {e}.")))?;
+            let base = parse_url(env.settings.searxng_url.trim().trim_end_matches('/'), false).map_err(|e| err("search_setup", format!("The SearXNG address (Settings → Models → Tools in chats) is invalid: {e}.")))?;
             let path = base.target.trim_end_matches('/');
             let url = WebUrl { target: format!("{path}/search?q={}&format=json&safesearch=1", encode_query(q)), ..base };
             ("searxng", t.send(&WebReq { method: "GET", url: &url, headers: vec![("Accept".into(), "application/json".into())], body: None, rule: HostRule::Any, max: MAX_DOWNLOAD }))
@@ -708,7 +708,7 @@ pub fn search_with(args: &Value, env: &AgentEnv, key: Option<&str>, t: &dyn WebT
     if !(200..300).contains(&resp.status) {
         let hint = match (provider, resp.status) {
             ("searxng", 403) => " SearXNG must allow the json format (search.formats in its settings.yml).",
-            (_, 401 | 403) => " Check the API key in the settings.",
+            (_, 401 | 403) => " Check the API key in Settings → Models → Tools in chats.",
             (_, 429) => " The rate limit of the search service was reached; try again later.",
             _ => "",
         };

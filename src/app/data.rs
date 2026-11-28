@@ -61,114 +61,111 @@ impl App {
         if bytes >= 1 << 20 { format!("{:.1} MB", bytes as f64 / (1u64 << 20) as f64) } else { format!("{} KB", (bytes + 1023) / 1024) }
     }
 
-    /// Inhalt des Tabs „Daten & Sicherung“.
-    pub(super) fn data_settings_ui(&mut self, ui: &mut Ui) {
-        let lang = self.settings.language;
-        let dim = style::dim(ui);
+    /// *Einstellungen → Daten & Sicherung → Sicherung*.
+    pub(super) fn data_backup_page(&mut self, ui: &mut Ui, cx: &super::settings_items::RowCx) {
+        use super::settings_items::{note, srow};
+        let lang = cx.lang;
         if let Some(e) = &self.db_error {
             ui.colored_label(Color32::LIGHT_RED, e);
             ui.add_space(S2);
         }
         let top = ui.cursor().min.y;
-        ui.label(RichText::new(lang.t("Datenbank-Sicherung", "Database backup")).strong());
-        ui.label(RichText::new(lang.t(
+        note(ui, cx, lang.t(
             "Paneldeck legt automatisch Kopien der Datenbank an. War der Rechner zur fälligen Zeit aus, wird die Sicherung beim nächsten Start nachgeholt (mehrere verpasste ergeben nur eine).",
             "Paneldeck makes copies of the database automatically. If the computer was off when one was due, it is made at the next start (several missed ones result in just one).",
-        )).small().color(dim));
-        ui.add_space(S2);
-        ui.horizontal(|ui| {
-            ui.label(lang.t("Intervall:", "Interval:"));
+        ));
+        srow(ui, cx, "backup_interval", |ui| {
             ui.add(egui::DragValue::new(&mut self.settings.backup_interval_hours).range(0..=720).suffix(" h"));
-            ui.label(RichText::new(lang.t("(0 = keine automatische Sicherung)", "(0 = no automatic backup)")).small().color(dim));
         });
-        ui.horizontal(|ui| {
-            ui.label(lang.t("Behaltene Kopien:", "Copies to keep:"));
+        srow(ui, cx, "backup_keep", |ui| {
             ui.add(egui::DragValue::new(&mut self.settings.backup_keep).range(1..=50));
-            ui.label(RichText::new(lang.t("(zusätzlich zur Datenbank selbst; manuelle Sicherungen zählen nicht mit)", "(besides the database itself; manual backups do not count)")).small().color(dim));
         });
         let dir = self.backup_dir_path();
-        ui.horizontal_wrapped(|ui| {
-            ui.label(lang.t("Ordner:", "Folder:"));
-            ui.label(RichText::new(dir.display().to_string()).small().monospace());
-            if crate::cli::get().backup_dir.is_some() {
-                ui.label(RichText::new(lang.t("(festgelegt mit --backup-dir)", "(set by --backup-dir)")).small().color(dim));
-            }
-        });
         let fixed = crate::cli::get().backup_dir.is_some();
-        ui.horizontal_wrapped(|ui| {
-            if ui.add_enabled(!fixed, egui::Button::new(lang.t("Ordner wählen …", "Choose folder …"))).clicked() {
-                if let Some(p) = notify::pick_folder(&dir.display().to_string()) {
-                    self.settings.backup_dir = p;
+        let hint = if fixed { format!("{}  {}", dir.display(), lang.t("(festgelegt mit --backup-dir)", "(set by --backup-dir)")) } else { dir.display().to_string() };
+        super::settings_items::srow_hint(ui, cx, "backup_dir", Some(&hint), |ui| {
+            ui.horizontal_wrapped(|ui| {
+                if ui.add_enabled(!fixed, egui::Button::new(lang.t("Ordner wählen …", "Choose folder …"))).clicked() {
+                    if let Some(p) = notify::pick_folder(&dir.display().to_string()) {
+                        self.settings.backup_dir = p;
+                        self.backups_dirty = true;
+                    }
+                }
+                if ui.add_enabled(!fixed && !self.settings.backup_dir.is_empty(), egui::Button::new(lang.t("Standardordner", "Default folder"))).clicked() {
+                    self.settings.backup_dir.clear();
                     self.backups_dirty = true;
                 }
-            }
-            if ui.add_enabled(!fixed && !self.settings.backup_dir.is_empty(), egui::Button::new(lang.t("Standardordner", "Default folder"))).clicked() {
-                self.settings.backup_dir.clear();
-                self.backups_dirty = true;
-            }
-            if ui.button(lang.t("Ordner öffnen", "Open folder")).clicked() {
-                let _ = std::fs::create_dir_all(&dir);
-                let _ = std::process::Command::new("explorer").arg(&dir).spawn();
-            }
-            let busy = self.backup_rx.is_some();
-            if ui.add_enabled(self.db.is_some() && !busy, egui::Button::new(lang.t("Jetzt sichern", "Back up now"))).clicked() {
-                self.start_backup(Kind::Manual);
-            }
+                if ui.button(lang.t("Ordner öffnen", "Open folder")).clicked() {
+                    let _ = std::fs::create_dir_all(&dir);
+                    let _ = std::process::Command::new("explorer").arg(&dir).spawn();
+                }
+                let busy = self.backup_rx.is_some();
+                if ui.add_enabled(self.db.is_some() && !busy, egui::Button::new(lang.t("Jetzt sichern", "Back up now"))).clicked() {
+                    self.start_backup(Kind::Manual);
+                }
+            });
         });
         if let Some(m) = &self.backup_msg {
-            ui.label(RichText::new(m).small().color(dim));
+            note(ui, cx, m);
         }
         tutorial::spot_since(ui, Spot::DataBackups, top);
-        ui.add_space(S2);
-        ui.separator();
-        ui.add_space(S2);
+        super::settings_items::link(ui, cx, lang.t("Vorhandene Sicherungen wiederherstellen:", "Restore existing backups:"), super::settings_nav::Page::DataRestore);
+    }
+
+    /// *Einstellungen → Daten & Sicherung → Wiederherstellen*: vorhandene Sicherungen.
+    pub(super) fn data_restore_page(&mut self, ui: &mut Ui, cx: &super::settings_items::RowCx) {
+        let lang = cx.lang;
+        let dim = style::dim(ui);
+        let dir = self.backup_dir_path();
+        if self.backups_dirty || self.backups_cache.is_none() {
+            self.backups_cache = Some(backup::list(&dir));
+            self.backups_dirty = false;
+        }
+        let list = self.backups_cache.clone().unwrap_or_default();
+        super::settings_items::block(ui, cx, "backups_list", true, |ui| {
+            if list.is_empty() {
+                ui.label(RichText::new(lang.t("Noch keine Sicherungen.", "No backups yet.")).small().color(dim));
+            }
+            egui::ScrollArea::vertical().max_height((ui.ctx().content_rect().height() - 220.0).max(160.0)).id_salt("backups").show(ui, |ui| {
+                for b in &list {
+                    ui.horizontal(|ui| {
+                        ui.label(self.fmt_time(b.time));
+                        ui.label(RichText::new(b.kind.label(lang)).small().color(dim));
+                        ui.label(RichText::new(Self::fmt_size(b.size)).small().color(dim));
+                        if ui.small_button(lang.t("Wiederherstellen …", "Restore …")).clicked() {
+                            self.confirm_restore = Some(b.path.clone());
+                        }
+                    });
+                }
+            });
+        });
+    }
+
+    /// *Einstellungen → Daten & Sicherung → Pflege & Aufräumen*: Weg zur Datenbankpflege, Aufräumen, Rückgängig-Schritte.
+    pub(super) fn data_maintenance_page(&mut self, ui: &mut Ui, cx: &super::settings_items::RowCx) {
+        use super::settings_items::{block, srow};
+        let lang = cx.lang;
         // Datenbankpflege (#308) gibt es nur auf der Wartungsseite; hier nur der Weg dorthin.
-        ui.horizontal_wrapped(|ui| {
-            ui.label(RichText::new(lang.t("Datenbankpflege (prüfen, verdichten, reparieren, retten):", "Database care (check, compact, repair, rescue):")).small());
+        block(ui, cx, "db_care", true, |ui| {
             if ui.add_enabled(self.db.is_some(), egui::Button::new(lang.t("Wartungsseite öffnen", "Open the maintenance page"))).clicked() {
                 self.plan.request_maintenance_db();
                 self.set_mode(titlebar::Mode::Tasks);
                 self.settings_open = false;
             }
         });
-        ui.add_space(S2);
-        ui.label(RichText::new(lang.t("Vorhandene Sicherungen", "Existing backups")).strong());
-        if self.backups_dirty || self.backups_cache.is_none() {
-            self.backups_cache = Some(backup::list(&dir));
-            self.backups_dirty = false;
-        }
-        let list = self.backups_cache.clone().unwrap_or_default();
-        if list.is_empty() {
-            ui.label(RichText::new(lang.t("Noch keine Sicherungen.", "No backups yet.")).small().color(dim));
-        }
-        egui::ScrollArea::vertical().max_height(220.0).id_salt("backups").show(ui, |ui| {
-            for b in &list {
-                ui.horizontal(|ui| {
-                    ui.label(self.fmt_time(b.time));
-                    ui.label(RichText::new(b.kind.label(lang)).small().color(dim));
-                    ui.label(RichText::new(Self::fmt_size(b.size)).small().color(dim));
-                    if ui.small_button(lang.t("Wiederherstellen …", "Restore …")).clicked() {
-                        self.confirm_restore = Some(b.path.clone());
-                    }
-                });
+        block(ui, cx, "cleanup", true, |ui| {
+            if ui.button(lang.t("Aufräumen …", "Clean up …")).spot(Spot::DataCleanup).clicked() {
+                let ctx = ui.ctx().clone();
+                self.open_cleanup(&ctx);
             }
         });
-        ui.add_space(S2);
-        ui.separator();
-        ui.add_space(S2);
-        ui.label(RichText::new(lang.t("Aufräumen", "Clean up")).strong());
-        ui.label(RichText::new(lang.t(
-            "Wählen, was gelöscht werden soll: Sicherungen, Verlauf, Protokolle, Inhalte, Einstellungen, Integration – bis zum kompletten Zurücksetzen.",
-            "Choose what to delete: backups, history, logs, content, settings, integration – up to a complete reset.",
-        )).small().color(dim));
-        if ui.button(lang.t("Aufräumen …", "Clean up …")).spot(Spot::DataCleanup).clicked() {
-            let ctx = ui.ctx().clone();
-            self.open_cleanup(&ctx);
-        }
-        ui.add_space(S2);
-        ui.separator();
-        ui.add_space(S2);
-        self.undo_steps_ui(ui);
+        srow(ui, cx, "undo_steps", |ui| {
+            egui::ComboBox::from_id_salt("undo_steps").selected_text(self.settings.undo_steps.to_string()).width(80.0).show_ui(ui, |ui| {
+                for n in crate::state::UNDO_STEP_CHOICES {
+                    ui.selectable_value(&mut self.settings.undo_steps, n, n.to_string());
+                }
+            });
+        });
     }
 
     /// Sicherheitsabfrage für das Wiederherstellen.

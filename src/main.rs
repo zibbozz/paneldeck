@@ -45,6 +45,8 @@ mod search;
 mod session_env;
 mod layout;
 mod links;
+// Smart-Modus des Editors (#367): Language-Server-Client, Server-Suche, vertrauenswürdige Ordner.
+mod lsp;
 mod llm;
 mod markdown;
 mod mcp;

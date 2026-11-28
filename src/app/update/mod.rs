@@ -1,6 +1,6 @@
 //! Selbst-Update aus den GitHub-Releases (Issue #113).
 //!
-//! Ablauf: Prüfen (Knopf unter *Einstellungen → Info* oder automatisch beim Start, höchstens einmal am Tag – Standard aus) →
+//! Ablauf: Prüfen (Knopf unter *Einstellungen → Info → Updates* oder automatisch beim Start, höchstens einmal am Tag – Standard aus) →
 //! neuere reguläre Version gefunden → Knopf in der Fensterleiste → Dialog („Jetzt aktualisieren“, „Später“, „Diese Version
 //! überspringen“, „Was ist neu“) → Herunterladen samt Prüfung gegen `SHA256SUMS.txt` → bei laufenden Sitzungen nachfragen →
 //! (Hauptversion: Datenbank sichern) → installieren (Setup still bzw. `paneldeck.exe` tauschen) → Zustand speichern, neu starten.
@@ -529,8 +529,8 @@ fn install(exe: &Path, flavor: Option<Flavor>, file: &Path, want: &[u8; 32], off
                 Ok(()) => Ok(()),
                 Err(install::SetupError::StillRunning) => Err(StillRunning(
                     lang.t(
-                        "Das Setup läuft nach 5 Minuten noch. Paneldeck wartet nicht länger – bitte später unter Einstellungen → Info prüfen, ob die neue Version installiert ist, und Paneldeck dann selbst neu starten.",
-                        "The setup is still running after 5 minutes. Paneldeck stops waiting – please check later under Settings → About whether the new version is installed, then restart Paneldeck yourself.",
+                        "Das Setup läuft nach 5 Minuten noch. Paneldeck wartet nicht länger – bitte später unter Einstellungen → Info → Updates prüfen, ob die neue Version installiert ist, und Paneldeck dann selbst neu starten.",
+                        "The setup is still running after 5 minutes. Paneldeck stops waiting – please check later under Settings → About → Updates whether the new version is installed, then restart Paneldeck yourself.",
                     )
                     .into(),
                 )),

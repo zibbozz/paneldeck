@@ -42,6 +42,9 @@ impl SelEdit {
     }
 }
 
+/// Most cursors a view can have (#394); more are cut off with a hint.
+pub const MAX_CURSORS: usize = 10_000;
+
 /// Characters that open a block (newline between them and their partner indents).
 const OPENERS: [(char, char); 3] = [('{', '}'), ('[', ']'), ('(', ')')];
 
@@ -123,21 +126,11 @@ impl Document {
         self.apply_sel_edits(sels, edits, origin, EditKind::Other)
     }
 
-    /// Paste. With several cursors and as many lines (or `parts`) as cursors, each cursor gets one; `whole_lines`
-    /// text (from copying without selection) goes above the cursor's line.
+    /// Paste: the whole clipboard at every cursor (#394, 3.3.0: no distributing by parts or lines any more);
+    /// `whole_lines` text (from copying without selection) goes above the cursor's line.
     pub fn paste(&mut self, sels: &mut Selections, clip: &ClipboardText, origin: EditOrigin) -> bool {
         self.sync(sels);
         let text = normalize_eol(&clip.text).0;
-        if sels.is_multi() {
-            if clip.parts.len() == sels.len() {
-                return self.insert_per_selection(sels, &clip.parts, origin);
-            }
-            let body = if clip.whole_lines { text.strip_suffix('\n').unwrap_or(&text) } else { &text };
-            let lines: Vec<String> = body.split('\n').map(str::to_string).collect();
-            if lines.len() == sels.len() {
-                return self.insert_per_selection(sels, &lines, origin);
-            }
-        }
         if clip.whole_lines && sels.iter().all(|s| s.is_empty()) {
             let n = text.chars().count();
             let mut seen_lines = std::collections::HashSet::new();
@@ -560,7 +553,9 @@ impl Document {
         text::word_range_at(self.rope(), pos)
     }
 
-    /// Ctrl+Alt+Up/Down: add a cursor on the line above the topmost (below the bottommost) cursor, same visual column.
+    /// Add a cursor on the line above the topmost (below the bottommost) cursor, same visual column (no shortcut since
+    /// 3.3.0, #394; kept for the API).
+    #[allow(dead_code)]
     pub fn add_cursor_vertical(&self, sels: &mut Selections, below: bool) -> bool {
         self.sync(sels);
         let s = if below { *sels.as_slice().last().expect("non-empty") } else { sels.as_slice()[0] };
@@ -583,7 +578,8 @@ impl Document {
     }
 
     /// Ctrl+D: with an empty primary cursor select the word there; else add the next occurrence of the primary
-    /// selection's text (whole word if the selection is a whole word) as a new primary selection. Wraps around.
+    /// selection's text (plain text, no whole-word special case since #394) as a new primary selection. Wraps around.
+    /// Not beyond [`MAX_CURSORS`].
     pub fn add_next_occurrence(&self, sels: &mut Selections) -> bool {
         self.sync(sels);
         let p = sels.primary();
@@ -594,6 +590,9 @@ impl Document {
             }
             sels.set_primary(Selection::new(r.start, r.end));
             return true;
+        }
+        if sels.len() >= MAX_CURSORS {
+            return false;
         }
         let Some(search) = self.occurrence_search(&p) else { return false };
         let mut from = p.end();
@@ -609,7 +608,8 @@ impl Document {
         false
     }
 
-    /// Ctrl+Shift+L: select all occurrences of the primary selection (or of the word at the cursor).
+    /// Ctrl+Shift+D (#394; before 3.3.0 Ctrl+Shift+L): select all occurrences of the primary selection (or of the word
+    /// at the cursor), at most `limit`.
     pub fn select_all_occurrences(&self, sels: &mut Selections, limit: usize) -> usize {
         self.sync(sels);
         let mut p = sels.primary();
@@ -621,9 +621,14 @@ impl Document {
             p = Selection::new(r.start, r.end);
         }
         let Some(search) = self.occurrence_search(&p) else { return 0 };
-        let (all, _) = search.find_all(self, limit);
+        let (mut all, _) = search.find_all(self, limit);
         if all.is_empty() {
             return 0;
+        }
+        // Gekürzt und das eigene Vorkommen liegt dahinter: es ersetzt das letzte (die Zahl zeigt weiter „gekürzt“).
+        if all.len() >= limit && !all.contains(&p.range()) {
+            all.pop();
+            all.push(p.range());
         }
         let primary = all.iter().position(|m| *m == p.range()).unwrap_or(0);
         let n = all.len();
@@ -633,28 +638,20 @@ impl Document {
 
     fn occurrence_search(&self, p: &Selection) -> Option<Search> {
         let needle = self.slice_string(p.range());
-        let mut q = SearchQuery::literal(&needle);
-        q.whole_word = self.word_at(p.start()) == p.range() && needle.chars().all(text::is_word_char);
-        Search::new(&q).ok()
+        Search::new(&SearchQuery::literal(&needle)).ok()
     }
 
-    /// Alt+drag / Shift+Alt+arrows: one selection per line from `anchor` to `head` (line, visual column). Lines that
-    /// are too short for a non-empty box are skipped (the head line always stays).
+    /// Column selection (middle mouse button, #394): one selection per line from `anchor` to `head` (line, visual
+    /// column). Lines that are too short (also empty ones) get a cursor at their end. At most [`MAX_CURSORS`] lines.
     pub fn column_select(&self, sels: &mut Selections, anchor: (usize, usize), head: (usize, usize)) {
         let last = self.len_lines().saturating_sub(1);
         let (al, hl) = (anchor.0.min(last), head.0.min(last));
-        let lines: Vec<usize> = if al <= hl { (al..=hl).collect() } else { (hl..=al).rev().collect() };
+        let lines: Vec<usize> = if al <= hl { (al..=hl).take(MAX_CURSORS).collect() } else { (hl..=al).rev().take(MAX_CURSORS).collect() };
         let mut out = Vec::new();
         let mut primary = 0;
         for line in lines {
             let a = self.pos_at_visual(line, anchor.1);
             let h = self.pos_at_visual(line, head.1);
-            let width = self.rope().line(line).len_chars();
-            let too_short = anchor.1 != head.1 && a == h && text::line_visual_width(self.rope(), line, self.tab_width()) < anchor.1.min(head.1);
-            if too_short && line != hl {
-                continue;
-            }
-            let _ = width;
             if line == hl {
                 primary = out.len();
             }
@@ -662,6 +659,54 @@ impl Document {
         }
         sels.replace(out, primary);
         sels.rev = Some(self.revision());
+    }
+
+    /// Toggle comment (#394, Ctrl+/): the lines of all selections get the line comment `prefix` (plus a space) at the
+    /// smallest indentation of their non-blank lines – or lose it, if every non-blank line already starts with it (after
+    /// its indentation). Blank lines stay as they are. One undo step; the selections follow.
+    pub fn toggle_comment(&mut self, sels: &mut Selections, prefix: &str, origin: EditOrigin) -> bool {
+        self.sync(sels);
+        if prefix.is_empty() {
+            return false;
+        }
+        let mut lines: Vec<usize> = Vec::new();
+        for s in sels.iter() {
+            let (a, b) = self.selection_lines(s);
+            lines.extend(a..=b);
+        }
+        lines.sort_unstable();
+        lines.dedup();
+        let rope = self.rope();
+        let content: Vec<(usize, usize, String)> = lines
+            .iter()
+            .filter_map(|&l| {
+                let s = text::line_slice(rope, l).to_string();
+                let ind = s.chars().take_while(|c| *c == ' ' || *c == '\t').count();
+                (ind < s.chars().count()).then_some((l, ind, s))
+            })
+            .collect();
+        if content.is_empty() {
+            return false;
+        }
+        let commented = content.iter().all(|(_, ind, s)| starts_with_comment(&s.chars().skip(*ind).collect::<String>(), prefix));
+        let p_len = prefix.chars().count();
+        let mut edits: Vec<(Range<usize>, String)> = Vec::new();
+        if commented {
+            for (l, ind, s) in &content {
+                let start = self.line_to_char(*l) + ind;
+                let after: String = s.chars().skip(ind + p_len).take(1).collect();
+                let n = p_len + usize::from(after == " ");
+                edits.push((start..start + n, String::new()));
+            }
+        } else {
+            let min = content.iter().map(|(_, ind, _)| *ind).min().unwrap_or(0);
+            for (l, _, _) in &content {
+                let at = self.line_to_char(*l) + min;
+                edits.push((at..at, format!("{prefix} ")));
+            }
+        }
+        let Ok(cs) = ChangeSet::from_edits(self.rope(), edits) else { return false };
+        self.commit_mapped(sels, cs, origin, EditKind::Other, Assoc::After, Assoc::After)
     }
 
     /// Go to line `line` (1-based) and optional column `col` (1-based, chars); clamped. Returns the position.
@@ -695,6 +740,17 @@ pub fn parse_goto(input: &str) -> Option<(usize, Option<usize>)> {
         _ => None,
     };
     Some((line, col))
+}
+
+/// Does `s` (a line without its indentation) start with the line comment `prefix`? A word-like prefix (`REM` of
+/// batch files) must stand as a whole word (`REMARK` is no comment) and matches regardless of case (`rem`).
+fn starts_with_comment(s: &str, prefix: &str) -> bool {
+    if !prefix.chars().last().is_some_and(|c| c.is_alphanumeric()) {
+        return s.starts_with(prefix);
+    }
+    let n = prefix.chars().count();
+    let head: String = s.chars().take(n).collect();
+    head.to_lowercase() == prefix.to_lowercase() && !s.chars().nth(n).is_some_and(|c| c.is_alphanumeric() || c == '_')
 }
 
 #[cfg(test)]
@@ -858,9 +914,21 @@ mod tests {
         d.sync(&mut s);
         let clip = d.copy(&s);
         assert_eq!(clip.text, "a\nc");
-        // Same number of cursors: one part each.
+        // Several cursors (#394): the whole clipboard at every cursor, also with as many parts as cursors.
         let mut t = cursors(&d, &[2, 5]);
         d.paste(&mut t, &clip, EditOrigin::User);
+        assert_eq!(d.text(), "aba\nc\ncda\nc\n");
+        d.undo(&mut t);
+        let mut t = cursors(&d, &[2, 5]);
+        d.paste(&mut t, &ClipboardText { text: "a".into(), parts: vec![], whole_lines: false }, EditOrigin::User);
+        assert_eq!(d.text(), "aba\ncda\n");
+        d.undo(&mut t);
+        let mut t = cursors(&d, &[2, 5]);
+        d.paste(&mut t, &ClipboardText { text: "a\nc".into(), parts: vec!["a".into(), "c".into()], whole_lines: false }, EditOrigin::User);
+        assert_eq!(d.text(), "aba\nc\ncda\nc\n", "parts are not distributed");
+        d.undo(&mut t);
+        let mut t = cursors(&d, &[2, 5]);
+        d.insert_per_selection(&mut t, &["a".to_string(), "c".to_string()], EditOrigin::User);
         assert_eq!(d.text(), "aba\ncdc\n");
         // Whole-line copy and paste above.
         let s = cursors(&d, &[1]);
@@ -895,12 +963,15 @@ mod tests {
         assert_eq!(s.primary().range(), 0..3);
         assert!(d.add_next_occurrence(&mut s));
         assert!(d.add_next_occurrence(&mut s));
-        // "foobar" is skipped (whole word), wraps to nothing new.
-        assert_eq!(s.iter().map(|x| x.range()).collect::<Vec<_>>(), vec![0..3, 8..11, 19..22]);
+        assert!(d.add_next_occurrence(&mut s));
+        // No whole-word special case (#394): "foo" in "foobar" counts too; wraps to nothing new.
+        assert_eq!(s.iter().map(|x| x.range()).collect::<Vec<_>>(), vec![0..3, 8..11, 12..15, 19..22]);
         assert!(!d.add_next_occurrence(&mut s));
         let mut t = cursors(&d, &[9]);
-        assert_eq!(d.select_all_occurrences(&mut t, 100), 3);
+        assert_eq!(d.select_all_occurrences(&mut t, 100), 4);
         assert_eq!(t.primary().range(), 8..11);
+        let mut t = cursors(&d, &[9]);
+        assert_eq!(d.select_all_occurrences(&mut t, 2), 2, "limit");
     }
 
     #[test]
@@ -913,13 +984,55 @@ mod tests {
         let mut d2 = Document::from_text("abcdef\nab\nabcdef\n\tx");
         let mut s = d2.new_selections(0);
         d2.column_select(&mut s, (0, 4), (2, 5));
-        assert_eq!(s.len(), 2); // line 1 is too short
+        assert_eq!(s.len(), 3, "a short line gets a cursor at its end (#394)");
         d2.type_text(&mut s, "#", EditOrigin::User);
-        assert_eq!(d2.text(), "abcd#f\nab\nabcd#f\n\tx");
+        assert_eq!(d2.text(), "abcd#f\nab#\nabcd#f\n\tx");
+        d2.undo(&mut s);
+        // Empty lines too.
+        let d3 = Document::from_text("abc\n\nabc");
+        let mut s = d3.new_selections(0);
+        d3.column_select(&mut s, (0, 2), (2, 2));
+        assert_eq!(s.iter().map(|x| x.head).collect::<Vec<_>>(), vec![2, 4, 7]);
         // Tabs count by visual column.
         let mut s = d2.new_selections(0);
         d2.column_select(&mut s, (3, 4), (3, 4));
         assert_eq!(s.primary().head, d2.line_to_char(3) + 1);
+    }
+
+    #[test]
+    fn toggle_comment_adds_and_removes_at_the_smallest_indentation() {
+        let mut d = Document::from_text("fn a() {\n    x();\n\n    y();\n}\n");
+        let mut s = Selections::from_vec(vec![Selection::new(d.line_to_char(1), d.line_to_char(3) + 2)], 0);
+        d.sync(&mut s);
+        assert!(d.toggle_comment(&mut s, "//", EditOrigin::User));
+        assert_eq!(d.text(), "fn a() {\n    // x();\n\n    // y();\n}\n", "blank line stays");
+        assert!(d.toggle_comment(&mut s, "//", EditOrigin::User));
+        assert_eq!(d.text(), "fn a() {\n    x();\n\n    y();\n}\n");
+        // Mixed: one line commented, one not → both get a comment; several cursors on different lines.
+        let mut d = Document::from_text("# a\nb\n  c\n");
+        let mut s = cursors(&d, &[0, 4, 7]);
+        assert!(d.toggle_comment(&mut s, "#", EditOrigin::User));
+        assert_eq!(d.text(), "# # a\n# b\n#   c\n");
+        d.undo(&mut s);
+        assert_eq!(d.text(), "# a\nb\n  c\n", "one undo step");
+        // Without a space after the prefix it still removes it.
+        let mut d = Document::from_text("--x\n");
+        let mut s = cursors(&d, &[0]);
+        assert!(d.toggle_comment(&mut s, "--", EditOrigin::User));
+        assert_eq!(d.text(), "x\n");
+        let mut s = cursors(&d, &[0]);
+        assert!(!d.toggle_comment(&mut s, "", EditOrigin::User));
+        // Batch: REM als ganzes Wort, Groß/Klein egal; REMARK ist kein Kommentar.
+        let mut d = Document::from_text("REMARK x\n");
+        let mut s = cursors(&d, &[0]);
+        assert!(d.toggle_comment(&mut s, "REM", EditOrigin::User));
+        assert_eq!(d.text(), "REM REMARK x\n");
+        let mut d = Document::from_text("rem x\n");
+        let mut s = cursors(&d, &[0]);
+        assert!(d.toggle_comment(&mut s, "REM", EditOrigin::User));
+        assert_eq!(d.text(), "x\n");
+        assert!(starts_with_comment("REM", "REM") && starts_with_comment("Rem\tx", "REM") && !starts_with_comment("REM_x", "REM"));
+        assert!(starts_with_comment("//x", "//"), "Zeichen-Kommentar wie bisher");
     }
 
     #[test]

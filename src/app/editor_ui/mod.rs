@@ -30,11 +30,15 @@ mod menu;
 mod marks;
 mod panes;
 mod persist;
+pub(crate) mod smart;
+mod smart_ui;
 mod text;
 mod tree;
 mod view;
 #[cfg(test)]
 mod diff_tests;
+#[cfg(test)]
+mod multi_tests;
 #[cfg(test)]
 mod tests;
 
@@ -70,10 +74,42 @@ pub(crate) struct EditorPrefs {
     pub diff_context: usize,
     pub diff_layout: crate::editor_svc::settings::DiffLayout,
     pub diff_ignore_ws: bool,
+    /// Mehrere Cursor (#394; alles standardmäßig aus).
+    pub multi: MultiPrefs,
+    /// Smart-Modus (#367): Vervollständigung öffnet sich von selbst.
+    pub smart_auto: bool,
+}
+
+/// Schalter der mehreren Cursor (#394, *Einstellungen → Editor*): Kürzel und Befehle, Alt+Klick, mittlere Maustaste.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct MultiPrefs {
+    pub on: bool,
+    pub alt_click: bool,
+    pub middle: bool,
 }
 
 /// Kennungen der Kürzel, die die Menüleiste anzeigt.
-pub(crate) const MENU_KEYS: [&str; 10] = ["split_r", "split_d", "palette", "ed_format", "ed_minify", "ed_validate", "ed_sort_keys", "save_no_actions", "ed_next_change", "ed_prev_change"];
+pub(crate) const MENU_KEYS: [&str; 19] = [
+    "split_r",
+    "split_d",
+    "palette",
+    "ed_format",
+    "ed_minify",
+    "ed_validate",
+    "ed_sort_keys",
+    "save_no_actions",
+    "ed_next_change",
+    "ed_prev_change",
+    "ed_next_occurrence",
+    "ed_all_occurrences",
+    "ed_soft_undo",
+    "ed_toggle_comment",
+    "ed_toggle_comment_alt",
+    "ed_complete",
+    "ed_problems",
+    "ed_next_problem",
+    "ed_prev_problem",
+];
 
 impl Default for EditorPrefs {
     fn default() -> Self {
@@ -90,6 +126,8 @@ impl Default for EditorPrefs {
             diff_context: crate::editor_svc::settings::DEFAULT_DIFF_CONTEXT as usize,
             diff_layout: Default::default(),
             diff_ignore_ws: false,
+            multi: MultiPrefs::default(),
+            smart_auto: true,
         }
     }
 }
@@ -204,6 +242,8 @@ pub(crate) struct EditorUi {
     next_diff: u64,
     /// Offenes Fenster einer Änderungsmarke.
     pub(super) mark_popup: Option<marks::MarkPopup>,
+    /// Smart-Modus (#367): Language Server, Vertrauen, Diagnosen, Vervollständigen.
+    pub(crate) smart: smart::SmartUi,
     /// Fenster „Vergleichen mit Revision …“.
     pub(super) rev_picker: Option<diff_menu::RevPicker>,
     /// Wächst nach dem Speichern und wenn das Fenster den Fokus bekommt: Vergleiche und Marken lesen die Stände in
@@ -349,6 +389,15 @@ impl EditorUi {
 
     /// Datei öffnen (oder ihren Reiter zeigen). `side`: in einer neuen Teilung rechts. Liefert das Dokument.
     pub(super) fn open_path(&mut self, path: &Path, side: bool) -> u64 {
+        // `.`/`..` lexikalisch auflösen (wie Windows selbst; Wege über das IPC `--edit`, Strg+Klick, Agenten, Dialoge):
+        // Pfad im Reiter und für Vertrauen/Projektwurzel ist dann der echte Ort (#367, Review).
+        let clean;
+        let path = if cfg!(windows) && path.components().any(|c| matches!(c, std::path::Component::CurDir | std::path::Component::ParentDir)) {
+            clean = crate::lsp::trust::normalize_lexical(path);
+            clean.as_path()
+        } else {
+            path
+        };
         let id = match self.doc_for_path(path) {
             Some(id) => id,
             None => {
@@ -842,6 +891,15 @@ impl super::App {
     pub(crate) fn editor_tick(&mut self, ctx: &eframe::egui::Context) {
         self.ed.poll_formats(self.settings.language);
         let prefs = self.editor_prefs();
+        // Smart-Modus (#367): Server abfragen, Dokumente senden, Diagnosen übernehmen.
+        let smart = self.settings.editor.smart.clone();
+        let dir = self.dir.clone();
+        if self.ed.smart_tick(&prefs, &smart, &dir) {
+            ctx.request_repaint_after(std::time::Duration::from_millis(50));
+        } else if self.ed.smart.servers.running() > 0 {
+            // Antworten der Server kommen in Hilfsfäden an: ruhig nachsehen, solange einer läuft.
+            ctx.request_repaint_after(std::time::Duration::from_millis(250));
+        }
         let Some(delay) = prefs.autosave else { return };
         let mut next: Option<std::time::Duration> = None;
         let mut due = Vec::new();
@@ -1009,6 +1067,32 @@ impl super::App {
     }
 
     /// Text eines offenen Dokuments (lädt es bei Bedarf). `None`, wenn es die Id nicht gibt oder die Datei nicht lesbar ist.
+    /// Cursor und Auswahlen des Nutzers in einem Dokument (#394, `editor_read`): die Ansicht der fokussierten Teilung,
+    /// sonst die erste, die es zeigt; Hauptcursor zuerst. (Zeile, Spalte) ab 0.
+    pub(crate) fn editor_selections(&mut self, id: u64) -> Option<Vec<((usize, usize), (usize, usize))>> {
+        let doc = self.ed.docs.get(&id)?.doc.as_ref()?;
+        let focused = self.ed.panes.focused;
+        let mut views: Vec<(bool, &text::View)> = Vec::new();
+        for (g, grp) in &self.ed.panes.groups {
+            for (i, t) in grp.tabs.iter().enumerate() {
+                if t.doc == id && t.diff.is_none() {
+                    views.push((*g == focused && grp.active == i, &t.view));
+                }
+            }
+        }
+        views.sort_by_key(|(f, _)| !*f);
+        let mut sels = views.first()?.1.sels.clone()?;
+        doc.sync(&mut sels);
+        let lc = |p: usize| {
+            let l = crate::editor::text::pos_to_linecol(doc.rope(), p.min(doc.len_chars()));
+            (l.line, l.col)
+        };
+        let p = sels.primary_index();
+        let mut v: Vec<((usize, usize), (usize, usize))> = vec![(lc(sels.primary().anchor), lc(sels.primary().head))];
+        v.extend(sels.iter().enumerate().filter(|(i, _)| *i != p).map(|(_, s)| (lc(s.anchor), lc(s.head))));
+        Some(v)
+    }
+
     pub(crate) fn editor_text(&mut self, id: u64) -> Option<String> {
         let prefs = self.editor_prefs();
         let d = self.ed.docs.get_mut(&id)?;
@@ -1119,7 +1203,10 @@ impl super::App {
     pub(crate) fn editor_palette_items(&self) -> Vec<(String, String, EditorAction)> {
         let prefs = self.editor_prefs();
         let (next, prev) = (self.binding_text("ed_next_change"), self.binding_text("ed_prev_change"));
-        diff_menu::palette_entries(&self.ed, &prefs, self.settings.language, &next, &prev).into_iter().map(|(l, h, c)| (l, h, EditorAction(c))).collect()
+        let mut v = diff_menu::palette_entries(&self.ed, &prefs, self.settings.language, &next, &prev);
+        // Auswahl und Kommentar (#394)
+        v.extend(menu::palette_entries(&self.ed, &prefs, self.settings.language));
+        v.into_iter().map(|(l, h, c)| (l, h, EditorAction(c))).collect()
     }
 
     /// Befehl der Palette ausführen.

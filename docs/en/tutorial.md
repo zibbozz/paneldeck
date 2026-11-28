@@ -7,7 +7,7 @@ Paneldeck can show you around itself: a **short tour** and **chapters** on singl
 ## Starting it
 - **First start:** a card *Short tour (3 min)?* offers *Start*, *Later* (asks again at the next start) or *Never*.
 - **Any time:** command palette (**Ctrl+Shift+P**, type *Tutorial*), *Settings → About → Tutorial*, or *Take the short tour* in the empty Terminal Hub.
-- **Continue:** a tour you ended early continues at the step where you left it (*Tutorial: Continue* in the palette, *Continue* under *Settings → About*).
+- **Continue:** a tour you ended early continues at the step where you left it (*Tutorial: Continue* in the palette, *Continue* under *Settings → About → Tutorial*).
 
 ![The card “Short tour (3 min)?” at the first start with Start, Later and Never](../images/tutorial-card.png)
 
@@ -28,17 +28,17 @@ The steps in the Editor tab use a sample file of the tour (`paneldeck-tutorial.t
 | Tour | Content |
 |---|---|
 | Short tour | Sidebar, new terminal, rename/colour, projects, split, minimize, more windows, command palette, shortcuts, Claude Code, status and costs, chats, to-do list, expert mode, agent interface, the Editor tab |
-| The editor | the Editor tab, opening files and folders, tabs, splits, find and replace, multiple cursors, status bar and go to line, minimap, horizontal scrollbar, files changed on disk, search in files, *Settings → Editor* (search, agent switches) |
+| The editor | the Editor tab, opening files and folders, tabs, splits, find and replace, multiple cursors, status bar and go to line, minimap, horizontal scrollbar, files changed on disk, search in files, *Settings → Editor → Search & formatting* and *Settings → Agents → Editor* (search, agent switches) |
 | Time | the Time tab, its sub-tabs, a new alarm, timer presets, the calendar views, the notification options (since 3.2.0) |
 | To-do list & expert mode | simple list, expert mode, projects with a key, a ticket, boards, backlog and sprints, search with the query language |
 | Claude Code in detail | Claude mode, defaults, budget, starting, status, history, prompt library, composer and queue |
-| Chats with local models | local servers, *Settings → Models*, connecting, levels and approvals, a new chat (works without a real model) |
+| Chats with local models | local servers, *Settings → Models → Servers & models*, connecting, levels and approvals, a new chat (works without a real model) |
 | Agent interface (MCP) | levels Off/Read only/Control, registering with Claude Code, environment variables set by agents, system prompt, call log |
 | Profiles, command line & data folder | shell profiles, data folder, `--data-dir`, `--profile`, backups, clean up, updates |
 | More tools | file tree, changes, templates, processes, themes |
 
 ## What's new after an update
-Every step knows the version it came with. After an update Paneldeck shows a subtle hint in the sidebar (*New in x.y.z – start tour?*) that starts a short tour with only the new steps; × hides it. Switch on *Start the “What's new” tour by itself after an update* under *Settings → About* to start it automatically (off by default).
+Every step knows the version it came with. After an update Paneldeck shows a subtle hint in the sidebar (*New in x.y.z – start tour?*) that starts a short tour with only the new steps; × hides it. Switch on *Start the “What's new” tour by itself after an update* under *Settings → About → Tutorial* to start it automatically (off by default).
 
 ## Files
 Progress is stored in `tutorial.json` in the data folder (internal format, may change between versions). The switch above is the setting `tutorial_whats_new` in `settings.json`.

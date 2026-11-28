@@ -801,6 +801,10 @@ impl App {
             (lang.t("Einstellungen", "Settings").into(), String::new(), Action::OpenSettings),
             (lang.t("Aufräumen …", "Clean up …").into(), String::new(), Action::OpenCleanup),
         ]);
+        // Jede Seite der Einstellungen (#395): „Einstellungen: Agenten › Zugriff“.
+        for p in super::settings_nav::Page::ALL {
+            v.push((format!("{} {}", lang.t("Einstellungen:", "Settings:"), p.path(lang)), String::new(), Action::OpenSettingsPage(*p)));
+        }
         // „Neu laden“ nur für Terminals (ein Chat hat keinen Prozess).
         if self.entries.get(&f).is_some_and(|e| !e.is_chat()) {
             v.push((lang.t("Sitzung neu laden …", "Reload session …").into(), String::new(), Action::RequestReload(f)));
