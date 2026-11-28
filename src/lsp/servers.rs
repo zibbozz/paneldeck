@@ -26,7 +26,8 @@ const fn k(id: &'static str, program: &'static str, args: &'static [&'static str
 pub fn known(lang: &str) -> &'static [Known] {
     const RUST: &[Known] = &[k("rust-analyzer", "rust-analyzer", &[])];
     const PY: &[Known] = &[k("basedpyright", "basedpyright-langserver", &["--stdio"]), k("pyright", "pyright-langserver", &["--stdio"]), k("pylsp", "pylsp", &[])];
-    const TS: &[Known] = &[k("typescript-language-server", "typescript-language-server", &["--stdio"])];
+    // tsgo (TypeScript 7, „native preview“) hat keinen tsserver mehr, den typescript-language-server bräuchte: zweite Wahl.
+    const TS: &[Known] = &[k("typescript-language-server", "typescript-language-server", &["--stdio"]), k("tsgo", "tsgo", &["--lsp", "--stdio"])];
     const C: &[Known] = &[k("clangd", "clangd", &[])];
     const GO: &[Known] = &[k("gopls", "gopls", &[])];
     const LUA: &[Known] = &[k("lua-language-server", "lua-language-server", &[])];
@@ -40,7 +41,8 @@ pub fn known(lang: &str) -> &'static [Known] {
     const TEX: &[Known] = &[k("texlab", "texlab", &[])];
     const PHP: &[Known] = &[k("phpactor", "phpactor", &["language-server"])];
     const RUBY: &[Known] = &[k("ruby-lsp", "ruby-lsp", &[])];
-    const CMAKE: &[Known] = &[k("neocmakelsp", "neocmakelsp", &["--stdio"])];
+    // neocmakelsp: Unterbefehl `stdio` (eine Option `--stdio` gibt es nicht; Probe gegen den echten Server, #367).
+    const CMAKE: &[Known] = &[k("neocmakelsp", "neocmakelsp", &["stdio"])];
     const MD: &[Known] = &[k("marksman", "marksman", &["server"])];
     const DOCKER: &[Known] = &[k("docker-langserver", "docker-langserver", &["--stdio"])];
     const JAVA: &[Known] = &[k("jdtls", "jdtls", &[])];
@@ -283,6 +285,14 @@ mod tests {
         assert!(launch_for(Path::new(r"C:\t\s.cmd"), ".cmd", vec!["a&calc".into()], &e, 1).invalid.is_some(), "Argument mit &");
         assert!(launch_for(Path::new(r"C:\100%\s.cmd"), ".cmd", vec![], &e, 1).invalid.is_some(), "% im Pfad");
         assert!(launch_for(Path::new(r"C:\t\s.exe"), ".exe", vec!["a&b".into()], &e, 1).invalid.is_none(), "ohne cmd egal");
+    }
+
+    /// Befunde der Probe gegen echte Server (#367): richtige Argumente, tsgo als zweite Wahl für TypeScript.
+    #[test]
+    fn server_arguments_match_the_real_servers() {
+        assert_eq!(known("cmake")[0].args, &["stdio"]);
+        assert!(known("typescript").iter().any(|k| k.id == "tsgo" && k.args == ["--lsp", "--stdio"]));
+        assert_eq!(known("typescript")[0].id, "typescript-language-server", "Reihenfolge bleibt");
     }
 
     #[test]

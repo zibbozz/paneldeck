@@ -116,6 +116,8 @@ enum Pending {
     Initialize,
     Shutdown,
     Completion { ticket: u64, max: usize },
+    /// Diagnosen abholen (Pull): Adresse und Version beim Fragen.
+    Diagnostic { uri: String, version: i64 },
 }
 
 /// Diagnosen einer Datei (zum Stand `version` des Dokuments, falls der Server sie nennt).
@@ -337,6 +339,20 @@ impl Client {
         }
     }
 
+    /// Diagnosen abholen (Pull, falls der Server es so will); ein älteres Abholen für dieselbe Adresse wird verworfen.
+    fn pull(&mut self, uri: &str) {
+        if self.state != State::Ready || !self.caps.pull_diagnostics {
+            return;
+        }
+        let Some(&version) = self.docs.get(uri) else { return };
+        let old: Vec<i64> = self.pending.iter().filter(|(_, (p, _))| matches!(p, Pending::Diagnostic { uri: u, .. } if u == uri)).map(|(id, _)| *id).collect();
+        for id in old {
+            self.pending.remove(&id);
+            self.send(proto::notification("$/cancelRequest", json!({"id": id})));
+        }
+        self.request(Pending::Diagnostic { uri: uri.to_string(), version }, "textDocument/diagnostic", json!({"textDocument": {"uri": uri}}));
+    }
+
     /// Vor der Antwort auf `initialize`: für dieses Dokument nur den neuesten Text vormerken (nie eine wachsende
     /// Schlange): das vorgemerkte `didOpen` bekommt den neuen Text, `didChange` entfällt.
     fn queue_latest(&mut self, uri: &str, version: i64, text: &str) -> bool {
@@ -357,6 +373,7 @@ impl Client {
         }
         self.docs.insert(uri.to_string(), 1);
         self.notify("textDocument/didOpen", json!({"textDocument": {"uri": uri, "languageId": language_id(language), "version": 1, "text": text}}));
+        self.pull(uri);
         self.last_used = Instant::now();
     }
 
@@ -370,6 +387,7 @@ impl Client {
             return Some(version);
         }
         self.notify("textDocument/didChange", json!({"textDocument": {"uri": uri, "version": version}, "contentChanges": [{"text": text}]}));
+        self.pull(uri);
         // Diagnosen für einen älteren Stand sind ab jetzt veraltet (die Oberfläche zeigt sie nicht mehr an).
         self.last_used = Instant::now();
         Some(version)
@@ -517,6 +535,10 @@ impl Client {
                         for q in std::mem::take(&mut self.queued) {
                             self.send(q);
                         }
+                        let open: Vec<String> = self.docs.keys().cloned().collect();
+                        for u in open {
+                            self.pull(&u);
+                        }
                         self.log.push("initialized");
                     }
                     (Pending::Initialize, Err((c, msg))) => {
@@ -528,6 +550,16 @@ impl Client {
                         self.replies.push(Reply::Completions { ticket, items, incomplete });
                     }
                     (Pending::Completion { ticket, .. }, Err((_, msg))) => self.replies.push(Reply::Failed { ticket, message: msg }),
+                    (Pending::Diagnostic { uri, version }, Ok(v)) => {
+                        // Nur zum Stand, nach dem gefragt wurde; „unverändert“ lässt die alten stehen.
+                        if self.docs.get(&uri) == Some(&version)
+                            && let Some((items, cut)) = proto::parse_pull(&v, self.limits.max_diagnostics)
+                        {
+                            self.diagnostics.insert(uri, FileDiagnostics { version: Some(version), items, cut });
+                            self.diag_gen += 1;
+                        }
+                    }
+                    (Pending::Diagnostic { .. }, Err(_)) => {}
                     (Pending::Shutdown, _) => {
                         self.send(proto::notification("exit", Value::Null));
                     }
@@ -576,6 +608,13 @@ impl Client {
                     self.log.push(format!("refused server request {method}"));
                 } else if self.limits.trace {
                     self.log.push(format!("← request {method}"));
+                }
+                // Der Server hat neue Diagnosen (z. B. nach dem Laden des Projekts): alle offenen neu abholen.
+                if method == "workspace/diagnostic/refresh" {
+                    let open: Vec<String> = self.docs.keys().cloned().collect();
+                    for u in open {
+                        self.pull(&u);
+                    }
                 }
             }
         }
@@ -694,6 +733,11 @@ pub(crate) mod tests {
 
     /// Startet den Ersatz-Server; `seen` sammelt die Methoden, die er bekam.
     fn fake(seen: Arc<Mutex<Vec<Value>>>, diag_version: i64) -> (Client, Fake) {
+        fake_with(seen, diag_version, false)
+    }
+
+    /// Wie [`fake`]; `pull` = der Server meldet keine Diagnosen, sondern beantwortet `textDocument/diagnostic`.
+    fn fake_with(seen: Arc<Mutex<Vec<Value>>>, diag_version: i64, pull: bool) -> (Client, Fake) {
         let (c_read, s_write) = pair();
         let (s_read, c_write) = pair();
         let mut s_out = s_write.try_clone().unwrap();
@@ -705,9 +749,18 @@ pub(crate) mod tests {
                 let id = m.get("id").cloned();
                 match method.as_str() {
                     "initialize" => {
-                        let _ = proto::write_message(&mut s_out, &proto::response(&id.unwrap(), json!({"capabilities": {"textDocumentSync": 1, "completionProvider": {"triggerCharacters": ["."]}}})));
+                        let caps = if pull { json!({"textDocumentSync": 1, "diagnosticProvider": {"interFileDependencies": false, "workspaceDiagnostics": false}}) } else { json!({"textDocumentSync": 1, "completionProvider": {"triggerCharacters": ["."]}}) };
+                        let _ = proto::write_message(&mut s_out, &proto::response(&id.unwrap(), json!({"capabilities": caps})));
                         // Der Server versucht, eine Datei zu ändern: muss abgelehnt werden.
                         let _ = proto::write_message(&mut s_out, &json!({"jsonrpc": "2.0", "id": "s1", "method": "workspace/applyEdit", "params": {"edit": {}}}));
+                    }
+                    "textDocument/diagnostic" => {
+                        let d = json!({"range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 1}}, "severity": 2, "message": "pulled"});
+                        let _ = proto::write_message(&mut s_out, &proto::response(&id.unwrap(), json!({"kind": "full", "items": [d]})));
+                    }
+                    "textDocument/didOpen" if pull => {
+                        // Wie csharp-ls nach dem Laden des Projekts: um neues Abholen bitten.
+                        let _ = proto::write_message(&mut s_out, &json!({"jsonrpc": "2.0", "id": "r1", "method": "workspace/diagnostic/refresh", "params": null}));
                     }
                     "textDocument/didOpen" => {
                         let uri = m["params"]["textDocument"]["uri"].clone();
@@ -775,6 +828,33 @@ pub(crate) mod tests {
         assert!(c.diagnostics.is_empty());
         c.stop();
         assert!(matches!(c.state, State::Exited(_)));
+    }
+
+    /// Server mit Pull-Diagnosen (wie tsgo): Paneldeck holt sie nach dem Öffnen und jeder Änderung ab.
+    #[test]
+    fn pull_diagnostics_are_requested_after_open_and_change() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let (mut c, _f) = fake_with(seen.clone(), 1, true);
+        c.open("file:///c:/proj/p.ts", "typescript", "x");
+        wait(&mut c, |c| c.diagnostics.get("file:///c:/proj/p.ts").is_some_and(|d| d.items.first().is_some_and(|i| i.message == "pulled")));
+        assert!(c.caps.pull_diagnostics);
+        let count = |n: usize, c: &mut Client| {
+            let t0 = Instant::now();
+            loop {
+                c.poll();
+                if seen.lock().unwrap().iter().filter(|m| m["method"] == "textDocument/diagnostic").count() >= n {
+                    break;
+                }
+                assert!(t0.elapsed() < Duration::from_secs(5), "{n}. Abholen");
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        };
+        // Nach dem Öffnen und nach `workspace/diagnostic/refresh` des Servers
+        count(2, &mut c);
+        c.change("file:///c:/proj/p.ts", "xy");
+        count(3, &mut c);
+        wait(&mut c, |c| c.diagnostics.get("file:///c:/proj/p.ts").is_some_and(|d| d.version == Some(2)));
+        c.stop();
     }
 
     #[test]

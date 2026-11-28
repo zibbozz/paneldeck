@@ -126,10 +126,11 @@ pub fn answer_server_request(id: &Value, method: &str, params: &Value) -> Value 
         "window/workDoneProgress/create" | "client/registerCapability" | "client/unregisterCapability" | "workspace/diagnostic/refresh" | "workspace/semanticTokens/refresh" | "workspace/inlayHint/refresh" | "workspace/codeLens/refresh" => response(id, Value::Null),
         // Auswahl-Frage des Servers: nie beantwortet (keine Aktion) – leere Antwort heißt „nichts gewählt“.
         "window/showMessageRequest" => response(id, Value::Null),
-        // Einstellungen: für jeden erfragten Abschnitt `null` (Standards des Servers).
+        // Einstellungen: für jeden erfragten Abschnitt ein leeres Objekt (= Standards des Servers). Nicht `null`: der
+        // CSS-Server von VS Code scheitert daran beim Prüfen (Probe gegen echte Server, #367).
         "workspace/configuration" => {
-            let n = params.get("items").and_then(Value::as_array).map_or(0, Vec::len);
-            response(id, Value::Array(vec![Value::Null; n]))
+            let n = params.get("items").and_then(Value::as_array).map_or(0, Vec::len).min(1000);
+            response(id, Value::Array(vec![json!({}); n]))
         }
         "workspace/workspaceFolders" => response(id, Value::Null),
         m if REFUSED_SERVER_REQUESTS.contains(&m) => error_response(id, REQUEST_FAILED, "refused by Paneldeck"),
@@ -420,6 +421,8 @@ pub struct Caps {
     pub encoding: Encoding,
     /// Der Server will `didSave` mit Text.
     pub save_text: bool,
+    /// Diagnosen werden abgeholt (`textDocument/diagnostic`, LSP 3.17) statt nur gemeldet (z. B. tsgo).
+    pub pull_diagnostics: bool,
 }
 
 pub fn parse_caps(init_result: &Value) -> Caps {
@@ -438,6 +441,7 @@ pub fn parse_caps(init_result: &Value) -> Caps {
         triggers: comp.and_then(|v| v.get("triggerCharacters")).and_then(Value::as_array).map(|a| a.iter().filter_map(Value::as_str).filter(|s| s.chars().count() == 1).map(str::to_string).take(32).collect()).unwrap_or_default(),
         encoding: c.get("positionEncoding").and_then(Value::as_str).map(Encoding::from_id).unwrap_or_default(),
         save_text,
+        pull_diagnostics: c.get("diagnosticProvider").is_some_and(|v| !v.is_null()),
     }
 }
 
@@ -461,6 +465,7 @@ pub fn initialize_params(pid: u32, root_uri: &str, root_name: &str) -> Value {
                     "completionItem": {"snippetSupport": true, "documentationFormat": ["plaintext", "markdown"], "deprecatedSupport": true, "preselectSupport": true, "insertReplaceSupport": true, "labelDetailsSupport": false},
                     "completionItemKind": {"valueSet": (1..=25).collect::<Vec<i32>>()}
                 },
+                "diagnostic": {"dynamicRegistration": false, "relatedDocumentSupport": false},
                 "publishDiagnostics": {"relatedInformation": false, "versionSupport": true, "tagSupport": {"valueSet": [1, 2]}, "codeDescriptionSupport": false, "dataSupport": false}
             }
         },
@@ -500,6 +505,18 @@ pub fn uri_key(uri: &str) -> String {
         Some(p) => p,
         None => uri.to_string(),
     }
+}
+
+/// Antwort auf `textDocument/diagnostic`: `full` mit Einträgen bzw. `unchanged` (`None` = nichts Neues).
+pub fn parse_pull(result: &Value, max: usize) -> Option<(Vec<Diagnostic>, bool)> {
+    if result.get("kind").and_then(Value::as_str) != Some("full") {
+        return None;
+    }
+    let mut all: Vec<Diagnostic> = result.get("items")?.as_array()?.iter().filter_map(Diagnostic::parse).collect();
+    all.sort_by_key(|d| (d.severity, d.range.start));
+    let cut = all.len() > max;
+    all.truncate(max);
+    Some((all, cut))
 }
 
 /// Pfad aus einer `file:`-Adresse (`None` für andere Schemata). Windows: `C:\…` bzw. `\\server\share\…`.
@@ -568,7 +585,9 @@ mod tests {
             let a = answer_server_request(&json!(7), m, &json!({}));
             assert_eq!(a["error"]["code"], REQUEST_FAILED, "{m}");
         }
-        assert_eq!(answer_server_request(&json!(1), "workspace/configuration", &json!({"items": [{}, {}]}))["result"], json!([null, null]));
+        assert_eq!(answer_server_request(&json!(1), "workspace/configuration", &json!({"items": [{}, {}]}))["result"], json!([{}, {}]), "leere Objekte, nicht null");
+        assert!(parse_caps(&json!({"capabilities": {"diagnosticProvider": {"interFileDependencies": false}}})).pull_diagnostics);
+        assert!(!parse_caps(&json!({"capabilities": {}})).pull_diagnostics);
         assert_eq!(answer_server_request(&json!(1), "window/workDoneProgress/create", &json!({}))["result"], Value::Null);
         assert_eq!(answer_server_request(&json!("x"), "custom/thing", &json!({}))["error"]["code"], METHOD_NOT_FOUND);
         assert!(matches!(classify(json!({"id": 3, "result": [1]})), Some(Incoming::Response { id: 3, result: Ok(_) })));
