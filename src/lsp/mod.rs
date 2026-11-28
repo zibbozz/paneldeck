@@ -13,6 +13,8 @@ pub mod client;
 pub mod proto;
 pub mod servers;
 pub mod trust;
+#[cfg(test)]
+mod probe;
 
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
