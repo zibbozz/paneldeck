@@ -304,7 +304,7 @@ pub(super) fn model_section(ui: &mut Ui, lang: Lang, server: &LlmServer, name: &
     let salt = format!("{}/{name}", server.id);
     egui::CollapsingHeader::new(RichText::new(lang.t("Anweisungen (Master-Prompt)", "Instructions (master prompt)")).small()).id_salt(("prompt_model", salt.as_str())).show(ui, |ui| {
         let mut own = !cfg.prompt_parts.is_empty();
-        if ui.checkbox(&mut own, lang.t("Eigene Auswahl für dieses Modell", "Own selection for this model")).on_hover_text(lang.t("Aus: es gelten die Anweisungen oben im Reiter.", "Off: the instructions at the top of this tab apply.")).changed() {
+        if ui.checkbox(&mut own, lang.t("Eigene Auswahl für dieses Modell", "Own selection for this model")).on_hover_text(lang.t("Aus: es gelten die Anweisungen oben auf dieser Seite.", "Off: the instructions at the top of this page apply.")).changed() {
             cfg.prompt_parts = if own { PromptOverride::all_from(st.global) } else { PromptOverride::default() };
         }
         if own {

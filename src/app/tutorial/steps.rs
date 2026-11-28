@@ -40,8 +40,8 @@ pub(super) struct Probe {
     /// Prüfsumme über eigene Namen und Farben der Tutorial-Sitzungen (Umbenennen/Farbe erkennen).
     pub names: u64,
     pub palette: bool,
-    /// Offener Reiter der Einstellungen (`None` = geschlossen).
-    pub settings: Option<usize>,
+    /// Offene Seite der Einstellungen (`None` = geschlossen, #395).
+    pub settings: Option<super::super::settings_nav::Page>,
     /// Reiter „Todo-Liste“ aktiv.
     pub tasks: bool,
     pub expert: bool,
@@ -86,8 +86,8 @@ pub(super) enum Prep {
     Tasks,
     /// Einstellungen schließen.
     NoSettings,
-    /// Einstellungen mit diesem Reiter öffnen (Indizes wie in `settings.rs`).
-    Settings(usize),
+    /// Einstellungen bei dieser Seite öffnen (#395).
+    Settings(super::super::settings_nav::Page),
     /// Tutorial-Projekt aktiv.
     TutProject,
     /// Tutorial-Projekt aktiv und mindestens eine Sitzung darin (sonst ein Terminal anlegen).
@@ -248,16 +248,8 @@ fn alarms_grew(a: &Probe, b: &Probe) -> bool {
     b.alarms > a.alarms
 }
 
-// Indizes der Einstellungsreiter (siehe `settings.rs`).
-const S_APPEARANCE: usize = 1;
-const S_CLAUDE: usize = 2;
-const S_SHORTCUTS: usize = 5;
-const S_PROFILES: usize = 6;
-const S_AGENTS: usize = 7;
-const S_DATA: usize = 8;
-const S_ABOUT: usize = 9;
-const S_MODELS: usize = super::super::models_ui::SETTINGS_TAB;
-const S_EDITOR: usize = super::super::editor_services::SETTINGS_TAB;
+// Seiten der Einstellungen (#395): feste Kennungen statt Reiter-Indizes.
+use super::super::settings_nav::Page;
 
 const HUB: &[Prep] = &[Prep::Terminals, Prep::NoSettings, Prep::Palette(false), Prep::NoTools, Prep::TutProject];
 /// Editor mit der Beispieldatei der Tour, ohne Suchleiste und Suchfenster.
@@ -421,7 +413,7 @@ const BASICS: &[Step] = &[
             "Hier lassen sich alle Tastenkürzel ändern: Klick auf ein Kürzel und die neue Tastenkombination drücken.",
             "All keyboard shortcuts can be changed here: click a shortcut and press the new key combination.",
         ),
-        prep: &[Prep::Terminals, Prep::Palette(false), Prep::NoTools, Prep::Settings(S_SHORTCUTS)],
+        prep: &[Prep::Terminals, Prep::Palette(false), Prep::NoTools, Prep::Settings(Page::Shortcuts)],
         done: None,
         need: None,
     },
@@ -525,7 +517,7 @@ const BASICS: &[Step] = &[
             "Agenten wie Claude Code können deine Sitzungen über MCP sehen und steuern. Standardmäßig ist das aus; hier wählst du „Nur lesen“ oder „Steuern“, weiter unten trägst du Paneldeck in Claude Code ein. Das Kapitel „Agenten-Schnittstelle (MCP)“ erklärt die Stufen.",
             "Agents such as Claude Code can see and control your sessions through MCP. It is off by default; choose “Read only” or “Control” here and register Paneldeck with Claude Code further down. The chapter “Agent interface (MCP)” explains the levels.",
         ),
-        prep: &[Prep::ExpertRestore, Prep::Terminals, Prep::Palette(false), Prep::NoTools, Prep::Settings(S_AGENTS)],
+        prep: &[Prep::ExpertRestore, Prep::Terminals, Prep::Palette(false), Prep::NoTools, Prep::Settings(Page::AgentsAccess)],
         done: None,
         need: None,
     },
@@ -538,7 +530,7 @@ const BASICS: &[Step] = &[
             "Das war's! Die Tour und die Kapitel zu einzelnen Themen findest du immer hier, in der Befehls-Palette („Tutorial“) und im leeren Terminal Hub. Zum Schluss entscheidest du, ob das Tutorial-Projekt bleibt.",
             "That's it! The tour and the chapters on single topics are always here, in the command palette (“Tutorial”) and in the empty Terminal Hub. At the end you decide whether the tutorial project is kept.",
         ),
-        prep: &[Prep::Terminals, Prep::Settings(S_ABOUT)],
+        prep: &[Prep::Terminals, Prep::Settings(Page::AboutTutorial)],
         done: None,
         need: None,
     },
@@ -789,7 +781,7 @@ const EDITOR: &[Step] = &[
             "Hier stellst du die Schrift des Editors ein (Standard: die Terminalschrift), ab welcher Größe eine Datei als groß gilt und ob automatisch gespeichert wird – nur Dateien, die es schon gibt.",
             "Here you choose the editor font (default: the terminal font), from which size a file counts as large and whether files are saved automatically – only files that already exist.",
         ),
-        prep: &[Prep::Palette(false), Prep::NoTools, Prep::EditorSearch(false), Prep::Editor, Prep::Settings(S_EDITOR)],
+        prep: &[Prep::Palette(false), Prep::NoTools, Prep::EditorSearch(false), Prep::Editor, Prep::Settings(Page::EditorGeneral)],
         done: None,
         need: None,
     },
@@ -802,7 +794,7 @@ const EDITOR: &[Step] = &[
             "„Ignorierte einbeziehen“ ist die Vorgabe für den Schalter im Suchfenster; Ausschlussmuster (wie in .gitignore, z. B. node_modules oder *.min.js) gelten immer.",
             "“Include ignored” is the default of the switch in the search window; exclude patterns (as in .gitignore, e.g. node_modules or *.min.js) always apply.",
         ),
-        prep: &[Prep::Editor, Prep::Settings(S_EDITOR)],
+        prep: &[Prep::Editor, Prep::Settings(Page::EditorSearchFormat)],
         done: None,
         need: None,
     },
@@ -815,7 +807,7 @@ const EDITOR: &[Step] = &[
             "Regeln je Datei, Ordner oder Muster (wie .gitignore, z. B. src/**/*.ts): vor dem Schreiben Leerraum entfernen, Zeilenenden setzen oder formatieren, danach eigene Befehle (Lint, Upload mit scp/rsync), Kopieren an einen anderen lokalen Ort oder Paneldeck-Aktionen. Die Datei wird immer gespeichert; Fehler zeigen ein roter Punkt im Reiter und ein Hinweis mit der Ausgabe. Rechtsklick im Ordnerbaum legt eine Regel für Datei oder Ordner an.",
             "Rules per file, folder or pattern (like .gitignore, e.g. src/**/*.ts): before writing trim whitespace, set line endings or format, afterwards your own commands (lint, upload with scp/rsync), copying to another local place or Paneldeck actions. The file is always saved; errors show a red dot on the tab and a notice with the output. Right-click in the folder tree to create a rule for a file or folder.",
         ),
-        prep: &[Prep::Editor, Prep::Settings(S_EDITOR)],
+        prep: &[Prep::Editor, Prep::Settings(Page::EditorOnSave)],
         done: None,
         need: None,
     },
@@ -828,7 +820,7 @@ const EDITOR: &[Step] = &[
             "Agenten dürfen offene Dateien ab der Stufe „Nur lesen“ lesen. Öffnen, Bearbeiten und Speichern brauchen die Stufe „Steuern“ und je einen eigenen Schalter hier – alle standardmäßig aus. Änderungen eines Agenten bleiben ungespeichert und lassen sich rückgängig machen; die Tastatur nimmt ein Agent dir nie.",
             "Agents may read open files from level “Read only”. Opening, editing and saving need level “Control” plus their own switch here – all off by default. Changes by an agent stay unsaved and can be undone; an agent never takes your keyboard focus.",
         ),
-        prep: &[Prep::Editor, Prep::Settings(S_EDITOR)],
+        prep: &[Prep::Editor, Prep::Settings(Page::AgentsEditor)],
         done: None,
         need: None,
     },
@@ -966,7 +958,7 @@ const CLAUDE: &[Step] = &[
             "Der Claude-Modus zeigt alles rund um Claude Code: den Funken-Knopf, Status, Kosten und Verlauf. Ohne Claude Code kannst du ihn hier abschalten.",
             "Claude mode shows everything around Claude Code: the spark button, status, costs and history. Without Claude Code you can switch it off here.",
         ),
-        prep: &[Prep::Terminals, Prep::Palette(false), Prep::NoTools, Prep::Settings(S_CLAUDE)],
+        prep: &[Prep::Terminals, Prep::Palette(false), Prep::NoTools, Prep::Settings(Page::ClaudeGeneral)],
         done: None,
         need: Some(Need::Claude),
     },
@@ -979,7 +971,7 @@ const CLAUDE: &[Step] = &[
             "Modell, Aufwand, Berechtigungsmodus und mehr für neue Claude-Sitzungen werden hier vorgewählt – der Dialog „Neue Sitzung“ ändert sie je Sitzung.",
             "Model, effort, permission mode and more for new Claude sessions are preselected here – the “New session” dialog changes them per session.",
         ),
-        prep: &[Prep::Terminals, Prep::Settings(S_CLAUDE)],
+        prep: &[Prep::Terminals, Prep::Settings(Page::ClaudeSession)],
         done: None,
         need: None,
     },
@@ -992,7 +984,7 @@ const CLAUDE: &[Step] = &[
             "Ein Tages- und ein Sitzungsbudget melden sich, sobald die geschätzten Kosten den Betrag überschreiten. Die Preise für die Schätzung lassen sich darunter anpassen.",
             "A daily and a per-session budget notify you once the estimated costs exceed the amount. The prices for the estimate can be adjusted below.",
         ),
-        prep: &[Prep::Terminals, Prep::Settings(S_CLAUDE)],
+        prep: &[Prep::Terminals, Prep::Settings(Page::ClaudeCosts)],
         done: None,
         need: None,
     },
@@ -1087,7 +1079,7 @@ const CHAT: &[Step] = &[
             "Server und Modelle richtest du in diesem Reiter ein.",
             "Servers and models are set up in this tab.",
         ),
-        prep: &[Prep::Terminals, Prep::Palette(false), Prep::NoTools, Prep::Settings(S_MODELS)],
+        prep: &[Prep::Terminals, Prep::Palette(false), Prep::NoTools, Prep::Settings(Page::ModelsServers)],
         done: None,
         need: None,
     },
@@ -1100,7 +1092,7 @@ const CHAT: &[Step] = &[
             "Füge einen Server hinzu – für Ollama auf diesem Rechner reicht der Vorschlag http://localhost:11434 – und klicke auf „Verbinden“, um seine Modelle abzurufen. API-Schlüssel werden verschlüsselt gespeichert.",
             "Add a server – for Ollama on this computer the suggestion http://localhost:11434 is enough – and click “Connect” to fetch its models. API keys are stored encrypted.",
         ),
-        prep: &[Prep::Terminals, Prep::Settings(S_MODELS)],
+        prep: &[Prep::Terminals, Prep::Settings(Page::ModelsServers)],
         done: None,
         need: None,
     },
@@ -1113,7 +1105,7 @@ const CHAT: &[Step] = &[
             "Jedes Modell hat eine eigene Stufe: Aus (nur chatten), Nur lesen (sieht Sitzungen und To-dos) oder Steuern (darf tippen und ändern). Schreibende Werkzeuge fragen immer erst nach: Erlauben, Immer für diesen Chat oder Ablehnen. In der Werkzeugliste darunter wählst du einzelne Werkzeuge ab; Werkzeuge mit „(standardmäßig aus)“ bekommt ein Modell erst, wenn du sie anhakst.",
             "Each model has its own level: Off (just chatting), Read only (sees sessions and to-dos) or Control (may type and change things). Writing tools always ask first: Allow, Always for this chat or Deny. In the tool list below you can uncheck single tools; tools marked “(off by default)” only reach a model once you check them.",
         ),
-        prep: &[Prep::Terminals, Prep::Settings(S_MODELS)],
+        prep: &[Prep::Terminals, Prep::Settings(Page::ModelsServers)],
         done: None,
         need: None,
     },
@@ -1126,7 +1118,7 @@ const CHAT: &[Step] = &[
             "Ein Modell mit der Stufe „Steuern“ kann lange Befehle im Hintergrund starten: Jeder läuft in einem eigenen Terminal unter dem Chat, am Ende kommt eine Nachricht in den Chat. Hier stellst du Zeitlimit und Anzahl ein. Außerdem kann ein Modell dir Fragen mit Auswahl stellen – mit „(Empfohlen)“ und „Andere …“.",
             "A model with level “Control” can start long commands in the background: each runs in its own terminal below the chat, and a message comes into the chat when it ends. Set the time limit and the number here. A model can also ask you questions with choices – with “(Recommended)” and “Other …”.",
         ),
-        prep: &[Prep::Terminals, Prep::Settings(S_MODELS)],
+        prep: &[Prep::Terminals, Prep::Settings(Page::ModelsTools)],
         done: None,
         need: None,
     },
@@ -1257,7 +1249,7 @@ const MCP: &[Step] = &[
             "Aus: Agenten bekommen nichts. Nur lesen: Sie sehen Sitzungen, Terminalinhalt, Kosten und To-dos. Steuern: Sie dürfen auch tippen, Befehle ausführen und eigene Sitzungen anlegen und schließen. Terminalinhalt ist für sie nur Information, nie eine Anweisung.",
             "Off: agents get nothing. Read only: they see sessions, terminal content, costs and to-dos. Control: they may also type, run commands and create and close their own sessions. Terminal content is information for them, never an instruction.",
         ),
-        prep: &[Prep::Terminals, Prep::Palette(false), Prep::NoTools, Prep::Settings(S_AGENTS)],
+        prep: &[Prep::Terminals, Prep::Palette(false), Prep::NoTools, Prep::Settings(Page::AgentsAccess)],
         done: None,
         need: None,
     },
@@ -1270,7 +1262,7 @@ const MCP: &[Step] = &[
             "Jedes Projekt hat eine eigene Stufe: Ein Agent arbeitet im Projekt seiner Sitzung, andere Projekte erreicht er nur mit „Für alle“. Neue Projekte beginnen gesperrt (Schloss in der Projektleiste). Private Karten, Tags und Tickets sieht nie ein Agent; was Agenten löschen, landet im Papierkorb.",
             "Every project has its own level: an agent works in its session's project and reaches other projects only with “For all”. New projects start locked (lock in the project bar). Agents never see private cards, tags and tickets; what agents delete ends up in the trash.",
         ),
-        prep: &[Prep::Terminals, Prep::Palette(false), Prep::NoTools, Prep::Settings(S_AGENTS)],
+        prep: &[Prep::Terminals, Prep::Palette(false), Prep::NoTools, Prep::Settings(Page::AgentsAccess)],
         done: None,
         need: None,
     },
@@ -1283,7 +1275,7 @@ const MCP: &[Step] = &[
             "„Registrieren“ trägt Paneldeck in Claude Code ein (Benutzerebene) – oder kopiere den Befehl bzw. das JSON für andere Agenten. Wird eine portable .exe verschoben, neu registrieren.",
             "“Register” adds Paneldeck to Claude Code (user scope) – or copy the command or the JSON for other agents. If a portable .exe moves, register again.",
         ),
-        prep: &[Prep::Terminals, Prep::Settings(S_AGENTS)],
+        prep: &[Prep::Terminals, Prep::Settings(Page::AgentsSetup)],
         done: None,
         need: Some(Need::Claude),
     },
@@ -1296,7 +1288,7 @@ const MCP: &[Step] = &[
             "Jede Sitzung kann eigene Umgebungsvariablen haben (Reiter „Umgebung“ in „Neue Sitzung“ und in den Einstellungen der Sitzung). Agenten sehen davon nur die Namen. Mit diesem Schalter dürfen sie Variablen für Sitzungen setzen, die sie selbst anlegen – nie geheime, nie PATH, Lade- oder Startvariablen; die erlaubten Namen grenzt du mit Mustern wie APP_* ein.",
             "Every session can have its own environment variables (tab “Environment” in “New session” and in the session settings). Agents only see their names. With this switch they may set variables for sessions they create themselves – never secret ones, never PATH, loader or startup variables; you limit the allowed names with patterns such as APP_*.",
         ),
-        prep: &[Prep::Terminals, Prep::Settings(S_AGENTS)],
+        prep: &[Prep::Terminals, Prep::Settings(Page::AgentsAccess)],
         done: None,
         need: None,
     },
@@ -1309,7 +1301,7 @@ const MCP: &[Step] = &[
             "Agenten bekommen eine Anleitung, wie sie Paneldeck benutzen. Hier passt du sie mit einer eigenen system-prompt.md an.",
             "Agents get instructions on how to use Paneldeck. Here you adapt them with your own system-prompt.md.",
         ),
-        prep: &[Prep::Terminals, Prep::Settings(S_AGENTS)],
+        prep: &[Prep::Terminals, Prep::Settings(Page::AgentsSetup)],
         done: None,
         need: None,
     },
@@ -1322,7 +1314,7 @@ const MCP: &[Step] = &[
             "Jeder Aufruf eines Agenten steht hier und in mcp-log.jsonl. Solange die Schnittstelle an ist, zeigt die Fensterleiste ihre Stufe; bei Aufrufen leuchtet sie auf.",
             "Every agent call is listed here and in mcp-log.jsonl. While the interface is on, the title bar shows its level and lights up on calls.",
         ),
-        prep: &[Prep::Terminals, Prep::Settings(S_AGENTS)],
+        prep: &[Prep::Terminals, Prep::Settings(Page::AgentsLog)],
         done: None,
         need: None,
     },
@@ -1339,7 +1331,7 @@ const DATA: &[Step] = &[
             "Profile starten eine Shell mit eigenem Programm, eigenen Argumenten und Variablen oder als Administrator. Projekte und Ordner können ein Standardprofil haben.",
             "Profiles start a shell with its own program, arguments and variables, or as administrator. Projects and folders can have a default profile.",
         ),
-        prep: &[Prep::Terminals, Prep::Palette(false), Prep::NoTools, Prep::Settings(S_PROFILES)],
+        prep: &[Prep::Terminals, Prep::Palette(false), Prep::NoTools, Prep::Settings(Page::TerminalProfiles)],
         done: None,
         need: None,
     },
@@ -1352,7 +1344,7 @@ const DATA: &[Step] = &[
             "Hier steht, wo Paneldeck seine Daten ablegt: portabel neben der .exe, installiert unter %APPDATA%\\Paneldeck. --data-dir <ordner> oder PANELDECK_DATA wählen einen anderen Ordner, --profile <name> startet eine eigene Instanz mit eigenen Daten; paneldeck --help listet alle Optionen.",
             "This shows where Paneldeck keeps its data: portable next to the .exe, installed under %APPDATA%\\Paneldeck. --data-dir <folder> or PANELDECK_DATA choose another folder, --profile <name> starts a separate instance with its own data; paneldeck --help lists all options.",
         ),
-        prep: &[Prep::Terminals, Prep::Settings(S_ABOUT)],
+        prep: &[Prep::Terminals, Prep::Settings(Page::AboutVersion)],
         done: None,
         need: None,
     },
@@ -1365,7 +1357,7 @@ const DATA: &[Step] = &[
             "Die Datenbank (To-dos, Tickets) wird automatisch gesichert; Intervall, Zahl der Kopien und Ordner stellst du hier ein. Aus der Liste darunter lässt sich eine Sicherung zurückspielen.",
             "The database (to-dos, tickets) is backed up automatically; interval, number of copies and folder are set here. A backup can be restored from the list below.",
         ),
-        prep: &[Prep::Terminals, Prep::Settings(S_DATA)],
+        prep: &[Prep::Terminals, Prep::Settings(Page::DataBackup)],
         done: None,
         need: None,
     },
@@ -1378,7 +1370,7 @@ const DATA: &[Step] = &[
             "„Aufräumen …“ zeigt, was Platz belegt – Sicherungen, Protokolle, Verläufe – und löscht nur, was du anhakst.",
             "“Clean up …” shows what takes up space – backups, logs, histories – and deletes only what you tick.",
         ),
-        prep: &[Prep::Terminals, Prep::Settings(S_DATA)],
+        prep: &[Prep::Terminals, Prep::Settings(Page::DataMaintenance)],
         done: None,
         need: None,
     },
@@ -1391,7 +1383,7 @@ const DATA: &[Step] = &[
             "Paneldeck fragt GitHub nur nach Updates, wenn du es willst oder die automatische Prüfung einschaltest. Installierte und portable Fassung aktualisieren sich selbst; Downloads werden gegen SHA256SUMS geprüft.",
             "Paneldeck only asks GitHub for updates when you want it to or switch on the automatic check. Installed and portable copies update themselves; downloads are checked against SHA256SUMS.",
         ),
-        prep: &[Prep::Terminals, Prep::Settings(S_ABOUT)],
+        prep: &[Prep::Terminals, Prep::Settings(Page::AboutUpdates)],
         done: None,
         need: None,
     },
@@ -1473,7 +1465,7 @@ const TOOLS: &[Step] = &[
             "Wähle ein Theme oder bau dein eigenes: Der Theme-Editor ändert jede Farbe der Oberfläche und prüft den Kontrast.",
             "Choose a theme or build your own: the theme editor changes every colour of the interface and checks the contrast.",
         ),
-        prep: &[Prep::Terminals, Prep::Palette(false), Prep::NoTools, Prep::Settings(S_APPEARANCE)],
+        prep: &[Prep::Terminals, Prep::Palette(false), Prep::NoTools, Prep::Settings(Page::AppearanceTheme)],
         done: None,
         need: None,
     },
@@ -1486,7 +1478,7 @@ const TOOLS: &[Step] = &[
             "Ein Theme kann einen Hintergrund haben: ein Bild, einen Farbverlauf, eine Farbe oder ein Muster, dazu Helligkeit, Unschärfe und eine Überlagerung. Du stellst ihn im Theme-Editor unter „Hintergrund“ ein, je Bereich mit eigener Deckkraft. Wird es dir zu unruhig, macht „Transparenz reduzieren“ alle Flächen wieder deckend.",
             "A theme can have a background: an image, a gradient, a colour or a pattern, plus brightness, blur and an overlay. Set it up in the theme editor under “Background”, with its own opacity per area. If it gets too busy, “Reduce transparency” makes every surface opaque again.",
         ),
-        prep: &[Prep::Terminals, Prep::Palette(false), Prep::NoTools, Prep::Settings(S_APPEARANCE)],
+        prep: &[Prep::Terminals, Prep::Palette(false), Prep::NoTools, Prep::Settings(Page::AppearanceTransparency)],
         done: None,
         need: None,
     },

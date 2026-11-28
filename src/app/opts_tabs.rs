@@ -56,9 +56,6 @@ pub(super) fn session_tabs_env(claude: bool, env: bool) -> Vec<Tab> {
     v
 }
 
-/// Reiter der Standards (Einstellungen → Claude).
-pub(super) const DEFAULTS_TABS: [Tab; 3] = [Tab::Claude, Tab::Access, Tab::Advanced];
-
 /// Markierung eines Reiters.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub(super) enum Mark {

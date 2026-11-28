@@ -12,7 +12,6 @@ use std::hash::Hash;
 
 /// Index des Reiters „Farben“ in den Einstellungen (angehängt, damit die festen Indizes der übrigen gültig bleiben;
 /// angezeigt wird er hinter „Darstellung“).
-pub(super) const SETTINGS_TAB: usize = 11;
 
 /// Form der Farbfelder.
 #[derive(Clone, Copy, PartialEq, Eq)]

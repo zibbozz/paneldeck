@@ -31,6 +31,14 @@ pub(super) struct ThemeUi {
     job: Option<JobSlot>,
 }
 
+impl ThemeUi {
+    /// Ist ein Fenster der Theme-Verwaltung offen (Editor, Umbenennen, Löschen)? Öffnet die Seite *Darstellung › Theme*
+    /// eines, kommt der Hub vor das Einstellungsfenster (#395).
+    pub(super) fn any_open(&self) -> bool {
+        self.editor.is_some() || self.rename.is_some() || self.delete_ask.is_some()
+    }
+}
+
 /// Ergebnis einer Datei-Arbeit im Hintergrund.
 enum JobDone {
     /// Gelesenes Theme (Import), noch nicht gespeichert.
@@ -538,7 +546,8 @@ impl App {
         let Some(cur) = cur else { return };
         let editing = self.theme_ui.editor.is_some();
         ui.horizontal_wrapped(|ui| {
-            ui.add_space(248.0);
+            // Unter dem Bedienelement der Zeile „Theme“ (Spalte wie in `settings_items::srow`).
+            ui.add_space(super::settings_items::label_width(ui.available_width()) + style::S3 - ui.spacing().item_spacing.x);
             let (label, tip) = if cur.builtin {
                 (lang.t("Als Kopie bearbeiten …", "Edit as copy …"), lang.t("Eingebaute Themes sind schreibgeschützt; bearbeitet wird eine Kopie.", "Built-in themes are read-only; you edit a copy."))
             } else {

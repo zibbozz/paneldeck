@@ -25,7 +25,7 @@ macro_rules! view_fields {
     ($mac:ident!($($args:tt)*)) => {
         $mac!($($args)*;
             layout, focused, want_focus, focus_return, active_project, mode, filter, pane_rects, last_title, rename, group_prompt, new_dialog, new_chat,
-            confirm_close, reload_ask, session_settings, settings_open, settings_tab, capture_key, profile_sel, palette, text_prompt, folder_prompt, notes_open,
+            confirm_close, reload_ask, session_settings, settings_open, settings_nav, capture_key, profile_sel, palette, text_prompt, folder_prompt, notes_open,
             queue_open, queue_draft, files_open, diff_open, diff_sel, composer_open, composer_focus, composer_text, history_open,
             history_filter, history_hits, history_hits_rx, templates_open, tpl_name, tpl, cost_open, gsearch, prompts_open, prompt_sel,
             broadcast, wt_close, editor, confirm_restore, restore_error, dragging, dragging_folder, folder_rects, tree_geo,
@@ -62,7 +62,8 @@ pub(super) struct WinView {
     reload_ask: Option<super::session_settings::ReloadAsk>,
     session_settings: Option<super::session_settings::SessionForm>,
     settings_open: bool,
-    settings_tab: usize,
+    /// Einstellungsfenster dieses Fensters (#395): Seite, Suche, Lage.
+    settings_nav: super::settings_nav::Nav,
     /// Laufende Kürzel-Aufnahme in den Einstellungen dieses Fensters (sperrt nur hier die Kürzel).
     capture_key: Option<String>,
     profile_sel: usize,
@@ -128,7 +129,7 @@ impl WinView {
             reload_ask: None,
             session_settings: None,
             settings_open: false,
-            settings_tab: 0,
+            settings_nav: super::settings_nav::Nav::default(),
             capture_key: None,
             profile_sel: 0,
             palette: None,
@@ -448,7 +449,7 @@ impl Wins {
     }
 }
 
-fn icon() -> Arc<egui::IconData> {
+pub(super) fn icon() -> Arc<egui::IconData> {
     static ICON: OnceLock<Arc<egui::IconData>> = OnceLock::new();
     ICON.get_or_init(|| Arc::new(eframe::icon_data::from_png_bytes(include_bytes!("../../assets/icon64.png")).unwrap_or_default())).clone()
 }
@@ -867,7 +868,9 @@ impl App {
         if self.picker_here() {
             self.tlinks_picker_ui(ctx);
         }
-        self.restore_dialog(ctx);
+        if !self.settings_owns_dialogs() {
+            self.restore_dialog(ctx);
+        }
         if w.ask_close {
             self.close_window_dialog(ctx, w, &mut actions);
         }
@@ -1134,7 +1137,7 @@ mod tests {
         v.composer_text = format!("draft-{tag}");
         v.queue_draft = format!("queue-{tag}");
         v.history_filter = format!("hist-{tag}");
-        v.settings_tab = tag as usize;
+        v.settings_nav.page = super::super::settings_nav::Page::ALL[tag as usize % super::super::settings_nav::Page::ALL.len()];
         v.capture_key = Some(format!("key-{tag}"));
         v.confirm_restore = Some(PathBuf::from(format!("backup-{tag}.zip")));
         v.tpl_name = format!("tpl-{tag}");
@@ -1143,11 +1146,11 @@ mod tests {
     }
 
     #[allow(clippy::type_complexity)]
-    fn sig(v: &WinView) -> ((Vec<u64>, u64, u64, titlebar::Mode), (String, String, String, String), (usize, Option<String>, Option<PathBuf>, String, Vec<u64>)) {
+    fn sig(v: &WinView) -> ((Vec<u64>, u64, u64, titlebar::Mode), (String, String, String, String), (super::super::settings_nav::Page, Option<String>, Option<PathBuf>, String, Vec<u64>)) {
         (
             (leaves(&v.layout), v.focused, v.active_project, v.mode),
             (v.filter.clone(), v.composer_text.clone(), v.queue_draft.clone(), v.history_filter.clone()),
-            (v.settings_tab, v.capture_key.clone(), v.confirm_restore.clone(), v.tpl_name.clone(), v.proj_views.iter().map(|p| p.0).collect()),
+            (v.settings_nav.page, v.capture_key.clone(), v.confirm_restore.clone(), v.tpl_name.clone(), v.proj_views.iter().map(|p| p.0).collect()),
         )
     }
 

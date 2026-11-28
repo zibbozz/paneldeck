@@ -76,6 +76,9 @@ mod save_actions_dialog;
 mod save_actions_ui;
 mod session_settings;
 mod settings;
+// Einstellungsfenster (#395): Tabelle der Einstellungen, Baum, Suche.
+mod settings_items;
+mod settings_nav;
 #[cfg(feature = "readme-shots")]
 mod shot_start;
 #[cfg(unix)]
@@ -435,6 +438,8 @@ enum Action {
     ResumeHistory(usize),
     OpenSearch,
     OpenSettings,
+    /// Einstellungen bei einer bestimmten Seite öffnen (#395, Befehlspalette „Einstellungen: …“).
+    OpenSettingsPage(settings_nav::Page),
     /// Fenster „Aufräumen …“ (#307).
     OpenCleanup,
     OpenPrompts,
@@ -982,7 +987,8 @@ pub struct App {
     /// Dienste des Editor-Reiters (#54): Plattenänderungen, Suche in Dateien, `--edit`, Explorer-Eintrag.
     editor_svc: editor_services::EditorServices,
     detached: Vec<u64>,
-    settings_tab: usize,
+    /// Einstellungsfenster (#395): Seite, Suche, Baum, Lage – je Hub-Fenster.
+    settings_nav: settings_nav::Nav,
     capture_key: Option<String>,
     queue_open: Option<u64>,
     queue_draft: String,
@@ -990,7 +996,6 @@ pub struct App {
     start_in_tray: bool,
     win_autostart: crate::integration::Status,
     win_context: crate::integration::Status,
-    show_licenses: bool,
     win_probed: bool,
     composer_open: bool,
     composer_text: String,
@@ -1363,7 +1368,7 @@ impl App {
             save_actions: save_actions_state,
             editor_svc: editor_services::EditorServices::from_cli(),
             detached: saved.detached.clone(),
-            settings_tab: 0,
+            settings_nav: settings_nav::Nav::default(),
             capture_key: None,
             queue_open: None,
             queue_draft: String::new(),
@@ -1371,7 +1376,6 @@ impl App {
             start_in_tray: crate::cli::get().tray,
             win_autostart: crate::integration::Status::Off,
             win_context: crate::integration::Status::Off,
-            show_licenses: false,
             win_probed: false,
             composer_open: false,
             composer_text: saved.composer_draft.clone(),
@@ -4149,7 +4153,8 @@ impl App {
                     self.history_open = false;
                 }
             }
-            Action::OpenSettings => self.settings_open = true,
+            Action::OpenSettings => self.open_settings(settings_nav::Page::START),
+            Action::OpenSettingsPage(p) => self.open_settings(p),
             Action::OpenCleanup => self.open_cleanup(ctx),
             Action::OpenPrompts => self.prompts_open = true,
             Action::NewDialog(claude) => {
@@ -4798,7 +4803,6 @@ impl eframe::App for App {
             (self.new_dialog.is_some(), "newdlg", "new_session_dialog"),
             (self.session_settings.is_some(), "sset", "session_settings"),
             (self.tpl.form.is_some(), "tpled", "tpl_editor"),
-            (self.settings_open && self.settings_tab == 2, "defaults", "settings_win"),
         ] {
             if open {
                 opts_tabs::grab_keys(ctx, salt, Id::new(win));
@@ -4833,7 +4837,10 @@ impl eframe::App for App {
         if self.picker_here() {
             self.tlinks_picker_ui(ctx);
         }
-        self.restore_dialog(ctx);
+        // Bei offenem Einstellungsfenster zeichnet es die Rückfrage „Wiederherstellen“ selbst (#395).
+        if !self.settings_owns_dialogs() {
+            self.restore_dialog(ctx);
+        }
         self.cleanup_ui(ctx);
         self.update_frame(ctx);
         // Tutorial (#143) zuletzt: liest die in diesem Bild gemeldeten Ziele und zeichnet über allem.

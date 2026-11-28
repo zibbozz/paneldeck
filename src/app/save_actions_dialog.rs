@@ -676,10 +676,9 @@ impl App {
         self.save_actions.without_next = false;
     }
 
-    /// *Einstellungen → Editor* öffnen.
+    /// *Einstellungen → Editor → Aktionen beim Speichern* öffnen.
     pub(super) fn sa_open_settings(&mut self) {
-        self.settings_open = true;
-        self.settings_tab = editor_services::SETTINGS_TAB;
+        self.open_settings(super::settings_nav::Page::EditorOnSave);
     }
 
     /// Abschnitt *Aktionen beim Speichern* in *Einstellungen → Editor*.

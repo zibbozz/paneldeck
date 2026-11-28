@@ -397,16 +397,20 @@ impl App {
         }
     }
 
-    /// Abschnitt „Updates“ unter *Einstellungen → Info*.
-    pub(crate) fn update_about_ui(&mut self, ui: &mut egui::Ui) {
+    /// Seite *Einstellungen → Info → Updates*.
+    pub(in crate::app) fn update_about_ui(&mut self, ui: &mut egui::Ui, cx: &crate::app::settings_items::RowCx) {
         let lang = self.settings.language;
+        let top = ui.cursor().min.y;
+        crate::app::settings_items::srow(ui, cx, "update_auto_check", |ui| {
+            style::toggle(ui, &mut self.settings.update_auto_check);
+        });
+        crate::app::settings_items::block(ui, cx, "updates", false, |ui| self.update_about_inner(ui, lang));
+        crate::app::tutorial::spot_since(ui, crate::app::tutorial::Spot::AboutUpdates, top);
+    }
+
+    fn update_about_inner(&mut self, ui: &mut egui::Ui, lang: Lang) {
         let ctx = ui.ctx().clone();
         let dim = style::dim(ui);
-        ui.add_space(S2);
-        ui.separator();
-        ui.add_space(S1);
-        let top = ui.cursor().min.y;
-        ui.label(RichText::new(lang.t("Updates", "Updates")).strong());
         let flavor = self.updater.flavor(&self.exe);
         ui.horizontal(|ui| {
             ui.label(RichText::new(format!("{}:", lang.t("Version", "Version"))).color(dim));
@@ -434,11 +438,6 @@ impl App {
                 self.updater.dialog = true;
             }
         });
-        ui.horizontal(|ui| {
-            style::toggle(ui, &mut self.settings.update_auto_check);
-            ui.label(lang.t("Automatisch prüfen (beim Start, höchstens einmal am Tag)", "Check automatically (at start, at most once a day)"));
-        });
-        crate::app::tutorial::spot_since(ui, crate::app::tutorial::Spot::AboutUpdates, top);
         let last = if self.settings.update_last_check > 0 {
             chrono::DateTime::from_timestamp(self.settings.update_last_check, 0)
                 .map(|t| t.with_timezone(&chrono::Local).format(if lang == Lang::De { "%d.%m.%Y %H:%M" } else { "%Y-%m-%d %H:%M" }).to_string())

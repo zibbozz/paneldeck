@@ -180,6 +180,11 @@ impl App {
         }
     }
 
+    /// Läuft gerade eine Tour? (Die Einstellungen zeichnen dann im Hub, damit das Tutorial auf sie zeigen kann, #395.)
+    pub(super) fn tut_running(&self) -> bool {
+        self.tut.run.is_some()
+    }
+
     /// Ist kein Dialog der App offen, der Esc selbst braucht?
     fn tut_esc_free(&self) -> bool {
         !self.settings_open
@@ -519,7 +524,7 @@ impl App {
             minimized,
             names,
             palette: self.palette.is_some(),
-            settings: self.settings_open.then_some(self.settings_tab),
+            settings: self.settings_open.then_some(self.settings_nav.page),
             tasks: self.mode == titlebar::Mode::Tasks,
             expert: self.plan.expert,
             todos,
@@ -541,9 +546,11 @@ impl App {
                 Prep::Terminals => self.set_mode(titlebar::Mode::Terminals),
                 Prep::Tasks => self.set_mode(titlebar::Mode::Tasks),
                 Prep::NoSettings => self.settings_open = false,
-                Prep::Settings(tab) => {
-                    self.settings_open = true;
-                    self.settings_tab = tab;
+                // Seite zeigen (#395); während der Tour zeichnen die Einstellungen im Hub, damit das Tutorial auf sie zeigen kann.
+                Prep::Settings(page) => {
+                    if !self.settings_open || self.settings_nav.page != page {
+                        self.open_settings(page);
+                    }
                 }
                 Prep::TutProject => {
                     self.tut_enter_project();
@@ -801,16 +808,22 @@ impl App {
         })
     }
 
-    /// Abschnitt „Tutorial“ unter Einstellungen → Info.
-    pub(super) fn tut_about_ui(&mut self, ui: &mut Ui) -> Option<Cmd> {
+    /// Seite *Einstellungen → Info → Tutorial*.
+    pub(super) fn tut_about_ui(&mut self, ui: &mut Ui, cx: &super::settings_items::RowCx) -> Option<Cmd> {
         self.tut_load();
-        let lang = self.settings.language;
         let mut out = None;
         let top = ui.cursor().min.y;
-        ui.add_space(S2);
-        ui.separator();
-        ui.add_space(S1);
-        ui.label(RichText::new(lang.t("Tutorial", "Tutorial")).strong());
+        super::settings_items::block(ui, cx, "tutorial", false, |ui| out = self.tut_about_inner(ui));
+        super::settings_items::srow(ui, cx, "tutorial_whats_new", |ui| {
+            style::toggle(ui, &mut self.settings.tutorial_whats_new);
+        });
+        spot_since(ui, Spot::AboutTutorial, top);
+        out
+    }
+
+    fn tut_about_inner(&mut self, ui: &mut Ui) -> Option<Cmd> {
+        let lang = self.settings.language;
+        let mut out = None;
         ui.label(RichText::new(lang.t(
             "Geführte Schritte in der echten Oberfläche, in einem eigenen Projekt „Tutorial“. Auch in der Befehls-Palette („Tutorial“) und im leeren Terminal Hub.",
             "Guided steps in the real interface, in a project “Tutorial” of its own. Also in the command palette (“Tutorial”) and in the empty Terminal Hub.",
@@ -837,11 +850,6 @@ impl App {
                 }
             }
         });
-        ui.horizontal(|ui| {
-            style::toggle(ui, &mut self.settings.tutorial_whats_new);
-            ui.label(RichText::new(lang.t("Nach einem Update die Tour „Was ist neu“ von selbst starten (aus: nur ein Hinweis in der Seitenleiste)", "Start the “What's new” tour by itself after an update (off: just a hint in the sidebar)")).small());
-        });
-        spot_since(ui, Spot::AboutTutorial, top);
         out
     }
 }
