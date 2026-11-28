@@ -586,7 +586,8 @@ pub fn find_program(distro: &str, name: &str) -> Option<String> {
         return None;
     }
     let out = run(&which_args(distro, name), FAST_TIMEOUT).filter(|o| o.code == Some(0) && !o.truncated)?;
-    let p = String::from_utf8_lossy(&out.stdout).lines().next().unwrap_or("").trim().to_string();
+    // Die letzte Zeile: eine Login-Shell kann vorher etwas ausgeben (Begrüßung aus der `.profile`).
+    let p = String::from_utf8_lossy(&out.stdout).lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("").trim().to_string();
     (p.starts_with('/') && validate_linux_path(&p).is_ok()).then_some(p)
 }
 
@@ -892,7 +893,8 @@ fn run(args: &[String], timeout: Duration) -> Option<Output> {
 /// Wie [`run`] mit zusätzlichen Umgebungsvariablen.
 #[cfg(windows)]
 fn run_env(args: &[String], env: &[(String, String)], timeout: Duration) -> Option<Output> {
-    let mut cmd = std::process::Command::new("wsl.exe");
+    // Absoluter Pfad (System32), nie über die Suche im Arbeitsordner.
+    let mut cmd = std::process::Command::new(exe_path());
     cmd.args(args);
     for (k, v) in env {
         cmd.env(k, v);

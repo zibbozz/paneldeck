@@ -150,6 +150,7 @@ impl SmartSettings {
             completion_timeout: Duration::from_millis(self.completion_timeout_ms as u64),
             max_diagnostics: self.max_diagnostics as usize,
             trace: self.trace,
+            init_timeout: client::INIT_TIMEOUT,
         }
     }
 
@@ -273,9 +274,13 @@ impl Servers {
         let e = self.entries.entry(key.clone()).or_insert_with(|| Entry { server, language: lang.to_string(), root: root.to_path_buf(), launch: launch.clone(), client: None, stopped: None, counted: false });
         e.launch = launch;
         e.counted = false;
+        if let Some(why) = e.launch.invalid.clone() {
+            e.stopped = Some(why.clone());
+            return Ensure::Failed(why);
+        }
         let lsp_root = e.launch.lsp_root.clone().map(PathBuf::from).unwrap_or_else(|| root.to_path_buf());
         let cwd = if e.launch.lsp_root.is_some() { std::env::temp_dir() } else { root.to_path_buf() };
-        match client::Client::spawn(&e.launch.program, &e.launch.args, &cwd, &lsp_root, settings.client_limits(), settings.init_options.get(lang).cloned()) {
+        match client::Client::spawn(&e.launch.program, &e.launch.args, e.launch.raw_tail.as_deref(), &cwd, &lsp_root, settings.client_limits(), settings.init_options.get(lang).cloned()) {
             Ok(c) => {
                 e.client = Some(c);
                 Ensure::Running(key)
@@ -416,7 +421,7 @@ mod tests {
         let mut sv = Servers::default();
         let set = SmartSettings::default();
         assert_eq!(sv.ensure("rust", Path::new("C:/p"), &set, &|_| None), Ensure::NoServer);
-        let bad = servers::Launch { program: PathBuf::from(r"C:\does\not\exist\srv.exe"), args: vec![], found: PathBuf::from("x"), rustup_proxy: true, lsp_root: None };
+        let bad = servers::Launch { program: PathBuf::from(r"C:\does\not\exist\srv.exe"), args: vec![], found: PathBuf::from("x"), rustup_proxy: true, lsp_root: None, raw_tail: None, invalid: None };
         let r = sv.ensure("rust", &std::env::temp_dir(), &set, &|_| Some(("rust-analyzer".into(), bad.clone())));
         assert!(matches!(&r, Ensure::Failed(m) if m.contains("rustup component add")), "{r:?}");
         // danach angehalten, kein Dauerversuch
@@ -429,7 +434,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn three_crashes_turn_the_language_off_and_retry_and_idle_work() {
-        let cmd = servers::Launch { program: PathBuf::from(std::env::var("ComSpec").unwrap_or_else(|_| r"C:\Windows\System32\cmd.exe".into())), args: vec!["/c".into(), "exit".into(), "1".into()], found: PathBuf::from("cmd"), rustup_proxy: false, lsp_root: None };
+        let cmd = servers::Launch { program: PathBuf::from(std::env::var("ComSpec").unwrap_or_else(|_| r"C:\Windows\System32\cmd.exe".into())), args: vec!["/c".into(), "exit".into(), "1".into()], found: PathBuf::from("cmd"), rustup_proxy: false, lsp_root: None, raw_tail: None, invalid: None };
         let mut sv = Servers::default();
         let set = SmartSettings::default();
         let dir = std::env::temp_dir();

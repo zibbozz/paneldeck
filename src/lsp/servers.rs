@@ -92,6 +92,11 @@ pub struct Launch {
     pub rustup_proxy: bool,
     /// Server in WSL (#367): Projektwurzel als Linux-Pfad (für `rootUri`); `None` = Windows.
     pub lsp_root: Option<String>,
+    /// Hülle `.cmd`/`.bat`: Befehlszeile für `cmd /d /s /c`, unverändert übergeben (`raw_arg`; die normale Übergabe
+    /// würde die Anführungszeichen für cmd unlesbar maskieren).
+    pub raw_tail: Option<String>,
+    /// So nicht startbar (Grund für die Anzeige), z. B. Sonderzeichen von cmd in Argumenten einer Hülle.
+    pub invalid: Option<String>,
 }
 
 /// Was die Suche braucht (in Tests ersetzbar).
@@ -114,7 +119,8 @@ impl Env<'_> {
     #[cfg_attr(test, allow(dead_code))]
     pub fn system(project: Option<&Path>) -> Env<'_> {
         let path_var = portable_pty::CommandBuilder::new("x").get_env("PATH").map(|s| s.to_os_string()).or_else(|| std::env::var_os("PATH")).unwrap_or_default();
-        let path: Vec<PathBuf> = std::env::split_paths(&path_var).collect();
+        // Netzwerkpfade (UNC) im PATH nie durchsuchen: langsam und fremd.
+        let path: Vec<PathBuf> = std::env::split_paths(&path_var).filter(|p| !p.to_string_lossy().starts_with("\\\\")).collect();
         let exts = if cfg!(windows) {
             std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".into()).split(';').filter(|e| !e.is_empty()).map(|e| e.to_ascii_lowercase()).filter(|e| [".com", ".exe", ".bat", ".cmd"].contains(&e.as_str())).collect()
         } else {
@@ -164,37 +170,43 @@ pub fn find(name: &str, args: &[&str], env: &Env) -> Option<Launch> {
 pub fn launch_for(p: &Path, ext: &str, args: Vec<String>, env: &Env, size: u64) -> Launch {
     let rustup_proxy = env.rustup_size.is_some_and(|r| r == size) && p.file_stem().is_some_and(|s| s != "rustup");
     if ext == ".cmd" || ext == ".bat" {
-        // `cmd /d /s /c ""<hülle>" args"`: /d ohne AutoRun, /s nimmt nur die äußeren Anführungszeichen weg.
+        // `cmd /d /s /c ""<hülle>" args"`: /d ohne AutoRun, /s nimmt nur die äußeren Anführungszeichen weg. Sonderzeichen
+        // von cmd (`&|<>()%!^"`) lassen sich in dieser Zeile nicht sicher übergeben: dann startet der Server nicht.
+        let mut invalid = None;
+        if p.to_string_lossy().chars().any(|c| CMD_SPECIAL.contains(c)) {
+            invalid = Some(crate::state::t("Der Pfad der Hülle (.cmd/.bat) enthält Zeichen, die cmd anders liest (& | < > ( ) % ! ^ \").", "The path of the wrapper (.cmd/.bat) contains characters cmd reads differently (& | < > ( ) % ! ^ \").").to_string());
+        }
         let mut line = format!("\"\"{}\"", p.display());
         for a in &args {
-            line.push(' ');
-            line.push_str(&cmd_quote(a));
+            match cmd_quote(a) {
+                Some(q) => {
+                    line.push(' ');
+                    line.push_str(&q);
+                }
+                None => {
+                    invalid = Some(crate::state::t("Argumente für eine Hülle (.cmd/.bat) dürfen keine Sonderzeichen von cmd enthalten (& | < > ( ) % ! ^ \").", "Arguments for a wrapper (.cmd/.bat) must not contain cmd special characters (& | < > ( ) % ! ^ \").").to_string());
+                }
+            }
         }
         line.push('"');
-        return Launch { program: env.system32.join("cmd.exe"), args: vec!["/d".into(), "/s".into(), "/c".into(), line], found: p.to_path_buf(), rustup_proxy, lsp_root: None };
+        return Launch { program: env.system32.join("cmd.exe"), args: vec!["/d".into(), "/s".into(), "/c".into()], found: p.to_path_buf(), rustup_proxy, lsp_root: None, raw_tail: Some(line), invalid };
     }
-    Launch { program: p.to_path_buf(), args, found: p.to_path_buf(), rustup_proxy, lsp_root: None }
+    Launch { program: p.to_path_buf(), args, found: p.to_path_buf(), rustup_proxy, lsp_root: None, raw_tail: None, invalid: None }
 }
 
-/// Argument für die Zeile von `cmd /c`: nur einfache Zeichen bleiben ungequotet; Sonderzeichen von cmd werden mit `^`
-/// entschärft, damit kein Argument einen zweiten Befehl startet.
-fn cmd_quote(a: &str) -> String {
-    if !a.is_empty() && a.chars().all(|c| c.is_ascii_alphanumeric() || "-_./:=".contains(c)) {
-        return a.to_string();
+/// Zeichen, die cmd in der Zeile von `/c` (auch in Anführungszeichen) anders liest.
+const CMD_SPECIAL: &str = "&|<>()%!^\"";
+
+/// Argument für die Zeile von `cmd /c`: einfache Zeichen ungequotet, mit Leerzeichen in `"…"`; mit Sonderzeichen von
+/// cmd `None` (nicht sicher übergebbar – `^` wirkt in Anführungszeichen nicht).
+fn cmd_quote(a: &str) -> Option<String> {
+    if a.chars().any(|c| CMD_SPECIAL.contains(c) || c.is_control()) {
+        return None;
     }
-    let mut s = String::from("\"");
-    for c in a.chars() {
-        match c {
-            '"' => s.push_str("\"\""),
-            '^' | '&' | '|' | '<' | '>' | '%' | '!' | '(' | ')' => {
-                s.push('^');
-                s.push(c);
-            }
-            _ => s.push(c),
-        }
+    if !a.is_empty() && !a.contains(' ') {
+        return Some(a.to_string());
     }
-    s.push('"');
-    s
+    Some(format!("\"{a}\""))
 }
 
 /// Server für eine Sprache: eigener Pfad mit eigenen Argumenten (geht vor), sonst der erste gefundene eingebaute, der
@@ -242,7 +254,9 @@ mod tests {
         assert_eq!(id, "typescript-language-server");
         assert_eq!(l.found, PathBuf::from(r"C:\Users\u\AppData\Roaming\npm\typescript-language-server.cmd"));
         assert_eq!(l.program, PathBuf::from(r"C:\Windows\System32\cmd.exe"));
-        assert_eq!(l.args, vec!["/d", "/s", "/c", "\"\"C:\\Users\\u\\AppData\\Roaming\\npm\\typescript-language-server.cmd\" --stdio\""]);
+        assert_eq!(l.args, vec!["/d", "/s", "/c"]);
+        assert_eq!(l.raw_tail.as_deref(), Some("\"\"C:\\Users\\u\\AppData\\Roaming\\npm\\typescript-language-server.cmd\" --stdio\""));
+        assert!(l.invalid.is_none());
         // relativer Eintrag „.“ zählt nicht
         assert_eq!(resolve("c", None, &[], &[], &e).unwrap().1.program, PathBuf::from(r"C:\tools\clangd.exe"));
         // Store-Platzhalter übersprungen
@@ -259,10 +273,16 @@ mod tests {
 
     #[test]
     fn cmd_arguments_cannot_start_a_second_command() {
-        assert_eq!(cmd_quote("--stdio"), "--stdio");
-        assert_eq!(cmd_quote("a&b"), "\"a^&b\"");
-        assert_eq!(cmd_quote("x\"|y"), "\"x\"\"^|y\"");
-        assert_eq!(cmd_quote("%PATH%"), "\"^%PATH^%\"");
+        assert_eq!(cmd_quote("--stdio").as_deref(), Some("--stdio"));
+        assert_eq!(cmd_quote("a b").as_deref(), Some("\"a b\""));
+        for bad in ["a&b", "x\"|y", "%PATH%", "(x)", "!v!", "a^b", "a\nb"] {
+            assert_eq!(cmd_quote(bad), None, "{bad}");
+        }
+        let f = |_: &Path| Some(1u64);
+        let e = Env { path: vec![], exts: vec![], project: None, system32: PathBuf::from(r"C:\Windows\System32"), rustup_size: None, is_file: &f };
+        assert!(launch_for(Path::new(r"C:\t\s.cmd"), ".cmd", vec!["a&calc".into()], &e, 1).invalid.is_some(), "Argument mit &");
+        assert!(launch_for(Path::new(r"C:\100%\s.cmd"), ".cmd", vec![], &e, 1).invalid.is_some(), "% im Pfad");
+        assert!(launch_for(Path::new(r"C:\t\s.exe"), ".exe", vec!["a&b".into()], &e, 1).invalid.is_none(), "ohne cmd egal");
     }
 
     #[test]

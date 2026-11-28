@@ -17,12 +17,42 @@ use std::time::{Duration, Instant};
 
 /// Größe des Protokolls im Speicher je Server.
 pub const LOG_BYTES: usize = 1024 * 1024;
+/// Antwortet der Server so lange nicht auf `initialize`, gilt er als abgestürzt (zählt für die Absturz-Regel).
+pub const INIT_TIMEOUT: Duration = Duration::from_secs(60);
+/// Längste Zeile der Fehlerausgabe, die gelesen wird (der Rest der Zeile wird verworfen).
+const STDERR_LINE: usize = 8192;
+
+/// Eine Zeile mit Obergrenze lesen: höchstens `max` Bytes landen in `out`, der Rest der Zeile wird überlesen. Liefert die
+/// Zahl gelesener Bytes (0 = Ende).
+pub(crate) fn read_capped_line(r: &mut dyn BufRead, max: usize, out: &mut Vec<u8>) -> std::io::Result<usize> {
+    out.clear();
+    let mut total = 0;
+    loop {
+        let buf = r.fill_buf()?;
+        if buf.is_empty() {
+            return Ok(total);
+        }
+        let (take, done) = match buf.iter().position(|b| *b == b'\n') {
+            Some(i) => (i + 1, true),
+            None => (buf.len(), false),
+        };
+        let room = max.saturating_sub(out.len());
+        out.extend_from_slice(&buf[..take.min(room)]);
+        r.consume(take);
+        total += take;
+        if done {
+            return Ok(total);
+        }
+    }
+}
 
 /// Protokoll eines Servers im Speicher (Ring, älteste Zeilen fallen weg).
 #[derive(Default, Debug)]
 pub struct Log {
     lines: VecDeque<String>,
     bytes: usize,
+    /// Wächst mit jeder Zeile (die Anzeige merkt sich den zusammengesetzten Text je Stand).
+    pub rev: u64,
 }
 
 impl Log {
@@ -37,6 +67,7 @@ impl Log {
             l.push('…');
         }
         self.bytes += l.len();
+        self.rev += 1;
         self.lines.push_back(l);
         while self.bytes > LOG_BYTES {
             match self.lines.pop_front() {
@@ -103,11 +134,13 @@ pub struct ClientLimits {
     pub completion_timeout: Duration,
     pub max_diagnostics: usize,
     pub trace: bool,
+    /// Zeitgrenze für die Antwort auf `initialize` (danach gilt der Server als abgestürzt).
+    pub init_timeout: Duration,
 }
 
 impl Default for ClientLimits {
     fn default() -> Self {
-        ClientLimits { max_message: proto::DEFAULT_MAX_MESSAGE, completion_timeout: Duration::from_secs(5), max_diagnostics: 1000, trace: false }
+        ClientLimits { max_message: proto::DEFAULT_MAX_MESSAGE, completion_timeout: Duration::from_secs(5), max_diagnostics: 1000, trace: false, init_timeout: INIT_TIMEOUT }
     }
 }
 
@@ -137,6 +170,8 @@ pub struct Client {
     #[cfg_attr(not(any(windows, unix)), allow(dead_code))]
     job: Option<crate::platform::process::SessionJob>,
     pub last_used: Instant,
+    /// Start (Zeitgrenze für `initialize`).
+    started: Instant,
     /// Stand des Fortschritts (`$/progress`): Titel/Meldung, solange etwas läuft.
     pub progress: Option<String>,
 }
@@ -208,6 +243,7 @@ impl Client {
             stderr: None,
             job: None,
             last_used: Instant::now(),
+            started: Instant::now(),
             progress: None,
         };
         let root_s = root.to_string_lossy().to_string();
@@ -223,9 +259,15 @@ impl Client {
 
     /// Server starten: `program` mit `args` im Ordner `cwd`, ohne Fenster, in einem eigenen Job Object (endet mit
     /// Paneldeck), Fehlerausgabe ins Protokoll.
-    pub fn spawn(program: &Path, args: &[String], cwd: &Path, root: &Path, limits: ClientLimits, init: Option<Value>) -> Result<Client, String> {
+    pub fn spawn(program: &Path, args: &[String], raw_tail: Option<&str>, cwd: &Path, root: &Path, limits: ClientLimits, init: Option<Value>) -> Result<Client, String> {
         let mut cmd = std::process::Command::new(program);
         cmd.args(args).current_dir(cwd).stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
+        // Befehlszeile einer `.cmd`-Hülle unverändert (sonst maskiert Rust die Anführungszeichen für cmd unlesbar).
+        if let Some(t) = raw_tail {
+            crate::platform::process::raw_arg(&mut cmd, t.to_string());
+        }
+        // Programme ohne Pfad (z. B. `node` in einer npm-Hülle) nie im Arbeitsordner (= Projekt) suchen.
+        cmd.env("NoDefaultCurrentDirectoryInExePath", "1");
         crate::platform::process::hide_window(&mut cmd);
         let job = crate::platform::process::SessionJob::new();
         if let Some(j) = &job {
@@ -253,7 +295,13 @@ impl Client {
             // Fehlerausgabe des Servers zeilenweise ins Protokoll (über den Ereignis-Kanal).
             let (etx, erx) = mpsc::channel::<Event>();
             std::thread::spawn(move || {
-                for line in BufReader::new(e).lines().map_while(Result::ok) {
+                let mut r = BufReader::new(e);
+                let mut buf = Vec::new();
+                while let Ok(n) = read_capped_line(&mut r, STDERR_LINE, &mut buf) {
+                    if n == 0 {
+                        break;
+                    }
+                    let line = String::from_utf8_lossy(&buf).trim_end_matches(['\r', '\n']).to_string();
                     if etx.send(Event::Stderr(line)).is_err() {
                         break;
                     }
@@ -289,6 +337,19 @@ impl Client {
         }
     }
 
+    /// Vor der Antwort auf `initialize`: für dieses Dokument nur den neuesten Text vormerken (nie eine wachsende
+    /// Schlange): das vorgemerkte `didOpen` bekommt den neuen Text, `didChange` entfällt.
+    fn queue_latest(&mut self, uri: &str, version: i64, text: &str) -> bool {
+        for q in self.queued.iter_mut() {
+            if q["method"] == "textDocument/didOpen" && q["params"]["textDocument"]["uri"] == uri {
+                q["params"]["textDocument"]["text"] = Value::String(text.to_string());
+                q["params"]["textDocument"]["version"] = json!(version);
+                return true;
+            }
+        }
+        false
+    }
+
     /// Dokument öffnen (`didOpen`); schon offen = nichts.
     pub fn open(&mut self, uri: &str, language: &str, text: &str) {
         if self.docs.contains_key(uri) || matches!(self.state, State::Exited(_)) {
@@ -304,10 +365,19 @@ impl Client {
         let v = self.docs.get_mut(uri)?;
         *v += 1;
         let version = *v;
+        if self.state == State::Starting && self.queue_latest(uri, version, text) {
+            self.last_used = Instant::now();
+            return Some(version);
+        }
         self.notify("textDocument/didChange", json!({"textDocument": {"uri": uri, "version": version}, "contentChanges": [{"text": text}]}));
         // Diagnosen für einen älteren Stand sind ab jetzt veraltet (die Oberfläche zeigt sie nicht mehr an).
         self.last_used = Instant::now();
         Some(version)
+    }
+
+    /// Mitschnitt der Nachrichten an?
+    pub fn traced(&self) -> bool {
+        self.limits.trace
     }
 
     pub fn open_docs(&self) -> usize {
@@ -406,6 +476,12 @@ impl Client {
                 any = true;
             }
         }
+        if self.state == State::Starting && self.started.elapsed() > self.limits.init_timeout {
+            self.log.push("initialize timeout");
+            self.kill();
+            self.exited("initialize timeout".into());
+            any = true;
+        }
         if let Some(p) = self.process.as_mut()
             && let Ok(Some(status)) = p.try_wait()
             && !matches!(self.state, State::Exited(_))
@@ -466,9 +542,12 @@ impl Client {
                         if let Some((uri, version, items, cut)) = proto::parse_publish(&params, self.limits.max_diagnostics) {
                             // Nur für offene Dokumente; eine Meldung für einen älteren Stand fällt weg (sie passte nicht
                             // mehr zum Text).
-                            let cur = self.docs.get(&uri).copied();
+                            // Adressen vergleichen wie Pfade: `file:///c%3A/x` (vscode-uri) = `file:///c:/x`.
+                            let k = proto::uri_key(&uri);
+                            let Some(ours) = self.docs.keys().find(|d| proto::uri_key(d) == k).cloned() else { return };
+                            let cur = self.docs.get(&ours).copied();
                             if cur.is_some() && !version.is_some_and(|v| cur.is_some_and(|c| v < c)) {
-                                self.diagnostics.insert(uri, FileDiagnostics { version, items, cut });
+                                self.diagnostics.insert(ours, FileDiagnostics { version, items, cut });
                                 self.diag_gen += 1;
                             }
                         }
@@ -502,21 +581,31 @@ impl Client {
         }
     }
 
-    /// Server ordentlich beenden (`shutdown`, dann `exit`); nach kurzer Zeit hart über das Job Object.
+    /// Server ordentlich beenden (`shutdown`, `exit`), ohne den UI-Thread warten zu lassen: ein Hilfsfaden gibt ihm
+    /// kurz Zeit und beendet ihn dann hart über das Job Object.
     pub fn stop(&mut self) {
         if matches!(self.state, State::Exited(_)) {
             return;
         }
         self.request(Pending::Shutdown, "shutdown", Value::Null);
-        let until = Instant::now() + Duration::from_millis(800);
-        while Instant::now() < until {
-            self.poll();
-            if self.process.as_mut().is_none_or(|p| p.try_wait().ok().flatten().is_some()) {
-                break;
+        self.send(proto::notification("exit", Value::Null));
+        let (mut process, job) = (self.process.take(), self.job.take());
+        std::thread::spawn(move || {
+            let until = Instant::now() + Duration::from_millis(800);
+            while Instant::now() < until {
+                if process.as_mut().is_none_or(|p| p.try_wait().ok().flatten().is_some()) {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(20));
             }
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        self.kill();
+            if let Some(j) = &job {
+                j.terminate_all();
+            }
+            if let Some(p) = process.as_mut() {
+                let _ = p.kill();
+                let _ = p.wait();
+            }
+        });
         self.exited("stopped".into());
     }
 
@@ -724,7 +813,7 @@ pub(crate) mod tests {
             return;
         };
         let dir = std::env::temp_dir();
-        let mut c = Client::spawn(&exe, &[], &dir, &dir, ClientLimits::default(), None).expect("startet");
+        let mut c = Client::spawn(&exe, &[], None, &dir, &dir, ClientLimits::default(), None).expect("startet");
         assert!(c.pid.is_some());
         #[cfg(windows)]
         assert!(c.memory().is_some_and(|m| m > 0), "Arbeitsspeicher");
@@ -737,6 +826,62 @@ pub(crate) mod tests {
         wait(&mut c, |c| c.log.lines().any(|l| l.contains("refused server request workspace/applyEdit")));
         c.stop();
         assert!(matches!(c.state, State::Exited(_)));
+    }
+
+    /// Server hinter einer `.cmd`-Hülle in einem Pfad mit Leerzeichen startet wirklich (Review: cmd-Zeile über
+    /// `raw_arg`, nicht über die maskierende Übergabe).
+    #[cfg(windows)]
+    #[test]
+    fn a_cmd_wrapper_in_a_path_with_spaces_starts() {
+        let Some(exe) = fake_server_exe() else {
+            eprintln!("fake_lsp fehlt – übersprungen");
+            return;
+        };
+        let dir = std::env::temp_dir().join(format!("pd lsp cmd {}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let shim = dir.join("fake lsp.cmd");
+        std::fs::write(&shim, format!("@\"{}\" %*\r\n", exe.display())).unwrap();
+        let f = |p: &Path| std::fs::metadata(p).ok().map(|m| m.len());
+        let sys32 = std::env::var_os("SystemRoot").map(|r| PathBuf::from(r).join("System32")).unwrap_or_else(|| PathBuf::from(r"C:\Windows\System32"));
+        let env = super::super::servers::Env { path: vec![], exts: vec![], project: None, system32: sys32, rustup_size: None, is_file: &f };
+        let l = super::super::servers::launch_for(&shim, ".cmd", vec!["--stdio".into()], &env, 10);
+        assert!(l.invalid.is_none());
+        let mut c = Client::spawn(&l.program, &l.args, l.raw_tail.as_deref(), &dir, &dir, ClientLimits::default(), None).expect("startet");
+        c.open("file:///c:/t/b.rs", "rust", "x");
+        wait(&mut c, |c| c.diagnostics.contains_key("file:///c:/t/b.rs"));
+        c.stop();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Vor `initialize`: nur der neueste Text je Dokument wartet; antwortet der Server nicht, endet er nach der Frist.
+    #[test]
+    fn the_queue_before_initialize_keeps_only_the_latest_text_and_initialize_times_out() {
+        let (c_read, s_write) = pair();
+        let (_s_read, c_write) = pair();
+        let limits = ClientLimits { init_timeout: Duration::from_millis(100), ..Default::default() };
+        let mut c = Client::with_streams(Box::new(c_read), Box::new(c_write), Path::new(r"C:\p"), limits, None);
+        c.open("file:///c:/p/a.rs", "rust", "v1");
+        for i in 0..500 {
+            c.change("file:///c:/p/a.rs", &format!("v{i}"));
+        }
+        assert_eq!(c.queued.len(), 1, "nie eine wachsende Schlange");
+        assert_eq!(c.queued[0]["params"]["textDocument"]["text"], "v499");
+        wait(&mut c, |c| matches!(c.state, State::Exited(_)));
+        assert!(matches!(&c.state, State::Exited(w) if w.contains("initialize")));
+        drop(s_write);
+    }
+
+    #[test]
+    fn long_stderr_lines_are_capped() {
+        let data = format!("{}\nshort\n", "x".repeat(100_000));
+        let mut r = BufReader::new(data.as_bytes());
+        let mut buf = Vec::new();
+        assert_eq!(read_capped_line(&mut r, 10, &mut buf).unwrap(), 100_001);
+        assert_eq!(buf.len(), 10);
+        read_capped_line(&mut r, 10, &mut buf).unwrap();
+        assert_eq!(buf, b"short\n");
+        assert_eq!(read_capped_line(&mut r, 10, &mut buf).unwrap(), 0);
     }
 
     #[test]

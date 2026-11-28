@@ -230,7 +230,25 @@ pub(super) fn servers_window(ctx: &egui::Context, ed: &mut EditorUi, lang: Lang)
         });
         ui.separator();
         ui.label(RichText::new(lang.t("Protokoll (nur im Speicher, höchstens 1 MB je Server; Mitschnitt der Nachrichten: Einstellungen → Editor → Smart-Modus)", "Log (in memory only, at most 1 MB per server; message trace: Settings → Editor → Smart mode)")).small().color(style::dim(ui)));
-        let log = ed.smart.window_sel.as_ref().and_then(|k| ed.smart.servers.entries.get(k)).and_then(|e| e.client.as_ref()).map(|c| c.log.text()).unwrap_or_default();
+        if ed.smart.servers.entries.values().any(|e| e.client.as_ref().is_some_and(|c| c.traced())) {
+            ui.label(RichText::new(lang.t("Mitschnitt an: Das Protokoll kann Dateiinhalte zeigen – und ist auf Bildschirmfotos zu sehen, auch auf denen von Agenten (MCP screenshot), solange dieses Fenster offen ist.", "Trace on: the log can show file contents – and is visible in screenshots, also those taken by agents (MCP screenshot), while this window is open.")).small().color(style::ui().warning));
+        }
+        // Zusammengesetzten Text nur bei neuem Stand bauen (bis zu 1 MB, nicht jedes Bild).
+        let sel = ed.smart.window_sel.clone();
+        let cur = sel.as_ref().and_then(|k| ed.smart.servers.entries.get(k)).and_then(|e| e.client.as_ref()).map(|c| c.log.rev);
+        let stale = match (&ed.smart.log_cache, &sel, cur) {
+            (Some((k, r, _)), Some(s), Some(c)) => k != s || *r != c,
+            (_, Some(_), Some(_)) => true,
+            _ => false,
+        };
+        if stale && let (Some(k), Some(c)) = (sel.clone(), cur) {
+            let text = ed.smart.servers.entries.get(&k).and_then(|e| e.client.as_ref()).map(|c| c.log.text()).unwrap_or_default();
+            ed.smart.log_cache = Some((k, c, text));
+        }
+        let log = match (&ed.smart.log_cache, &sel) {
+            (Some((k, _, t)), Some(s)) if k == s => t.as_str(),
+            _ => "",
+        };
         egui::ScrollArea::vertical().stick_to_bottom(true).auto_shrink([false, false]).show(ui, |ui| {
             ui.add(egui::Label::new(RichText::new(log).monospace().small()).wrap());
         });

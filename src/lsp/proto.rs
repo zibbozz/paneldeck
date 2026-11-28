@@ -35,7 +35,8 @@ pub fn read_message(r: &mut dyn BufRead, max: usize) -> Result<Value, ReadError>
     let mut line = String::new();
     loop {
         line.clear();
-        let n = r.read_line(&mut line).map_err(|e| ReadError::Io(e.to_string()))?;
+        // Kopfzeile höchstens 4096 Bytes: nie unbegrenzt lesen.
+        let n = std::io::Read::take(&mut *r, 4097).read_line(&mut line).map_err(|e| ReadError::Io(e.to_string()))?;
         if n == 0 {
             return Err(ReadError::Eof);
         }
@@ -491,6 +492,16 @@ pub fn path_to_uri(path: &str) -> String {
     out
 }
 
+/// Vergleichsform einer Adresse: `file:`-Adressen als Pfad (dekodiert, Laufwerksbuchstabe und unter Windows alles
+/// klein), andere unverändert. So passt `file:///c%3A/x` (vscode-uri) zu `file:///C:/x`.
+pub fn uri_key(uri: &str) -> String {
+    match uri_to_path(uri, true) {
+        Some(p) if cfg!(windows) => p.to_lowercase(),
+        Some(p) => p,
+        None => uri.to_string(),
+    }
+}
+
 /// Pfad aus einer `file:`-Adresse (`None` für andere Schemata). Windows: `C:\…` bzw. `\\server\share\…`.
 pub fn uri_to_path(uri: &str, windows: bool) -> Option<String> {
     let rest = uri.strip_prefix("file://")?;
@@ -543,6 +554,9 @@ mod tests {
         assert_eq!(read_message(&mut std::io::BufReader::new(&big[..]), 1000), Err(ReadError::TooLarge(999999)));
         let bad = b"Content-Length: x\r\n\r\n".to_vec();
         assert!(matches!(read_message(&mut std::io::BufReader::new(&bad[..]), 1000), Err(ReadError::Malformed(_))));
+        // Endlose Kopfzeile: abgelehnt, ohne alles zu lesen
+        let long = vec![b'x'; 1 << 20];
+        assert!(matches!(read_message(&mut std::io::BufReader::new(&long[..]), 1000), Err(ReadError::Malformed(_))));
         // Weitere Kopfzeilen (Content-Type) werden überlesen.
         let ct = b"Content-Type: application/vscode-jsonrpc; charset=utf-8\r\nContent-Length: 2\r\n\r\n{}".to_vec();
         assert_eq!(read_message(&mut std::io::BufReader::new(&ct[..]), 1000), Ok(json!({})));
@@ -601,5 +615,7 @@ mod tests {
         assert_eq!(path_to_uri("/home/u/a.py"), "file:///home/u/a.py");
         assert_eq!(uri_to_path("file:///home/u/a%20b.py", false).as_deref(), Some("/home/u/a b.py"));
         assert_eq!(uri_to_path("https://x/y", true), None);
+        assert_eq!(uri_key("file:///c%3A/Work/a.rs"), uri_key("file:///C:/Work/a.rs"));
+        assert_ne!(uri_key("file:///c:/work/a.rs"), uri_key("file:///c:/work/b.rs"));
     }
 }
