@@ -191,13 +191,22 @@ fn is_f_key(k: Key) -> bool {
     n.len() >= 2 && n.starts_with('F') && n[1..].chars().all(|c| c.is_ascii_digit())
 }
 
-/// Anzeige im Menü/Tooltip (deutsch: Strg/Umschalt).
+/// Anzeige im Menü/Tooltip (deutsch: Strg/Umschalt); Satzzeichen-Tasten als Zeichen („Strg+/“ statt „Strg+Slash“).
 pub fn pretty(s: &str, de: bool) -> String {
-    if de {
-        s.replace("Ctrl", "Strg").replace("Shift", "Umschalt")
-    } else {
-        s.to_string()
-    }
+    let s = if de { s.replace("Ctrl", "Strg").replace("Shift", "Umschalt") } else { s.to_string() };
+    s.split('+')
+        .map(|t| match t {
+            "Slash" => "/",
+            "Backslash" => "\\",
+            "Minus" => "-",
+            "Equals" => "=",
+            "Comma" => ",",
+            "Period" => ".",
+            "Semicolon" => ";",
+            other => other,
+        })
+        .collect::<Vec<_>>()
+        .join("+")
 }
 
 #[cfg(test)]
@@ -209,6 +218,16 @@ mod tests {
     fn editor_only_shortcuts() {
         assert!(is_editor("save_no_actions") && !is_global("save_no_actions"));
         assert!(!is_editor("new") && label("save_no_actions", false) != "?");
+    }
+
+    /// Menü und Tastenkürzel-Seite zeigen „Strg+/“, nicht den egui-Namen „Slash“ (Klicktest 3.3.0).
+    #[test]
+    fn pretty_shows_punctuation_keys_as_characters() {
+        assert_eq!(pretty("Ctrl+Slash", true), "Strg+/");
+        assert_eq!(pretty("Ctrl+Shift+Minus", false), "Ctrl+Shift+-");
+        assert_eq!(pretty("Alt+Up", true), "Alt+Up");
+        assert_eq!(pretty("Ctrl+Shift+D", true), "Strg+Umschalt+D");
+        assert_eq!(pretty("", true), "");
     }
 
     #[test]

@@ -2074,12 +2074,10 @@ fn status_bar(ui: &mut Ui, ed: &mut EditorUi, lang: Lang, prefs: &super::EditorP
     let syn = ed.active_doc().and_then(|id| ed.docs.get_mut(&id)).filter(|d| d.doc.is_some()).map(|d| d.syntax_status(prefs, lang));
     ui.horizontal_centered(|ui| {
         let doc = ed.active_doc();
-        let info: Option<(StatusInfo, String, usize)> = ed.focused_view_and_doc().and_then(|(v, d)| d.status(prefs, lang).map(|s| (s, v.position_text(d, lang), v.selection_count())));
-        if let Some((_, pos, n)) = &info {
+        // Mehrere Cursor nennt schon `position_text` („3 Cursor“ / „3 Auswahlen“, #394) – keine zweite Anzeige.
+        let info: Option<(StatusInfo, String)> = ed.focused_view_and_doc().and_then(|(v, d)| d.status(prefs, lang).map(|s| (s, v.position_text(d, lang))));
+        if let Some((_, pos)) = &info {
             ui.label(RichText::new(pos).small());
-            if *n > 1 {
-                ui.label(RichText::new(format!("{n} {}", lang.t("Auswahlen", "selections"))).small().color(style::accent()));
-            }
         }
         if let Some((t, _)) = &ed.hint {
             ui.add_space(style::S3);

@@ -106,7 +106,8 @@ pub(super) fn completion_popup(ui: &mut Ui, at: Pos2, ed: &mut EditorUi, lang: L
     let mut click: Option<usize> = None;
     egui::Area::new(id).order(egui::Order::Foreground).fixed_pos(at).constrain(true).show(ui.ctx(), |ui| {
         ui.horizontal_top(|ui| {
-            egui::Frame::popup(ui.style()).show(ui, |ui| {
+            // Der Rahmen übernimmt die waagerechte Anordnung der Zeile: die Liste selbst ausdrücklich untereinander.
+            egui::Frame::popup(ui.style()).show(ui, |ui| ui.vertical(|ui| {
                 ui.set_min_width(260.0);
                 ui.set_max_width(460.0);
                 if p.shown.is_empty() {
@@ -136,7 +137,7 @@ pub(super) fn completion_popup(ui: &mut Ui, at: Pos2, ed: &mut EditorUi, lang: L
                 if p.shown.len() > super::smart::POPUP_ROWS {
                     ui.label(RichText::new(format!("{} / {}", p.selected + 1, p.shown.len())).small().color(style::dim(ui)));
                 }
-            });
+            }));
             if let Some(doc) = p.shown.get(p.selected).and_then(|i| p.items[*i].documentation.clone()).filter(|d| !d.trim().is_empty()) {
                 egui::Frame::popup(ui.style()).show(ui, |ui| {
                     ui.set_max_width(380.0);
@@ -212,7 +213,12 @@ pub(super) fn servers_window(ctx: &egui::Context, ed: &mut EditorUi, lang: Lang)
                     ed.smart.window_sel = Some(k.clone());
                 }
                 ui.label(RichText::new(e.root.display().to_string()).small());
-                ui.label(RichText::new(e.status()).small());
+                // Lange Gründe (z. B. die Meldung eines gescheiterten `initialize`) nicht in voller Länge: sonst wird das
+                // Fenster breiter als der Bildschirm. Ganz steht er im Tooltip und im Protokoll darunter.
+                let st = e.status();
+                let short: String = st.chars().take(60).collect();
+                let shown = if st.chars().count() > 60 { format!("{short} …") } else { st.clone() };
+                ui.label(RichText::new(shown).small()).on_hover_text(st);
                 ui.label(RichText::new(e.client.as_ref().and_then(|c| c.pid).map(|p| p.to_string()).unwrap_or_else(|| "–".into())).small());
                 // Unter WSL zählt der Prozess in der Distribution, nicht `wsl.exe`: dort „–“.
                 let mem = if e.launch.lsp_root.is_some() { None } else { e.client.as_ref().and_then(|c| c.memory()) };

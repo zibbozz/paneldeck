@@ -378,9 +378,12 @@ impl App {
                                 ui.label(RichText::new(lang.t("nur eigener Pfad", "own path only")).small().color(style::dim(ui)));
                             }
                         });
-                        ui.horizontal(|ui| {
-                            let mut txt = s.own_paths.get(l.id).map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
-                            if ui.add(egui::TextEdit::singleline(&mut txt).desired_width(200.0).hint_text(lang.t("eigener Pfad …", "own path …"))).changed() {
+                        // Untereinander, damit die Tabelle auch im Einstellungsfenster (~900 px) nicht rechts übersteht.
+                        // Beide Felder tippen in einen Puffer (solange sie den Fokus haben): „E“ ist noch kein absoluter
+                        // Pfad, und ein Leerzeichen am Ende verschwände beim Zerlegen der Argumente (Klicktest 3.3.0).
+                        ui.vertical(|ui| {
+                            let shown = s.own_paths.get(l.id).map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
+                            if let Some(txt) = buffered_edit(ui, ("smart_own_path", l.id), shown, lang.t("eigener Pfad …", "own path …")) {
                                 let p = std::path::PathBuf::from(txt.trim());
                                 if txt.trim().is_empty() {
                                     s.own_paths.remove(l.id);
@@ -389,8 +392,8 @@ impl App {
                                 }
                             }
                             // Argumente durch Leerzeichen getrennt (ein Argument mit Leerzeichen: in "…").
-                            let mut args = s.own_args.get(l.id).map(|a| a.iter().map(|x| if x.contains(' ') { format!("\"{x}\"") } else { x.clone() }).collect::<Vec<_>>().join(" ")).unwrap_or_default();
-                            if ui.add(egui::TextEdit::singleline(&mut args).desired_width(140.0).hint_text(lang.t("Argumente", "arguments"))).changed() {
+                            let shown = s.own_args.get(l.id).map(|a| a.iter().map(|x| if x.contains(' ') { format!("\"{x}\"") } else { x.clone() }).collect::<Vec<_>>().join(" ")).unwrap_or_default();
+                            if let Some(args) = buffered_edit(ui, ("smart_own_args", l.id), shown, lang.t("Argumente", "arguments")) {
                                 let v = split_args(&args);
                                 if v.is_empty() {
                                     s.own_args.remove(l.id);
@@ -919,6 +922,24 @@ impl EditorHost for BridgeHost<'_> {
     fn hidden(&self, path: &Path) -> bool {
         super::mcp::access_gate::path_hidden(path, &self.hidden)
     }
+}
+
+/// Einzeiliges Feld, das beim Tippen einen eigenen Puffer behält (egui-Speicher, solange es den Fokus hat) und den
+/// Text bei jeder Änderung zurückgibt. Ohne Fokus zeigt es `shown` (den gespeicherten Wert) – so überlebt auch eine
+/// Zwischeneingabe, die der Aufrufer (noch) nicht übernimmt.
+fn buffered_edit(ui: &mut Ui, key: (&str, &str), shown: String, hint: &str) -> Option<String> {
+    let id = ui.make_persistent_id(key);
+    let buf_id = id.with("buf");
+    let focused = ui.memory(|m| m.has_focus(id));
+    let mut buf = if focused { ui.data(|d| d.get_temp::<String>(buf_id)).unwrap_or(shown) } else { shown };
+    let r = ui.add(egui::TextEdit::singleline(&mut buf).id(id).desired_width(220.0).hint_text(hint));
+    let changed = r.changed().then(|| buf.clone());
+    if r.has_focus() {
+        ui.data_mut(|d| d.insert_temp(buf_id, buf));
+    } else {
+        ui.data_mut(|d| d.remove_temp::<String>(buf_id));
+    }
+    changed
 }
 
 /// Argumente aus einer Zeile (Leerzeichen trennen, `"…"` hält zusammen) – für den eigenen Server (#367).
