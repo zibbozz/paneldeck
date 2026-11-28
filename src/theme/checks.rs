@@ -22,10 +22,12 @@ pub enum Rule {
     Terminal,
     /// Harmonie und Stimmigkeit.
     Harmony,
+    /// Lesbarkeit über dem eigenen Hintergrund (#387).
+    Background,
 }
 
 impl Rule {
-    pub const ALL: [Rule; 5] = [Rule::Contrast, Rule::Distinct, Rule::Status, Rule::Terminal, Rule::Harmony];
+    pub const ALL: [Rule; 6] = [Rule::Contrast, Rule::Distinct, Rule::Status, Rule::Terminal, Rule::Harmony, Rule::Background];
 
     pub fn key(self) -> &'static str {
         match self {
@@ -34,6 +36,7 @@ impl Rule {
             Rule::Status => "status",
             Rule::Terminal => "terminal",
             Rule::Harmony => "harmony",
+            Rule::Background => "background",
         }
     }
 
@@ -44,6 +47,7 @@ impl Rule {
             Rule::Status => lang.t("Statusfarben und Farbsehschwächen", "Status colours and colour blindness"),
             Rule::Terminal => lang.t("Terminal-Palette", "Terminal palette"),
             Rule::Harmony => lang.t("Harmonie und Stimmigkeit", "Harmony and consistency"),
+            Rule::Background => lang.t("Hintergrund", "Background"),
         }
     }
 
@@ -54,6 +58,10 @@ impl Rule {
             Rule::Status => lang.t("Erfolg/Warnung/Fehler/Info und Diff-Farben bleiben unterscheidbar – auch bei Rot-Grün- und Blau-Gelb-Schwäche.", "Success/warning/error/info and diff colours stay distinguishable – also with red-green and blue-yellow deficiencies."),
             Rule::Terminal => lang.t("ANSI-Farben lesbar, helle Varianten heller, Text in der Auswahl lesbar, Cursor sichtbar.", "ANSI colours readable, bright variants brighter, text readable in the selection, cursor visible."),
             Rule::Harmony => lang.t("Akzent hebt sich vom Text ab, nicht zu viele grelle Flächen, gleichmäßige Stufen Hintergrund → Fläche → Rahmen.", "Accent stands out from text, not too many strongly saturated areas, even steps background → surface → border."),
+            Rule::Background => lang.t(
+                "Text und Terminalschrift je Bereich gegen die Fläche über dem Bild: mindestens 4,5:1 gegen das Mittel, 3:1 gegen die hellsten bzw. dunkelsten 10 %.",
+                "Text and terminal font per area against the surface over the image: at least 4.5:1 against the average, 3:1 against the brightest or darkest 10 %.",
+            ),
         }
     }
 }
@@ -65,6 +73,13 @@ pub struct Fix {
     pub color: Color32,
 }
 
+/// Vorschlag der Regel „Hintergrund“: Helligkeit bzw. Deckkraft der Überlagerung setzen (nichts ändert sich von selbst).
+#[derive(Clone, Debug, PartialEq)]
+pub struct BgFix {
+    pub brightness: Option<i8>,
+    pub overlay_opacity: Option<u8>,
+}
+
 /// Ein Hinweis der Design-Prüfung.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Hint {
@@ -73,6 +88,15 @@ pub struct Hint {
     pub tokens: Vec<&'static str>,
     pub msg: Msg,
     pub fix: Option<Fix>,
+    /// Vorschlag für den Hintergrund (nur Regel „Hintergrund“).
+    pub bg_fix: Option<BgFix>,
+}
+
+/// Was die Regel „Hintergrund“ braucht: Kennzahlen des Bildes (vor Helligkeit/Überlagerung) und die globale Deckkraft.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BgInput {
+    pub stats: super::bake::Stats,
+    pub global: f32,
 }
 
 /// Mindestkontrast für Text (WCAG AA).
@@ -144,6 +168,7 @@ impl Ctx<'_> {
             tokens: vec![fg, bg],
             msg: Msg::new(format!("Kontrast {:.2}:1 unter {min}:1 – {d}", (k * 100.0).floor() / 100.0), format!("Contrast {:.2}:1 is below {min}:1 – {e}", (k * 100.0).floor() / 100.0)),
             fix,
+            bg_fix: None,
         });
     }
 
@@ -160,6 +185,7 @@ impl Ctx<'_> {
             tokens: vec![a, b],
             msg: Msg::new(format!("{what_de} sehen fast gleich aus (ΔE {d:.1}) – {nd}"), format!("{what_en} look almost the same (ΔE {d:.1}) – {ne}")),
             fix,
+            bg_fix: None,
         });
     }
 
@@ -207,7 +233,7 @@ impl Ctx<'_> {
                         format!("Hard to tell apart with {} (ΔE {d:.1}) – {ne}", k.label(Lang::En)),
                     )
                 };
-                self.out.push(Hint { rule: Rule::Status, tokens: vec![b, a], msg, fix });
+                self.out.push(Hint { rule: Rule::Status, tokens: vec![b, a], msg, fix, bg_fix: None });
             }
         }
     }
@@ -215,9 +241,21 @@ impl Ctx<'_> {
 
 const ANSI: [&str; 16] = ["ansi0", "ansi1", "ansi2", "ansi3", "ansi4", "ansi5", "ansi6", "ansi7", "ansi8", "ansi9", "ansi10", "ansi11", "ansi12", "ansi13", "ansi14", "ansi15"];
 
-/// Alle Hinweise der eingeschalteten Regeln.
+/// Alle Hinweise der eingeschalteten Regeln (ohne Regel „Hintergrund“, siehe [`run_with`]). Nur in Tests; die
+/// Oberfläche nimmt [`run_with`].
+#[cfg(test)]
 pub fn run(t: &Theme, on: impl Fn(Rule) -> bool) -> Vec<Hint> {
+    run_with(t, None, on)
+}
+
+/// Alle Hinweise der eingeschalteten Regeln; mit `bg` (Kennzahlen des Hintergrunds) auch die Regel „Hintergrund“.
+pub fn run_with(t: &Theme, bg: Option<&BgInput>, on: impl Fn(Rule) -> bool) -> Vec<Hint> {
     let mut c = Ctx { t, out: Vec::new() };
+    if on(Rule::Background) {
+        if let Some(i) = bg {
+            background_rule(&mut c, i);
+        }
+    }
     if on(Rule::Contrast) {
         for (fg, bg, min) in [
             ("text", "window_bg", TEXT_MIN),
@@ -260,6 +298,15 @@ pub fn run(t: &Theme, on: impl Fn(Rule) -> bool) -> Vec<Hint> {
             ("code_escape", "bg", TEXT_MIN),
             ("code_heading", "bg", TEXT_MIN),
             ("code_variable", "bg", TEXT_MIN),
+            // Vergleich und Änderungsmarken (#385): Text auf den Zeilen-Hintergründen, Marken auf dem Editor-Hintergrund.
+            ("text", "diff_add_bg", TEXT_MIN),
+            ("text", "diff_remove_bg", TEXT_MIN),
+            ("marker_added", "bg", LARGE_MIN),
+            ("marker_modified", "bg", LARGE_MIN),
+            ("marker_deleted", "bg", LARGE_MIN),
+            ("marker_staged_added", "bg", LARGE_MIN),
+            ("marker_staged_modified", "bg", LARGE_MIN),
+            ("marker_staged_deleted", "bg", LARGE_MIN),
             ("accent", "window_bg", LARGE_MIN),
             ("danger", "window_bg", LARGE_MIN),
             ("info", "window_bg", LARGE_MIN),
@@ -303,6 +350,7 @@ pub fn run(t: &Theme, on: impl Fn(Rule) -> bool) -> Vec<Hint> {
                 tokens: vec![b, n],
                 msg: Msg::new(format!("Helle Varianten nicht heller als normal: ANSI {}", list.join(", ")), format!("Bright variants not brighter than normal: ANSI {}", list.join(", "))),
                 fix,
+                bg_fix: None,
             });
         }
         let sel = delta_e(t.selection, resolve(t, "bg").to_opaque());
@@ -310,7 +358,7 @@ pub fn run(t: &Theme, on: impl Fn(Rule) -> bool) -> Vec<Hint> {
             let bg = resolve(t, "bg").to_opaque();
             let fix = nudge_lightness(t.selection, |x| delta_e(x, bg) >= STATE_MIN_DE && contrast(t.fg, x) >= contrast(t.fg, t.selection).min(TEXT_MIN)).map(|color| Fix { token: "selection", color });
             let (d, e) = names(&["selection", "bg"]);
-            c.out.push(Hint { rule: Rule::Terminal, tokens: vec!["selection", "bg"], msg: Msg::new(format!("Auswahl kaum sichtbar (ΔE {sel:.1}) – {d}"), format!("Selection barely visible (ΔE {sel:.1}) – {e}")), fix });
+            c.out.push(Hint { rule: Rule::Terminal, tokens: vec!["selection", "bg"], msg: Msg::new(format!("Auswahl kaum sichtbar (ΔE {sel:.1}) – {d}"), format!("Selection barely visible (ΔE {sel:.1}) – {e}")), fix, bg_fix: None });
         }
     }
     if on(Rule::Harmony) {
@@ -319,7 +367,7 @@ pub fn run(t: &Theme, on: impl Fn(Rule) -> bool) -> Vec<Hint> {
         if d < ACCENT_TEXT_MIN_DE {
             let fix = nudge_lightness(resolve(t, "accent"), |c| delta_e(c.to_opaque(), x) >= ACCENT_TEXT_MIN_DE).map(|color| Fix { token: "accent", color });
             let (nd, ne) = names(&["accent", "text"]);
-            c.out.push(Hint { rule: Rule::Harmony, tokens: vec!["accent", "text"], msg: Msg::new(format!("Akzent kaum vom Text zu unterscheiden (ΔE {d:.1}) – {nd}"), format!("Accent barely distinct from text (ΔE {d:.1}) – {ne}")), fix });
+            c.out.push(Hint { rule: Rule::Harmony, tokens: vec!["accent", "text"], msg: Msg::new(format!("Akzent kaum vom Text zu unterscheiden (ΔE {d:.1}) – {nd}"), format!("Accent barely distinct from text (ΔE {d:.1}) – {ne}")), fix, bg_fix: None });
         }
         let areas = ["window_bg", "surface", "sidebar_bg", "input_bg", "widget_bg", "hover_bg", "active_bg", "selection_bg", "sidebar_active", "tab_active", "chip_active", "chat_user_bg"];
         let loud: Vec<&'static str> = areas.iter().copied().filter(|n| chroma(solid(t, n)) > LOUD_CHROMA).collect();
@@ -330,6 +378,7 @@ pub fn run(t: &Theme, on: impl Fn(Rule) -> bool) -> Vec<Hint> {
                 tokens: loud.clone(),
                 msg: Msg::new(format!("{} stark gesättigte Flächen – das wirkt unruhig: {nd}", loud.len()), format!("{} strongly saturated areas – this looks busy: {ne}", loud.len())),
                 fix: None,
+                bg_fix: None,
             });
         }
         // Stufen: Hintergrund → abgesetzte Fläche → Rahmen sollen in derselben Richtung zunehmen.
@@ -349,10 +398,83 @@ pub fn run(t: &Theme, on: impl Fn(Rule) -> bool) -> Vec<Hint> {
                     format!("Uneven steps: the border stands out less than the surface (ΔL {:.1} vs. {:.1}) – {ne}", s2.abs(), s1.abs()),
                 ),
                 fix,
+                bg_fix: None,
             });
         }
     }
     c.out
+}
+
+/// Bereiche der Regel „Hintergrund“: Bereich, Schrift, Fläche.
+const BG_AREAS: [(super::background::Area, &str, &str); 5] = {
+    use super::background::Area::*;
+    [(Terminals, "fg", "bg"), (Editor, "fg", "bg"), (Todo, "text", "bg"), (Chat, "text", "bg"), (Sidebar, "text", "sidebar_bg")]
+};
+
+/// Kontrast der Schrift `text` auf der Fläche `surface` (Deckkraft `alpha`) über dem Hintergrund mit den Kennzahlen `s`
+/// (nach Helligkeit/Überlagerung): (gegen das Mittel, gegen die gefährlichsten 10 %).
+pub fn bg_contrast(text: Color32, surface: Color32, alpha: f32, s: &super::bake::Stats) -> (f64, f64) {
+    let [r, g, b, _] = surface.to_srgba_unmultiplied();
+    let top = Color32::from_rgba_unmultiplied(r, g, b, (alpha.clamp(0.0, 1.0) * 255.0).round() as u8);
+    // Heller Text ist über hellen Stellen gefährdet, dunkler über dunklen.
+    let extreme = if luminance(text) >= luminance(surface) { s.bright } else { s.dark };
+    (contrast(text, over(top, s.mean)), contrast(text, over(top, extreme)))
+}
+
+fn bg_ok(k: (f64, f64)) -> bool {
+    k.0 >= TEXT_MIN && k.1 >= LARGE_MIN
+}
+
+fn background_rule(c: &mut Ctx, i: &BgInput) {
+    let t = c.t;
+    let Some(b) = t.background.as_ref() else { return };
+    let overlay = super::bake::overlay_of(t);
+    let now = i.stats.after(b.brightness, overlay);
+    for (area, text, surf) in BG_AREAS {
+        if !b.area(area).on {
+            continue;
+        }
+        let alpha = b.surface_alpha(area, i.global);
+        let (tc, sc) = (solid(t, text), solid(t, surf));
+        let k = bg_contrast(tc, sc, alpha, &now);
+        if bg_ok(k) {
+            continue;
+        }
+        // Vorschlag: mit Überlagerung deren Deckkraft erhöhen, sonst die Helligkeit (abdunkeln für helle Schrift).
+        let fix = match (&b.overlay, overlay) {
+            (Some(o), Some((oc, _))) => ((o.opacity / 5 * 5 + 5)..=100)
+                .step_by(5)
+                .find(|&op| bg_ok(bg_contrast(tc, sc, alpha, &i.stats.after(b.brightness, Some((oc, op))))))
+                .map(|op| BgFix { brightness: None, overlay_opacity: Some(op) }),
+            _ => {
+                let dir: i32 = if luminance(tc) >= luminance(sc) { -5 } else { 5 };
+                (1..=40)
+                    .map(|n| (b.brightness as i32 + dir * n).clamp(-100, 100) as i8)
+                    .find(|&br| bg_ok(bg_contrast(tc, sc, alpha, &i.stats.after(br, overlay))))
+                    .map(|br| BgFix { brightness: Some(br), overlay_opacity: None })
+            }
+        };
+        let (de_a, en_a) = (area.label(Lang::De), area.label(Lang::En));
+        let low_mean = k.0 < TEXT_MIN;
+        let (kk, min) = if low_mean { (k.0, TEXT_MIN) } else { (k.1, LARGE_MIN) };
+        let kk = (kk * 100.0).floor() / 100.0;
+        let msg = if low_mean {
+            Msg::new(format!("Bereich „{de_a}“: Kontrast {kk:.2}:1 gegen das Bild (Mittel) unter {min}:1"), format!("Area “{en_a}”: contrast {kk:.2}:1 against the image (average) is below {min}:1"))
+        } else {
+            let (wd, we) = if luminance(tc) >= luminance(sc) { ("hellsten", "brightest") } else { ("dunkelsten", "darkest") };
+            Msg::new(format!("Bereich „{de_a}“: Kontrast {kk:.2}:1 gegen die {wd} 10 % des Bildes unter {min}:1"), format!("Area “{en_a}”: contrast {kk:.2}:1 against the {we} 10 % of the image is below {min}:1"))
+        };
+        c.out.push(Hint { rule: Rule::Background, tokens: vec![text, surf], msg, fix: None, bg_fix: fix });
+    }
+}
+
+/// Kurztext eines Vorschlags der Regel „Hintergrund“.
+pub fn bg_fix_text(f: &BgFix, lang: Lang) -> String {
+    match (f.brightness, f.overlay_opacity) {
+        (Some(b), _) => format!("{} → {b:+} %", lang.t("Helligkeit", "Brightness")),
+        (_, Some(o)) => format!("{} → {o} %", lang.t("Überlagerung", "Overlay")),
+        _ => String::new(),
+    }
 }
 
 /// Kurztext eines Vorschlags („border → #3a3f4b“).
@@ -389,6 +511,19 @@ mod tests {
             let bad: Vec<String> = run(&t, |r| r == Rule::Contrast).into_iter().filter(|h| h.tokens.iter().any(|n| n.starts_with("code_"))).map(|h| h.msg.en).collect();
             assert!(bad.is_empty(), "{}: {bad:?}", t.name);
         }
+    }
+
+    #[test]
+    fn builtin_themes_have_visible_change_markers() {
+        for t in crate::theme::all() {
+            let bad: Vec<String> = run(&t, |r| r == Rule::Contrast).into_iter().filter(|h| h.tokens.iter().any(|n| n.starts_with("marker_"))).map(|h| h.msg.en).collect();
+            assert!(bad.is_empty(), "{}: {bad:?}", t.name);
+        }
+        // Gestagte und nicht gestagte Marken sind verschiedene Farben.
+        let u = crate::theme::tokens::ui_colors(&crate::theme::all()[0]);
+        assert_ne!(u.marker_added, u.marker_staged_added);
+        assert_ne!(u.marker_modified, u.marker_staged_modified);
+        assert_ne!(u.marker_deleted, u.marker_staged_deleted);
     }
 
     #[test]
@@ -459,6 +594,55 @@ mod tests {
         assert!(hints.iter().any(|h| h.tokens == ["selection", "bg"]));
         // Schwarz im dunklen Theme ist erlaubt.
         assert!(!hints.iter().any(|h| h.tokens == ["ansi0", "bg"]));
+    }
+
+    #[test]
+    fn background_rule_checks_each_area_and_suggests_a_fix() {
+        use crate::theme::background::{Area, Background, Kind, Overlay};
+        use crate::theme::bake::Stats;
+        let mut t = crate::theme::all()[0].clone();
+        let mut b = Background::new(Kind::Image);
+        for a in Area::ALL {
+            b.area_mut(a).opacity = 30;
+        }
+        t.background = Some(b);
+        // Helles Bild unter hellem Text (dunkles Theme): Hinweise je Bereich, Vorschlag = abdunkeln.
+        let bright = Stats { mean: Color32::from_gray(225), bright: Color32::from_gray(250), dark: Color32::from_gray(180) };
+        let inp = BgInput { stats: bright, global: 1.0 };
+        let hints = run_with(&t, Some(&inp), |r| r == Rule::Background);
+        assert_eq!(hints.len(), 5, "{hints:?}");
+        assert!(run(&t, |r| r == Rule::Background).is_empty(), "ohne Kennzahlen keine Prüfung");
+        assert!(run_with(&t, Some(&inp), |r| r != Rule::Background).iter().all(|h| h.rule != Rule::Background), "abschaltbar");
+        let h = hints.iter().find(|h| h.tokens == ["fg", "bg"]).unwrap();
+        assert!(h.msg.en.contains("Terminals") && h.msg.de.contains("Terminals"));
+        let f = h.bg_fix.clone().expect("Vorschlag");
+        let br = f.brightness.expect("Helligkeit");
+        assert!(br < 0, "abdunkeln: {br}");
+        assert!(!bg_fix_text(&f, Lang::En).is_empty() && !bg_fix_text(&f, Lang::De).is_empty());
+        // Vorschlag übernommen: Bereich „Terminals“ besteht.
+        t.background.as_mut().unwrap().brightness = br;
+        assert!(!run_with(&t, Some(&inp), |r| r == Rule::Background).iter().any(|h| h.tokens == ["fg", "bg"]));
+        // Mit Überlagerung wird deren Deckkraft vorgeschlagen.
+        t.background.as_mut().unwrap().brightness = 0;
+        t.background.as_mut().unwrap().overlay = Some(Overlay { color: crate::theme::Spec::Hex(Color32::BLACK), opacity: 10 });
+        let h = run_with(&t, Some(&inp), |r| r == Rule::Background).into_iter().find(|h| h.tokens == ["fg", "bg"]).unwrap();
+        assert!(h.bg_fix.as_ref().and_then(|f| f.overlay_opacity).is_some_and(|o| o > 10));
+        // Dunkles Bild: keine Hinweise; ausgeschalteter Bereich wird nicht geprüft.
+        let dark = BgInput { stats: Stats { mean: Color32::from_gray(10), bright: Color32::from_gray(40), dark: Color32::from_gray(0) }, global: 1.0 };
+        assert!(run_with(&t, Some(&dark), |r| r == Rule::Background).is_empty());
+        t.background.as_mut().unwrap().overlay = None;
+        for a in Area::ALL {
+            t.background.as_mut().unwrap().area_mut(a).on = false;
+        }
+        assert!(run_with(&t, Some(&inp), |r| r == Rule::Background).is_empty());
+        // Ein Bild mit wenigen hellen Stellen: das Mittel reicht, die hellsten 10 % nicht.
+        let spots = BgInput { stats: Stats { mean: Color32::from_gray(20), bright: Color32::from_gray(255), dark: Color32::from_gray(0) }, global: 1.0 };
+        let mut t2 = crate::theme::all()[0].clone();
+        let mut b2 = Background::new(Kind::Image);
+        b2.area_mut(Area::Terminals).opacity = 5;
+        t2.background = Some(b2);
+        let h = run_with(&t2, Some(&spots), |r| r == Rule::Background);
+        assert!(h.iter().any(|h| h.tokens == ["fg", "bg"] && h.msg.en.contains("brightest 10 %")), "{h:?}");
     }
 
     #[test]

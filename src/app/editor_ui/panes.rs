@@ -7,11 +7,26 @@
 use crate::layout::{Dir, Node};
 use std::collections::BTreeMap;
 
-/// Ein Reiter: Dokument und eigene Ansicht.
+/// Ein Reiter: Dokument und eigene Ansicht. Ein Vergleichs-Reiter (#385) hat `diff` = Kennung seines Vergleichs; `doc`
+/// ist dann das Dokument einer Seite und `extra` das der anderen (falls beide Seiten Dokumente sind) – beide bleiben
+/// offen, solange der Reiter da ist.
 #[derive(Clone, Debug)]
 pub struct Tab<V> {
     pub doc: u64,
     pub view: V,
+    pub diff: Option<u64>,
+    pub extra: Option<u64>,
+}
+
+impl<V> Tab<V> {
+    pub fn new(doc: u64, view: V) -> Self {
+        Tab { doc, view, diff: None, extra: None }
+    }
+
+    /// Zeigt der Reiter dieses Dokument (als Datei oder als Seite eines Vergleichs)?
+    pub fn uses(&self, doc: u64) -> bool {
+        self.doc == doc || self.extra == Some(doc)
+    }
 }
 
 /// Eine Fläche mit eigener Reiterleiste.
@@ -37,8 +52,14 @@ impl<V> Group<V> {
         self.tabs.get_mut(self.active)
     }
 
+    /// Reiter, der das Dokument selbst zeigt (kein Vergleich).
     pub fn find(&self, doc: u64) -> Option<usize> {
-        self.tabs.iter().position(|t| t.doc == doc)
+        self.tabs.iter().position(|t| t.doc == doc && t.diff.is_none())
+    }
+
+    /// Reiter des Vergleichs `diff`.
+    pub fn find_diff(&self, diff: u64) -> Option<usize> {
+        self.tabs.iter().position(|t| t.diff == Some(diff))
     }
 
     fn clamp(&mut self) {
@@ -111,9 +132,34 @@ impl<V: Clone + Default> Panes<V> {
             return (g, i);
         }
         let at = if grp.tabs.is_empty() { 0 } else { grp.active + 1 };
-        grp.tabs.insert(at, Tab { doc, view: V::default() });
+        grp.tabs.insert(at, Tab::new(doc, V::default()));
         grp.active = at;
         (g, at)
+    }
+
+    /// Vergleichs-Reiter zeigen (#385): ist er in der fokussierten Gruppe offen, wird er aktiv; sonst kommt er hinter
+    /// den aktiven Reiter. `doc`/`extra` = die Dokumente seiner Seiten. Liefert (Gruppe, Index).
+    pub fn open_diff(&mut self, diff: u64, doc: u64, extra: Option<u64>) -> (u64, usize) {
+        let g = self.ensure_group();
+        let grp = self.groups.get_mut(&g).expect("Gruppe");
+        if let Some(i) = grp.find_diff(diff) {
+            grp.active = i;
+            return (g, i);
+        }
+        let at = if grp.tabs.is_empty() { 0 } else { grp.active + 1 };
+        grp.tabs.insert(at, Tab { doc, view: V::default(), diff: Some(diff), extra });
+        grp.active = at;
+        (g, at)
+    }
+
+    /// Wo ist der Vergleich `diff` offen? (Gruppe, Index)
+    pub fn diff_tab(&self, diff: u64) -> Option<(u64, usize)> {
+        self.groups.iter().find_map(|(g, grp)| grp.find_diff(diff).map(|i| (*g, i)))
+    }
+
+    /// Kennungen aller offenen Vergleiche.
+    pub fn diffs(&self) -> Vec<u64> {
+        self.groups.values().flat_map(|g| g.tabs.iter().filter_map(|t| t.diff)).collect()
     }
 
     /// Gruppe `group` teilen: Die neue Gruppe zeigt das aktive Dokument der alten (eigene Ansicht, Kopie der alten) und
@@ -170,17 +216,17 @@ impl<V: Clone + Default> Panes<V> {
         ids.get(i + 1).or_else(|| i.checked_sub(1).and_then(|j| ids.get(j))).copied()
     }
 
-    /// Ist das Dokument in irgendeinem Reiter offen?
+    /// Ist das Dokument in irgendeinem Reiter offen (auch als Seite eines Vergleichs)?
     pub fn shows(&self, doc: u64) -> bool {
-        self.groups.values().any(|g| g.find(doc).is_some())
+        self.groups.values().any(|g| g.tabs.iter().any(|t| t.uses(doc)))
     }
 
-    /// Alle Reiter, die das Dokument zeigen: (Gruppe, Index).
+    /// Alle Reiter, die das Dokument zeigen (auch Vergleiche): (Gruppe, Index).
     pub fn tabs_of(&self, doc: u64) -> Vec<(u64, usize)> {
         let mut v = Vec::new();
         for (gid, g) in &self.groups {
             for (i, t) in g.tabs.iter().enumerate() {
-                if t.doc == doc {
+                if t.uses(doc) {
                     v.push((*gid, i));
                 }
             }
@@ -188,13 +234,20 @@ impl<V: Clone + Default> Panes<V> {
         v
     }
 
-    /// Alle offenen Dokumente (jedes einmal, Layout-Reihenfolge).
+    /// Reiter, die das Dokument selbst zeigen (keine Vergleiche).
+    pub fn file_tabs_of(&self, doc: u64) -> Vec<(u64, usize)> {
+        self.tabs_of(doc).into_iter().filter(|(g, i)| self.groups[g].tabs[*i].diff.is_none()).collect()
+    }
+
+    /// Alle offenen Dokumente (jedes einmal, Layout-Reihenfolge; auch die Seiten von Vergleichen).
     pub fn docs(&self) -> Vec<u64> {
         let mut v = Vec::new();
         for g in self.group_ids() {
             for t in &self.groups[&g].tabs {
-                if !v.contains(&t.doc) {
-                    v.push(t.doc);
+                for d in std::iter::once(t.doc).chain(t.extra) {
+                    if !v.contains(&d) {
+                        v.push(d);
+                    }
                 }
             }
         }
@@ -225,7 +278,11 @@ impl<V: Clone + Default> Panes<V> {
                 }
                 let tab = self.take_tab(from, index);
                 let grp = self.groups.get_mut(&group)?;
-                if let Some(i) = grp.find(tab.doc) {
+                let dup = match tab.diff {
+                    Some(d) => grp.find_diff(d),
+                    None => grp.find(tab.doc),
+                };
+                if let Some(i) = dup {
                     grp.active = i;
                 } else {
                     let at = at.min(grp.tabs.len());
@@ -405,9 +462,33 @@ mod tests {
     }
 
     #[test]
+    fn diff_tabs_keep_both_documents_and_move_like_tabs() {
+        let mut p = P::default();
+        let (g, _) = p.open(1);
+        let (g2, i) = p.open_diff(50, 1, Some(2));
+        assert_eq!((g2, i), (g, 1));
+        assert_eq!(p.open_diff(50, 1, Some(2)), (g, 1), "schon offen: nur aktivieren");
+        assert_eq!(p.open(1), (g, 0), "der Datei-Reiter ist ein anderer als der Vergleich");
+        assert_eq!(p.docs(), [1, 2]);
+        assert!(p.shows(2), "die andere Seite bleibt offen");
+        assert_eq!(p.tabs_of(1).len(), 2);
+        assert_eq!(p.file_tabs_of(1), [(g, 0)]);
+        assert_eq!(p.diffs(), [50]);
+        // In eine neue Teilung ziehen und zurück
+        let n = p.move_tab(g, 1, Drop::Split { group: g, dir: Dir::Horizontal, before: false }).unwrap();
+        assert_eq!(p.diff_tab(50), Some((n, 0)));
+        assert_eq!(p.move_tab(n, 0, Drop::Bar { group: g, index: 0 }), Some(g));
+        assert_eq!(p.diff_tab(50), Some((g, 0)));
+        // Schließen: das Dokument 2 wird frei, 1 nicht (eigener Reiter)
+        assert_eq!(p.close_tab(g, 0), None, "Dokument 1 hat noch seinen Reiter");
+        assert!(!p.shows(2));
+        assert!(p.shows(1));
+    }
+
+    #[test]
     fn normalize_repairs_a_loaded_layout() {
         let mut p = P::default();
-        p.insert_group(4, Group { tabs: vec![Tab { doc: 1, view: 0 }], active: 9 });
+        p.insert_group(4, Group { tabs: vec![Tab::new(1, 0)], active: 9 });
         p.insert_group(8, Group::default());
         p.layout = Some(Node::Split { dir: Dir::Horizontal, ratio: f32::NAN, a: Box::new(Node::Leaf(4)), b: Box::new(Node::Split { dir: Dir::Vertical, ratio: 0.5, a: Box::new(Node::Leaf(8)), b: Box::new(Node::Leaf(99)) }) });
         p.focused = 99;

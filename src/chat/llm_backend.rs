@@ -274,10 +274,30 @@ impl PromptPlan {
     }
 }
 
+/// Höchster automatischer Kontext für Steuern ohne Expertenmodus (Entscheidung des Nutzers, 3.2.0): Er bleibt bei
+/// 32768 – passt die volle Fassung dort nicht, bekommt der Chat die Kurzfassung mit `more_tools` (wie Steuern im
+/// Expertenmodus bei 32768). Nichts wird dafür gekürzt.
+pub const CONTROL_SIMPLE_AUTO_CONTEXT: u32 = 32768;
+
+/// Obergrenze des automatischen Kontexts für diese Werkzeug-Regeln: [`CONTROL_SIMPLE_AUTO_CONTEXT`] bei Steuern ohne
+/// Expertenmodus, sonst keine (dann gilt `llm::config::MAX_AUTO_CONTEXT`).
+/// Gerechnet mit der wirksamen Stufe (Modell und Projekt, Review 3.2.0).
+pub fn auto_context_cap(policy: &ToolPolicy) -> Option<u32> {
+    (policy.prompt_level() == McpLevel::Control && !policy.expert).then_some(CONTROL_SIMPLE_AUTO_CONTEXT)
+}
+
 /// Plant den Prompt: voller Master-Prompt mit den eingeschalteten Teilen, Kontextlänge (ohne eigene Angabe nach
 /// `llm::config::auto_context` für genau diesen Prompt), dann die Wahl zwischen voller Fassung und Kurzfassung nach
 /// `llm::config::prompt_fits` – abgeschaltete Teile machen den Prompt kleiner und zählen bei beiden Entscheidungen mit.
 pub fn plan_prompt(server: &crate::llm::config::LlmServer, model: &str, policy: &ToolPolicy, cx: &TurnContext) -> PromptPlan {
+    // Die Stufe des Projekts gilt immer (Review 3.2.0): auch wenn der Aufrufer sie in `policy` nicht gesetzt hat.
+    let capped;
+    let policy = if cx.project_cap < policy.project_cap {
+        capped = policy.clone().with_project_cap(cx.project_cap);
+        &capped
+    } else {
+        policy
+    };
     let scale = if cx.token_scale.is_finite() { cx.token_scale.clamp(1.0, 4.0) } else { 1.0 };
     let tokens_of = |tools: &[llm::ToolSpec]| if tools.is_empty() { 0 } else { llm::tokens::estimate_tokens(&serde_json::to_string(tools).unwrap_or_default()) };
     let real = |n: usize| (n as f64 * scale as f64).ceil() as usize;
@@ -288,13 +308,19 @@ pub fn plan_prompt(server: &crate::llm::config::LlmServer, model: &str, policy: 
     let mut sys_tokens = llm::tokens::message_tokens(&ChatMessage::new(Role::System, system.clone()));
     // Ohne eigene Angabe: so viel Kontext, wie der volle Prompt und die Werkzeuge samt Platz für das Gespräch brauchen
     // (in echten Tokens). Ohne Werkzeuge (Stufe Aus, keine Werkzeug-Fähigkeit) bleibt es bei 8192.
-    let ctx_len = server.request_context(model, policy.enabled().then_some(real(sys_tokens + tool_tokens)));
+    let mut ctx_len = server.request_context(model, policy.enabled().then_some(real(sys_tokens + tool_tokens)));
+    // Obergrenze des automatischen Kontexts je Stufe/Modus (nur ohne eigene Angabe und nur, wo Paneldeck den Kontext
+    // selbst bemisst – Ollama): passt die volle Fassung darunter nicht, gilt die Kurzfassung mit `more_tools`.
+    if let Some(cap) = auto_context_cap(policy).filter(|_| server.kind == llm::ServerKind::Ollama && server.user_context(model).is_none()) {
+        ctx_len = ctx_len.min(cap);
+    }
     // Passt der volle Prompt nicht gut in diesen Kontext (eigene kleine Angabe, OpenAI-kompatibler Server ohne
     // gemeldete Länge, kleines Modell), gilt die Kurzfassung mit knappen Werkzeug-Beschreibungen (#340).
     let variant = super::master_prompt::choose(ctx_len, real(sys_tokens + tool_tokens));
     if variant == super::master_prompt::Variant::Compact {
         system = system_prompt_variant(policy, model, cx, variant);
-        tools = super::master_prompt::minimal_specs(tools);
+        // Nur Kern, nachgeladene und `more_tools` (#393); erlaubt bleibt alles aus `policy.specs()`.
+        tools = super::master_prompt::request_specs(policy, variant);
         tool_tokens = tokens_of(&tools);
         sys_tokens = llm::tokens::message_tokens(&ChatMessage::new(Role::System, system.clone()));
     }
@@ -324,7 +350,10 @@ fn build(meta: &ChatMeta, history: &[ChatMsg], cx: &TurnContext, with_key: bool)
     }
     let cfg = server.model_cfg(model);
     let endpoint = if with_key { server.endpoint(lang)? } else { Endpoint::new(server.kind, &server.url) };
-    let policy = ToolPolicy::new(cfg.clone(), server.tools_supported(model), cx.expert).with_agent(cx.agent.clone());
+    // Über `more_tools` nachgeladene Werkzeuge (#393) listet die Kurzfassung mit – nur, soweit die Regeln sie erlauben.
+    // Stufe des Projekts (#386, Review 3.2.0): ein gesperrtes oder nur lesbares Projekt bekommt weder Schemas noch Doku
+    // verbotener Werkzeuge, und der Prompt nennt die wirksame Stufe.
+    let policy = ToolPolicy::new(cfg.clone(), server.tools_supported(model), cx.expert).with_agent(cx.agent.clone()).with_loaded(super::more_tools::loaded(history)).with_project_cap(cx.project_cap);
     // Bilder (#357): an alle Modelle außer denen, die sicher keine lesen (unbekannt = versuchen; lehnt der Server ab,
     // merkt sich die App „keine Bilder“). Ohne Bildverständnis ein Hinweis, wenn die laufende Runde Bilder hat.
     let vision = server.vision_supported(model);
@@ -1481,7 +1510,11 @@ mod tests {
         });
         let mut s = server(&base, ServerKind::Ollama);
         s.set_model_cfg(LlmModel { level: McpLevel::Control, level_chosen: true, ..LlmModel::named("m1") });
-        let ev = collect(&LlmBackend::new().start(&meta(), &[msg(store::Role::User, "hi")], &cx(vec![s]), Arc::new(|| {})));
+        // Steuern im Expertenmodus: der volle Prompt mit allen Werkzeugen (ohne Expertenmodus bliebe es bei 32768 und der
+        // Kurzfassung, `auto_context_cap`).
+        let mut c = cx(vec![s]);
+        c.expert = true;
+        let ev = collect(&LlmBackend::new().start(&meta(), &[msg(store::Role::User, "hi")], &c, Arc::new(|| {})));
         assert_eq!(text(&ev), "Hi", "{ev:?}");
         assert_eq!(ev.last(), Some(&TurnEvent::Done));
         let (head, len, body) = h.join().unwrap();
@@ -1588,12 +1621,21 @@ mod tests {
                     let sys = llm::tokens::estimate_tokens(&system_prompt(&policy, model, &cx)) + 4;
                     let tools = llm::tokens::estimate_tokens(&serde_json::to_string(&policy.specs()).unwrap());
                     eprintln!("SIZES {model} expert={expert} {level:?}: system {sys} + tools {tools} = {}", sys + tools);
-                    // ohne eigene Angabe passt jede Stufe in den automatisch gewählten Kontext (höchstens 65536)
-                    let ctx = crate::llm::config::auto_context(sys + tools, None);
-                    assert!(!crate::llm::config::context_too_small(ctx, sys + tools), "{model} {expert} {level:?}: {ctx}");
-                    eprintln!("SIZES   -> auto context {ctx}");
-                    // Nur Steuern im Expertenmodus (die meisten Werkzeuge) braucht mehr als 32768.
-                    assert!(ctx <= 32768 || (expert && level == McpLevel::Control), "{model} {expert} {level:?}: {ctx}");
+                    // Ollama ohne eigene Angabe: der automatische Kontext (wie `prepare`)
+                    let mut s = server("http://localhost:11434", ServerKind::Ollama);
+                    s.last_models = vec![ModelInfo { name: model.into(), tools: Some(true), context_length: Some(131_072), vision: None }];
+                    let plan = plan_prompt(&s, model, &policy, &cx);
+                    let ctx = plan.ctx_len;
+                    eprintln!("SIZES   -> auto context {ctx}, {:?}, sent {} tokens", plan.variant, plan.sys_tokens + plan.tool_tokens);
+                    // Die gesendete Fassung passt immer in den gewählten Kontext und lässt dem Gespräch Platz.
+                    assert!(!crate::llm::config::context_too_small(ctx, plan.sys_tokens + plan.tool_tokens), "{model} {expert} {level:?}: {ctx}");
+                    // Lesen: voll in höchstens 32768. Steuern ohne Expertenmodus (Entscheidung des Nutzers, 3.2.0): bleibt bei
+                    // 32768, dort die Kurzfassung mit `more_tools` – nie 65536. Steuern im Expertenmodus: voll in 65536.
+                    match (level, expert) {
+                        (McpLevel::Control, false) => assert_eq!((ctx, plan.variant), (32768, super::super::master_prompt::Variant::Compact), "{model}"),
+                        (McpLevel::Control, true) => assert_eq!((ctx, plan.variant), (65536, super::super::master_prompt::Variant::Full), "{model}"),
+                        _ => assert!(ctx <= 32768 && plan.variant == super::super::master_prompt::Variant::Full, "{model} {expert} {level:?}: {ctx} {:?}", plan.variant),
+                    }
                 }
             }
         }
@@ -1606,22 +1648,48 @@ mod tests {
         s.set_model_cfg(LlmModel { level: McpLevel::Control, level_chosen: true, ..LlmModel::named("m1") });
         let p = prepare(&meta(), &[msg(store::Role::User, "q")], &cx(vec![s.clone()])).unwrap();
         let ctx = p.request.num_ctx.unwrap();
-        assert!(ctx > 8192 && ctx <= 32768 && ctx.is_power_of_two(), "{ctx}");
+        assert!(ctx > 8192 && ctx <= 65536 && ctx.is_power_of_two(), "{ctx}");
         assert!(p.note.is_none() && p.context_notice.is_none(), "{:?} {:?}", p.note, p.context_notice);
         assert!(p.history_budget >= 4096 * 3 / 4, "{}", p.history_budget);
         // erkannte Länge kleiner: höchstens diese
         s.last_models[0].context_length = Some(4096);
         assert_eq!(prepare(&meta(), &[msg(store::Role::User, "q")], &cx(vec![s.clone()])).unwrap().request.num_ctx, Some(4096));
-        // eigene zu kleine Angabe: bleibt, aber mit Hinweis
+        // eigene Angabe 8192: seit #393 (Kurzfassung nur mit Kern und `more_tools`) genug für Steuern – kein Hinweis
         s.last_models[0].context_length = Some(131_072);
         s.set_model_cfg(LlmModel { level: McpLevel::Control, level_chosen: true, context_length: Some(8192), ..LlmModel::named("m1") });
         let p = prepare(&meta(), &[msg(store::Role::User, "q")], &cx(vec![s.clone()])).unwrap();
-        assert_eq!(p.request.num_ctx, Some(8192));
-        assert_eq!(p.context_notice.as_deref(), Some("This model's context (8192 tokens) is too small for its tool level – raise it in Settings → Models or use level Read."));
+        assert_eq!((p.request.num_ctx, p.context_notice.as_deref()), (Some(8192), None));
+        // eigene zu kleine Angabe: bleibt, aber mit Hinweis
+        s.set_model_cfg(LlmModel { level: McpLevel::Control, level_chosen: true, context_length: Some(4096), ..LlmModel::named("m1") });
+        let p = prepare(&meta(), &[msg(store::Role::User, "q")], &cx(vec![s.clone()])).unwrap();
+        assert_eq!(p.request.num_ctx, Some(4096));
+        assert_eq!(p.context_notice.as_deref(), Some("This model's context (4096 tokens) is too small for its tool level – raise it in Settings → Models or use level Read."));
         assert!(context_notice(8192, Lang::De).contains("zu klein"));
         // Stufe Aus: kein Hinweis
         s.set_model_cfg(LlmModel { level: McpLevel::Off, level_chosen: true, context_length: Some(8192), ..LlmModel::named("m1") });
         assert!(prepare(&meta(), &[msg(store::Role::User, "q")], &cx(vec![s])).unwrap().context_notice.is_none());
+    }
+
+    /// #393: Ein über `more_tools` nachgeladenes Werkzeug steht in den folgenden Anfragen der Kurzfassung mit in der
+    /// Werkzeug-Liste – aber nur, solange die Stufe es erlaubt; die volle Fassung bleibt unberührt.
+    #[test]
+    fn a_tool_loaded_with_more_tools_is_listed_in_the_next_compact_request() {
+        let mut ask = msg(store::Role::Assistant, "");
+        ask.tool_calls = vec![store::ToolCall { id: "m1".into(), name: super::super::more_tools::NAME.into(), arguments: serde_json::json!({"name": "screenshot"}) }];
+        let res = super::super::logic::tool_result(&ask.tool_calls[0], store::ToolStatus::Ok, "{\"tool\":\"screenshot\"}".into());
+        let history = vec![msg(store::Role::User, "screenshot?"), ask, res, msg(store::Role::Assistant, "Let me look."), msg(store::Role::User, "go on")];
+        let names = |level: McpLevel, ctx: u32, h: &[ChatMsg]| {
+            let mut o = server("http://localhost:1234/v1", ServerKind::OpenAi);
+            o.set_model_cfg(LlmModel { level, level_chosen: true, context_length: Some(ctx), ..LlmModel::named("m1") });
+            prepare(&meta(), h, &cx(vec![o])).unwrap().request.tools.into_iter().map(|t| t.name).collect::<Vec<_>>()
+        };
+        let before = names(McpLevel::Read, 8192, &history[..1]);
+        assert!(!before.contains(&"screenshot".to_string()) && before.contains(&"more_tools".to_string()));
+        let after = names(McpLevel::Read, 8192, &history);
+        assert!(after.contains(&"screenshot".to_string()) && after.contains(&"more_tools".to_string()), "{after:?}");
+        // großer Kontext: jedes Werkzeug direkt, kein more_tools
+        let full = names(McpLevel::Read, 131_072, &history);
+        assert!(full.contains(&"screenshot".to_string()) && full.contains(&"search_history".to_string()) && !full.contains(&"more_tools".to_string()));
     }
 
     /// Kleiner Kontext (#340): OpenAI-kompatibler Server ohne gemeldete Länge (8192) oder eigene kleine Angabe – die
@@ -1643,9 +1711,13 @@ mod tests {
             assert!(!sys.contains(full_marker) && sys.contains("## Tool call rules") && sys.contains("## Safety rules"), "{level:?} {expert}: Kurzfassung");
             assert_eq!(p.note, None, "{level:?} {expert}: passt in 8192");
             assert!(p.request.tools.iter().all(|t| t.parameters["properties"].as_object().unwrap().values().all(|v| v.get("description").is_none())), "knappe Werkzeuge");
-            assert_eq!(p.request.tools.len(), ToolPolicy::new(cfg.clone(), None, expert).specs().len(), "alle Werkzeuge der Stufe");
+            // #393: nur der Kern und `more_tools` – die übrigen erlaubten Werkzeuge kommen über `more_tools`.
+            let pol = ToolPolicy::new(cfg.clone(), None, expert);
+            assert_eq!(p.request.tools, super::super::master_prompt::request_specs(&pol, super::super::master_prompt::Variant::Compact), "{level:?} {expert}");
+            assert!(p.request.tools.iter().all(|t| t.name == super::super::more_tools::NAME || super::super::more_tools::is_core(&t.name)), "{level:?} {expert}: nur der Kern");
+            assert!(p.request.tools.iter().any(|t| t.name == super::super::more_tools::NAME) && sys.contains("`more_tools`"), "{level:?} {expert}: more_tools mit Anleitung");
             eprintln!("SMALL {level:?} expert={expert}: history budget {} of 6144", p.history_budget);
-            assert!(p.history_budget >= 1200, "{level:?} {expert}: Platz für das Gespräch {}", p.history_budget);
+            assert!(p.history_budget >= 6144 / 2, "{level:?} {expert}: Platz für das Gespräch {}", p.history_budget);
             // eigene Angabe 65536: voller Prompt mit vollen Werkzeugen
             let mut o = server("http://localhost:1234/v1", ServerKind::OpenAi);
             o.set_model_cfg(LlmModel { context_length: Some(65536), ..cfg.clone() });
@@ -1653,17 +1725,49 @@ mod tests {
             let p = prepare(&meta(), &[msg(store::Role::User, "q")], &c).unwrap();
             assert!(p.request.messages[0].content.contains(full_marker), "{level:?} {expert}: voller Prompt");
             assert_eq!(p.request.tools, ToolPolicy::new(cfg.clone(), None, expert).specs());
-            // Ollama ohne eigene Angabe: automatischer Kontext, voller Prompt
+            // Ollama ohne eigene Angabe: automatischer Kontext, voller Prompt – außer Steuern ohne Expertenmodus: bleibt bei
+            // 32768 mit der Kurzfassung (Entscheidung des Nutzers, 3.2.0)
             let mut s = server("http://localhost:11434", ServerKind::Ollama);
             s.set_model_cfg(cfg.clone());
             c.servers = vec![s];
             let p = prepare(&meta(), &[msg(store::Role::User, "q")], &c).unwrap();
-            assert!(p.request.messages[0].content.contains(full_marker) && p.note.is_none() && p.context_notice.is_none(), "{level:?} {expert}");
+            assert!(p.note.is_none() && p.context_notice.is_none(), "{level:?} {expert}");
+            if level == McpLevel::Control && !expert {
+                assert!(!p.request.messages[0].content.contains(full_marker) && p.request.num_ctx == Some(32768), "{level:?} {expert}: {:?}", p.request.num_ctx);
+                assert!(p.request.tools.iter().any(|t| t.name == super::super::more_tools::NAME));
+            } else {
+                assert!(p.request.messages[0].content.contains(full_marker), "{level:?} {expert}");
+            }
         }
         // Selbst die Kurzfassung passt nicht: der bisherige Hinweis bleibt.
         let mut s = server("http://localhost:11434", ServerKind::Ollama);
         s.set_model_cfg(LlmModel { level: McpLevel::Read, level_chosen: true, context_length: Some(1024), ..LlmModel::named("m1") });
         let p = prepare(&meta(), &[msg(store::Role::User, "q")], &cx(vec![s])).unwrap();
         assert!(p.note.is_some() && !p.request.messages[0].content.contains(full_marker), "{:?}", p.note);
+    }
+
+    /// Review 3.2.0: Die Anfrage folgt der Stufe des Projekts (`TurnContext::project_cap`): keine Schemas und keine Doku
+    /// verbotener Werkzeuge, der Prompt nennt die wirksame Stufe; ein gesperrtes Projekt hat keine Paneldeck-Werkzeuge.
+    #[test]
+    fn the_request_follows_the_project_cap() {
+        let cfg = LlmModel { level: McpLevel::Control, level_chosen: true, context_length: Some(65536), ..LlmModel::named("m1") };
+        let mut s = server("http://localhost:11434", ServerKind::Ollama);
+        s.set_model_cfg(cfg.clone());
+        let names = |c: &TurnContext| prepare(&meta(), &[msg(store::Role::User, "q")], c).unwrap().request.tools.into_iter().map(|t| t.name).collect::<Vec<_>>();
+        let open = cx(vec![s.clone()]);
+        assert!(names(&open).iter().any(|n| n == "send_text"), "ohne Grenze wie bisher");
+        let ro = TurnContext { project_cap: McpLevel::Read, ..cx(vec![s.clone()]) };
+        let tools = names(&ro);
+        assert!(tools.iter().any(|n| n == "list_sessions") && !tools.iter().any(|n| n == "send_text" || n == "close_session" || n == "create_ticket"), "{tools:?}");
+        let p = prepare(&meta(), &[msg(store::Role::User, "q")], &ro).unwrap();
+        let sys = &p.request.messages[0].content;
+        assert!(sys.contains("Tool level: **Read**") && sys.contains("limits the Paneldeck tools to **Read**"), "wirksame Stufe im Prompt");
+        assert!(!sys.contains("### send_text"), "keine Doku verbotener Werkzeuge");
+        let locked = TurnContext { project_cap: McpLevel::Off, ..cx(vec![s]) };
+        let left = names(&locked);
+        assert!(left.iter().all(|n| super::super::agent::is_agent_tool(n) || n == super::super::more_tools::NAME), "gesperrt: nur die eigenen Werkzeuge des Chats: {left:?}");
+        assert!(!left.iter().any(|n| n == "list_sessions"));
+        let p = prepare(&meta(), &[msg(store::Role::User, "q")], &locked).unwrap();
+        assert!(!p.request.messages[0].content.contains("### list_sessions"));
     }
 }

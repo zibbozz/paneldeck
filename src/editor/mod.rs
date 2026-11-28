@@ -10,6 +10,8 @@
 //! - Files (`file.rs`): open with detection and `.editorconfig`, atomic save, change detection on disk, conflict choice.
 //! - [`HotExitStore`]: unsaved buffers across restarts.
 //! - [`syntax`]: Syntax mode (#312) – language detection and incremental syntax colours behind a small interface.
+//! - [`compare`], [`linemarks`]: file comparison (#385) – Patience diff, intra-line changes, alignment rows, block
+//!   edits, patches; change markers in the gutter (unstaged/staged against git, unsaved against disk).
 //!
 //! Positions are char indices into the text; see `text.rs` for line/column helpers. API overview for the UI and
 //! services: `notes/editor-core-api.md` in the test folder (kept up to date with this module).
@@ -21,14 +23,17 @@
 
 pub mod change;
 pub mod commands;
+pub mod compare;
 pub mod diff;
 pub mod document;
 pub mod editorconfig;
 pub mod encoding;
 pub mod file;
+pub mod format;
 pub mod history;
 pub mod hotexit;
 pub mod indent;
+pub mod linemarks;
 pub mod movement;
 pub mod search;
 pub mod selection;
@@ -50,7 +55,7 @@ pub use encoding::{EolStats, LineEnding, TextEncoding, Unencodable};
 #[allow(unused_imports)]
 pub use file::{
     ConflictChoice, ConflictOutcome, ContentHasher, DiskChangeAction, DiskSnapshot, DiskState, OpenError, OpenNote,
-    OpenOptions, OpenReport, SaveError, SaveReport, atomic_write, check_disk,
+    OpenOptions, OpenReport, SaveError, SaveJob, SaveReport, WriteResult, atomic_write, check_disk,
 };
 #[allow(unused_imports)]
 pub use history::{EditKind, EditOrigin, HistoryLimits};

@@ -21,15 +21,17 @@ Mit `--profile <name>` wird der Unterordner `profiles\<name>` dieses Ordners gen
 |---|---|
 | `settings.json` | Einstellungen (von Hand editierbar); `settings.json.bak-<Zeit>` = Kopie von `--reset-settings` |
 | `state.json` | Sitzungen, Projekte, Layout, weitere Fenster (`state.defekt.json` = Sicherung, falls die Datei beschädigt war; `state.json.bak-<Datum>` = Sicherung beim Ausschalten von *Sitzungen merken*) |
-| `paneldeck.db` | die lokale Datenbank (SQLite, seit 2.6.0 Schema-Version 10) mit Todo-Liste, Projekten und Tickets (`paneldeck.db-wal` / `-shm` gibt es nur, solange die App läuft) |
+| `paneldeck.db` | die lokale Datenbank (SQLite, seit 3.2.0 Schema-Version 13) mit Todo-Liste, Projekten und Tickets (`paneldeck.db-wal` / `-shm` gibt es nur, solange die App läuft) |
 | `backups/` | automatische und manuelle Kopien der Datenbank (der Ordner ist änderbar) |
 | `scrollback/` | gespeicherter Terminalverlauf |
 | `chats/` | Verläufe der [Chats](chat.md), je Chat eine `<id>.json` (siehe [Chatverläufe](#chatverläufe)); seit 3.1.0 `chats/<id>/images/` mit den [Bildern](chat.md#bilder-und-bildschirmfotos) des Chats |
 | `plans/` | freigegebene Pläne aus dem [Plan-Modus](chat.md#plan-modus) der Chats als Markdown-Dateien (seit 3.1.0) |
 | `processes.json` | Einträge der [Prozessliste](processes.md) (siehe [unten](#prozessliste-processesjson)) |
 | `process-logs/` | Protokolldateien von Einträgen der Prozessliste mit eingeschalteter *Protokolldatei* |
+| `save-actions.json` | Regeln der [Aktionen beim Speichern](editor.md#aktionen-beim-speichern) des Editors (siehe [unten](#aktionen-beim-speichern-save-actionsjson), seit 3.2.0) |
+| `save-action-logs/` | Protokolldateien von Aktionen beim Speichern mit eingeschalteter *Ausgabe in eine Protokolldatei* (seit 3.2.0) |
 | `prompts.json` | Prompt-Bibliothek |
-| `themes/*.json` | eigene Themes (Beispiel liegt bei; Format und Farbnamen: [Themes](themes.md#dateiformat), optionales Feld `ui` seit 2.6.0, höchstens 1 MB) |
+| `themes/*.json` | eigene Themes (Beispiel liegt bei; Format und Farbnamen: [Themes](themes.md#dateiformat), optionales Feld `ui` seit 2.6.0, optionales Feld `background` seit 3.2.0, höchstens 1 MB) |
 | `system-prompt.md` | deine eigene Vorlage des [Systemprompts für Agenten](agent-interface.md#systemprompt) (nur wenn du eine gespeichert hast); `system-prompt.md.bak` = die vorige Vorlage nach *Auf Standard zurücksetzen* |
 | `clipboard/` | Bilder aus der Zwischenablage (nach 14 Tagen gelöscht) |
 | `claude-hooks*.json` | von Paneldeck erzeugte Hook-Konfiguration |
@@ -41,7 +43,7 @@ Mit `--profile <name>` wird der Unterordner `profiles\<name>` dieses Ordners gen
 | `ipc.json` | Port und Token der laufenden Instanz (intern) |
 | `cleanup-pending.json` | Aufräum-Schritte, die für den nächsten Start vorgemerkt sind (intern, siehe [Aufräumen](#aufräumen); wird nach dem Ausführen gelöscht) |
 
-`settings.json`, `state.json`, `prompts.json`, `themes/*.json`, `system-prompt.md`, `chats/*.json`, `processes.json` und `mcp-log.jsonl` sind stabile Formate: Neuere Versionen lesen ältere Dateien weiter, neue Felder sind optional.
+`settings.json`, `state.json`, `prompts.json`, `themes/*.json`, `system-prompt.md`, `chats/*.json`, `processes.json`, `save-actions.json` und `mcp-log.jsonl` sind stabile Formate: Neuere Versionen lesen ältere Dateien weiter, neue Felder sind optional.
 
 ## Chatverläufe
 Jeder [Chat](chat.md) speichert seinen Verlauf in `chats/<id>.json` (`<id>` = Kennung der Sitzung; Formatversion 1, seit 2.2.0):
@@ -101,6 +103,42 @@ Die Einträge der [Prozessliste](processes.md) (seit 2.6.0, Formatversion 1):
 - `env`: Liste von `{ "name", "value_protected" }`. Der Wert steht **nur** als `value_protected` = Base64 eines Windows-DPAPI-Blobs (aktueller Benutzer) in der Datei – nie im Klartext; ein Wert, der sich nicht entschlüsseln lässt (anderer Benutzer oder Rechner), fehlt beim Start mit einem Hinweis. Namen dürfen kein `=` und keine Leerzeichen enthalten, Namen mit `PANELDECK_` am Anfang werden abgelehnt.
 - Lesen ist tolerant: BOM erlaubt, ein ungültiger Eintrag wird übersprungen (die Datei wird vorher als `processes.defekt-<zeit>.json` gesichert), doppelte oder fehlende Kennungen werden neu vergeben. **Unbekannte Felder bleiben** beim Speichern erhalten (in den Einträgen und auf oberster Ebene), neuere Versionen können also Felder ergänzen. Geschrieben wird atomar. Paneldeck überschreibt die Datei nicht, wenn sie sich nicht lesen ließ (z. B. gesperrt) oder eine beschädigte Datei sich nicht sichern ließ, oder wenn ihre `version` neuer ist als die, die dieses Paneldeck kennt – Änderungen an der Liste werden dann mit einem Hinweis nicht gespeichert.
 - Laufzustand, Ausgabe und erkannte Adressen werden nicht gespeichert: Nach einem Neustart ist jeder Eintrag gestoppt.
+
+## Aktionen beim Speichern (save-actions.json)
+Die Regeln der [Aktionen beim Speichern](editor.md#aktionen-beim-speichern) des Editors (seit 3.2.0, Formatversion 1):
+
+```json
+{
+  "version": 1,
+  "enabled": true,
+  "parallel": 2,
+  "rules": [
+    {
+      "id": 1,
+      "name": "Lint",
+      "scope": "pattern",
+      "path": "C:\\work\\web",
+      "patterns": ["src/**/*.ts", "!dist/**"],
+      "actions": [
+        { "kind": "trim_whitespace" },
+        { "kind": "command", "command": "npx eslint --fix ${file}" },
+        { "kind": "copy", "target": "D:\\mirror", "keep_structure": true, "continue_on_error": true }
+      ],
+      "on_autosave": true,
+      "shell": "pwsh",
+      "env": [ { "name": "TOKEN", "value_protected": "AQAAANCMnd8BFdER…" } ],
+      "timeout_secs": 120
+    }
+  ]
+}
+```
+
+- Oberste Ebene: `enabled` (Hauptschalter, Standard `true`), `parallel` (gleichzeitige Läufe, 1–8, Standard `2`), `rules` (in der Reihenfolge, in der sie laufen).
+- Pflicht je Regel: `id` (eindeutige Zahl > 0). Alles andere ist optional; ein fehlendes Feld bedeutet seinen Standard und wird nicht geschrieben: `name`, `enabled` (`true`), `scope` (`"file"`, `"folder"` Standard, `"pattern"`), `path` (die Datei bzw. der Regelordner), `patterns` (Syntax wie `.gitignore`, nur bei `pattern`), `actions`, `on_autosave` / `on_agent_save` (`false`), `stop_after` / `no_parent_rules` (`false`), `shell` (Kennung einer erkannten Shell, leer = PowerShell), `env` (wie in `processes.json`: Namen im Klartext, Werte nur als `value_protected` = DPAPI-Blob des aktuellen Benutzers), `cwd` (leer = der Regelordner), `timeout_secs` (`60`, 1–3600), `terminal`, `notify_success`, `log_file` (`false`).
+- `actions`: eine Liste von Objekten mit `kind` und seinen Feldern – `format`, `trim_whitespace`, `final_newline`, `line_endings` (`eol`: `"lf"`/`"crlf"`), `encoding` (`encoding`: `utf-8`, `utf-8-bom`, `utf-16le`, `utf-16be`, `windows-1252`), `tabs_to_spaces` / `spaces_to_tabs` (`width`, fehlt = Tabbreite der Datei), `command` (`command`), `copy` (`target`, `keep_structure`, Standard `true`), `send_to_session` (`session`-Kennung, `name`, `text`), `restart_process` (`process`-Kennung oder `group`, `name`), `notify` (`text`); jede kann `continue_on_error: true` haben. Eine Aktion mit unbekanntem `kind` (aus einer neueren Version) bleibt erhalten und wird übersprungen.
+- Gelesen wird tolerant wie bei `processes.json` (BOM erlaubt, ungültige Regeln übersprungen nach einer Sicherung `save-actions.defekt-<zeit>.json`, doppelte Kennungen neu vergeben, unbekannte Felder bleiben, atomar geschrieben, eine neuere `version` wird nie überschrieben). Fehlt die Datei, gibt es keine Regeln.
+- Ergebnisse und der Verlauf der Ausgabe werden nicht gespeichert (nur im Speicher); `save-action-logs/` enthält die rotierenden Protokolldateien von Regeln mit *Ausgabe in eine Protokolldatei*.
+- Ein Export (*Gewählte exportieren …*) enthält dieselben Regel-Objekte unter `{"paneldeck_save_actions": 1, "rules": [...]}`, ohne `value_protected`.
 
 ## Neue Felder in 2.2.0
 - `settings.json` → `llm_servers`: die Server aus *Einstellungen → Modelle*, je mit `id`, `name`, `kind` (`ollama`/`openai`), `url`, optional `api_key` (Base64 eines Windows-DPAPI-Blobs – nie Klartext; nur derselbe Windows-Benutzer auf demselben Rechner kann ihn entschlüsseln), optional `receive_timeout_secs`, `models` (Einstellungen je Modell: `name`, `level`, `level_chosen`, `disabled_tools`, `ask_write`, `max_steps`, optional `tools`, `context_length`, `temperature`; `level_chosen: true` = die Stufe wurde in der [Frage nach der Stufe](chat.md#die-frage-nach-der-stufe) oder unter *Einstellungen → Modelle* gewählt – fehlt es oder ist es `false`, gilt das Modell als *Aus*, egal was in `level` steht) und `last_models` (Ergebnis des letzten *Verbinden*). Ein Server-Eintrag, der sich nicht lesen lässt (z. B. ein unbekannter `kind` einer neueren Version), bleibt unverändert erhalten und wird nur lesbar mit *Entfernen* angezeigt.
@@ -186,6 +224,11 @@ Alle Felder sind optional; ältere Versionen ignorieren sie, fehlende Felder bed
 
 - `hot-exit/`: ungespeicherte Editor-Puffer; `editor-state.json`: offener Ordner, Tabs, Teilungen und zuletzt geöffnete Dateien des Editor-Reiters (beides interne Formate; im *Aufräumen* als *Editor: ungespeicherte Puffer* bzw. als Teil von *Sitzungen und Layout*).
 
+## Neue Felder in 3.2.0
+- Neue Datei `save-actions.json` für die [Aktionen beim Speichern](editor.md#aktionen-beim-speichern) des Editors (siehe [oben](#aktionen-beim-speichern-save-actionsjson)) und der Ordner `save-action-logs/`. Ältere Versionen ignorieren beides.
+- Kürzel-Kennung `save_no_actions` (*Editor: Ohne Aktionen speichern*, ohne Standardtaste, nur im Editor-Reiter) in den Einstellungen der Tastenkürzel.
+- `processes.json` → optional auf oberster Ebene `next_id`: die nächste Kennung für einen neuen Eintrag, damit die Kennung eines gelöschten Eintrags nie an einen neuen geht (Aktionen beim Speichern merken sich Prozesse per Kennung). Ältere Versionen behalten das Feld.
+
 ## Neue Felder in 3.1.0
 Alle Felder sind optional; ältere Versionen ignorieren sie, fehlende Felder bedeuten die Standardwerte unten. Siehe [Befehle im Hintergrund](chat.md#befehle-im-hintergrund).
 - `chats/<id>.json` → nach dem [Kompaktieren](chat.md#lange-chats-kompaktieren) tragen die ersetzten Nachrichten `"compacted": true` (sie bleiben in der Datei, gehen aber nicht mehr an das Modell), und an der Stelle des Schnitts steht die Zusammenfassung: eine Nachricht mit `"role": "system"`, `content` = der Text, den das Modell sieht, und `"summary": {"messages": 12, "files": [{"path": "src/a.rs", "changed": true}], "text": "…"}` (Zahl der ersetzten Nachrichten, berührte Dateien, die Zusammenfassung des Modells selbst). Ältere Versionen senden keine Systemnachrichten und sehen daher weiter den ganzen Verlauf. Kompaktierte Nachrichten ohne Zusammenfassung dahinter gelten beim Laden wieder als normal.
@@ -209,6 +252,42 @@ Alle Felder sind optional; ältere Versionen ignorieren sie (siehe [Bilder und B
 <!-- Plan-Modus (#358) -->
 - `chats/<id>.json` → `plan`: der aktuelle Plan des Chats aus dem [Plan-Modus](chat.md#plan-modus) – `{"level": "low" | "medium" | "high" | "xhigh" | "max", "status": "proposed" | "revising" | "approved" | "discarded", "markdown": "# Plan: …", "revision": 1, "created": 1763200000, "approved": 1763200100, "file": "plans/12-1763200100.md", "finished": true}` (`approved` und `file` erst nach *Ausführen*; `finished: true` = die Ausführung des freigegebenen Plans ist vorbei, z. B. weil eine neue Plan-Runde begann – fehlt = `false`). Ein Plan, der mit Stand `revising` gelesen wird, gilt als `proposed`. Nur geschrieben, wenn es einen Plan gibt; ein unlesbarer oder leerer Wert heißt: kein Plan. *Verlauf leeren* leert ihn mit. Ältere Versionen ignorieren ihn.
 - `plans/`: freigegebene Pläne als Markdown-Dateien, `<Chat-Kennung>-<Zeit>.md`, mit einer Kommentarzeile oben (Chat, Stufe, Fassung, Zeit). Sie sind Dokumente zum Aufheben: Schließen des Chats oder Löschen seines Verlaufs löscht sie nicht (lösche sie selbst, wenn darin etwas Privates steht), und ihr Format ist keine feste Schnittstelle.
+
+## Neue Felder in 3.2.0
+Alle Felder sind optional; ältere Versionen ignorieren sie, fehlende Felder bedeuten die Standardwerte unten (es bleibt alles wie vor dem Update). Siehe [Zugriff je Projekt](agent-interface.md#zugriff-je-projekt) und [Private Einträge und Systemnotizen](todo-and-tickets.md#private-einträge-und-systemnotizen).
+- `settings.json` → `editor` ([Menüleiste](editor.md#menüleiste), [JSON und XML formatieren](editor.md#json-und-xml-formatieren)):
+
+  | Feld | Standard | Bedeutung |
+  |---|---|---|
+  | `menu_bar` | `true` | Menüleiste über jeder Teilung des Editors; nur ein ausdrückliches `false` schaltet sie ab |
+  | `agent_format` | `false` | Schalter *Agenten dürfen formatieren* (MCP `format_file` außer `validate`); nur ein ausdrückliches `true` schaltet ihn ein |
+
+- `settings.json` → `keys` → `ed_format`, `ed_minify`, `ed_validate`, `ed_sort_keys`: eigene Kürzel der Format-Befehle (Standard `Alt+Shift+F`, `Alt+Shift+M`, `Alt+Shift+V`, keins); zweite Belegungen `ed_format_alt` (`Ctrl+Shift+I`), `ed_minify_alt`, `ed_validate_alt` (keine).
+Siehe [Umgebungsvariablen](terminals.md#umgebungsvariablen).
+- `state.json` → je Sitzung `env` und `templates.json` → je Sitzung `env`: die eigenen Umgebungsvariablen der Sitzung, eine Liste von Objekten:
+
+  | Feld | Bedeutung |
+  |---|---|
+  | `name` | Name der Variable (`PANELDECK_*` und interne Namen werden nicht geladen) |
+  | `value` | Wert im Klartext – nur bei normalen Variablen |
+  | `value_protected` | verschlüsselter Wert (Base64 des DPAPI-Blobs für deinen Windows-Benutzer; Linux/macOS: Schlüsselbund bzw. Master-Passwort) – nur mit `secret` |
+  | `secret` | `true` = geheimer Wert (nie im Klartext gespeichert) |
+  | `mode` | `"replace"` (Standard, wird nicht geschrieben), `"prepend"` oder `"append"` |
+  | `remove` | `true` = die geerbte Variable entfernen |
+  | `wsl_path` | `true` = WSL: als Pfad umrechnen (`WSLENV /p`, Listen `/l`) |
+  | `by_agent` | `true` = von einem Agenten gesetzt (`create_session` mit `env`) |
+
+  Nur geschrieben, wenn nicht leer. Unlesbare Einträge, geschützte Namen und doppelte (der letzte gilt) fallen weg; ein von Hand eingetragener Klartext-`value` einer geheimen Variable wird beim Laden verschlüsselt. Ein `value_protected`, der sich nicht entschlüsseln lässt (anderer Benutzer oder Rechner), sperrt die Sitzung beim Start, bis die Werte neu eingegeben sind.
+- `settings.json` → `mcp_session_env` (Standard `false`): *Agenten dürfen Umgebungsvariablen setzen*; `mcp_env_allow` (Standard `[]`): erlaubte Namensmuster wie `"APP_*"`.
+- `themes/*.json` → optionales Objekt `background`: der [eigene Hintergrund](themes.md#hintergrund) des Themes (Bild, Farbverlauf, Farbe oder Muster, Filter, Überlagerung, Bereiche; Format unter [Themes](themes.md#dateiformat)). Bilder stehen als bloße Dateinamen in einem Ordner neben der Theme-Datei, `themes/<datei>/` (Kopien mit höchstens 3840 px). Ein ungültiger Wert fällt auf seinen Standard zurück; das Theme bleibt gültig.
+- `settings.json` → `reduce_transparency` (*Einstellungen → Darstellung → Transparenz reduzieren*, Standard `false`): alle Flächen deckend, kein Hintergrund des Themes.
+- `settings.json` → `agent_general`: Zugriff der Agenten auf **Allgemein** (alles ohne Projekt), `{"level": "global" | "off" | "read" | "control", "for_all": true}`. Fehlt = `{"level": "global", "for_all": true}`; ein fehlendes Feld darin zählt ebenso, ein unbekannter `level` zählt als `"off"` (der sichere Fall).
+- `settings.json` → `agent_create_projects` (Standard `false`): *Agenten dürfen Projekte anlegen*; `agent_delete` (Standard `false`): *Agenten dürfen Tickets und eigene Kommentare löschen* (in den Papierkorb).
+- `settings.json` → `llm_servers[].models[].enabled_tools` (Standard `[]`, nur geschrieben, wenn nicht leer): Werkzeuge, die für Chats standardmäßig aus sind und die du für dieses Modell unter *Einstellungen → Modelle* angehakt hast (siehe [Werkzeuge in kleinen Kontexten](chat.md#werkzeuge-in-kleinen-kontexten)); `disabled_tools` geht vor. Fehlt = keins davon angehakt.
+- `settings.json` → `todo_new_private` (Standard `false`): neue Todo-Karten sind privat; `show_system_notes` (Standard `true`): Listen zeigen Systemnotizen (Karten und Tickets, die Agenten oder Paneldeck angelegt haben).
+- `state.json` → je Projekt `agent_access`, gleiche Form wie `agent_general`. Fehlt (Projekte von vor 3.2.0) = *Wie global* + *Für alle*; später angelegte Projekte werden mit `{"level": "off", "for_all": false}` geschrieben.
+- `mcp-log.jsonl` → optionales Feld `project` je Eintrag: Name des Seitenleisten-Projekts der Zielsitzung bzw. Schlüssel des Ticket-Projekts (fehlt, wenn ein Aufruf kein Projekt betrifft).
+- `paneldeck.db` → **Schema-Version 13**: Ticket-Projekte bekommen `agent_level` (`global`/`off`/`read`/`control`), `agent_for_all`, `sidebar_project` (Verknüpfung mit einem Seitenleisten-Projekt), `origin` und `origin_detail`; Tickets `private`, `origin`, `origin_detail` und die Papierkorb-Spalten `trashed_at`, `trashed_by`, `trashed_was_archived`; Kommentare `origin`, `origin_detail`, `trashed_at`, `trashed_by`; Todo-Karten `project` (Kennung des Seitenleisten-Projekts), `private`, `origin`, `origin_detail`; Tags `private`. Vorhandene Daten werden *Wie global* + *Für alle*, Herkunft `user`, nicht privat. Wie vor jeder Migration sichert Paneldeck die Datenbank zuerst; ältere Versionen lehnen eine Datenbank mit Schema-Version 13 ab (zurück über die Sicherung, wie unter 2.3.0 beschrieben).
 
 ## Sicherungen
 *Einstellungen → Daten & Sicherung* steuert die automatischen Sicherungen von `paneldeck.db`: Standard ist eine Kopie alle 24 Stunden, behalten werden zwei (zusätzlich zur Datenbank selbst). War der Rechner zur fälligen Zeit aus, wird die Sicherung beim nächsten Start nachgeholt; mehrere verpasste ergeben nur eine. Du kannst einen anderen Sicherungsordner wählen, ihn öffnen, mit **Jetzt sichern** eine Kopie anlegen (manuelle Kopien werden nie automatisch gelöscht) und jede Kopie aus der Liste **wiederherstellen** – dabei wird zuerst der aktuelle Stand gesichert, danach beendet sich Paneldeck und spielt die Wiederherstellung beim nächsten Start ein. Vor jedem Datenbank-Update (Migration) legt Paneldeck ebenfalls eine Kopie an und fasst eine Datenbank einer neueren Version nie an.
@@ -247,7 +326,7 @@ Alle Felder sind optional; ältere Versionen ignorieren sie (siehe [Bilder und B
 |---|---|
 | Platz schaffen | Datenbank-Sicherungen (alle außer den neuesten *N*, Standard 3; „alle löschen“ nur mit Eintippen), Bilder aus der Zwischenablage, alte Sicherungsdateien; nur wenn vorhanden: Programm-Kopien von Läufen (`%TEMP%\paneldeck-run`), Wartungs-Sicherungen (`maintenance-<zeit>.db` im Sicherungsordner – nur Dateien mit genau diesem Namensmuster), *Editor: ungespeicherte Puffer* (`hot-exit\`, die ungespeicherten Änderungen von Editor-Tabs – nur mit Eintippen und Neustart, sie lassen sich nicht wiederherstellen) |
 | Verlauf und Protokolle | Scrollback und Chatverläufe, je **ohne Sitzung** oder **alle** („alle“ betrifft auch offene Sitzungen: Terminals behalten nur den Bildschirm, Chats werden leer; Chatverläufe samt ihrer Bilder), **Bilder in Chats** (`chats\<id>\images\` aller Chats – die Chats bleiben, zeigen und senden die Bilder aber nicht mehr; nur mit Eintippen), wahlweise nur Dateien älter als *X* Tage (Standard 30); `crash.log`; das MCP-Protokoll `mcp-log.jsonl` (es dokumentiert, was Agenten getan haben) |
-| Inhalte | Prompt-Bibliothek, Terminal-/Gruppenvorlagen, eigene Themes (eingebaute Themes und das Beispiel bleiben; ein aktives gelöschtes Theme fällt auf den Standard zurück), `system-prompt.md`, die Todo-/Ticket-Datenbank, Sitzungen und Layout |
+| Inhalte | Prompt-Bibliothek, Terminal-/Gruppenvorlagen, eigene Themes samt Hintergrundbildern (eingebaute Themes und das Beispiel bleiben; ein aktives gelöschtes Theme fällt auf den Standard zurück), `system-prompt.md`, die Todo-/Ticket-Datenbank, Sitzungen und Layout |
 | Einstellungen | alle Einstellungen (wie `--reset-settings`, mit Kopie `settings.json.bak-<zeit>`; die Sprache bleibt), Modell-Server und API-Schlüssel, Claude-Standards, Tastenkürzel |
 | Windows-Integration | Autostart-Run-Werte (auch von Profilen) und Explorer-Kontextmenü (Ordner-Einträge und *In Paneldeck-Editor öffnen*), die auf diese `paneldeck.exe` zeigen, `paneldeck*`-Einträge in `~/.claude.json`, die auf diese .exe zeigen, `claude-hooks*.json` im Datenordner |
 | Alles | **Paneldeck komplett zurücksetzen**: wählt alles samt Integration, sichert den Datenordner vorher als ZIP-Datei (Zielordner wählbar, außerhalb des Datenordners; API-Schlüssel und die Werte der Umgebungsvariablen der Prozessliste bleiben draußen – auch aus Kopien wie `settings.json.bak-*`, unlesbare Kopien dieser Dateien ganz) und startet danach neu wie beim ersten Start |

@@ -238,6 +238,17 @@ impl TLinks {
     pub(super) fn chips_of(&self, session: u64) -> &[Chip] {
         if self.enabled { self.chips.get(&session).map(Vec::as_slice).unwrap_or(&[]) } else { &[] }
     }
+
+    /// Kennungen aller Tickets, die die Chips gerade zeigen (leer, wenn die Funktion aus ist; für `screenshot`).
+    pub(super) fn shown_ticket_ids(&self) -> Vec<i64> {
+        if !self.enabled {
+            return Vec::new();
+        }
+        let mut v: Vec<i64> = self.chips.values().flatten().map(|c| c.ticket_id).collect();
+        v.sort_unstable();
+        v.dedup();
+        v
+    }
 }
 
 fn has_expert_project(conn: &Connection) -> bool {

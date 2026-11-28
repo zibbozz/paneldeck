@@ -11,6 +11,9 @@
 //! * `end delete` · `end keep` – Rückfrage am Ende
 //! * `card start|later|never` – Karte beim ersten Start
 //! * `whatsnew_from <version>` – so tun, als sei die zuletzt benutzte Version `<version>` (Tour „Was ist neu“ prüfen)
+//! * `new_terminal` – wie „Neues Terminal“ in der Mitte (Sitzung im aktiven Projekt). Seit 3.2.0 (#386) ist das Projekt
+//!   „Tutorial“ für Agenten gesperrt; der Smoke-Test legt die Sitzung des Schritts `basics.new_terminal` deshalb so an
+//!   statt über `create_session`.
 //!
 //! Der Zustand nennt Tour, Schritt, Ziel (gefunden/Rechteck), Erkennung, Voraussetzung, Rückfrage, Karte, Hinweis,
 //! Tutorial-Projekt und den Katalog aller Touren und Schritte (damit der Smoke-Test jeden Schritt prüfen kann).
@@ -108,14 +111,17 @@ impl App {
                     self.tut.p.whats_new_after = v.to_string();
                     self.tut_save();
                 }
+                ("new_terminal", _) => actions.push(Action::NewQuick),
                 _ => {}
             }
             ctx.request_repaint();
         }
         let status = self.tut_status();
         let text = serde_json::to_string_pretty(&status).unwrap_or_default();
-        if text != self.tut.hook.last {
-            let _ = crate::state::write_atomic(&dir.join(STATUS_FILE), text.as_bytes());
+        // Nur als geschrieben merken, wenn es geklappt hat: Unter Windows schlägt das Umbenennen fehl, solange der
+        // Smoke-Test die alte Datei gerade liest – sonst bliebe ein veralteter Stand liegen, bis sich wieder etwas ändert
+        // (z. B. die Rückfrage am Ende einer Tour fehlte dann dauerhaft).
+        if text != self.tut.hook.last && crate::state::write_atomic(&dir.join(STATUS_FILE), text.as_bytes()).is_ok() {
             self.tut.hook.last = text;
         }
         // Weiter zeichnen, damit Befehle auch im verborgenen/minimierten Fenster ankommen.
@@ -156,10 +162,13 @@ impl App {
             "mode": match self.mode {
                 titlebar::Mode::Tasks => "tasks",
                 titlebar::Mode::Editor => "editor",
+                titlebar::Mode::Time => "time",
                 titlebar::Mode::Terminals => "terminals",
             },
             "expert": self.plan.expert,
-            "project": {"id": pid, "exists": exists, "sessions": sessions, "active": pid == Some(self.active_project)},
+            "project": {"id": pid, "exists": exists, "sessions": sessions, "active": pid == Some(self.active_project), "access": self.projects.iter().find(|p| Some(p.id) == pid).map(|p| p.agent_access.level.as_str())},
+            // Alle Sitzungen der Instanz (der Smoke-Test sieht die im gesperrten Projekt „Tutorial“ über MCP nicht).
+            "sessions_total": self.entries.len(),
             "todos": self.tut.p.todos,
             "plan_project": self.tut.p.plan_project,
             "progress": serde_json::to_value(&self.tut.p.tours).unwrap_or(Value::Null),

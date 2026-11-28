@@ -28,11 +28,12 @@ The steps in the Editor tab use a sample file of the tour (`paneldeck-tutorial.t
 | Tour | Content |
 |---|---|
 | Short tour | Sidebar, new terminal, rename/colour, projects, split, minimize, more windows, command palette, shortcuts, Claude Code, status and costs, chats, to-do list, expert mode, agent interface, the Editor tab |
-| The editor | the Editor tab, opening files and folders, tabs, splits, find and replace, multiple cursors, status bar and go to line, minimap, files changed on disk, search in files, *Settings → Editor* (search, agent switches) |
+| The editor | the Editor tab, opening files and folders, tabs, splits, find and replace, multiple cursors, status bar and go to line, minimap, horizontal scrollbar, files changed on disk, search in files, *Settings → Editor* (search, agent switches) |
+| Time | the Time tab, its sub-tabs, a new alarm, timer presets, the calendar views, the notification options (since 3.2.0) |
 | To-do list & expert mode | simple list, expert mode, projects with a key, a ticket, boards, backlog and sprints, search with the query language |
 | Claude Code in detail | Claude mode, defaults, budget, starting, status, history, prompt library, composer and queue |
 | Chats with local models | local servers, *Settings → Models*, connecting, levels and approvals, a new chat (works without a real model) |
-| Agent interface (MCP) | levels Off/Read only/Control, registering with Claude Code, system prompt, call log |
+| Agent interface (MCP) | levels Off/Read only/Control, registering with Claude Code, environment variables set by agents, system prompt, call log |
 | Profiles, command line & data folder | shell profiles, data folder, `--data-dir`, `--profile`, backups, clean up, updates |
 | More tools | file tree, changes, templates, processes, themes |
 

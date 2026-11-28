@@ -72,6 +72,27 @@ pub struct Item {
     pub tags: Vec<i64>,
     /// Fälligkeit (`JJJJ-MM-TT` oder `JJJJ-MM-TTTHH:MM`, siehe `due.rs`), optional.
     pub due: Option<String>,
+    /// Seitenleisten-Projekt der Karte (#386); `None` = Bereich „Allgemein“.
+    pub project: Option<u64>,
+    /// Privat (#386): nie für Agenten sichtbar (auch über einen privaten Tag, siehe [`is_private`]).
+    pub private: bool,
+    /// Herkunft (#386): Nutzer, Agent (mit Sitzungsname) oder Paneldeck – Agent/Paneldeck = Systemnotiz.
+    pub origin: crate::planning::access::Origin,
+    pub origin_detail: Option<String>,
+}
+
+/// Ist die Karte privat – selbst oder über einen ihrer Tags (#386)?
+pub fn is_private(it: &Item, tags: &[Tag]) -> bool {
+    it.private || it.tags.iter().any(|t| tags.iter().any(|x| x.id == *t && x.private))
+}
+
+/// Was beim Anlegen einer Karte zusätzlich gilt (#386).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ItemMeta {
+    pub project: Option<u64>,
+    pub private: bool,
+    pub origin: crate::planning::access::Origin,
+    pub origin_detail: Option<String>,
 }
 
 impl Item {
@@ -81,7 +102,7 @@ impl Item {
     }
 
     fn state(&self) -> ItemState {
-        ItemState { title: self.title.clone(), body: self.body.clone(), done: self.done, done_at: self.done_at.clone(), tags: self.tags.clone(), due: self.due.clone() }
+        ItemState { title: self.title.clone(), body: self.body.clone(), done: self.done, done_at: self.done_at.clone(), tags: self.tags.clone(), due: self.due.clone(), project: self.project, private: self.private }
     }
 }
 
@@ -95,6 +116,8 @@ pub struct Tag {
     pub name: String,
     /// „#RRGGBB“
     pub color: String,
+    /// Privat (#386): alle Karten mit diesem Tag sind privat.
+    pub private: bool,
 }
 
 /// Veränderbarer Teil einer Karte (für Rückgängig/Wiederholen).
@@ -107,6 +130,9 @@ pub struct ItemState {
     /// Tag-Ids, aufsteigend.
     pub tags: Vec<i64>,
     pub due: Option<String>,
+    /// Projekt und Privat-Schalter (#386).
+    pub project: Option<u64>,
+    pub private: bool,
 }
 
 /// Welche Karten die Liste zeigt.
@@ -264,7 +290,7 @@ pub fn due_counts(conn: &Connection, now: chrono::NaiveDateTime) -> Res<(usize, 
 
 // ------------------------------------------------------------------ Lesen
 
-const ITEM_COLS: &str = "id, title, body, done, position, created_at, updated_at, done_at, due";
+const ITEM_COLS: &str = "id, title, body, done, position, created_at, updated_at, done_at, due, project, private, origin, origin_detail";
 
 fn item_from_row(r: &rusqlite::Row) -> rusqlite::Result<Item> {
     Ok(Item {
@@ -278,6 +304,10 @@ fn item_from_row(r: &rusqlite::Row) -> rusqlite::Result<Item> {
         done_at: r.get(7)?,
         tags: Vec::new(),
         due: r.get(8)?,
+        project: r.get::<_, Option<i64>>(9)?.and_then(|p| u64::try_from(p).ok()),
+        private: r.get::<_, i64>(10)? != 0,
+        origin: crate::planning::access::Origin::parse(&r.get::<_, String>(11)?),
+        origin_detail: r.get(12)?,
     })
 }
 
@@ -324,21 +354,21 @@ pub fn counts(conn: &Connection) -> Res<(usize, usize)> {
 
 /// Alle Tags, alphabetisch (ohne Beachtung der Groß-/Kleinschreibung).
 pub fn list_tags(conn: &Connection) -> Res<Vec<Tag>> {
-    let mut st = conn.prepare("SELECT id, name, color FROM todo_tags")?;
-    let mut v = st.query_map([], |r| Ok(Tag { id: r.get(0)?, name: r.get(1)?, color: r.get(2)? }))?.collect::<Result<Vec<Tag>, _>>()?;
+    let mut st = conn.prepare("SELECT id, name, color, private FROM todo_tags")?;
+    let mut v = st.query_map([], |r| Ok(Tag { id: r.get(0)?, name: r.get(1)?, color: r.get(2)?, private: r.get::<_, i64>(3)? != 0 }))?.collect::<Result<Vec<Tag>, _>>()?;
     v.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()).then(a.id.cmp(&b.id)));
     Ok(v)
 }
 
 fn get_tag(conn: &Connection, id: i64) -> Res<Tag> {
-    conn.query_row("SELECT id, name, color FROM todo_tags WHERE id = ?1", [id], |r| Ok(Tag { id: r.get(0)?, name: r.get(1)?, color: r.get(2)? }))
+    conn.query_row("SELECT id, name, color, private FROM todo_tags WHERE id = ?1", [id], |r| Ok(Tag { id: r.get(0)?, name: r.get(1)?, color: r.get(2)?, private: r.get::<_, i64>(3)? != 0 }))
         .optional()?
         .ok_or(TaskError::NotFound)
 }
 
 pub fn find_tag(conn: &Connection, name: &str) -> Res<Option<Tag>> {
     let k = tag_key(name);
-    Ok(conn.query_row("SELECT id, name, color FROM todo_tags WHERE name_key = ?1", [k], |r| Ok(Tag { id: r.get(0)?, name: r.get(1)?, color: r.get(2)? })).optional()?)
+    Ok(conn.query_row("SELECT id, name, color, private FROM todo_tags WHERE name_key = ?1", [k], |r| Ok(Tag { id: r.get(0)?, name: r.get(1)?, color: r.get(2)?, private: r.get::<_, i64>(3)? != 0 })).optional()?)
 }
 
 /// Auf wie vielen Karten ein Tag steht, je Tag-Id (Tags ohne Karte fehlen).
@@ -378,7 +408,7 @@ fn find_or_create_tag(conn: &Connection, name: &str) -> Res<Tag> {
     }
     let color = next_color(conn)?;
     conn.execute("INSERT INTO todo_tags (name, name_key, color) VALUES (?1, ?2, ?3)", params![name, tag_key(&name), color])?;
-    Ok(Tag { id: conn.last_insert_rowid(), name, color })
+    Ok(Tag { id: conn.last_insert_rowid(), name, color, private: false })
 }
 
 /// Namen zu Tag-Ids auflösen und fehlende Tags anlegen; leere Namen werden übersprungen, Doppelte (auch in anderer
@@ -483,7 +513,7 @@ fn undo_merge(conn: &Connection, from: &Tag, into: i64, moved: &[(i64, bool)]) -
         }
         conn.execute("DELETE FROM todo_tags WHERE id = ?1", [other.id])?;
     }
-    conn.execute("INSERT INTO todo_tags (id, name, name_key, color) VALUES (?1, ?2, ?3, ?4)", params![from.id, from.name, tag_key(&from.name), from.color])?;
+    conn.execute("INSERT INTO todo_tags (id, name, name_key, color, private) VALUES (?1, ?2, ?3, ?4, ?5)", params![from.id, from.name, tag_key(&from.name), from.color, from.private as i64])?;
     for (item, had_into) in moved {
         conn.execute("INSERT OR IGNORE INTO todo_item_tags (item_id, tag_id) SELECT id, ?2 FROM todo_items WHERE id = ?1", params![item, from.id])?;
         if !had_into {
@@ -516,8 +546,8 @@ fn set_item_tags(conn: &Connection, id: i64, tags: &[i64]) -> Res<()> {
 
 fn apply_state(conn: &Connection, id: i64, st: &ItemState) -> Res<()> {
     let n = conn.execute(
-        "UPDATE todo_items SET title = ?2, body = ?3, done = ?4, done_at = ?5, updated_at = ?6, due = ?7 WHERE id = ?1",
-        params![id, st.title, st.body, st.done as i64, st.done_at, now(), st.due],
+        "UPDATE todo_items SET title = ?2, body = ?3, done = ?4, done_at = ?5, updated_at = ?6, due = ?7, project = ?8, private = ?9 WHERE id = ?1",
+        params![id, st.title, st.body, st.done as i64, st.done_at, now(), st.due, st.project.map(|p| p as i64), st.private as i64],
     )?;
     if n == 0 {
         return Err(TaskError::NotFound);
@@ -527,14 +557,21 @@ fn apply_state(conn: &Connection, id: i64, st: &ItemState) -> Res<()> {
 
 fn insert_item(conn: &Connection, it: &Item) -> Res<()> {
     conn.execute(
-        "INSERT INTO todo_items (id, title, body, done, position, created_at, updated_at, done_at, due) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-        params![it.id, it.title, it.body, it.done as i64, it.position, it.created_at, it.updated_at, it.done_at, it.due],
+        "INSERT INTO todo_items (id, title, body, done, position, created_at, updated_at, done_at, due, project, private, origin, origin_detail) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+        params![it.id, it.title, it.body, it.done as i64, it.position, it.created_at, it.updated_at, it.done_at, it.due, it.project.map(|p| p as i64), it.private as i64, it.origin.as_str(), it.origin_detail],
     )?;
     set_item_tags(conn, it.id, &it.tags)
 }
 
 /// Neue Karte oben in der Liste anlegen. Titel/Text: mindestens eins gefüllt, sonst `Empty` (dann entsteht auch kein Tag).
+/// Seit #386 nur noch in Tests; das Programm nimmt [`create_item_ext`].
+#[cfg(test)]
 pub fn create_item(conn: &Connection, title: &str, body: &str, due: Option<&str>, tag_names: &[String]) -> Res<(Item, TaskOp)> {
+    create_item_ext(conn, title, body, due, tag_names, &ItemMeta::default())
+}
+
+/// [`create_item`] mit Projekt, Privat-Schalter und Herkunft (#386).
+pub fn create_item_ext(conn: &Connection, title: &str, body: &str, due: Option<&str>, tag_names: &[String], meta: &ItemMeta) -> Res<(Item, TaskOp)> {
     let (title, body) = validate(title, body)?;
     let due = clean_due(due)?;
     let tx = conn.unchecked_transaction()?;
@@ -542,8 +579,8 @@ pub fn create_item(conn: &Connection, title: &str, body: &str, due: Option<&str>
     let position: i64 = tx.query_row("SELECT COALESCE(MIN(position), 0) - 1 FROM todo_items", [], |r| r.get(0))?;
     let t = now();
     tx.execute(
-        "INSERT INTO todo_items (title, body, done, position, created_at, updated_at, due) VALUES (?1, ?2, 0, ?3, ?4, ?4, ?5)",
-        params![title, body, position, t, due],
+        "INSERT INTO todo_items (title, body, done, position, created_at, updated_at, due, project, private, origin, origin_detail) VALUES (?1, ?2, 0, ?3, ?4, ?4, ?5, ?6, ?7, ?8, ?9)",
+        params![title, body, position, t, due, meta.project.map(|p| p as i64), meta.private as i64, meta.origin.as_str(), meta.origin_detail],
     )?;
     let id = tx.last_insert_rowid();
     set_item_tags(&tx, id, &tags)?;
@@ -559,13 +596,34 @@ pub fn edit_item(conn: &Connection, id: i64, title: &str, body: &str, due: Optio
     let tx = conn.unchecked_transaction()?;
     let before = get_item(&tx, id)?.state();
     let tags = resolve_tags(&tx, tag_names)?;
-    let after = ItemState { title, body, done: before.done, done_at: before.done_at.clone(), tags, due };
+    let after = ItemState { title, body, done: before.done, done_at: before.done_at.clone(), tags, due, project: before.project, private: before.private };
     if before == after {
         return Ok(None);
     }
     apply_state(&tx, id, &after)?;
     tx.commit()?;
     Ok(Some(TaskOp::Edit { id, before, after }))
+}
+
+/// Projekt und Privat-Schalter einer Karte (nur der Nutzer, #386). `None` = nichts geändert.
+pub fn set_item_meta(conn: &Connection, id: i64, project: Option<u64>, private: bool) -> Res<Option<TaskOp>> {
+    let tx = conn.unchecked_transaction()?;
+    let before = get_item(&tx, id)?.state();
+    let after = ItemState { project, private, ..before.clone() };
+    if before == after {
+        return Ok(None);
+    }
+    apply_state(&tx, id, &after)?;
+    tx.commit()?;
+    Ok(Some(TaskOp::Edit { id, before, after }))
+}
+
+/// Privat-Schalter eines Tags (nur der Nutzer, #386).
+pub fn set_tag_private(conn: &Connection, id: i64, private: bool) -> Res<()> {
+    if conn.execute("UPDATE todo_tags SET private = ?1 WHERE id = ?2", params![private as i64, id])? == 0 {
+        return Err(TaskError::NotFound);
+    }
+    Ok(())
 }
 
 /// Karte abhaken oder wieder öffnen. `None` = war schon so.

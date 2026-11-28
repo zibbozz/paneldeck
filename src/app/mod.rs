@@ -31,6 +31,9 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+/// Kalender (#164): Ansichten, Dialoge; Einstieg `calendar_ui::show` (für den Zeit-Reiter).
+pub(crate) mod calendar_ui;
+mod access_ui;
 mod chat_plan_ui;
 mod chat_images;
 mod chat_images_ui;
@@ -43,11 +46,14 @@ mod dialogs;
 mod dragdrop;
 pub(crate) mod editor_ui;
 mod empty_hub;
+mod env_ui;
+use env_ui::env_locked_text;
 // Editor-Reiter (#54): Einstellungen, MCP-Werkzeuge, Plattenänderungen, --edit, Explorer-Eintrag, Suche in Dateien.
 mod editor_services;
 mod editor_search_ui;
 pub(crate) mod folder_picker;
 mod fresh_start;
+mod inbox_ui;
 mod closing;
 mod conv_pick;
 #[cfg(test)]
@@ -66,6 +72,8 @@ mod panels;
 mod paste_ask;
 mod planning_ui;
 mod procs_ui;
+mod save_actions_dialog;
+mod save_actions_ui;
 mod session_settings;
 mod settings;
 #[cfg(feature = "readme-shots")]
@@ -77,8 +85,11 @@ mod sysprompt_ui;
 mod taint;
 mod tasks_ui;
 mod terminal_links;
+mod backdrop;
 mod theme_editor;
 mod theme_preview;
+// Reiter „Zeit“ (#164): Wecker, Timer, Kalender-Platz, Stoppuhren, Weltuhren, Geburtstage.
+mod time_ui;
 mod titlebar;
 mod toasts;
 mod tpl_lib;
@@ -86,6 +97,7 @@ mod tutorial;
 pub(crate) mod update;
 
 use tutorial::{Spot, TutMark};
+use save_actions_dialog::SaPaletteCmd;
 
 /// Vorgabefarbe einer neuen Sitzung/eines neuen Projekts Nummer `i` aus der geltenden Palette des Terminal-Hubs
 /// (läuft im Kreis; bis 2.2 die feste Palette, jetzt `crate::palette::HUB_DEFAULTS` bzw. die gemeinsame).
@@ -144,13 +156,20 @@ struct Entry {
     track: claude_status::Track,
     /// Die Sitzung wartet vor ihrem Start auf die Auswahl der Konversation (#302, `conv_pick`).
     pick_pending: bool,
+    /// Geheime Umgebungsvariablen ließen sich beim Start nicht entschlüsseln (#384): die Sitzung wartet auf
+    /// „Entsperren und starten“ bzw. neue Werte.
+    env_locked: Option<crate::session_env::Locked>,
+    /// Geänderte Umgebungsvariablen gelten erst nach einem Neustart (#384, oranger Punkt in der Kopfzeile).
+    env_pending: bool,
+    /// Variablen, die die laufende Shell hat: beim Start festgehalten, nach „Jetzt setzen“ fortgeschrieben (#384).
+    env_live: Vec<crate::session_env::EnvVar>,
 }
 
 impl Entry {
     fn new(meta: SessionMeta) -> Self {
         let launched_claude = meta.claude && meta.kind != SessionKind::Chat;
         let launched_opts = if launched_claude { meta.claude_opts_eff().0 } else { Default::default() };
-        Entry { meta, live: None, error: None, status: ClaudeStatus::Unknown, status_msg: String::new(), attention: false, live_cwd: String::new(), start_cwd: String::new(), hook_seen: false, queue_active: false, perm_since: None, budget_warned: false, shell_eff: String::new(), shell_flavor: None, chat: None, session_key: String::new(), hook_conv: Default::default(), hook_keyed: false, launched_claude, launched_opts, launch_note: None, progress: None, track: Default::default(), pick_pending: false }
+        Entry { meta, live: None, error: None, status: ClaudeStatus::Unknown, status_msg: String::new(), attention: false, live_cwd: String::new(), start_cwd: String::new(), hook_seen: false, queue_active: false, perm_since: None, budget_warned: false, shell_eff: String::new(), shell_flavor: None, chat: None, session_key: String::new(), hook_conv: Default::default(), hook_keyed: false, launched_claude, launched_opts, launch_note: None, progress: None, track: Default::default(), pick_pending: false, env_locked: None, env_pending: false, env_live: Vec::new() }
     }
     /// Chat-Sitzung mit geladenem Verlauf (kein Terminal, keine PTY).
     fn new_chat(meta: SessionMeta, chat: ChatState) -> Self {
@@ -337,10 +356,16 @@ enum Nav {
 
 #[derive(Clone)]
 enum Action {
+    /// Formatier-Befehl des Editors auf den aktiven Reiter (#381, Befehls-Palette).
+    EditorFormat(crate::editor::format::Op),
+    /// Befehl des Editors aus der Befehlspalette (#385).
+    Editor(editor_ui::EditorAction),
     /// Eingefügter Text mit mehreren Zeilen wartet auf die Rückfrage (Sitzung, Text, aus abgedocktem Fenster).
     /// Sitzung, Text, aus abgedocktem Fenster, Rückfrage nur wegen möglicher Broadcast-Ziele (`Session::take_paste_ask`).
     PasteAsk(u64, String, bool, bool),
     OpenPalette,
+    /// Aktionen beim Speichern (#383) aus der Befehls-Palette.
+    SaveActions(SaPaletteCmd),
     OpenTemplates,
     OpenCosts,
     TemplateStart(usize),
@@ -385,7 +410,8 @@ enum Action {
     OpenQueue(u64),
     ToggleDiff,
     QueueAdd(u64, String),
-    Approve(u64, bool),
+    /// Freigabe-Frage von Claude beantworten: Sitzung, Ja/Nein, laufende Nummer des gezeigten Aufrufs (#390).
+    Approve(u64, bool, u64),
     OpenGlobalSearch,
     GlobalJump(u64, i32, String),
     JumpCmd(i32),
@@ -485,6 +511,12 @@ enum Action {
     ChatImage(u64, chat_images_ui::ImageReq),
     /// Tutorial (#143): Tour starten, fortsetzen, „Was ist neu“, Hinweis ausblenden.
     Tutorial(tutorial::Cmd),
+    /// Umgebungsvariablen (#384): kopieren, einfügen, als .env kopieren, gesperrte entsperren und starten, bearbeiten.
+    EnvCopy(u64),
+    EnvPaste(u64),
+    EnvCopyDotenv(u64),
+    EnvUnlock(u64),
+    EnvEdit(u64),
 }
 
 struct NewDialog {
@@ -515,6 +547,8 @@ struct NewDialog {
     notes: String,
     /// Vorhandene Tags für die Vorschläge (setzt die App beim Öffnen).
     tag_values: Vec<planning_ui::value_suggest::Counted>,
+    /// Reiter „Umgebung“ (#384).
+    env: env_ui::EnvEditor,
 }
 
 #[derive(Default)]
@@ -550,6 +584,8 @@ struct NewOpts {
     color: Option<[u8; 3]>,
     tags: Vec<String>,
     notes: String,
+    /// Umgebungsvariablen der Sitzung (#384; aus Dialog, Vorlage, Duplikat oder MCP `env`).
+    env: Vec<crate::session_env::EnvVar>,
 }
 
 /// Farbe einer neuen Sitzung: eigene (Dialog „Neue Sitzung“, #292), sonst die des Profils, sonst automatisch.
@@ -590,6 +626,7 @@ impl NewDialog {
             tags: String::new(),
             notes: String::new(),
             tag_values: Vec::new(),
+            env: Default::default(),
         }
     }
 
@@ -815,10 +852,14 @@ pub struct App {
     theme_issues: Vec<theme::Issue>,
     /// Theme-Editor und Verwaltung eigener Themes (#309).
     theme_ui: theme_editor::ThemeUi,
+    /// Eigener Hintergrund des Themes je Fenster (#387).
+    backdrops: backdrop::Backdrops,
     entries: BTreeMap<u64, Entry>,
     layout: Option<Node>,
     focused: u64,
     next_id: u64,
+    /// Nächste Kennung eines Seitenleisten-Projekts (#386, nie wiederverwendet).
+    next_project_id: u64,
     want_focus: Option<u64>,
     /// Zurück in den Terminal Hub (#238): Zahl der Bilder seit dem Umschalten; nach zwei vollen Terminal-Bildern bekommt
     /// das zuvor fokussierte Terminal (sonst die Pane oben links) den Fokus – nur, wenn kein Dialog/Popup offen ist.
@@ -849,6 +890,10 @@ pub struct App {
     reload_ask: Option<session_settings::ReloadAsk>,
     /// Auswahl der Konversation vor Neu laden/Neustart/Programmstart (#302); global, erscheint im Hauptfenster.
     conv_pick: conv_pick::ConvPick,
+    /// Kopierte Umgebungsvariablen einer Sitzung (#384, Kontextmenü): bleiben in Paneldeck, nie in der Zwischenablage.
+    env_clip: Option<Vec<crate::session_env::EnvVar>>,
+    /// Rückfrage *Neu starten / Jetzt setzen / Später* nach geänderten Variablen einer laufenden Sitzung (#384).
+    env_ask: Option<(u64, env_ui::EnvLive)>,
     /// Rückfrage vor dem Einfügen mehrerer Zeilen (#183).
     paste_ask: Option<paste_ask::PasteAsk>,
     /// Dialog „Einstellungen der Sitzung“ (#170).
@@ -869,6 +914,8 @@ pub struct App {
     db_error: Option<String>,
     tasks: tasks_ui::TasksUi,
     plan: planning_ui::PlanUi,
+    /// Kalender (#164, `calendar_ui`).
+    cal: calendar_ui::CalUi,
     /// Ticket↔Terminal-Verknüpfung (`terminal_links.rs`).
     tlinks: terminal_links::TLinks,
     backup_rx: Option<std::sync::mpsc::Receiver<Result<crate::backup::BackupInfo, String>>>,
@@ -930,6 +977,8 @@ pub struct App {
     quit_ok: bool,
     /// Prozessliste (#243): Einträge, Laufzeit, Ausgabeansicht, Dialoge.
     procs: procs_ui::ProcsState,
+    /// Aktionen beim Speichern im Editor (#383).
+    save_actions: save_actions_ui::SaState,
     /// Dienste des Editor-Reiters (#54): Plattenänderungen, Suche in Dateien, `--edit`, Explorer-Eintrag.
     editor_svc: editor_services::EditorServices,
     detached: Vec<u64>,
@@ -980,6 +1029,8 @@ pub struct App {
     editor: Option<Editor>,
     /// Reiter „Editor“ (#54): Ordnerbaum, Dokumente, Teilungen. Für alle Fenster gemeinsam (nicht in `view_fields!`).
     ed: editor_ui::EditorUi,
+    /// Reiter „Zeit“ (#164): Daten, Auswahl, Klingeln, Hinweise. Für alle Fenster gemeinsam (nicht in `view_fields!`).
+    time: time_ui::TimeUi,
     applied_font: String,
     /// Weitere Fenster (`multiwin.rs`, #110).
     wins: multiwin::Wins,
@@ -1187,6 +1238,8 @@ impl App {
         let restored_once = restored_once && !saved.sessions.is_empty();
         // Vorgemerkte Wiederherstellung einspielen, dann die Datenbank öffnen (Migrationen inklusive).
         let restore_result = crate::backup::apply_pending_restore(&dir, crate::db::FILE);
+        // Sicherung von vor 3.2.0 (Schema < 13, #386): Zugriff der Ticket-Projekte steht danach auf den Standards.
+        let restore_resets_access = matches!(restore_result, Some(Ok(_))) && mcp::access_gate::restore_resets_access(mcp::access_gate::file_schema_version(&dir.join(crate::db::FILE)));
         let backup_dir = crate::cli::get().backup_dir.clone().unwrap_or_else(|| crate::backup::dir(&dir, &settings.backup_dir));
         let (db, db_error) = match crate::db::open(&dir, &backup_dir) {
             Ok(d) => (Some(d), None),
@@ -1200,16 +1253,19 @@ impl App {
         }
         let bg = std::sync::mpsc::channel::<String>();
         let procs_state = procs_ui::ProcsState::load(&dir);
+        let save_actions_state = save_actions_ui::SaState::load(&dir);
         let mut app = App {
             settings,
             shells,
             themes: Vec::new(),
             theme_issues: Vec::new(),
             theme_ui: theme_editor::ThemeUi::default(),
+            backdrops: Default::default(),
             entries: BTreeMap::new(),
             layout: None,
             focused: 0,
             next_id: saved.next_id.max(1),
+            next_project_id: saved.project_id_floor(),
             want_focus: None,
             focus_return: None,
             rename: None,
@@ -1233,6 +1289,8 @@ impl App {
             confirm_close: None,
             reload_ask: None,
             conv_pick: Default::default(),
+            env_clip: None,
+            env_ask: None,
             paste_ask: None,
             session_settings: None,
             settings_open: false,
@@ -1248,6 +1306,7 @@ impl App {
             db_error,
             tasks: tasks_ui::TasksUi::default(),
             plan: planning_ui::PlanUi::default(),
+            cal: calendar_ui::CalUi::default(),
             backup_rx: None,
             backup_checked: Instant::now().checked_sub(Duration::from_secs(61)).unwrap_or_else(Instant::now),
             backup_msg: None,
@@ -1301,6 +1360,7 @@ impl App {
             quitting: false,
             quit_ok: false,
             procs: procs_state,
+            save_actions: save_actions_state,
             editor_svc: editor_services::EditorServices::from_cli(),
             detached: saved.detached.clone(),
             settings_tab: 0,
@@ -1342,6 +1402,7 @@ impl App {
             in_tray: false,
             editor: None,
             ed: Default::default(),
+            time: Default::default(),
             applied_font: String::new(),
             wins: Default::default(),
             // `--no-update-check`: keine automatische Prüfung für diesen Start (die manuelle geht weiter).
@@ -1446,7 +1507,7 @@ impl App {
         // Start aus dem Explorer-Kontextmenü: Sitzung im übergebenen Ordner öffnen.
         let cli = crate::cli::get();
         if let Some(p) = &cli.open {
-            let _ = app.open_folder(&cc.egui_ctx, p, cli.claude, false);
+            let _ = app.open_folder(&cc.egui_ctx, p, cli.claude, None);
         }
         app.want_focus = Some(app.focused);
         if let Some(n) = startup_note {
@@ -1468,6 +1529,12 @@ impl App {
                 Err(e) => format!("{}: {e}", lang.t("Wiederherstellung fehlgeschlagen", "Restore failed")),
             });
         }
+        if restore_resets_access {
+            app.notify_text(lang.t(
+                "Die Sicherung stammt von vor 3.2.0: Der Zugriff der Agenten auf Ticket-Projekte steht auf den Standards (wie global, für alle) – prüfe Einstellungen → Agenten.",
+                "The backup is from before 3.2.0: agent access to ticket projects was reset to the defaults (as global, for all) – check Settings → Agents.",
+            ).to_string());
+        }
         if let Some(e) = app.db_error.clone() {
             app.notify_text(e);
         }
@@ -1481,7 +1548,11 @@ impl App {
     /// `from_hub` = angestoßen aus einem Hub-Terminal (`paneldeck --open` dort, möglicherweise von einem Agenten): dann
     /// Optionen wie bei Sitzungen über MCP (#182): ohne die Rechte erweiternden Wertoptionen der Standards und mit
     /// ausdrücklichem Permission-Mode (`ClaudeOpts::for_agent`).
-    fn open_folder(&mut self, ctx: &egui::Context, path: &str, claude: bool, from_hub: bool) -> u64 {
+    fn open_folder(&mut self, ctx: &egui::Context, path: &str, claude: bool, origin: Option<u64>) -> u64 {
+        let from_hub = origin.is_some();
+        // Aus einer Sitzung heraus (#386): Fenster und Projekt dieser Sitzung (wie Kinder über `create_session`), nicht das
+        // gerade angezeigte Projekt – sonst landete ein Agent über `paneldeck --open` in einem für ihn gesperrten Projekt.
+        let (window, project) = mcp::access_gate::open_home(origin.and_then(|o| self.entries.get(&o)).map(|e| (e.meta.window, e.meta.project)), self.active_project);
         let p = std::path::Path::new(path);
         // Ein WSL-Pfad gilt ungeprüft als Ordner (schon das Prüfen kann die WSL-VM starten und die Oberfläche blockieren).
         let dir = if !crate::wsl::is_wsl_unc(path) && p.is_file() { p.parent().map(|d| d.to_string_lossy().to_string()).unwrap_or_default() } else { path.to_string() };
@@ -1490,7 +1561,7 @@ impl App {
         // Das Standardprofil des Projekts kann ein eigenes Programm haben: nur wenn die Sitzung wirklich in dieser
         // Distribution startet, den Linux-Pfad nehmen – sonst bleibt es der (für Windows gültige) UNC-Pfad.
         let wsl = crate::wsl::unc_to_linux(&dir).and_then(|(d, linux)| self.wsl_shell_for(&d).map(|sid| (d, sid, linux))).filter(|(d, sid, _)| {
-            let eff = self.effective_shell_id(Some(sid), self.active_project);
+            let eff = self.effective_shell_id(Some(sid), project);
             matches!(folder_picker::Target::for_shell(self.shell_by_id(&eff).as_ref(), false), folder_picker::Target::Wsl { distro: Some(x), .. } if x.eq_ignore_ascii_case(d))
         }).map(|(_, sid, linux)| (sid, linux));
         let (shell_id, cwd) = match wsl {
@@ -1498,16 +1569,22 @@ impl App {
             None => (None, dir),
         };
         let claude_opts = from_hub.then(|| ClaudeOpts::default().for_agent(&self.settings.claude_defaults));
-        self.new_session(ctx, NewOpts { shell_id, cwd: Some(cwd), claude: claude && self.settings.claude_mode, claude_opts, ..NewOpts::default() })
+        let home = from_hub.then_some((Some(window), Some(project)));
+        self.new_session(ctx, NewOpts { shell_id, cwd: Some(cwd), claude: claude && self.settings.claude_mode, claude_opts, window: home.and_then(|h| h.0), project: home.and_then(|h| h.1), ..NewOpts::default() })
     }
 
     fn handle_ipc(&mut self, ctx: &egui::Context) {
         let cmds: Vec<IpcCmd> = self.hook_server.as_ref().map(|h| h.cmd_rx.try_iter().collect()).unwrap_or_default();
         for c in cmds {
             self.from_tray(ctx);
-            if let IpcCmd::Edit { path } = c {
-                // `paneldeck --edit <datei>` (#54): im Editor-Reiter öffnen (keine Sitzung, keine Agenten-Kette).
-                self.editor_open_from_ipc(path);
+            if let IpcCmd::Edit { path, origin } = c {
+                // `paneldeck --edit <datei>` (#54): im Editor-Reiter öffnen (keine Sitzung, keine Agenten-Kette). Ein
+                // Linux-Pfad gilt in der Sitzung, aus der der Aufruf kam (sonst in der WSL-Standard-Distribution, #392).
+                let (from, _) = self.open_origin(origin.as_ref());
+                match self.cli_path(&path, from) {
+                    Ok(p) => self.editor_open_from_ipc(p),
+                    Err(e) => self.notify_text(format!("{} {path}: {}", state::t("Datei ließ sich nicht im Editor öffnen:", "Could not open the file in the editor:"), e.message(self.settings.language))),
+                }
                 continue;
             }
             if let IpcCmd::Open { path, claude, origin } = c {
@@ -1520,7 +1597,10 @@ impl App {
                     self.notify_text(taint::orphan_error().1);
                     continue;
                 }
-                let id = self.open_folder(ctx, &path, claude, origin.is_some());
+                // Linux-Pfad (#392): in der Sitzung des Aufrufs (sonst WSL-Standard) – als `\\wsl.localhost\<D>\…` bzw.
+                // `C:\…`; `open_folder` wählt dann die passende Shell.
+                let path = self.cli_path(&path, origin).unwrap_or(path);
+                let id = self.open_folder(ctx, &path, claude, origin);
                 if origin.is_some() && taint::on_create(&mut self.entries, origin, id) {
                     self.save_state();
                 }
@@ -1635,6 +1715,7 @@ impl App {
         self.theme_issues = issues;
         self.style_cache.clear();
         self.applied_theme.clear();
+        self.backdrops.themes_changed();
     }
 
     fn binding(&self, id: &str) -> Option<(Modifiers, Key)> {
@@ -1643,6 +1724,11 @@ impl App {
             Some((m, k)) => keys::usable(m, k).then_some((m, k)),
             None => keys::DEFAULTS.iter().find(|(i, _)| *i == id).and_then(|(_, d)| keys::parse(d)),
         }
+    }
+
+    /// Aktuelles Kürzel als Text wie in `keys::DEFAULTS` (`Ctrl+Shift+D`; leer = keins) – für die Menüs des Editors.
+    fn binding_raw(&self, id: &str) -> String {
+        self.binding(id).map(|(m, k)| keys::format(m, k)).unwrap_or_default()
     }
 
     /// Anzeigetext des aktuellen Kürzels (für Tooltips).
@@ -1913,7 +1999,7 @@ impl App {
             self.hooks_global,
             self.hooks_incomplete,
             self.hooks_foreign.is_some(),
-            self.profile(meta.profile).map_or("", |p| p.env.as_str()),
+            &self.env_lines_of(meta),
             hooks::global_settings_path().as_deref(),
         ) {
             // Ohne globale Hooks immer; mit ihnen, wenn das Profil ein anderes CLAUDE_CONFIG_DIR setzt (dort gelten sie
@@ -1981,7 +2067,7 @@ impl App {
             entry.meta.queue_paused = false;
         }
         entry.track = Default::default();
-        entry.status_msg.clear();
+        entry.clear_status_msg();
         entry.perm_since = None;
         let Some(mut shell) = self.session_shell(&entry.meta.shell_id, entry.meta.profile) else {
             entry.error = Some(state::t("Keine Shell gefunden", "No shell found").into());
@@ -2000,7 +2086,10 @@ impl App {
         // Ein gespeicherter `\\wsl$\<distro>\…`-Ordner derselben Distribution geht ebenfalls über `--cd`; Pfade mit `"`/`\`
         // erreichen die Kommandozeile nie (wsl.exe zerlegt sie selbst – Befehlseinschleusung).
         let cwd = if wsl {
-            let distro = wsl_distro_of(&shell);
+            // Ohne `-d`: die bekannte Standard-Distribution (ein `\\wsl.localhost\<D>\…`-Ordner derselben geht dann über `--cd`).
+            let distro = wsl_distro_of(&shell).or_else(crate::wsl::cached_default);
+            // Home und Einhängepunkt für spätere Umrechnungen (Links, Einfügen, `~`) im Hintergrund holen (#392).
+            crate::wsl::prefetch(distro.as_deref());
             let de = self.settings.language == Lang::De;
             // Der WSL-Starter `bash.exe` kennt kein `--cd`: er startet im Windows-Ordner (#261).
             let cd = if shells::is_system_bash(&shell.program) { crate::wsl::Cd::Windows } else { crate::wsl::apply_cd(&mut shell.args, &entry.meta.cwd, distro.as_deref()) };
@@ -2038,12 +2127,25 @@ impl App {
             }
         } else if entry.meta.cwd.is_empty() {
             home_dir()
-        } else if cfg!(windows) && crate::wsl::looks_linux(&entry.meta.cwd) {
+        } else if cfg!(windows) && (entry.meta.cwd.starts_with('/') || entry.meta.cwd.starts_with('~')) {
             // (Linux/macOS, #149: Unix-Pfade sind dort die normalen Pfade.)
-            // Nie einen Linux-Pfad an eine Windows-Shell geben: `/mnt/c/x` → `C:\x`, sonst das Windows-Home.
-            crate::wsl::linux_to_windows("", &entry.meta.cwd).unwrap_or_else(home_dir)
+            // Nie einen Linux-Pfad an eine Windows-Shell geben (#392): Git Bash `/c/x`, `/mnt/c/x` → `C:\x`, `~`/`~/x` =
+            // Windows-Benutzerordner; was Windows nicht kennt, startet im Windows-Home.
+            crate::targetpath::PathKind::of(&shell).to_windows(&entry.meta.cwd).unwrap_or_else(|_| home_dir())
         } else {
             entry.meta.cwd.clone()
+        };
+        // cmd.exe kennt keinen UNC-Arbeitsordner (startet sonst in C:\Windows, #392): im Benutzerordner starten und sagen, warum.
+        let cwd = if !wsl && matches!(crate::targetpath::PathKind::of(&shell), crate::targetpath::PathKind::Windows { cmd: true }) && (cwd.starts_with("\\\\") || cwd.starts_with("//")) {
+            let de = self.settings.language == Lang::De;
+            self.spawn_notes.borrow_mut().push(if de {
+                format!("cmd.exe kann nicht in einem Netzwerk- oder WSL-Ordner starten ({}) – die Sitzung startet im Benutzerordner.", crate::mcp::short(&cwd, 80))
+            } else {
+                format!("cmd.exe cannot start in a network or WSL folder ({}) – the session starts in the home folder.", crate::mcp::short(&cwd, 80))
+            });
+            home_dir()
+        } else {
+            cwd
         };
         // Erst nach dem Startordner: ein unbrauchbarer gespeicherter Ordner setzt die Konversation zurück (#245).
         let claude_cmd = if entry.launched_claude {
@@ -2102,23 +2204,15 @@ impl App {
         };
         let profile = self.profile(entry.meta.profile).cloned();
         let startup = profile.as_ref().map(|p| p.startup.trim().to_string()).filter(|s| !s.is_empty());
-        let initial = match (&startup, claude_cmd) {
+        let mut initial = match (&startup, claude_cmd) {
             (Some(st), Some(c)) => Some(format!("{st}\r{c}")),
             (Some(st), None) => Some(format!("{st}\r")),
             (None, c) => c,
         };
-        entry.track.launch_lines = claude_status::launch_lines(initial.as_deref());
         // Schlüssel an zweiter Stelle: er landet so auch in WSLENV (siehe unten, alles ab Index 1 wird durchgereicht).
         entry.session_key = hooks::random_hex();
         let mut env = vec![(hooks::ENV_SESSION.to_string(), entry.meta.id.to_string()), (hooks::ENV_SESSION_KEY.to_string(), entry.session_key.clone())];
         if let Some(p) = &profile {
-            for line in p.env.lines() {
-                if let Some((k, v)) = line.split_once('=') {
-                    if !k.trim().is_empty() {
-                        env.push((k.trim().to_string(), v.trim().to_string()));
-                    }
-                }
-            }
             if p.admin && l.restore {
                 // Beim Programmstart (auch Autostart im Tray) nicht für jede gespeicherte Admin-Sitzung eine UAC-Abfrage öffnen.
                 entry.error = Some(self.settings.language.t(
@@ -2137,6 +2231,46 @@ impl App {
                 return;
             }
         }
+        // Umgebungsvariablen (#384): Profil < Sitzung (die Vorlage ist beim Anlegen in die Sitzung kopiert). Geschützte
+        // Namen (`PANELDECK_*`, intern) fallen weg – ein Profil überschreibt `PANELDECK_SESSION`/`_KEY` nicht mehr.
+        // Lässt sich ein geheimer Wert nicht entschlüsseln, wartet die Sitzung („Entsperren und starten“, wie
+        // Administrator-Sitzungen beim Programmstart).
+        let user_vars = crate::session_env::merge(&profile.as_ref().map(|p| crate::session_env::from_profile(&p.env)).unwrap_or_default(), &entry.meta.env);
+        let mut user_ops = match crate::session_env::resolve(&user_vars, crate::llm::secret::unprotect) {
+            Ok(ops) => ops,
+            Err(locked) => {
+                entry.error = Some(env_locked_text(&locked, self.settings.language));
+                entry.env_locked = Some(locked);
+                entry.live = None;
+                return;
+            }
+        };
+        entry.env_locked = None;
+        entry.env_pending = false;
+        entry.env_live = entry.meta.env.clone();
+        // WSL: nur gesetzte Werte gehen über WSLENV; Voranstellen/Anhängen/Entfernen wirken auf die Linux-Werte und gehen
+        // deshalb als sichtbarer Befehl (führendes Leerzeichen) vor den Startbefehl – geheime nie, die fehlen mit Hinweis.
+        let mut wsl_live: Vec<crate::session_env::Op> = Vec::new();
+        if wsl {
+            let (set, rest): (Vec<_>, Vec<_>) = user_ops.into_iter().partition(|o| matches!(o.kind, crate::session_env::OpKind::Set(_)));
+            user_ops = set;
+            let (secret, normal): (Vec<_>, Vec<_>) = rest.into_iter().partition(|o| o.secret);
+            wsl_live = normal;
+            if !secret.is_empty() {
+                let names: Vec<String> = secret.iter().map(|o| o.name.clone()).collect();
+                self.spawn_notes.borrow_mut().push(format!(
+                    "{} ({}): {}",
+                    state::t("Geheime Variablen zum Voranstellen/Anhängen/Entfernen gehen in WSL nicht, weggelassen", "Secret variables to prepend/append/remove do not work in WSL, left out"),
+                    entry.display_name(),
+                    names.join(", ")
+                ));
+            }
+        }
+        // Ein WSLENV des Nutzers wird zusammengeführt (Paneldecks Einträge kommen dazu), nicht ersetzt.
+        let user_wslenv = user_ops.iter().rev().find(|o| o.name.eq_ignore_ascii_case("WSLENV")).and_then(|o| match &o.kind {
+            crate::session_env::OpKind::Set(v) => Some(v.clone()),
+            _ => None,
+        });
         if let Some(h) = &self.hook_server {
             env.push((hooks::ENV_PORT.to_string(), h.port.to_string()));
             env.push((hooks::ENV_TOKEN.to_string(), h.token.clone()));
@@ -2146,7 +2280,8 @@ impl App {
             env.push((crate::paths::ENV_HUB_BASE.to_string(), crate::paths::get().base.display().to_string()));
         }
         if wsl {
-            // Variablen an WSL durchreichen (und zurück an die Windows-.exe beim Hook-Aufruf); dazu die Profilvariablen.
+            // Variablen an WSL durchreichen (und zurück an die Windows-.exe beim Hook-Aufruf); dazu die Variablen von
+            // Profil und Sitzung (je mit `/p` bzw. `/l`, wenn „Pfad umrechnen“ gewählt ist).
             // Dazu Name/Version des Terminals (`terminal::term_env`), wie Windows Terminal es mit WT_SESSION macht.
             let mut names = vec![
                 hooks::ENV_SESSION.to_string(),
@@ -2161,17 +2296,26 @@ impl App {
                 }
             }
             let ours = names.join(":");
-            let wslenv = match std::env::var("WSLENV") {
-                Ok(v) if !v.is_empty() => format!("{v}:{ours}"),
-                _ => ours,
-            };
+            let base = user_wslenv.clone().or_else(|| std::env::var("WSLENV").ok()).unwrap_or_default();
+            let mut wslenv = if base.is_empty() { ours } else { format!("{base}:{ours}") };
+            for op in user_ops.iter().filter(|o| !o.name.eq_ignore_ascii_case("WSLENV")) {
+                wslenv = wslenv_with(&wslenv, &op.name, crate::session_env::wslenv_flag(op));
+            }
             env.push(("WSLENV".to_string(), wslenv));
         }
         entry.shell_eff = shell.id.clone();
         entry.status = ClaudeStatus::Unknown;
         if self.settings.shell_integration {
-            // zsh/fish (#57): Hilfsdateien im Datenordner; ein ZDOTDIR aus dem Profil bleibt das des Nutzers.
-            let plan = shells::integration(&shell, &self.dir, &crate::shellinit::EnvCtx { env: &env, inherit: self.settings.inherit_env });
+            // zsh/fish (#57): Hilfsdateien im Datenordner; ein ZDOTDIR aus Profil oder Sitzung bleibt das des Nutzers.
+            let mut known: Vec<(String, String)> = user_ops
+                .iter()
+                .filter_map(|o| match &o.kind {
+                    crate::session_env::OpKind::Set(v) => Some((o.name.clone(), v.clone())),
+                    _ => None,
+                })
+                .collect();
+            known.extend(env.iter().cloned());
+            let plan = shells::integration(&shell, &self.dir, &crate::shellinit::EnvCtx { env: &known, inherit: self.settings.inherit_env });
             entry.shell_flavor = plan.flavor;
             shell.args.extend(plan.args);
             for (k, v) in plan.env {
@@ -2188,6 +2332,37 @@ impl App {
         } else {
             entry.shell_flavor = None;
         }
+        // Voranstellen/Anhängen/Entfernen in WSL (#384 Review): in der Syntax der erkannten Login-Shell (fish eigene);
+        // ohne erkannte Shell oder für nicht wörtlich setzbare Schritte nicht – mit Hinweis, nie still.
+        if !wsl_live.is_empty() {
+            let lang = self.settings.language;
+            let mut left: Vec<String> = Vec::new();
+            match entry.shell_flavor.map(crate::session_env::LiveShell::of) {
+                None => left.extend(wsl_live.iter().map(|o| o.name.clone())),
+                Some(sh) => {
+                    for o in &wsl_live {
+                        if let Some(i) = crate::session_env::live_issue(sh, true, o) {
+                            left.push(format!("{} ({})", o.name, i.text(lang)));
+                        }
+                    }
+                    if let Some(cmd) = crate::session_env::live_command(sh, true, &wsl_live) {
+                        initial = Some(format!("{cmd}\r{}", initial.unwrap_or_default()));
+                    }
+                }
+            }
+            if !left.is_empty() {
+                self.spawn_notes.borrow_mut().push(format!(
+                    "{} ({}): {}",
+                    lang.t(
+                        "Voranstellen/Anhängen/Entfernen in WSL braucht eine erkannte Shell (Shell-Integration) und wörtlich setzbare Werte – weggelassen",
+                        "Prepend/append/remove in WSL needs a detected shell (shell integration) and values that can be set literally – left out",
+                    ),
+                    entry.display_name(),
+                    left.join(", ")
+                ));
+            }
+        }
+        entry.track.launch_lines = claude_status::launch_lines(initial.as_deref());
         match Session::spawn(
             ctx,
             SpawnOptions {
@@ -2197,6 +2372,7 @@ impl App {
                 initial_input: initial.as_deref(),
                 scrollback_lines: self.settings.scrollback_lines,
                 env,
+                user_env: user_ops,
                 // Farb- und Größenabfragen ab dem ersten Byte richtig beantworten (#183), auch ungezeichnet.
                 view: Some(self.reply_view_for(ctx, entry.meta.profile)),
                 inherit_env: self.settings.inherit_env,
@@ -2263,6 +2439,8 @@ impl App {
             transcript: o.transcript.clone(),
             group: o.group.as_deref().map(state::clean_folder_path).unwrap_or_default(),
             window,
+            // Chats bekommen keine Umgebungsvariablen (#384).
+            env: if chat_meta.is_some() { Vec::new() } else { crate::session_env::clean(o.env.clone()) },
             ..SessionMeta::default()
         };
         meta.set_resume_mode(o.resume_mode.unwrap_or_default());
@@ -2276,7 +2454,10 @@ impl App {
             Some(cm) => {
                 // Liegt unter dieser Id noch ein fremder Verlauf, wird er beiseitegelegt, nie geladen oder überschrieben.
                 let _ = chatmod::store::set_aside(&chatmod::store::path(&self.dir, id));
-                let meta = SessionMeta { kind: SessionKind::Chat, chat: Some(cm), shell_id: String::new(), ..meta };
+                // Ein Linux-Ordner (aus einer WSL-Sitzung, Ordnervorgabe, Projekt) wird zum Windows-Pfad
+                // `\\wsl.localhost\<D>\…` – die Datei-Werkzeuge des Chats arbeiten über den Windows-Zugriff (#392).
+                let cwd = self.chat_root(&meta.cwd, meta.project);
+                let meta = SessionMeta { kind: SessionKind::Chat, chat: Some(cm), shell_id: String::new(), cwd, ..meta };
                 let mut chat = ChatState::new(chatmod::ChatFile::default(), None);
                 chat.focus_input = true;
                 Entry::new_chat(meta, chat)
@@ -2503,6 +2684,8 @@ impl App {
             project,
             profile: self.entries[&target].meta.profile,
             window,
+            // Teilen kopiert die Umgebungsvariablen (#384); danach sind sie unabhängig.
+            env: self.entries[&target].meta.env.clone(),
             ..SessionMeta::default()
         };
         let mut entry = Entry::new(meta);
@@ -2607,6 +2790,7 @@ impl App {
             layout: self.layout.clone(),
             focused: self.focused,
             next_id: self.next_id,
+            next_project_id: self.next_project_id.max(self.projects.iter().map(|p| p.id).max().unwrap_or(0) + 1),
             projects: {
                 let mut p = self.projects.clone();
                 if let Some(a) = p.iter_mut().find(|p| p.id == self.active_project) {
@@ -2640,7 +2824,9 @@ impl App {
     /// Fertige Stile liegen im Zwischenspeicher, damit der Wechsel zwischen Fenstern `style::apply` nicht jedes Bild neu rechnet.
     fn ensure_style(&mut self, ctx: &egui::Context) {
         let theme = self.theme();
-        let key = format!("{}|{}|{}|{:?}", theme.name, theme.bg.a(), self.settings.animations, style::accent());
+        // Deckkraft der Seitenleiste (mit eigenem Hintergrund des Themes die des Bereichs, #387).
+        let side = self.surface_alpha(crate::theme::background::Area::Sidebar);
+        let key = format!("{}|{}|{}|{:?}|{side}", theme.name, theme.bg.a(), self.settings.animations, style::accent());
         if self.applied_theme == key {
             return;
         }
@@ -2650,7 +2836,7 @@ impl App {
         match self.style_cache.iter().find(|(k, _)| *k == key) {
             Some((_, s)) => ctx.set_style(s.clone()),
             None => {
-                style::apply(ctx, &theme, self.settings.opacity);
+                style::apply(ctx, &theme, side);
                 if self.style_cache.len() >= 16 {
                     self.style_cache.remove(0);
                 }
@@ -2710,7 +2896,9 @@ impl App {
             .find(|t| t.name == self.settings.theme)
             .unwrap_or(&self.themes[0])
             .clone();
-        let a = (self.settings.opacity.clamp(0.3, 1.0) * 255.0).round() as u8;
+        // „Transparenz reduzieren“ (#387): alles deckend.
+        let o = if self.settings.reduce_transparency { 1.0 } else { self.settings.opacity.clamp(0.3, 1.0) };
+        let a = (o * 255.0).round() as u8;
         t.bg = Color32::from_rgba_unmultiplied(t.bg.r(), t.bg.g(), t.bg.b(), a);
         t
     }
@@ -2729,6 +2917,8 @@ impl App {
             ("mode_tasks_alt", titlebar::Mode::Tasks),
             ("mode_editor", titlebar::Mode::Editor),
             ("mode_editor_alt", titlebar::Mode::Editor),
+            ("mode_time", titlebar::Mode::Time),
+            ("mode_time_alt", titlebar::Mode::Time),
         ] {
             if let Some((m, k)) = self.binding(id) {
                 if ctx.input_mut(|i| consume_key_exact(i, m, k, true)) {
@@ -2782,7 +2972,7 @@ impl App {
             return; // gerade wird ein Kürzel aufgenommen
         }
         let mut binds: Vec<(&'static str, Modifiers, Key)> =
-            keys::DEFAULTS.iter().filter(|(id, _)| !keys::is_global(id)).filter_map(|(id, _)| self.binding(id).map(|(m, k)| (*id, m, k))).collect();
+            keys::DEFAULTS.iter().filter(|(id, _)| !keys::is_global(id) && !keys::is_editor(id)).filter_map(|(id, _)| self.binding(id).map(|(m, k)| (*id, m, k))).collect();
         // Spezifischere Kürzel (mehr Modifikatoren) zuerst prüfen.
         binds.sort_by_key(|b| std::cmp::Reverse(b.1.ctrl as u8 + b.1.shift as u8 + b.1.alt as u8));
         let mut fired: Vec<&'static str> = Vec::new();
@@ -2876,7 +3066,10 @@ impl App {
         if self.new_dialog.is_some() || self.folder_prompt.as_ref().is_some_and(|p| p.kind == 2) || self.templates_open || self.wt_close.is_some() || self.tpl.form.is_some() || self.tpl.confirm.is_some() || pick_here {
             self.release_terminal_focus(ctx);
         }
-        let theme = self.theme();
+        // Terminals mit der Deckkraft ihres Bereichs; mit eigenem Hintergrund (#387) lässt die Mitte das Bild durch.
+        let theme = self.theme_for(crate::theme::background::Area::Terminals);
+        let chat_bg = self.theme_for(crate::theme::background::Area::Chat).bg;
+        let center_fill = if self.backdrop_active() { Color32::TRANSPARENT } else { theme.bg };
         let font = FontId::monospace(self.settings.font_size);
         let lang = self.settings.language;
 
@@ -2912,7 +3105,7 @@ impl App {
         self.pane_rects.clear();
         let hide_key = self.binding_text("hide");
         egui::CentralPanel::default()
-            .frame(egui::Frame::NONE.fill(theme.bg))
+            .frame(egui::Frame::NONE.fill(center_fill))
             .show(ctx, |ui| {
                 let rect = ui.available_rect_before_wrap();
                 // Ausgabe eines Prozesses der Prozessliste (#243) statt der Sitzungen.
@@ -2945,6 +3138,7 @@ impl App {
                     tl: &self.tlinks,
                     alt_wheel: self.settings.alt_screen_wheel,
                     hide_key: &hide_key,
+                    chat_bg,
                 };
                 show_node(ui, &mut layout, rect, &mut cx);
                 self.layout = Some(layout);
@@ -3036,16 +3230,18 @@ impl App {
 
     fn project_bar(&mut self, ui: &mut Ui, actions: &mut Vec<Action>) {
         let lang = self.settings.language;
-        let projects: Vec<(u64, String, [u8; 3], usize)> = self
+        let projects: Vec<(u64, String, [u8; 3], usize, bool)> = self
             .projects
             .iter()
-            .map(|p| (p.id, p.name.clone(), p.color, self.entries.values().filter(|e| e.meta.project == p.id && self.in_win(e)).count()))
+            .map(|p| (p.id, p.name.clone(), p.color, self.entries.values().filter(|e| e.meta.project == p.id && self.in_win(e)).count(), p.agent_access.level == crate::access::AreaLevel::Off))
             .collect();
         let bar = ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing = Vec2::new(4.0, 4.0);
-            for (id, name, c, n) in projects {
+            for (id, name, c, n, locked) in projects {
                 let col = Color32::from_rgb(c[0], c[1], c[2]);
-                let r = style::pill(ui, &name, Some(n), col, id == self.active_project);
+                // Schloss: für Agenten gesperrt (#386).
+                let r = style::pill_ex(ui, &name, Some(n), col, id == self.active_project, locked);
+                let r = if locked { r.on_hover_text(lang.t("Für Agenten gesperrt (Rechtsklick → Zugriff für Agenten …)", "Locked for agents (right-click → Agent access …)")) } else { r };
                 if r.clicked() {
                     actions.push(Action::SwitchProject(id));
                 }
@@ -3056,6 +3252,10 @@ impl App {
                     }
                     if ui.button(lang.t("Standardordner …", "Default folder …")).clicked() {
                         actions.push(Action::ProjectPrompt(id, PromptKind::ProjectFolder));
+                        ui.close();
+                    }
+                    if ui.button(lang.t("Zugriff für Agenten …", "Agent access …")).clicked() {
+                        self.mcp.access_dlg = Some(crate::access::Area::Project(id));
                         ui.close();
                     }
                     if !self.settings.profiles.is_empty() {
@@ -3158,6 +3358,34 @@ impl App {
                 Err(e) => self.notify_text(format!("{}: {e}", self.settings.language.t("Worktree konnte nicht angelegt werden", "Could not create worktree"))),
             }
         }
+    }
+
+    /// Arbeitsordner eines Chats als Windows-Pfad (#392): Ein Linux-Pfad (`/home/u/p`, `~`) gilt in der Pfadart der Shell
+    /// des Projekts (WSL-Distribution, Git Bash), sonst in der WSL-Standard-Distribution; geht das nicht, bleibt er.
+    pub(super) fn chat_root(&self, cwd: &str, project: u64) -> String {
+        let c = cwd.trim();
+        if !crate::wsl::looks_linux(c) || !cfg!(windows) {
+            return cwd.to_string();
+        }
+        let shell = self.shell_by_id(&self.effective_shell_id(None, project));
+        cli_path_kind(shell.as_ref(), c).to_windows(c).unwrap_or_else(|_| cwd.to_string())
+    }
+
+    /// Pfad aus `--open`/`--edit` (#392): Ein Linux-Pfad (`/…`, `~`) gilt in der Sitzung `origin`, aus der der Aufruf kam
+    /// (ihre Pfadart: WSL-Distribution, Git Bash), sonst in der WSL-Standard-Distribution; Ergebnis ein Windows-Pfad.
+    /// Andere Pfade bleiben.
+    pub(super) fn cli_path(&self, path: &str, origin: Option<u64>) -> Result<String, crate::targetpath::PathErr> {
+        if !crate::wsl::looks_linux(path.trim()) {
+            return Ok(path.to_string());
+        }
+        cli_path_kind(origin.and_then(|id| self.entries.get(&id)).and_then(|e| e.live.as_ref().map(|s| &s.spec)), path).to_windows(path)
+    }
+
+    /// Hinweis: Pfad nicht eingefügt (#392: Ordner einer anderen WSL-Distribution, nicht umrechenbar).
+    pub(super) fn path_refused_toast(&mut self, err: &crate::targetpath::PathErr) {
+        let lang = self.settings.language;
+        let text = format!("{} {}", lang.t("Pfad nicht eingefügt:", "Path not inserted:"), err.message(lang));
+        self.push_toast(text, toasts::ToastKind::Warning, None);
     }
 
     fn notify_text(&mut self, text: String) {
@@ -3307,7 +3535,7 @@ impl App {
             let Some(e) = self.entries.get(&id) else { continue };
             let (Some(c), Some(meta)) = (e.chat.as_ref(), e.meta.chat.as_ref()) else { continue };
             let mut h = std::collections::hash_map::DefaultHasher::new();
-            (base, c.rev(), c.token_scale.to_bits(), &meta.server, &meta.model, &e.meta.cwd).hash(&mut h);
+            (base, c.rev(), c.token_scale.to_bits(), &meta.server, &meta.model, &e.meta.cwd, self.chat_project_cap(id).as_u8()).hash(&mut h);
             self.projects.iter().find(|p| p.id == e.meta.project).map(|p| &p.name).hash(&mut h);
             let key = h.finish();
             if c.context_key == Some(key) {
@@ -3333,6 +3561,22 @@ impl App {
         }
         .with_origins(origins)
         .with_agent(self.agent_env(id))
+        .with_project_cap(self.chat_project_cap(id))
+        .with_general_cap(self.chat_general_cap(id))
+    }
+
+    /// Neue Kennung für ein Seitenleisten-Projekt (#386): steigt immer, auch über gelöschte Projekte hinweg.
+    pub(super) fn alloc_project_id(&mut self) -> u64 {
+        let id = self.next_project_id.max(self.projects.iter().map(|p| p.id).max().unwrap_or(0) + 1);
+        self.next_project_id = id + 1;
+        id
+    }
+
+    /// Stufe des Projekts eines Chats für seine Paneldeck-Werkzeuge (#386): „wie global“ = wie das Modell; gesperrt = keine.
+    /// Eingeordnet wie bei jedem Werkzeugaufruf (`access_who`, Review 3.2.0): ein von einem externen Agenten angelegter
+    /// Chat gilt als extern – es gilt das Strengere.
+    fn chat_project_cap(&self, id: u64) -> crate::mcp::McpLevel {
+        self.chat_cap_of(id)
     }
 
     /// Muss der Chat vor dem Senden einmal nach der Stufe seines Modells fragen? Ja, wenn das Modell Werkzeuge nutzen
@@ -3392,6 +3636,8 @@ impl App {
             plan: e.and_then(|e| e.chat.as_ref()).and_then(|c| c.next_plan_phase()),
             compact: self.settings.chat_compact,
             images: self.chat_turn_images(id),
+            // Stufe des Projekts (#386, Review 3.2.0): Werkzeuge, Prompt und Kontext der Anfrage folgen ihr.
+            project_cap: self.chat_project_cap(id),
         }
     }
 
@@ -3760,20 +4006,30 @@ impl App {
                     }
                 }
             }
-            Action::Approve(id, yes) => {
+            Action::Approve(id, yes, seq) => {
                 if let Some(e) = self.entries.get_mut(&id) {
                     let settled = e.perm_since.is_none_or(|t| t.elapsed() >= std::time::Duration::from_millis(500));
-                    if e.status == ClaudeStatus::Permission && settled && !e.exited() {
+                    // Nur, wenn die Frage noch genau den Aufruf verlangt, den die Karte zeigte, und der Dialog ihn gerade
+                    // zeigt (#390) – sonst nichts senden; die Karte zeigt bis zur nächsten Prüfung nur *Öffnen*.
+                    let screen = e.live.as_ref().map(|s| s.screen_text()).unwrap_or_default();
+                    if !e.answerable(seq, &screen) {
+                        if let Some(r) = e.track.request.as_mut() {
+                            r.confirmed = false;
+                        }
+                    } else if e.status == ClaudeStatus::Permission && settled && !e.exited() {
+                        e.track.tools.answered();
                         if let Some(s) = &e.live {
                             s.write(if yes { b"\r" } else { b"\x1b" });
                         }
                         if yes {
                             e.assume_working();
                         } else {
-                            // Abgelehnt: Claude bricht die Runde ab und wartet (dafür gibt es keinen Stop-Hook).
+                            // Abgelehnt: Claude bricht die Runde ab und wartet (dafür gibt es keinen Stop-Hook). Der
+                            // abgelehnte Aufruf meldet kein PostToolUse mehr (#390).
+                            e.track.tools.forget(seq);
                             e.apply_fallback(ClaudeStatus::Idle);
                         }
-                        e.status_msg.clear();
+                        e.clear_status_msg();
                         e.perm_since = None;
                         e.attention = false;
                     }
@@ -3814,20 +4070,37 @@ impl App {
                 }
             }
             Action::InsertPath(p) => {
+                let mut refused = None;
                 if let Some(e) = self.entries.get_mut(&self.focused) {
-                    // Chat: Pfad unverändert ins Eingabefeld; Terminal: passend zur Shell gequotet.
+                    // Chat: Pfad unverändert ins Eingabefeld; Terminal: für die Shell umgerechnet und gequotet (#392:
+                    // `\\wsl.localhost\<D>\x` → `/x`, `C:\x` → `/mnt/c/x`); ein Pfad einer anderen Distribution nicht.
                     let text = match &e.live {
-                        Some(s) => format!("{} ", pathfmt::for_shell(&s.spec, &p)),
-                        None => p.clone(),
+                        Some(s) => match crate::targetpath::for_insert(&s.spec, &p) {
+                            Ok(t) => Some(format!("{t} ")),
+                            Err(err) => {
+                                refused = Some(err);
+                                None
+                            }
+                        },
+                        None => Some(p.clone()),
                     };
-                    e.insert_text(&text, false);
+                    if let Some(text) = text {
+                        e.insert_text(&text, false);
+                    }
+                }
+                if let Some(err) = refused {
+                    self.path_refused_toast(&err);
                 }
                 self.want_focus = Some(self.focused);
             }
             Action::NewSessionAt(dir) => {
-                self.new_session(ctx, NewOpts { cwd: Some(dir), ..NewOpts::default() });
+                // Wie „Hier öffnen“ (#392): ein WSL-Ordner bekommt die WSL-Shell seiner Distribution.
+                self.open_folder(ctx, &dir, false, None);
             }
             Action::OpenPalette => self.palette = Some(Palette { query: String::new(), sel: 0 }),
+            Action::EditorFormat(op) => self.editor_format_active(ctx, op),
+            Action::SaveActions(c) => self.sa_palette(c),
+            Action::Editor(a) => self.editor_run_action(ctx, a),
             Action::OpenHistory => {
                 self.history_open = true;
                 if self.history_rx.is_none() {
@@ -3984,10 +4257,31 @@ impl App {
             Action::DeleteProject(id) => {
                 let other = self.projects.iter().find(|p| p.id != id).map(|p| p.id);
                 if let (true, Some(other)) = (self.projects.len() > 1, other) {
+                    // Hinweis, wenn Agenten durch das Verschieben mehr Zugriff bekommen (#386) – vor dem Entfernen prüfen,
+                    // auch wenn das Ziel nur für sein eigenes Projekt (ohne „Für alle“) freigegeben ist.
+                    let gains = self.access_map(self.settings.mcp_level).move_gains(id, other);
                     for e in self.entries.values_mut() {
                         if e.meta.project == id {
                             e.meta.project = other;
                         }
+                    }
+                    // Karten, verknüpfte Ticket-Projekte und Prozesse ziehen mit; es gilt sofort der Zugriff des Ziels (#386).
+                    if let Some(db) = self.db.as_ref() {
+                        let _ = crate::planning::access::sidebar_project_moved(&db.conn, id, other);
+                        self.tasks.invalidate();
+                    }
+                    if crate::procs::move_project(&mut self.procs.defs, id, other) {
+                        self.procs_save();
+                    }
+                    if gains {
+                        let name = self.projects.iter().find(|p| p.id == other).map(|p| p.name.clone()).unwrap_or_default();
+                        let lang = self.settings.language;
+                        let text = if lang == Lang::De {
+                            format!("Hinweis: In „{name}“ haben Agenten der verschobenen Sitzungen mehr Zugriff als vorher – das gilt sofort.")
+                        } else {
+                            format!("Note: agents of the moved sessions have more access in “{name}” than before – this applies immediately.")
+                        };
+                        self.push_toast(text, toasts::ToastKind::Info, None);
                     }
                     if self.active_project == id {
                         self.projects.retain(|p| p.id != id);
@@ -4132,9 +4426,16 @@ impl App {
                     if !e.meta.custom_name {
                         it.name = String::new();
                     }
+                    // Geheime Werte (#384) kommen nur nach Rückfrage in die Vorlage (Haken im Reiter „Umgebung“).
+                    let secrets = e.meta.env.iter().any(|v| v.secret && v.value_protected.is_some());
+                    it.env = e.meta.env.clone();
                     let base = templates::unique_name(&name, &self.templates);
                     self.want_focus = None;
-                    self.tpl.form = Some(tpl_lib::TplForm::of(None, &Template::terminal(&base, it)));
+                    let mut f = tpl_lib::TplForm::of(None, &Template::terminal(&base, it));
+                    if secrets {
+                        f.env.keep_secrets = Some(false);
+                    }
+                    self.tpl.form = Some(f);
                 }
             }
             Action::ToggleTree => {
@@ -4268,6 +4569,25 @@ impl App {
                     self.entries.insert(id, e);
                 }
             }
+            Action::EnvCopy(id) => self.env_copy(id),
+            Action::EnvPaste(id) => self.env_paste(id),
+            Action::EnvCopyDotenv(id) => self.env_copy_dotenv(ctx, id),
+            Action::EnvUnlock(id) => {
+                // Gesperrte geheime Variablen (#384): erneut starten – unter Linux/macOS fragt das Fenster dabei nach dem
+                // Master-Passwort; lassen sich die Werte nicht entschlüsseln, die Einstellungen der Sitzung öffnen.
+                let reentry = self.entries.get(&id).and_then(|e| e.env_locked.as_ref()).is_some_and(|l| l.needs_reentry());
+                if reentry {
+                    self.apply(ctx, Action::EnvEdit(id));
+                } else if self.entries.get(&id).is_some_and(|e| e.live.is_none()) {
+                    self.apply(ctx, Action::Restart(id));
+                }
+            }
+            Action::EnvEdit(id) => {
+                self.open_session_settings(id);
+                if let Some(f) = self.session_settings.as_mut() {
+                    f.start_tab = Some(opts_tabs::Tab::Environment);
+                }
+            }
             Action::Duplicate(id) => {
                 if let Some(src) = self.entries.get(&id) {
                     if src.is_chat() {
@@ -4301,6 +4621,8 @@ impl App {
                         profile: Some(src.meta.profile),
                         window: Some(src.meta.window),
                         project: Some(src.meta.project),
+                        // Duplizieren kopiert die Umgebungsvariablen (#384), danach unabhängig.
+                        env: src.meta.env.clone(),
                         ..NewOpts::default()
                     };
                     let new = self.new_session(ctx, o);
@@ -4401,6 +4723,9 @@ impl eframe::App for App {
         self.sync_accent();
         self.ensure_style(ctx);
         self.apply_font(ctx);
+        // Eigener Hintergrund des Themes (#387): zuerst, damit er unter allen Flächen liegt.
+        self.backdrop_frame(ctx);
+        self.backdrop_tick(self.theme_ui.editor.is_some());
         ctx.options_mut(|o| o.zoom_with_keyboard = false);
         if (ctx.zoom_factor() - self.settings.ui_scale).abs() > 0.001 {
             ctx.set_zoom_factor(self.settings.ui_scale);
@@ -4422,6 +4747,9 @@ impl eframe::App for App {
         self.poll_mcp(ctx);
         self.editor_tick(ctx);
         self.poll_procs(ctx);
+        self.poll_save_actions(ctx);
+        // Ordnerfelder ohne eigene Shell (Arbeitsordner der Planung) folgen der Standard-Shell (#392).
+        folder_picker::set_default_target(folder_picker::Target::for_shell(self.shell_by_id(&self.effective_shell_id(None, self.active_project)).as_ref(), false));
         self.poll_editor_services(ctx);
         self.poll_retired(ctx);
         // Linux/macOS: Master-Passwort für API-Schlüssel, wenn ein Zugriff darauf wartet (#149).
@@ -4458,6 +4786,8 @@ impl eframe::App for App {
         self.poll_history();
         self.poll_picks(ctx);
         self.check_budget(ctx);
+        // Reiter „Zeit“ (#164): Wecker, Timer, Geburtstage und Benachrichtigungen – auch minimiert und im Tray.
+        self.time_tick(ctx);
         self.handle_drops(ctx);
         let mut actions: Vec<Action> = self.main_frame_begin(ctx);
         // Reiter der Sitzungsdialoge (#292): Standards zum Zählen/Zurücksetzen; Tasten zum Wechseln der Reiter gehören
@@ -4486,12 +4816,16 @@ impl eframe::App for App {
             self.handle_drag(ctx);
         } else if self.mode == titlebar::Mode::Editor {
             self.editor_view(ctx);
+        } else if self.mode == titlebar::Mode::Time {
+            self.time_view(ctx);
         } else {
             self.tasks_view(ctx);
         }
         if self.main_overlay() {
             self.notice_ui(ctx);
             self.toasts_ui(ctx);
+            self.access_dialog_ui(ctx);
+            self.time_overlay(ctx);
         }
         self.detached_windows(ctx, &mut actions);
         self.text_prompt_ui(ctx, &mut actions);
@@ -4533,6 +4867,8 @@ impl eframe::App for App {
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         crate::platform::chrome::shutdown();
+        // Reiter „Zeit“ (#164): ein klingelnder Wecker verstummt mit dem Programm.
+        crate::platform::sound::stop_all();
         self.save_for_exit();
         // Editor (#54) unabhängig von „Sitzungen merken“: Reiter und ungespeicherte Puffer (Hot Exit) immer sichern.
         self.ed.save(&self.dir);
@@ -4566,6 +4902,8 @@ struct PaneCx<'a> {
     alt_wheel: state::AltScreenWheel,
     /// Kürzel „Bereich minimieren“ für den Tooltip (eigene Belegung, Sprache).
     hide_key: &'a str,
+    /// Hintergrund eines Chats (Deckkraft des Bereichs „Chat“, #387).
+    chat_bg: Color32,
 }
 
 
@@ -4903,6 +5241,13 @@ fn show_pane(ui: &mut Ui, id: u64, rect: Rect, cx: &mut PaneCx) {
     if let Some(g) = cx.git.get(id).filter(|_| !entry.is_chat()) {
         infos.push(git_line(&g));
     }
+    // Umgebungsvariablen (#384): `$ n`, Tooltip mit den Namen, oranger Punkt bis zum Neustart.
+    if !entry.is_chat() && x - name_end > 40.0 {
+        let w = env_ui::header_badge(ui, id, &entry.meta.env, entry.env_pending, Pos2::new(x, cy), lang);
+        if w > 0.0 {
+            x -= w + 10.0;
+        }
+    }
     for text in infos {
         let g = ui.painter().layout_no_wrap(text, FontId::proportional(11.5), weak);
         let w = g.size().x;
@@ -4961,7 +5306,7 @@ fn show_pane(ui: &mut Ui, id: u64, rect: Rect, cx: &mut PaneCx) {
 
     // Chat (keine PTY): Nachrichten und Eingabe; Senden usw. führt die App aus.
     if let Some(chat) = entry.chat.as_mut() {
-        ui.painter().rect_filled(body, 0.0, cx.theme.bg);
+        ui.painter().rect_filled(body, 0.0, cx.chat_bg);
         let grab = *cx.want_focus == Some(id);
         if grab {
             *cx.want_focus = None;
@@ -5063,6 +5408,20 @@ fn show_pane(ui: &mut Ui, id: u64, rect: Rect, cx: &mut PaneCx) {
                         }
                         if ui.button(lang.t("Ohne Auswahl neu starten", "Start new without choosing")).clicked() {
                             cx.actions.push(Action::ConvPickFresh(id));
+                        }
+                    });
+                    return;
+                }
+                if let Some(l) = &entry.env_locked {
+                    // Geheime Variablen gesperrt (#384): kein Fehler, die Sitzung wartet wie eine Administrator-Sitzung.
+                    ui.label(RichText::new(&msg).color(crate::style::ui().warning));
+                    ui.horizontal(|ui| {
+                        if l.needs_reentry() {
+                            if ui.button(lang.t("Variablen bearbeiten …", "Edit variables …")).clicked() {
+                                cx.actions.push(Action::EnvEdit(id));
+                            }
+                        } else if ui.button(lang.t("Entsperren und starten", "Unlock and start")).clicked() {
+                            cx.actions.push(Action::EnvUnlock(id));
                         }
                     });
                     return;
@@ -5328,10 +5687,57 @@ fn shell_is_wsl(spec: Option<&ShellSpec>, shell_id: &str) -> bool {
 /// `WSLENV` mit `name` (und Kennzeichen wie `/p`) am Ende; ein früherer Eintrag desselben Namens fällt weg (sonst gälte
 /// womöglich der ohne `/p`, etwa ein `ZDOTDIR` aus dem Profil).
 fn wslenv_with(wslenv: &str, name: &str, flag: &str) -> String {
+    // Ein Name mit `:`, `/` oder `=` zerlegte WSLENV (z. B. `X:PATH/l`): nie eintragen (#384 Review).
+    if name.is_empty() || name.contains([':', '/', '=']) || name.chars().any(|c| c.is_control() || c.is_whitespace()) {
+        return wslenv.to_string();
+    }
     let mut parts: Vec<&str> = wslenv.split(':').filter(|p| !p.is_empty() && p.split('/').next() != Some(name)).collect();
     let add = format!("{name}{flag}");
     parts.push(&add);
     parts.join(":")
+}
+
+/// Pfadart für einen Linux-Pfad `path` aus `--open`/`--edit` bzw. einen Chat-Ordner: die der Ursprungssitzung, wenn sie
+/// POSIX-Pfade kennt (WSL, Git Bash); sonst ist `~`/`~/x` der Windows-Benutzerordner (#392, Entscheidung 9) und ein
+/// absoluter Linux-Pfad gilt in der WSL-Standard-Distribution.
+fn cli_path_kind(origin: Option<&ShellSpec>, path: &str) -> crate::targetpath::PathKind {
+    use crate::targetpath::PathKind;
+    let p = path.trim();
+    let home_form = p == "~" || p.starts_with("~/") || p.starts_with("~\\");
+    match origin.map(PathKind::of) {
+        Some(k @ (PathKind::Wsl { .. } | PathKind::Msys { .. })) => k,
+        Some(PathKind::Native) => PathKind::Native,
+        _ if home_form => PathKind::Windows { cmd: false },
+        _ => PathKind::Wsl { distro: None },
+    }
+}
+
+#[cfg(test)]
+mod cli_path_tests {
+    use super::*;
+    use crate::targetpath::PathKind;
+
+    /// #392: Linux-Pfade aus `--open`/`--edit` und Chat-Ordner gelten in der Pfadart der Ursprungssitzung, sonst WSL.
+    #[test]
+    fn linux_paths_follow_the_origin_session() {
+        let s = |id: &str, prog: &str, args: &[&str]| ShellSpec { id: id.into(), label: id.into(), program: prog.into(), args: args.iter().map(|a| a.to_string()).collect() };
+        let deb = s("wsl:Debian", "wsl.exe", &["-d", "Debian"]);
+        assert_eq!(cli_path_kind(Some(&deb), "/srv"), PathKind::Wsl { distro: Some("Debian".into()) });
+        assert_eq!(cli_path_kind(Some(&deb), "~/x"), PathKind::Wsl { distro: Some("Debian".into()) }, "~ aus WSL = Linux-Home");
+        assert_eq!(cli_path_kind(Some(&s("gitbash", r"C:\Program Files\Git\bin\bash.exe", &[])), "/c/x"), PathKind::Msys { root: Some(r"C:\Program Files\Git".into()) });
+        assert_eq!(cli_path_kind(None, "/etc/hostname"), PathKind::Wsl { distro: None });
+        assert_eq!(cli_path_kind(None, "~"), PathKind::Windows { cmd: false }, "~ ohne Ursprung = Windows-Home");
+        if cfg!(windows) {
+            let ps = s("powershell", "powershell.exe", &[]);
+            assert_eq!(cli_path_kind(Some(&ps), "/srv"), PathKind::Wsl { distro: None }, "Windows-Shell: Standard-Distribution");
+            assert_eq!(cli_path_kind(Some(&ps), "~/x"), PathKind::Windows { cmd: false }, "Windows-Shell: ~ = Windows-Home");
+            let home = std::env::var("USERPROFILE").unwrap_or_default();
+            assert_eq!(cli_path_kind(Some(&ps), "~/x").to_windows("~/x"), Ok(format!("{home}\\x")));
+            // Ergebnis für die Sitzung: UNC der Distribution bzw. Laufwerk
+            assert_eq!(cli_path_kind(Some(&deb), "/srv/a.txt").to_windows("/srv/a.txt").as_deref(), Ok(r"\\wsl.localhost\Debian\srv\a.txt"));
+            assert_eq!(cli_path_kind(Some(&s("wsl:Debian", "wsl.exe", &[])), "/mnt/c/x").to_windows("/mnt/c/x").as_deref(), Ok(r"C:\x"));
+        }
+    }
 }
 
 fn wsl_distro_of(shell: &ShellSpec) -> Option<String> {
@@ -5493,6 +5899,7 @@ mod pane_tests {
                         tl: &tl,
                         alt_wheel: Default::default(),
                         hide_key: "Ctrl+Shift+W",
+                        chat_bg: theme.bg,
                     };
                     if detached {
                         show_pane(ui, layout.leaf_ids()[0], rect, &mut cx);

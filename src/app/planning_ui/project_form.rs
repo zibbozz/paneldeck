@@ -36,6 +36,8 @@ pub(super) struct Form {
     err: Option<String>,
     /// Nur Einstellungen: Wartung (#308) – Zielstatus „Won't Do“ und Schwellen, samt der Status zur Auswahl.
     maint: Option<(crate::planning::maintenance::Settings, Vec<(i64, String)>)>,
+    /// Zugriff für Agenten (#386): eigene Stufe, verknüpftes Seitenleisten-Projekt, von einem Agenten angelegt.
+    access: Option<(crate::access::AgentAccess, Option<u64>, bool)>,
 }
 
 impl Form {
@@ -57,6 +59,7 @@ impl Form {
             focus_name: true,
             err: None,
             maint: None,
+            access: None,
         }
     }
 
@@ -77,6 +80,7 @@ impl Form {
             focus_name: false,
             err: None,
             maint: None,
+            access: None,
         }
     }
 
@@ -174,14 +178,8 @@ fn form_ui(ui: &mut Ui, f: &mut Form, lang: Lang, new: bool) -> bool {
     ui.add_space(S2);
     // Arbeitsordner
     ui.label(RichText::new(lang.t("Arbeitsordner (Repo-Pfad)", "Working directory (repo path)")).strong());
-    ui.horizontal(|ui| {
-        ui.add(egui::TextEdit::singleline(&mut f.work_dir).desired_width((w - 120.0).max(120.0)).hint_text(lang.t("optional", "optional")).margin(egui::Margin::symmetric(8, 5)));
-        if ui.button(lang.t("Wählen …", "Browse …")).clicked() {
-            if let Some(d) = crate::platform::notify::pick_folder(&f.work_dir) {
-                f.work_dir = d;
-            }
-        }
-    });
+    // Ordnerfeld nach der Standard-Shell (#392): WSL-Pfade, Git Bash `/c/x`, `~`.
+    crate::app::folder_picker::field(ui, "plan_work_dir", &mut f.work_dir, crate::app::folder_picker::default_target(), false, lang, &Default::default());
     hint(ui, lang.t("Terminals zu Tickets dieses Projekts starten später hier.", "Terminals for tickets of this project will start here later."));
     ui.add_space(S2);
     // Schalter
@@ -320,6 +318,12 @@ impl PlanUi {
             let st = crate::planning::statuses::list_statuses(cx.conn, id).unwrap_or_default().iter().map(|s| (s.id, s.display(lang))).collect();
             f.maint = Some((s, st));
         }
+        if f.access.is_none() {
+            let (acc, link) = crate::planning::access::project_access(cx.conn, id).unwrap_or((crate::access::AgentAccess::LOCKED, None));
+            let by_agent = crate::planning::access::project_origin(cx.conn, id).map(|o| o.0 == crate::planning::access::Origin::Agent).unwrap_or(false);
+            f.access = Some((acc, link, by_agent));
+        }
+        let sidebar = self.sidebar_projects.clone();
         let mut save = false;
         let mut close = false;
         let m = crate::style::modal(Self::modal_id("settings")).show(ctx, |ui| {
@@ -331,6 +335,23 @@ impl PlanUi {
                 }
                 if let Some((m, statuses)) = f.maint.as_mut() {
                     maint_ui(ui, m, statuses, lang);
+                }
+                // Zugriff für Agenten (#386)
+                if let Some((acc, link, by_agent)) = f.access.as_mut() {
+                    ui.add_space(S2);
+                    ui.label(egui::RichText::new(lang.t("Zugriff für Agenten", "Agent access")).strong());
+                    if *by_agent {
+                        ui.label(egui::RichText::new(lang.t("Von einem Agenten angelegt", "Created by an agent")).small().color(crate::style::ui().warning));
+                    }
+                    ui.label(
+                        egui::RichText::new(lang.t(
+                            "Mit einem Projekt der Seitenleiste verknüpft, gilt dessen Zugriff; sonst die eigene Stufe (für Agenten in jeder Sitzung, „Für alle“ nimmt externe Agenten dazu).",
+                            "Linked to a sidebar project, its access applies; otherwise the own level (for agents in any session, “For all” adds external agents).",
+                        ))
+                        .small()
+                        .color(crate::style::dim(ui)),
+                    );
+                    ui.horizontal(|ui| super::super::access_ui::ticket_access_row(ui, id, acc, link, &sidebar, lang));
                 }
             });
             ui.add_space(S2);
@@ -365,6 +386,9 @@ impl PlanUi {
                 Some((m, _)) => crate::planning::maintenance::save_settings(cx.conn, id, m).map_err(PlanError::from),
                 None => Ok(()),
             });
+            if let (Ok(()), Some((acc, link, _))) = (&r, &f.access) {
+                let _ = crate::planning::access::set_project_access(cx.conn, id, *acc, *link);
+            }
             match r {
                 Ok(()) => {
                     self.dirty = true;

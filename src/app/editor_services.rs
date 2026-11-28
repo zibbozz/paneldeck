@@ -111,9 +111,62 @@ impl App {
             return;
         }
         for path in std::mem::take(&mut self.editor_svc.open_queue) {
-            if let Err(e) = self.editor_bridge_open(ctx, &path) {
+            // Linux-Pfad beim Programmstart (`--edit /home/u/x`): in der WSL-Standard-Distribution (#392).
+            let path = match self.cli_path(&path.to_string_lossy(), None) {
+                Ok(p) => PathBuf::from(p),
+                Err(e) => {
+                    self.notify_text(format!("{} {}: {}", state::t("Datei ließ sich nicht im Editor öffnen:", "Could not open the file in the editor:"), path.display(), e.message(self.settings.language)));
+                    continue;
+                }
+            };
+            // WSL-Dateien laden im Hintergrund (#392), lokale wie bisher.
+            let r = if crate::wsl::is_wsl_unc(&path.to_string_lossy()) { self.editor_open_user(&path, None).map(|_| ()) } else { self.editor_bridge_open(ctx, &path) };
+            if let Err(e) = r {
                 self.notify_text(format!("{} {}: {e}", state::t("Datei ließ sich nicht im Editor öffnen:", "Could not open the file in the editor:"), path.display()));
             }
+        }
+        // Strg+Klick auf einen Pfad im Terminal (#392): Textdatei im Editor an der Zeile.
+        for (path, line) in crate::links::take_editor_requests() {
+            if let Err(e) = self.editor_open_user(Path::new(&path), line) {
+                self.notify_text(format!("{} {path}: {e}", state::t("Datei ließ sich nicht im Editor öffnen:", "Could not open the file in the editor:")));
+            }
+        }
+        self.ed.apply_pending_goto();
+        if self.ed.pending_goto.is_some() {
+            ctx.request_repaint_after(Duration::from_millis(50));
+        }
+        // Speichern/Neu laden von WSL-Dateien im Hintergrund (#392).
+        let lang = self.settings.language;
+        let (done, busy) = self.ed.poll_disk_jobs(lang);
+        for (id, title, r) in done {
+            use super::editor_ui::DiskJobDone;
+            match r {
+                DiskJobDone::Saved => {
+                    self.ed.set_hint(format!("{title}: {}", lang.t("gespeichert", "saved")));
+                    // Aktionen beim Speichern (#383), Vergleiche und Marken (#385) erst jetzt – die Datei ist geschrieben.
+                    self.sa_disk_job_done(id, true);
+                    // Hot-Exit-Kopie erst jetzt löschen, anderer Reiter derselben Datei, Schließen fortsetzen.
+                    self.editor_background_saved(id);
+                }
+                DiskJobDone::Reloaded(s) => {
+                    self.ed.set_hint(format!("{title}: {}{}", lang.t("von der Platte neu geladen", "reloaded from disk"), if s.is_empty() { String::new() } else { format!(" ({s})") }));
+                    self.ed.generation += 1;
+                }
+                DiskJobDone::Failed(e) => {
+                    let extra = self.sa_disk_job_done(id, false);
+                    let msg = match extra {
+                        Some(x) => format!("{title}: {e} {x}"),
+                        None => format!("{title}: {e}"),
+                    };
+                    // Hot-Exit-Kopie bleibt; eine wartende Schließen-Rückfrage zeigt den Fehler.
+                    self.editor_background_save_failed(id, &msg);
+                    self.notify_text(msg);
+                }
+                DiskJobDone::Conflict | DiskJobDone::Deleted | DiskJobDone::Unchanged => {}
+            }
+        }
+        if busy {
+            ctx.request_repaint_after(Duration::from_millis(100));
         }
         let open = self.editor_bridge_paths();
         let c = ctx.clone();
@@ -136,14 +189,49 @@ impl App {
     }
 
     /// MCP-Werkzeuge `editor_*` (Stufe prüft der Hub bzw. die Werkzeug-Regeln des Chats; die Schalter prüft `tools`).
-    pub(super) fn mcp_editor(&mut self, ctx: &egui::Context, tool: &str, args: &Value) -> Result<Value, (String, String)> {
+    /// `hidden` = Ordner der für den Agenten gesperrten Projekte (#386, Review 3.2.0): solche Dokumente sieht er nicht,
+    /// solche Dateien öffnet er nicht.
+    pub(super) fn mcp_editor(&mut self, ctx: &egui::Context, tool: &str, args: &Value, hidden: Vec<String>) -> Result<Value, (String, String)> {
         let settings = self.settings.editor.clone();
-        let mut host = BridgeHost { app: self };
+        let mut host = BridgeHost { app: self, hidden };
         let r = tools::call(tool, &mut host, &settings, args);
         if r.is_ok() && matches!(tool, "editor_open" | "editor_edit" | "editor_save") {
             ctx.request_repaint();
         }
         r
+    }
+
+    /// MCP `format_file` (#381) starten: Regeln prüfen (`tools::plan_format`; die Stufe nach `op` prüft der Hub bzw. die
+    /// Werkzeug-Regeln des Chats), dann den Lauf im Hilfsthread. Liefert Lauf, Dokument und Befehl.
+    pub(super) fn mcp_format_start(&mut self, ctx: &egui::Context, args: &Value, hidden: &[String]) -> Result<(crate::editor_svc::format_job::Job, u64, crate::editor::format::Op), (String, String)> {
+        let settings = self.settings.editor.clone();
+        // Dokumente in Ordnern gesperrter Projekte gibt es für den Agenten nicht (Review 3.2.0).
+        let docs: Vec<DocInfo> = self.editor_list().into_iter().map(doc_info).filter(|d| !doc_hidden(d, hidden)).collect();
+        let (d, op) = tools::plan_format(&docs, &settings, args)?;
+        let confirmed = args.get("remove_comments").and_then(Value::as_bool) == Some(true);
+        let job = self.editor_start_agent_format(ctx, d.id, op, confirmed).map_err(|e| ("internal".to_string(), e))?;
+        Ok((job, d.id, op))
+    }
+
+    /// Ergebnis von `format_file` anwenden (Herkunft Agent; ein inzwischen geändertes Dokument bleibt unverändert) und
+    /// die Antwort bauen.
+    pub(super) fn mcp_format_finish(&mut self, ctx: &egui::Context, doc: u64, op: crate::editor::format::Op, revision: u64, done: crate::editor_svc::format_job::Done) -> Result<Value, (String, String)> {
+        use crate::editor_svc::format_job::Done;
+        if let Done::Changed { edits, .. } = &done {
+            match self.editor_apply_agent_format(doc, revision, edits.clone()) {
+                Ok(()) => ctx.request_repaint(),
+                Err(("conflict", _)) => {
+                    return Err((
+                        "conflict".into(),
+                        state::t("Das Dokument wurde während des Formatierens geändert – nichts wurde übernommen. Bitte noch einmal aufrufen.", "The document changed while formatting – nothing was applied. Please call again.").into(),
+                    ))
+                }
+                Err(("not_found", _)) => return Err(("not_found".into(), state::t("Das Dokument ist nicht mehr offen.", "The document is no longer open.").into())),
+                Err(_) => return Err(("internal".into(), state::t("Die Änderung ließ sich nicht anwenden.", "The change could not be applied.").into())),
+            }
+        }
+        let after = self.editor_list().into_iter().map(doc_info).find(|d| d.id == doc).unwrap_or_default();
+        tools::format_reply(&after, op, &done)
     }
 
     /// *Einstellungen → Editor*.
@@ -188,8 +276,16 @@ impl App {
                 self.settings.editor.autosave_delay_ms = ((secs * 1000.0).round() as u32).clamp(lo, hi);
             }
         });
+        row(ui, lang.t("Menüleiste", "Menu bar"), lang.t("Datei · Bearbeiten · Ansicht · Format über jeder Teilung", "File · Edit · View · Format above every split"), |ui| {
+            style::toggle(ui, &mut self.settings.editor.menu_bar);
+        });
+        ui.add_space(S2);
+        self.editor_format_settings_ui(ui);
         ui.add_space(S2);
         self.editor_languages_ui(ui);
+        ui.add_space(S2);
+        self.save_actions_settings_ui(ui);
+        self.editor_compare_ui(ui);
         ui.add_space(S2);
         let top = ui.cursor().min.y;
         ui.label(RichText::new(lang.t("Suche in Dateien", "Search in files")).strong());
@@ -221,6 +317,19 @@ impl App {
         super::tutorial::spot_since(ui, Spot::EditorSearchSettings, top);
         ui.add_space(S2);
         self.editor_agents_ui(ui);
+    }
+
+    /// Abschnitt „Formatieren“ der Editor-Einstellungen (#381): nur ein Hinweis – es gibt keine Einstellung dafür, formatiert wird nie von allein.
+    fn editor_format_settings_ui(&mut self, ui: &mut Ui) {
+        let lang = self.settings.language;
+        ui.label(RichText::new(lang.t("Formatieren (JSON, XML)", "Formatting (JSON, XML)")).strong());
+        let (f, m, v) = (self.binding_text("ed_format"), self.binding_text("ed_minify"), self.binding_text("ed_validate"));
+        let text = match lang {
+            Lang::De => format!("Menü Format bzw. {f} (formatieren), {m} (minifizieren), {v} (prüfen); änderbar unter Tastenkürzel. Alles läuft lokal. Eingerückt wird nach .editorconfig bzw. der Einrückung der Datei."),
+            Lang::En => format!("Format menu or {f} (format), {m} (minify), {v} (validate); changeable under Shortcuts. Everything runs locally. Indentation follows .editorconfig or the file's indentation."),
+        };
+        ui.label(RichText::new(text).small().color(style::dim(ui)));
+        ui.label(RichText::new(lang.t("Formatiert wird nie von allein: nur auf Knopfdruck oder beim Speichern über eine Regel mit der Aktion Formatieren (Abschnitt „Aktionen beim Speichern“; Menü Format → Beim Speichern formatieren …).", "Nothing is ever formatted automatically: only on demand, or on save through a rule with the Format action (section “Actions on save”; Format menu → Format on save …).")).small().color(style::dim(ui)));
     }
 
     /// Abschnitt „Sprachen“ der Editor-Einstellungen (#312): Standard-Modus, Modus je Sprache, eigene Zuordnungen.
@@ -337,6 +446,69 @@ impl App {
         });
     }
 
+    /// Abschnitt „Vergleich und Änderungsmarken“ (#385): Marken am Rand (Standard aus) und ihre Grundlage, Vorgaben
+    /// neuer Vergleichs-Reiter.
+    fn editor_compare_ui(&mut self, ui: &mut Ui) {
+        use crate::editor_svc::settings::{DiffLayout, MarkerBase, DIFF_CONTEXT_RANGE};
+        let lang = self.settings.language;
+        ui.label(RichText::new(lang.t("Vergleich und Änderungsmarken", "Comparison and change markers")).strong());
+        let (next, prev) = (self.binding_text("ed_next_change"), self.binding_text("ed_prev_change"));
+        let ed = &mut self.settings.editor;
+        row(
+            ui,
+            lang.t("Änderungsmarken am Rand", "Change markers in the gutter"),
+            lang.t("Hinzugefügte, geänderte und entfernte Zeilen; nicht in großen Dateien", "Added, modified and removed lines; not in large files"),
+            |ui| {
+                style::toggle(ui, &mut ed.change_markers);
+            },
+        );
+        row(
+            ui,
+            lang.t("Grundlage der Marken", "Markers compare with"),
+            lang.t("git: nicht gestagt und gestagt in eigenen Farben; außerhalb eines Repositorys die gespeicherte Datei", "git: unstaged and staged in their own colours; outside a repository the saved file"),
+            |ui| {
+                let label = |b: MarkerBase| match b {
+                    MarkerBase::Git => lang.t("git (Index und HEAD)", "git (index and HEAD)"),
+                    MarkerBase::Disk => lang.t("Gespeicherte Datei", "Saved file"),
+                };
+                ui.add_enabled_ui(ed.change_markers, |ui| {
+                    egui::ComboBox::from_id_salt("editor_marker_base").selected_text(label(ed.marker_base)).show_ui(ui, |ui| {
+                        for b in [MarkerBase::Git, MarkerBase::Disk] {
+                            ui.selectable_value(&mut ed.marker_base, b, label(b));
+                        }
+                    });
+                });
+            },
+        );
+        row(ui, lang.t("Darstellung im Vergleich", "Comparison layout"), lang.t("Automatisch: nebeneinander, unter 700 px untereinander", "Automatic: side by side, unified below 700 px"), |ui| {
+            let label = |l: DiffLayout| match l {
+                DiffLayout::Auto => lang.t("Automatisch", "Automatic"),
+                DiffLayout::Split => lang.t("Nebeneinander", "Side by side"),
+                DiffLayout::Unified => lang.t("Untereinander", "Unified"),
+            };
+            egui::ComboBox::from_id_salt("editor_diff_layout").selected_text(label(ed.diff_layout)).show_ui(ui, |ui| {
+                for l in [DiffLayout::Auto, DiffLayout::Split, DiffLayout::Unified] {
+                    ui.selectable_value(&mut ed.diff_layout, l, label(l));
+                }
+            });
+        });
+        row(ui, lang.t("Kontextzeilen", "Context lines"), lang.t("Unveränderte Zeilen um jede Änderung, der Rest ist eingeklappt", "Unchanged lines around each change, the rest is collapsed"), |ui| {
+            ui.add(egui::DragValue::new(&mut ed.diff_context).range(DIFF_CONTEXT_RANGE.0..=DIFF_CONTEXT_RANGE.1).speed(0.2));
+        });
+        row(ui, lang.t("Leerraum ignorieren", "Ignore whitespace"), lang.t("Vorgabe für neue Vergleiche (umschaltbar im Vergleich)", "Default for new comparisons (switchable in the comparison)"), |ui| {
+            style::toggle(ui, &mut ed.diff_ignore_whitespace);
+        });
+        ui.label(
+            RichText::new(if lang == Lang::De {
+                format!("Nächste/vorige Änderung: {next} / {prev} (Einstellungen → Tastenkürzel). Vergleichen: Kontextmenü eines Reiters oder einer Datei im Ordnerbaum, Befehlspalette.")
+            } else {
+                format!("Next/previous change: {next} / {prev} (Settings → Shortcuts). Compare: context menu of a tab or of a file in the folder tree, command palette.")
+            })
+            .small()
+            .color(style::dim(ui)),
+        );
+    }
+
     /// Abschnitt „Agenten“ der Editor-Einstellungen: die drei Schalter (Standard aus, nur bei Stufe Steuern wirksam).
     fn editor_agents_ui(&mut self, ui: &mut Ui) {
         let lang = self.settings.language;
@@ -345,8 +517,8 @@ impl App {
         let control = self.settings.mcp_level == crate::mcp::McpLevel::Control;
         ui.label(
             RichText::new(lang.t(
-                "Lesen geht ab der Stufe „Nur lesen“ (editor_list, editor_read). Die Schalter gelten nur bei der Stufe „Steuern“ – für externe Agenten unter Einstellungen → Agenten, für Chats die Stufe des Modells. Änderungen eines Agenten bleiben ungespeichert, sind als „vom Agenten“ markiert und lassen sich rückgängig machen.",
-                "Reading works from level “Read only” (editor_list, editor_read). The switches only apply at level “Control” – for external agents under Settings → Agents, for chats the level of the model. Changes by an agent stay unsaved, are marked “by agent” and can be undone.",
+                "Lesen geht ab der Stufe „Nur lesen“ (editor_list, editor_read, format_file mit validate). Die Schalter gelten nur bei der Stufe „Steuern“ – für externe Agenten unter Einstellungen → Agenten, für Chats die Stufe des Modells. Änderungen eines Agenten bleiben ungespeichert, sind als „vom Agenten“ markiert und lassen sich rückgängig machen.",
+                "Reading works from level “Read only” (editor_list, editor_read, format_file with validate). The switches only apply at level “Control” – for external agents under Settings → Agents, for chats the level of the model. Changes by an agent stay unsaved, are marked “by agent” and can be undone.",
             ))
             .small()
             .color(style::dim(ui)),
@@ -363,6 +535,9 @@ impl App {
         });
         row(ui, lang.t("Agenten dürfen speichern", "Agents may save"), lang.t("Nur offene Dateien, die es schon gibt; unbenannte Tabs speichert nur du", "Only open files that already exist; only you save untitled tabs"), |ui| {
             style::toggle(ui, &mut ed.agent_save);
+        });
+        row(ui, lang.t("Agenten dürfen formatieren", "Agents may format"), lang.t("format_file: offene JSON/XML-Dateien; Prüfen geht ab „Nur lesen“ ohne Schalter", "format_file: open JSON/XML files; validating works from “Read only” without a switch"), |ui| {
+            style::toggle(ui, &mut ed.agent_format);
         });
         super::tutorial::spot_since(ui, Spot::EditorAgentSwitches, top);
     }
@@ -436,6 +611,13 @@ impl App {
             large_file_bytes: e.large_file_bytes(),
             autosave: e.autosave.then(|| Duration::from_millis(e.autosave_delay_ms as u64)),
             syntax: super::editor_ui::SyntaxPrefs::from_settings(e),
+            menu_bar: e.menu_bar,
+            keys: super::editor_ui::MENU_KEYS.iter().map(|id| (id.to_string(), self.binding_raw(id))).collect(),
+            markers: e.change_markers,
+            marker_base: e.marker_base,
+            diff_context: e.diff_context as usize,
+            diff_layout: e.diff_layout,
+            diff_ignore_ws: e.diff_ignore_whitespace,
         }
     }
 
@@ -502,9 +684,65 @@ pub(super) fn find_files_window<'a>(ctx: &egui::Context, lang: Lang) -> egui::Wi
     style::fit_to_screen(ctx, style::movable(ctx, Id::new("editor_find_files"), egui::Window::new(lang.t("In Dateien suchen", "Search in files"))), [520.0, 420.0], [340.0, 200.0]).collapsible(false)
 }
 
+/// Gespeicherter Stand einer Datei für `editor_diff` (#385): `disk`, `head` oder `index` (lokales git, Zeitgrenze
+/// [`crate::editor_svc::git_base::GIT_TIMEOUT`]). Blockiert – im Hilfsthread aufrufen.
+fn read_base(path: &Path, enc: Option<crate::editor::TextEncoding>, base: &str, max: u64) -> Result<Option<String>, String> {
+    use crate::editor_svc::git_base::{self, Blob, Rev};
+    match base {
+        "disk" => match std::fs::metadata(path) {
+            Ok(m) if m.len() > max => Err(state::t("Die Datei auf der Platte ist zu groß.", "The file on disk is too large.").to_string()),
+            Ok(_) => std::fs::read(path).map(|b| Some(crate::editor::encoding::decode(&b, enc).text)).map_err(|e| e.to_string()),
+            Err(_) => Ok(None),
+        },
+        "head" | "index" => {
+            let repo = git_base::locate(path).ok_or_else(|| state::t("Die Datei liegt in keinem git-Repository (oder git fehlt).", "The file is not in a git repository (or git is missing).").to_string())?;
+            let rev = if base == "head" { Rev::Head } else { Rev::Index };
+            match git_base::blobs(&repo, &[rev], max)?.into_iter().next() {
+                Some(Blob::Bytes(b)) => Ok(Some(git_base::decode_like(&b, enc).text)),
+                Some(Blob::TooLarge(_)) => Err(state::t("Der Stand in git ist zu groß.", "The state in git is too large.").to_string()),
+                _ => Ok(None),
+            }
+        }
+        _ => Err("disk, head, index".into()),
+    }
+}
+
+impl App {
+    /// `editor_diff` (#385) ohne die Oberfläche anzuhalten: Argumente und Texte jetzt, Lesen des Stands (git, Platte) und
+    /// Vergleichen im Hilfsthread. Das Ergebnis kommt über den Kanal (der Hub wartet in `McpState::pending`).
+    pub(super) fn mcp_editor_diff(&mut self, ctx: &egui::Context, args: &Value, hidden: Vec<String>) -> Result<std::sync::mpsc::Receiver<Result<Value, (String, String)>>, (String, String)> {
+        let plan = {
+            let mut host = BridgeHost { app: self, hidden };
+            tools::diff_plan(&mut host, args)?
+        };
+        let path = plan.doc.path.clone();
+        let enc = crate::editor::TextEncoding::from_id(&plan.doc.encoding);
+        let max = self.settings.editor.large_file_bytes();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let c = ctx.clone();
+        std::thread::spawn(move || {
+            let base = match (&plan.base, &path) {
+                (tools::DiffBase::Read(a), Some(p)) => read_base(p, enc, a, max),
+                (tools::DiffBase::Read(_), None) => Err(state::t("Ein unbenannter Tab hat keinen gespeicherten Stand.", "An untitled tab has no saved state.").to_string()),
+                (tools::DiffBase::Text(_), _) => Ok(None),
+            };
+            let _ = tx.send(tools::diff_finish(plan, base));
+            c.request_repaint();
+        });
+        Ok(rx)
+    }
+}
+
 /// Die App als `EditorHost` für die MCP-Werkzeuge (nur im Hauptdurchlauf).
 struct BridgeHost<'a> {
     app: &'a mut App,
+    /// Ordner der für den Agenten gesperrten Projekte (#386, Review 3.2.0).
+    hidden: Vec<String>,
+}
+
+/// Liegt das Dokument im Ordner eines gesperrten Projekts (`hidden`)? Unbenannte Tabs nie.
+fn doc_hidden(d: &DocInfo, hidden: &[String]) -> bool {
+    d.path.as_deref().is_some_and(|p| super::mcp::access_gate::path_hidden(p, hidden))
 }
 
 fn doc_info(d: super::editor_ui::DocInfo) -> DocInfo {
@@ -535,7 +773,7 @@ fn doc_info(d: super::editor_ui::DocInfo) -> DocInfo {
 
 impl EditorHost for BridgeHost<'_> {
     fn docs(&self) -> Vec<DocInfo> {
-        self.app.editor_list().into_iter().map(doc_info).collect()
+        self.app.editor_list().into_iter().map(doc_info).filter(|d| !doc_hidden(d, &self.hidden)).collect()
     }
 
     fn text(&mut self, doc: u64) -> Option<String> {
@@ -558,7 +796,14 @@ impl EditorHost for BridgeHost<'_> {
         self.app.editor_focus(doc);
     }
 
+    fn base_text(&mut self, doc: u64, base: &str) -> Result<Option<String>, String> {
+        let info = self.app.editor_list().into_iter().find(|d| d.id == doc).ok_or_else(|| state::t("Das Dokument ist nicht mehr offen.", "The document is no longer open.").to_string())?;
+        let path = info.path.ok_or_else(|| state::t("Ein unbenannter Tab hat keinen gespeicherten Stand.", "An untitled tab has no saved state.").to_string())?;
+        read_base(&path, crate::editor::TextEncoding::from_id(&info.encoding), base, self.app.settings.editor.large_file_bytes())
+    }
+
     fn save(&mut self, doc: u64) -> Result<(), String> {
+        self.app.save_actions.last_report = None;
         let r = self.app.editor_save_doc(doc);
         // Eigenes Speichern: neuer Vergleichsstand, sonst meldete die Überwachung es als fremde Änderung.
         if r.is_ok()
@@ -567,5 +812,18 @@ impl EditorHost for BridgeHost<'_> {
             self.app.editor_svc.watch.baseline(&p);
         }
         r
+    }
+
+    fn save_actions_report(&mut self) -> Option<Value> {
+        self.app.save_actions.last_report.take()
+    }
+
+    /// Datenordner (und der Ordner der laufenden Instanz bei Profilen) – nie für Agenten (#383).
+    fn protected(&self, path: &Path) -> bool {
+        crate::save_actions::is_inside(path, &self.app.dir) || crate::save_actions::is_inside(&crate::save_actions::copy::normalize(path), &self.app.dir)
+    }
+
+    fn hidden(&self, path: &Path) -> bool {
+        super::mcp::access_gate::path_hidden(path, &self.hidden)
     }
 }

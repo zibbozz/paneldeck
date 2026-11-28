@@ -669,6 +669,14 @@ impl PlanUi {
         if go && !close {
             match dlg.execute(cx) {
                 Ok(report) => {
+                    // In ein anderes Projekt verschoben (#386): die Anwendung prüft, ob Agenten dadurch mehr Zugriff bekommen.
+                    if let Some((old_prefix, _)) = report.old_key.rsplit_once('-') {
+                        if let Ok(old) = crate::planning::projects::project_by_key(cx.conn, old_prefix) {
+                            if old.id != report.ticket.project_id {
+                                self.moved.push((old.id, report.ticket.project_id));
+                            }
+                        }
+                    }
                     let mut ids = vec![dlg.ticket];
                     ids.extend(report.detached_children.iter().copied());
                     self.tickets.forget_tickets(&ids);

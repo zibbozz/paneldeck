@@ -67,8 +67,11 @@ spots! {
     ClaudeDefaults = "settings.claude.defaults",
     ClaudeBudget = "settings.claude.budget",
     McpLevel = "settings.agents.level",
+    AgentAccess = "settings.agents.access",
     McpRegister = "settings.agents.register",
     McpSysprompt = "settings.agents.system_prompt",
+    // Umgebungsvariablen der Sitzungen (#384, 3.2.0)
+    McpSessionEnv = "settings.agents.session_env",
     McpLog = "settings.agents.log",
     ModelsServers = "settings.models.servers",
     ModelsCommands = "settings.models.commands",
@@ -78,6 +81,7 @@ spots! {
     AboutUpdates = "settings.about.updates",
     AboutTutorial = "settings.about.tutorial",
     ThemeManage = "settings.appearance.theme",
+    ReduceTransparency = "settings.appearance.reduce_transparency",
     TodoInput = "todo.input",
     TodoList = "todo.list",
     ExpertToggle = "todo.expert",
@@ -100,6 +104,17 @@ spots! {
     TabEditor = "settings.tab.editor",
     EditorSearchSettings = "settings.editor.search",
     EditorAgentSwitches = "settings.editor.agents",
+    // Reiter „Zeit“ (#164, 3.2.0)
+    TitlebarTime = "titlebar.time",
+    TimeSubTabs = "time.subtabs",
+    TimeNewAlarm = "time.new_alarm",
+    TimePresets = "time.presets",
+    CalendarViews = "time.calendar.views",
+    TimeOptions = "time.options",
+    // Menüleiste je Teilung (#381, 3.2.0)
+    EditorMenuBar = "editor.menu_bar",
+    // Aktionen beim Speichern (#383, 3.2.0)
+    EditorSaveActions = "settings.editor.save_actions",
 }
 
 /// Wo ein Ziel in diesem Bild lag: ganzes Rechteck und der sichtbare (nicht weggeschnittene) Teil.

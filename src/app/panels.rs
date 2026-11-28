@@ -345,49 +345,6 @@ impl App {
         }
     }
 
-    /// Karten für Sitzungen, die auf eine Freigabe warten (Seitenleiste).
-    pub(super) fn inbox_ui(&mut self, ui: &mut Ui, actions: &mut Vec<Action>) {
-        let lang = self.settings.language;
-        let waiting: Vec<(u64, String, String, bool)> = self
-            .entries
-            .iter()
-            .filter(|(_, e)| e.needs_you() && e.is_claude())
-            .map(|(id, e)| (*id, e.display_name(), e.status_msg.clone(), e.status == ClaudeStatus::Permission))
-            .collect();
-        if waiting.is_empty() {
-            return;
-        }
-        egui::Frame::new()
-            .fill(style::brand().gamma_multiply(0.12))
-            .stroke(Stroke::new(1.0_f32, style::brand().gamma_multiply(0.5)))
-            .corner_radius(CornerRadius::same(8))
-            .inner_margin(Margin::same(8))
-            .show(ui, |ui| {
-                ui.label(RichText::new(format!("{} ({})", lang.t("Wartet auf dich", "Waiting for you"), waiting.len())).strong().small());
-                for (id, name, msg, permission) in waiting {
-                    ui.add_space(S1);
-                    ui.label(RichText::new(name).strong());
-                    if !msg.is_empty() {
-                        ui.add(egui::Label::new(RichText::new(msg).small().color(style::dim(ui))).wrap());
-                    }
-                    ui.horizontal(|ui| {
-                        if permission {
-                            if ui.add(egui::Button::new(RichText::new(lang.t("Ja", "Yes")).strong()).fill(Color32::from_rgb(0x2f, 0x7d, 0x4a))).on_hover_text(lang.t("Sendet Enter (Standardauswahl „Ja“)", "Sends Enter (default choice “Yes”)")).clicked() {
-                                actions.push(Action::Approve(id, true));
-                            }
-                            if ui.button(lang.t("Nein", "No")).on_hover_text(lang.t("Sendet Esc", "Sends Esc")).clicked() {
-                                actions.push(Action::Approve(id, false));
-                            }
-                        }
-                        if ui.button(lang.t("Öffnen", "Open")).clicked() {
-                            actions.push(Action::Activate(id));
-                        }
-                    });
-                }
-            });
-        ui.add_space(S2);
-    }
-
     pub(super) fn diff_ui(&mut self, ctx: &egui::Context) {
         let lang = self.settings.language;
         if !self.diff_open {
@@ -785,10 +742,27 @@ impl App {
     pub(super) fn palette_items(&self) -> Vec<(String, String, Action)> {
         let lang = self.settings.language;
         let f = self.focused;
-        let mut v: Vec<(String, String, Action)> = vec![
+        // Im Editor-Reiter zuerst die Befehle des Editors (#385: Vergleichen, Änderungsmarken, F7).
+        let editor: Vec<(String, String, Action)> = if self.mode == super::titlebar::Mode::Editor && self.wins.cur == 0 { self.editor_palette_items().into_iter().map(|(l, h, a)| (l, h, Action::Editor(a))).collect() } else { Vec::new() };
+        let mut v: Vec<(String, String, Action)> = editor;
+        // Editor (#381): Formatier-Befehle für den aktiven Reiter, im Editor-Reiter zuerst.
+        if self.mode == titlebar::Mode::Editor && self.ed_has_active_doc() {
+            use crate::editor::format::Op;
+            let kind = self.editor_active_format_kind();
+            let selection = self.editor_active_selection();
+            let pre = lang.t("Format:", "Format:");
+            for (op, id) in [(Op::Format, "ed_format"), (Op::Minify, "ed_minify"), (Op::Validate, "ed_validate"), (Op::SortKeys, "ed_sort_keys")] {
+                if kind == Some(crate::editor::format::Kind::Xml) && op == Op::SortKeys {
+                    continue;
+                }
+                let label = super::editor_ui::format::op_label(op, kind, selection && op != Op::Validate, lang);
+                v.push((format!("{pre} {label}"), self.binding_text(id), Action::EditorFormat(op)));
+            }
+        }
+        v.extend([
             (lang.t("Neue Sitzung (Standard-Shell)", "New session (default shell)").into(), self.binding_text("new"), Action::NewQuick),
             (lang.t("Neue Sitzung …", "New session …").into(), String::new(), Action::NewDialog(false)),
-        ];
+        ]);
         if self.settings.claude_mode {
             v.push((lang.t("Neue Claude-Sitzung …", "New Claude session …").into(), String::new(), Action::NewDialog(true)));
         }
@@ -852,6 +826,8 @@ impl App {
         for (i, s) in self.prompts.iter().enumerate() {
             v.push((format!("{} {}", lang.t("Prompt senden:", "Send prompt:"), s.name), String::new(), Action::SendSnippet(i)));
         }
+        // Aktionen beim Speichern im Editor (#383).
+        v.extend(self.sa_palette_items());
         // Tutorial (#143): Tour, Fortsetzen, Kapitel, „Was ist neu“ (nur im Hauptfenster).
         if self.wins.cur == 0 {
             v.extend(self.tut_palette_items());

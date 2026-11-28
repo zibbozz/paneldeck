@@ -206,7 +206,7 @@ impl App {
         entry.error = Some(lang.t("Wartet auf die Auswahl der Konversation (im Hauptfenster) …", "Waiting for the conversation to be chosen (in the main window) …").to_string());
         // Nichts aus dem vorigen Start gilt noch (Status, Hook-Meldungen übrig gebliebener Prozesse).
         entry.status = ClaudeStatus::Unknown;
-        entry.status_msg.clear();
+        entry.clear_status_msg();
         entry.perm_since = None;
         entry.session_key.clear();
         entry.hook_conv = hooks::ConvBinding::default();

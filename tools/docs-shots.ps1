@@ -57,6 +57,7 @@ $AllViews = @(
   @{ Name = 'app';                 Spec = 'app';                 W = 1400; H = 860;  Wait = 4; Rename = $false }
   @{ Name = 'kosten';              Spec = 'kosten';              W = 1240; H = 860;  Wait = 4; Rename = $false }
   @{ Name = 'agenten';             Spec = 'agenten';             W = 1100; H = 1060 }
+  @{ Name = 'session-env';         Spec = 'session-env';         W = 1300; H = 900;  Wait = 5 }
   # Todo-Liste (Demo-Datenbank "Acme Shop")
   @{ Name = 'todo-tickets';        Spec = 'tickets:{TICKET}';    W = 1300; H = 1260 }
   @{ Name = 'todo-dashboard';      Spec = 'dashboard' }
@@ -75,7 +76,15 @@ $AllViews = @(
   @{ Name = 'editor-disk-changed'; Spec = 'editor-disk-changed'; W = 1400; H = 860; Wait = 4 }
   @{ Name = 'editor-search';       Spec = 'editor-search';       W = 1400; H = 860; Wait = 3 }
   @{ Name = 'editor-syntax';       Spec = 'editor-syntax';       W = 1400; H = 860; Wait = 3 }
+  @{ Name = 'editor-format';       Spec = 'editor-format';       W = 1400; H = 860; Wait = 3 }
   @{ Name = 'editor-settings';     Spec = 'editor-settings';     W = 1100; H = 900 }
+  # Reiter Zeit (#164)
+  @{ Name = 'time-alarms';         Spec = 'time-alarms';         W = 1300; H = 820; Wait = 2 }
+  @{ Name = 'time-timers';         Spec = 'time-timers';         W = 1300; H = 820; Wait = 2 }
+  @{ Name = 'time-clocks';         Spec = 'time-clocks';         W = 1300; H = 820; Wait = 2 }
+  @{ Name = 'editor-on-save';      Spec = 'editor-on-save';      W = 1400; H = 900; Wait = 2 }
+  @{ Name = 'editor-diff';         Spec = 'editor-diff';         W = 1400; H = 860; Wait = 3 }
+  @{ Name = 'editor-gutter';       Spec = 'editor-gutter';       W = 1400; H = 860; Wait = 4 }
   # Chats
   @{ Name = 'chat-images';         Spec = 'chat-images';         W = 1300; H = 860; Wait = 3 }
   # Prozesse
@@ -90,6 +99,9 @@ $AllViews = @(
   @{ Name = 'theme-editor';        Spec = 'theme-editor';        W = 1400; H = 900 }
   @{ Name = 'theme-color';         Spec = 'theme-color';         W = 1400; H = 900 }
   @{ Name = 'theme-checks';        Spec = 'theme-checks';        W = 1400; H = 900; Wait = 2 }
+  # Kalender (#164; bis zum Zeit-Reiter ueber dem Fenster gezeichnet)
+  @{ Name = 'time-calendar-month';  Spec = 'calendar-month';     W = 1400; H = 900;  Wait = 3 }
+  @{ Name = 'time-calendar-dialog'; Spec = 'calendar-dialog';    W = 1300; H = 1040; Wait = 3 }
   # Chats (#355, #356)
   @{ Name = 'chat-background-command'; Spec = 'chat-background-command'; W = 1400; H = 860; Wait = 3 }
   @{ Name = 'chat-ask-form';       Spec = 'chat-ask-form';       W = 1100; H = 860; Wait = 2 }

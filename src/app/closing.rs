@@ -666,6 +666,10 @@ impl App {
         if self.procs_quit_guard(ctx) {
             return;
         }
+        // Laufende Aktionen beim Speichern (#383): ebenso.
+        if self.sa_quit_guard(ctx) {
+            return;
+        }
         let ids: Vec<u64> = self.entries.keys().copied().collect();
         let lingering = self.lingering_of(&ids);
         if lingering.is_empty() {

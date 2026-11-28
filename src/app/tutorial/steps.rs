@@ -12,6 +12,8 @@
 //!
 //! Editor-Reiter (#54, 3.0.0): Kapitel `editor` und der Schritt `basics.editor`; Schritte mit Text im Editor öffnen eine
 //! eigene Beispieldatei der Tour (`Prep::EditorFile`, nie eine Datei des Nutzers).
+//!
+//! Reiter „Zeit“ (#164, 3.2.0): Kapitel `time` (`Prep::Time(<Unterreiter>)`).
 
 use super::marks::Spot;
 
@@ -66,6 +68,10 @@ pub(super) struct Probe {
     pub editor_find: bool,
     /// Cursor (Auswahlen) im aktiven Reiter des Editors.
     pub editor_cursors: usize,
+    /// Reiter „Zeit“ aktiv (#164).
+    pub time: bool,
+    /// Zahl der Wecker.
+    pub alarms: usize,
 }
 
 /// Erkennung „Aufgabe erledigt“: Zustand beim Betreten des Schritts, Zustand jetzt.
@@ -108,6 +114,8 @@ pub(super) enum Prep {
     EditorFind(bool),
     /// Fenster „In Dateien suchen“ offen bzw. geschlossen.
     EditorSearch(bool),
+    /// Reiter „Zeit“ mit diesem Unterreiter zeigen (#164).
+    Time(super::super::time_ui::Sub),
 }
 
 /// Voraussetzung eines Schritts.
@@ -232,6 +240,12 @@ fn editor_find_opened(a: &Probe, b: &Probe) -> bool {
 }
 fn editor_cursor_added(a: &Probe, b: &Probe) -> bool {
     b.editor_cursors > 1 && b.editor_cursors > a.editor_cursors
+}
+fn time_shown(a: &Probe, b: &Probe) -> bool {
+    b.time && !a.time
+}
+fn alarms_grew(a: &Probe, b: &Probe) -> bool {
+    b.alarms > a.alarms
 }
 
 // Indizes der Einstellungsreiter (siehe `settings.rs`).
@@ -637,6 +651,32 @@ const EDITOR: &[Step] = &[
         need: None,
     },
     Step {
+        id: "editor.format",
+        since: "3.2.0",
+        spot: Some(Spot::EditorMenuBar),
+        title: tx("Menüleiste und Formatieren", "Menu bar and formatting"),
+        body: tx(
+            "Jede Teilung hat oben eine Menüleiste: Datei, Bearbeiten, Ansicht und Format – mit allen Befehlen und ihren Kürzeln; was gerade nicht passt, ist ausgegraut. Format formatiert JSON und XML ({key:ed_format}), minifiziert ({key:ed_minify}), prüft ({key:ed_validate}) und sortiert JSON-Schlüssel – lokal, als ein Rückgängig-Schritt, mit Auswahl nur die Auswahl. Ein Fehler zeigt Zeile und Spalte mit „Gehe zu“. Formatiert wird nie von allein: nur auf Knopfdruck oder beim Speichern über eine Regel mit der Aktion „Formatieren“ (Format → Beim Speichern formatieren …).",
+            "Every split has a menu bar at the top: File, Edit, View and Format – with all commands and their shortcuts; what does not apply right now is greyed out. Format pretty-prints JSON and XML ({key:ed_format}), minifies ({key:ed_minify}), validates ({key:ed_validate}) and sorts JSON keys – locally, as one undo step, with a selection only the selection. An error shows line and column with “Go to”. Nothing is formatted automatically: only on demand, or on save through a rule with the “Format” action (Format → Format on save …).",
+        ),
+        prep: EDITOR_FILE,
+        done: None,
+        need: None,
+    },
+    Step {
+        id: "editor.hscroll",
+        since: "3.2.0",
+        spot: Some(Spot::EditorText),
+        title: tx("Waagerechte Bildlaufleiste", "Horizontal scrollbar"),
+        body: tx(
+            "Ohne Zeilenumbruch erscheint unten im Text eine Bildlaufleiste, sobald Zeilen breiter sind als die Ansicht: Griff ziehen, ein Klick daneben blättert eine Seite nach links oder rechts; Umschalt+Mausrad und das Touchpad rollen ebenfalls seitwärts. Gerollt wird bis zum Ende der längsten Zeile.",
+            "Without word wrap a scrollbar appears at the bottom of the text as soon as lines are wider than the view: drag the thumb, a click beside it moves one page left or right; Shift+wheel and the touchpad scroll sideways too. Scrolling stops at the end of the longest line.",
+        ),
+        prep: EDITOR_FILE,
+        done: None,
+        need: None,
+    },
+    Step {
         id: "editor.minimap",
         since: "3.0.0",
         spot: Some(Spot::EditorMinimap),
@@ -657,6 +697,32 @@ const EDITOR: &[Step] = &[
         body: tx(
             "Ändert ein anderes Programm (z. B. Claude Code) eine offene Datei, lädt der Editor sie still neu. Hast du dort ungespeicherte Änderungen, fragt eine Leiste: „Meine behalten“, „Von der Platte laden“ oder „Unterschied anzeigen“. Gespeichert wird immer über eine temporäre Datei, damit nichts halb geschrieben zurückbleibt.",
             "When another program (e.g. Claude Code) changes an open file, the editor reloads it quietly. If you have unsaved changes there, a bar asks: “Keep mine”, “Load from disk” or “Show difference”. Saving always goes through a temporary file, so nothing is left half written.",
+        ),
+        prep: EDITOR_FILE,
+        done: None,
+        need: None,
+    },
+    Step {
+        id: "editor.diff",
+        since: "3.2.0",
+        spot: Some(Spot::EditorTabBar),
+        title: tx("Vergleichen", "Compare"),
+        body: tx(
+            "Rechtsklick auf einen Reiter → „Vergleichen mit …“ vergleicht die Datei mit der gespeicherten Fassung, mit git (HEAD, Index, einer Revision), der Zwischenablage oder einer anderen Datei – in einem eigenen Reiter, nebeneinander mit Füllzeilen und Änderungen innerhalb der Zeilen. Die Pfeile zwischen den Seiten übernehmen einen Block (ein Schritt zum Rückgängigmachen), {key:ed_next_change} springt zur nächsten Änderung.",
+            "Right-click a tab → “Compare with …” compares the file with its saved version, with git (HEAD, index, a revision), the clipboard or another file – in a tab of its own, side by side with filler lines and changes within the lines. The arrows between the sides copy a block (one undo step), {key:ed_next_change} jumps to the next change.",
+        ),
+        prep: EDITOR_FILE,
+        done: None,
+        need: None,
+    },
+    Step {
+        id: "editor.markers",
+        since: "3.2.0",
+        spot: Some(Spot::EditorText),
+        title: tx("Änderungsmarken", "Change markers"),
+        body: tx(
+            "Änderungsmarken (Einstellungen → Editor, standardmäßig aus) zeigen am linken Rand, welche Zeilen hinzugekommen, geändert oder entfernt sind – gegen git (nicht gestagt und gestagt in eigenen Farben) oder gegen die gespeicherte Datei. Ein Klick auf eine Marke zeigt die alten Zeilen und setzt sie auf Wunsch zurück.",
+            "Change markers (Settings → Editor, off by default) show in the gutter which lines were added, modified or removed – against git (unstaged and staged in their own colours) or against the saved file. A click on a marker shows the old lines and reverts them if you like.",
         ),
         prep: EDITOR_FILE,
         done: None,
@@ -696,6 +762,19 @@ const EDITOR: &[Step] = &[
         body: tx(
             "„Ignorierte einbeziehen“ ist die Vorgabe für den Schalter im Suchfenster; Ausschlussmuster (wie in .gitignore, z. B. node_modules oder *.min.js) gelten immer.",
             "“Include ignored” is the default of the switch in the search window; exclude patterns (as in .gitignore, e.g. node_modules or *.min.js) always apply.",
+        ),
+        prep: &[Prep::Editor, Prep::Settings(S_EDITOR)],
+        done: None,
+        need: None,
+    },
+    Step {
+        id: "editor.save_actions",
+        since: "3.2.0",
+        spot: Some(Spot::EditorSaveActions),
+        title: tx("Aktionen beim Speichern", "Actions on save"),
+        body: tx(
+            "Regeln je Datei, Ordner oder Muster (wie .gitignore, z. B. src/**/*.ts): vor dem Schreiben Leerraum entfernen, Zeilenenden setzen oder formatieren, danach eigene Befehle (Lint, Upload mit scp/rsync), Kopieren an einen anderen lokalen Ort oder Paneldeck-Aktionen. Die Datei wird immer gespeichert; Fehler zeigen ein roter Punkt im Reiter und ein Hinweis mit der Ausgabe. Rechtsklick im Ordnerbaum legt eine Regel für Datei oder Ordner an.",
+            "Rules per file, folder or pattern (like .gitignore, e.g. src/**/*.ts): before writing trim whitespace, set line endings or format, afterwards your own commands (lint, upload with scp/rsync), copying to another local place or Paneldeck actions. The file is always saved; errors show a red dot on the tab and a notice with the output. Right-click in the folder tree to create a rule for a file or folder.",
         ),
         prep: &[Prep::Editor, Prep::Settings(S_EDITOR)],
         done: None,
@@ -992,8 +1071,8 @@ const CHAT: &[Step] = &[
         spot: Some(Spot::ModelsServers),
         title: tx("Was ein Modell darf", "What a model may do"),
         body: tx(
-            "Jedes Modell hat eine eigene Stufe: Aus (nur chatten), Nur lesen (sieht Sitzungen und To-dos) oder Steuern (darf tippen und ändern). Schreibende Werkzeuge fragen immer erst nach: Erlauben, Immer für diesen Chat oder Ablehnen.",
-            "Each model has its own level: Off (just chatting), Read only (sees sessions and to-dos) or Control (may type and change things). Writing tools always ask first: Allow, Always for this chat or Deny.",
+            "Jedes Modell hat eine eigene Stufe: Aus (nur chatten), Nur lesen (sieht Sitzungen und To-dos) oder Steuern (darf tippen und ändern). Schreibende Werkzeuge fragen immer erst nach: Erlauben, Immer für diesen Chat oder Ablehnen. In der Werkzeugliste darunter wählst du einzelne Werkzeuge ab; Werkzeuge mit „(standardmäßig aus)“ bekommt ein Modell erst, wenn du sie anhakst.",
+            "Each model has its own level: Off (just chatting), Read only (sees sessions and to-dos) or Control (may type and change things). Writing tools always ask first: Allow, Always for this chat or Deny. In the tool list below you can uncheck single tools; tools marked “(off by default)” only reach a model once you check them.",
         ),
         prep: &[Prep::Terminals, Prep::Settings(S_MODELS)],
         done: None,
@@ -1041,6 +1120,93 @@ const CHAT: &[Step] = &[
     },
 ];
 
+use super::super::time_ui::Sub as TimeSub;
+
+/// Unterreiter des Zeit-Reiters ohne Einstellungen und Palette.
+const TIME_ALARMS: &[Prep] = &[Prep::NoSettings, Prep::Palette(false), Prep::NoTools, Prep::Time(TimeSub::Alarms)];
+
+/// Kapitel „Zeit“ (#164, 3.2.0): Reiter, Unterreiter, Wecker, Timer-Vorlagen, Kalender, Optionen.
+const TIME: &[Step] = &[
+    Step {
+        id: "time.intro",
+        since: "3.2.0",
+        spot: Some(Spot::TitlebarTime),
+        title: tx("Der Reiter Zeit", "The Time tab"),
+        body: tx(
+            "Wecker, Timer, Kalender, Stoppuhren, Weltuhren und Geburtstage an einem Ort. Öffne den Reiter mit einem Klick oder {key:mode_time}, um weiterzumachen.",
+            "Alarms, timers, calendar, stopwatches, world clocks and birthdays in one place. Open the tab with a click or {key:mode_time} to continue.",
+        ),
+        prep: HUB,
+        done: Some(time_shown),
+        need: None,
+    },
+    Step {
+        id: "time.subtabs",
+        since: "3.2.0",
+        spot: Some(Spot::TimeSubTabs),
+        title: tx("Unterreiter", "Sub-tabs"),
+        body: tx(
+            "Jeder Unterreiter ist eine Liste mit Details rechts. Wecker und Timer klingeln, solange Paneldeck läuft – auch minimiert oder im Tray; was verpasst wurde, steht beim nächsten Start oben als Hinweis.",
+            "Every sub-tab is a list with details on the right. Alarms and timers ring while Paneldeck runs – also minimized or in the tray; what was missed is shown as a hint at the top at the next start.",
+        ),
+        prep: TIME_ALARMS,
+        done: None,
+        need: None,
+    },
+    Step {
+        id: "time.alarm",
+        since: "3.2.0",
+        spot: Some(Spot::TimeNewAlarm),
+        title: tx("Einen Wecker stellen", "Set an alarm"),
+        body: tx(
+            "„+ Neuer Wecker“ legt einen Wecker an; rechts stellst du Uhrzeit, Wochentage oder einmalig, Klang (mit Vorschau) und Schlummern ein. Leg einen an, um weiterzumachen.",
+            "“+ New alarm” adds an alarm; on the right you set the time, weekdays or once, the sound (with preview) and snooze. Add one to continue.",
+        ),
+        prep: TIME_ALARMS,
+        done: Some(alarms_grew),
+        need: None,
+    },
+    Step {
+        id: "time.presets",
+        since: "3.2.0",
+        spot: Some(Spot::TimePresets),
+        title: tx("Timer und Vorlagen", "Timers and presets"),
+        body: tx(
+            "Mehrere Timer laufen gleichzeitig und überstehen einen Neustart. „Als Vorlage speichern“ in den Details eines Timers legt hier einen Knopf an, z. B. „Tee 4 min“ – ein Klick startet einen neuen Timer.",
+            "Several timers run at the same time and survive a restart. “Save as preset” in a timer's details puts a button here, e.g. “Tea 4 min” – one click starts a new timer.",
+        ),
+        prep: &[Prep::NoSettings, Prep::Palette(false), Prep::NoTools, Prep::Time(TimeSub::Timers)],
+        done: None,
+        need: None,
+    },
+    Step {
+        id: "time.calendar",
+        since: "3.2.0",
+        spot: Some(Spot::CalendarViews),
+        title: tx("Kalender", "Calendar"),
+        body: tx(
+            "Monat, Woche, Tag oder Liste: eigene Termine (auch wiederkehrend, per Baukasten oder Cron) und – in den Optionen des Kalenders schaltbar – Fälligkeiten, Sprints, Versionen und gebuchte Zeit deiner Projekte. iCal-Dateien lassen sich importieren und exportieren.",
+            "Month, week, day or list: your own events (also recurring, via the builder or cron) and – switchable in the calendar's options – due dates, sprints, versions and booked time of your projects. iCal files can be imported and exported.",
+        ),
+        prep: &[Prep::NoSettings, Prep::Palette(false), Prep::NoTools, Prep::Time(TimeSub::Calendar)],
+        done: None,
+        need: None,
+    },
+    Step {
+        id: "time.options",
+        since: "3.2.0",
+        spot: Some(Spot::TimeOptions),
+        title: tx("Benachrichtigungen", "Notifications"),
+        body: tx(
+            "Hier legst du fest, ob Wecker, Timer, Termine und Geburtstage mit Klang und Toast melden, ob die Taskleiste blinkt, wie laut es ist – und ob Timer und Stoppuhren Zeit an Tickets buchen.",
+            "Here you choose whether alarms, timers, events and birthdays notify with sound and toast, whether the taskbar flashes, how loud it is – and whether timers and stopwatches book time on tickets.",
+        ),
+        prep: TIME_ALARMS,
+        done: None,
+        need: None,
+    },
+];
+
 /// Kapitel „Agenten-Schnittstelle (MCP)“.
 const MCP: &[Step] = &[
     Step {
@@ -1051,6 +1217,19 @@ const MCP: &[Step] = &[
         body: tx(
             "Aus: Agenten bekommen nichts. Nur lesen: Sie sehen Sitzungen, Terminalinhalt, Kosten und To-dos. Steuern: Sie dürfen auch tippen, Befehle ausführen und eigene Sitzungen anlegen und schließen. Terminalinhalt ist für sie nur Information, nie eine Anweisung.",
             "Off: agents get nothing. Read only: they see sessions, terminal content, costs and to-dos. Control: they may also type, run commands and create and close their own sessions. Terminal content is information for them, never an instruction.",
+        ),
+        prep: &[Prep::Terminals, Prep::Palette(false), Prep::NoTools, Prep::Settings(S_AGENTS)],
+        done: None,
+        need: None,
+    },
+    Step {
+        id: "mcp.access",
+        since: "3.2.0",
+        spot: Some(Spot::AgentAccess),
+        title: tx("Zugriff je Projekt", "Access per project"),
+        body: tx(
+            "Jedes Projekt hat eine eigene Stufe: Ein Agent arbeitet im Projekt seiner Sitzung, andere Projekte erreicht er nur mit „Für alle“. Neue Projekte beginnen gesperrt (Schloss in der Projektleiste). Private Karten, Tags und Tickets sieht nie ein Agent; was Agenten löschen, landet im Papierkorb.",
+            "Every project has its own level: an agent works in its session's project and reaches other projects only with “For all”. New projects start locked (lock in the project bar). Agents never see private cards, tags and tickets; what agents delete ends up in the trash.",
         ),
         prep: &[Prep::Terminals, Prep::Palette(false), Prep::NoTools, Prep::Settings(S_AGENTS)],
         done: None,
@@ -1068,6 +1247,19 @@ const MCP: &[Step] = &[
         prep: &[Prep::Terminals, Prep::Settings(S_AGENTS)],
         done: None,
         need: Some(Need::Claude),
+    },
+    Step {
+        id: "mcp.session_env",
+        since: "3.2.0",
+        spot: Some(Spot::McpSessionEnv),
+        title: tx("Umgebungsvariablen für Agenten", "Environment variables for agents"),
+        body: tx(
+            "Jede Sitzung kann eigene Umgebungsvariablen haben (Reiter „Umgebung“ in „Neue Sitzung“ und in den Einstellungen der Sitzung). Agenten sehen davon nur die Namen. Mit diesem Schalter dürfen sie Variablen für Sitzungen setzen, die sie selbst anlegen – nie geheime, nie PATH, Lade- oder Startvariablen; die erlaubten Namen grenzt du mit Mustern wie APP_* ein.",
+            "Every session can have its own environment variables (tab “Environment” in “New session” and in the session settings). Agents only see their names. With this switch they may set variables for sessions they create themselves – never secret ones, never PATH, loader or startup variables; you limit the allowed names with patterns such as APP_*.",
+        ),
+        prep: &[Prep::Terminals, Prep::Settings(S_AGENTS)],
+        done: None,
+        need: None,
     },
     Step {
         id: "mcp.system_prompt",
@@ -1182,6 +1374,19 @@ const TOOLS: &[Step] = &[
         need: None,
     },
     Step {
+        id: "tools.paths",
+        since: "3.2.0",
+        spot: Some(Spot::SidebarFiles),
+        title: tx("Pfade für jede Shell", "Paths for every shell"),
+        body: tx(
+            "Pfade folgen der Shell: Ziehst du eine Datei in eine WSL-Sitzung oder fügst sie aus dem Dateibaum ein, wird `C:\\x` zu `/mnt/c/x` und `\\\\wsl.localhost\\<Distro>\\x` zu `/x`; in Git Bash zu `/c/x`. Ordnerfelder (Vorlagen, Profile, Prozesse) nehmen Linux-Pfade, `/c/x` und `~`. Strg+Klick auf `/home/…/datei:12` öffnet die Datei im Editor an der Zeile.",
+            "Paths follow the shell: drag a file into a WSL session or insert it from the file tree and `C:\\x` becomes `/mnt/c/x` and `\\\\wsl.localhost\\<distro>\\x` becomes `/x`; in Git Bash `/c/x`. Folder fields (templates, profiles, processes) take Linux paths, `/c/x` and `~`. Ctrl+click on `/home/…/file:12` opens the file in the editor at that line.",
+        ),
+        prep: HUB,
+        done: None,
+        need: None,
+    },
+    Step {
         id: "tools.diff",
         since: "1.0.0",
         spot: Some(Spot::SidebarDiff),
@@ -1233,12 +1438,26 @@ const TOOLS: &[Step] = &[
         done: None,
         need: None,
     },
+    Step {
+        id: "tools.theme_background",
+        since: "3.2.0",
+        spot: Some(Spot::ReduceTransparency),
+        title: tx("Eigener Hintergrund", "Your own background"),
+        body: tx(
+            "Ein Theme kann einen Hintergrund haben: ein Bild, einen Farbverlauf, eine Farbe oder ein Muster, dazu Helligkeit, Unschärfe und eine Überlagerung. Du stellst ihn im Theme-Editor unter „Hintergrund“ ein, je Bereich mit eigener Deckkraft. Wird es dir zu unruhig, macht „Transparenz reduzieren“ alle Flächen wieder deckend.",
+            "A theme can have a background: an image, a gradient, a colour or a pattern, plus brightness, blur and an overlay. Set it up in the theme editor under “Background”, with its own opacity per area. If it gets too busy, “Reduce transparency” makes every surface opaque again.",
+        ),
+        prep: &[Prep::Terminals, Prep::Palette(false), Prep::NoTools, Prep::Settings(S_APPEARANCE)],
+        done: None,
+        need: None,
+    },
 ];
 
 /// Alle Touren: zuerst die kurze Tour, dann die Kapitel.
 pub(super) static TOURS: &[Tour] = &[
     Tour { id: "basics", title: tx("Kurze Tour", "Short tour"), summary: tx("Die wichtigsten Teile in etwa 3 Minuten", "The main parts in about 3 minutes"), steps: BASICS },
     Tour { id: "editor", title: tx("Der Editor", "The editor"), summary: tx("Dateien, Reiter, Teilungen, Suchen und Ersetzen, mehrere Cursor, Suche in Dateien, Agenten", "Files, tabs, splits, find and replace, multiple cursors, search in files, agents"), steps: EDITOR },
+    Tour { id: "time", title: tx("Zeit", "Time"), summary: tx("Wecker, Timer und Vorlagen, Kalender, Benachrichtigungen", "Alarms, timers and presets, calendar, notifications"), steps: TIME },
     Tour { id: "todo", title: tx("Todo-Liste & Expertenmodus", "To-do list & expert mode"), summary: tx("Liste, Projekte, Tickets, Boards, Sprints, Abfragen", "List, projects, tickets, boards, sprints, queries"), steps: TODO },
     Tour { id: "claude", title: tx("Claude Code im Detail", "Claude Code in detail"), summary: tx("Claude-Modus, Status, Kosten und Budget, Verlauf, Prompts, Warteschlange", "Claude mode, status, costs and budget, history, prompts, queue"), steps: CLAUDE },
     Tour { id: "chat", title: tx("Chats mit lokalen Modellen", "Chats with local models"), summary: tx("Ollama einrichten, Modelle verbinden, Stufen und Freigaben", "Set up Ollama, connect models, levels and approvals"), steps: CHAT },
@@ -1249,7 +1468,7 @@ pub(super) static TOURS: &[Tour] = &[
 
 /// Version, mit der das Tutorial erscheint (Schritte dürfen bis zu ihr reichen, auch solange `Cargo.toml` noch davor steht).
 #[cfg_attr(not(test), allow(dead_code))]
-pub(super) const TUTORIAL_VERSION: &str = "3.0.0";
+pub(super) const TUTORIAL_VERSION: &str = "3.2.0";
 
 /// Kennung der Tour „Was ist neu“ (ihre Schritte stellt `whats_new_steps` zusammen).
 pub(super) const WHATS_NEW: &str = "whatsnew";

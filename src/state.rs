@@ -171,6 +171,10 @@ pub struct Settings {
     pub opacity: f32,
     /// Weiche Animationen (aus = sofortige Zustandswechsel).
     pub animations: bool,
+    /// „Transparenz reduzieren“ (#387, ab 3.2.0): alle Flächen deckend, kein eigener Hintergrund des Themes. Standard aus;
+    /// ein falscher Typ gilt als aus.
+    #[serde(deserialize_with = "lenient_false")]
+    pub reduce_transparency: bool,
     /// Terminalschrift: "Cascadia Mono" (eingebettet), "Hack", "Consolas", "Lucida Console", "Courier New".
     pub terminal_font: String,
     /// Abweichende Tastenkürzel (Kennung → "Ctrl+Shift+T").
@@ -192,6 +196,21 @@ pub struct Settings {
     pub mcp_level: crate::mcp::McpLevel,
     /// Agenten dürfen auch Sitzungen schließen, die sie nicht selbst angelegt haben.
     pub mcp_close_any: bool,
+    /// Agenten dürfen Umgebungsvariablen setzen (#384, 3.2.0): nur in Sitzungen, die sie selbst anlegen (`create_session`
+    /// mit `env`), nie in bestehenden, nie im laufenden Terminal. Standard: aus.
+    pub mcp_session_env: bool,
+    /// Erlaubte Namensmuster für Variablen von Agenten (#384, z. B. `APP_*`); leer = alle außer der festen Sperrliste.
+    pub mcp_env_allow: Vec<String>,
+    /// Zugriff der Agenten auf den Bereich „Allgemein“ (alles ohne Projekt, #386). Fehlt = wie global, für alle.
+    pub agent_general: crate::access::AgentAccess,
+    /// Agenten dürfen Ticket-Projekte anlegen (#386, Standard aus; nur mit Steuern im Heimatprojekt).
+    pub agent_create_projects: bool,
+    /// Agenten dürfen Tickets und eigene Kommentare in den Papierkorb legen (#386, Standard aus; nur mit Steuern).
+    pub agent_delete: bool,
+    /// Neue Todo-Karten sind privat (#386, Standard aus).
+    pub todo_new_private: bool,
+    /// Systemnotizen (von Agenten oder Paneldeck angelegte Karten/Tickets) in den Listen zeigen (#386, Standard an).
+    pub show_system_notes: bool,
     /// Sprache des Systemprompts für Agenten (`initialize`), unabhängig von der Sprache der Oberfläche. Standard: Englisch;
     /// ein ungültiger Wert ergibt Englisch (die Datei bleibt lesbar).
     #[serde(deserialize_with = "crate::mcp::sysprompt::de_lang")]
@@ -311,6 +330,10 @@ pub struct Settings {
     /// in der Seitenleiste).
     #[serde(deserialize_with = "lenient_false")]
     pub tutorial_whats_new: bool,
+    /// Reiter „Zeit“ (seit 3.2.0, #164): Klang/Toast je Art, Blinken, Lautstärke, Klingeldauer, Zeiterfassung an Tickets,
+    /// Sekunden der Weltuhren (`time::settings`). Fehlt in älteren Dateien (dann die Standards); Unlesbares je Wert der Standard.
+    #[serde(deserialize_with = "crate::time::settings::TimeSettings::lenient", skip_serializing_if = "crate::time::settings::TimeSettings::is_default")]
+    pub time: crate::time::settings::TimeSettings,
 }
 
 /// Liste von Texten tolerant lesen: Einträge mit falschem Typ fallen weg, ein falscher Typ insgesamt ergibt eine leere Liste.
@@ -389,6 +412,7 @@ impl Default for Settings {
             minimize_to_tray: false,
             opacity: 1.0,
             animations: true,
+            reduce_transparency: false,
             terminal_font: "Cascadia Mono".into(),
             keys: Default::default(),
             prices: Default::default(),
@@ -400,6 +424,13 @@ impl Default for Settings {
             session_budget: 0.0,
             mcp_level: crate::mcp::McpLevel::Off,
             mcp_close_any: false,
+            mcp_session_env: false,
+            mcp_env_allow: Vec::new(),
+            agent_general: crate::access::AgentAccess::AS_BEFORE,
+            agent_create_projects: false,
+            agent_delete: false,
+            todo_new_private: false,
+            show_system_notes: true,
             mcp_prompt_lang: Lang::En,
             backup_interval_hours: 24,
             backup_keep: 2,
@@ -432,6 +463,7 @@ impl Default for Settings {
             chat_compact: Default::default(),
             editor: Default::default(),
             tutorial_whats_new: false,
+            time: Default::default(),
         }
     }
 }
@@ -516,6 +548,11 @@ pub struct SessionMeta {
     /// Lesen und Setzen nur über [`SessionMeta::resume_mode`] / [`SessionMeta::set_resume_mode`].
     #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "ResumeMode::lenient")]
     pub claude_resume_mode: Option<ResumeMode>,
+    /// Eigene Umgebungsvariablen der Sitzung (seit 3.2.0, #384): Name, Wert (normal im Klartext, geheim nur als
+    /// `value_protected`), `secret`, `mode`, `remove`, `wsl_path`, `by_agent` (`session_env::EnvVar`). Fehlt, wenn leer;
+    /// unlesbare oder geschützte Einträge laden nicht.
+    #[serde(skip_serializing_if = "Vec::is_empty", deserialize_with = "crate::session_env::lenient_list")]
+    pub env: Vec<crate::session_env::EnvVar>,
 }
 
 /// „Fortsetzen nach Neustart“ einer Claude-Sitzung (#302).
@@ -677,6 +714,7 @@ impl Default for SessionMeta {
             claude_resume_mode: None,
             claude_opts: Default::default(),
             agent_chain: Vec::new(),
+            env: Vec::new(),
         }
     }
 }
@@ -698,11 +736,13 @@ pub struct Project {
     pub tree_view: bool,
     /// Ordner dieses Projekts (Pfade mit `/`, auch leere).
     pub folders: Vec<Folder>,
+    /// Zugriff der Agenten (#386). Fehlt (ältere `state.json`) = wie global, für alle; neue Projekte beginnen gesperrt.
+    pub agent_access: crate::access::AgentAccess,
 }
 
 impl Default for Project {
     fn default() -> Self {
-        Self { id: 0, name: String::new(), color: [0x61, 0xaf, 0xef], folder: String::new(), profile: 0, layout: None, focused: 0, tree_view: false, folders: Vec::new() }
+        Self { id: 0, name: String::new(), color: [0x61, 0xaf, 0xef], folder: String::new(), profile: 0, layout: None, focused: 0, tree_view: false, folders: Vec::new(), agent_access: crate::access::AgentAccess::AS_BEFORE }
     }
 }
 
@@ -895,6 +935,17 @@ pub struct SavedState {
     /// Weitere Fenster (Strg+Klick auf einen Reiter); fehlt, solange es keine gibt.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub extra_windows: Vec<SavedWindow>,
+    /// Nächste Kennung eines Seitenleisten-Projekts (#386): Kennungen werden nie wiederverwendet, sonst erbten neue
+    /// Projekte Karten und Verknüpfungen gelöschter. Fehlt (ältere Dateien) = größte Kennung + 1.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub next_project_id: u64,
+}
+
+impl SavedState {
+    /// Nächste freie Projekt-Kennung: nie unter einer schon vergebenen.
+    pub fn project_id_floor(&self) -> u64 {
+        self.next_project_id.max(self.projects.iter().map(|p| p.id).max().unwrap_or(0) + 1)
+    }
 }
 
 /// Ein weiteres Fenster (#110): Reiter, Projekt und Layout des Terminal Hubs, Lage auf dem Bildschirm.
@@ -1506,6 +1557,14 @@ mod tests {
         assert_eq!(s.theme_checks_off, ["contrast", "harmony"]);
         let s: Settings = serde_json::from_str(r#"{"theme_checks_off":"x"}"#).unwrap();
         assert!(s.theme_checks_off.is_empty());
+        // Transparenz reduzieren (#387): fehlt in alten Dateien = aus; falscher Typ = aus; wird geschrieben und gelesen.
+        assert!(!Settings::default().reduce_transparency && !s.reduce_transparency);
+        let s: Settings = serde_json::from_str(r#"{"reduce_transparency":"ja"}"#).unwrap();
+        assert!(!s.reduce_transparency);
+        let s: Settings = serde_json::from_str(r#"{"reduce_transparency":true}"#).unwrap();
+        assert!(s.reduce_transparency);
+        let back: Settings = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
+        assert!(back.reduce_transparency);
         // Prompt-Teile der Chats (#341): fehlt = alles an und wird nicht geschrieben; falscher Typ = alles an.
         use crate::llm::prompt_parts::PromptPart;
         assert!(s.chat_prompt_parts.is_default());

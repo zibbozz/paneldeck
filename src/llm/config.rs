@@ -4,7 +4,7 @@
 //! "llm_servers": [
 //!   { "id": "srv-18a3f0c2b1d4e5f6", "name": "Ollama", "kind": "ollama", "url": "http://localhost:11434",
 //!     "receive_timeout_secs": 600,
-//!     "models": [ { "name": "llama3.1:8b", "level": "Read", "level_chosen": true, "disabled_tools": ["read_terminal"], "ask_write": true,
+//!     "models": [ { "name": "llama3.1:8b", "level": "Read", "level_chosen": true, "disabled_tools": ["read_terminal"], "enabled_tools": ["list_alarms"], "ask_write": true,
 //!                   "max_steps": 10, "tools": true, "context_length": 16384, "temperature": 0.7,
 //!                   "prompt_parts": { "examples": false }, "prompt_family": "llama", "vision": false } ],
 //!     "last_models": [ { "name": "llama3.1:8b", "tools": true, "context_length": 131072, "vision": false } ] }
@@ -114,6 +114,11 @@ pub struct LlmModel {
     /// Einzeln gesperrte Werkzeuge.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub disabled_tools: Vec<String>,
+    /// Einzeln eingeschaltete Werkzeuge, die für Chats standardmäßig aus sind (`chat::tools::CHAT_DEFAULT_OFF`, seit
+    /// 3.2.0, #393). Fehlt = keins: Alte Dateien laden unverändert, die neuen Werkzeuge bleiben aus. `disabled_tools`
+    /// geht vor.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub enabled_tools: Vec<String>,
     /// Vor Werkzeugen mit Schreibzugriff nachfragen (Standard: an).
     pub ask_write: bool,
     /// Höchstens so viele Werkzeugaufrufe je Antwort (1–100, Standard 10).
@@ -146,6 +151,7 @@ impl Default for LlmModel {
             level: McpLevel::Off,
             level_chosen: false,
             disabled_tools: Vec::new(),
+            enabled_tools: Vec::new(),
             ask_write: true,
             max_steps: DEFAULT_MAX_STEPS,
             tools: None,
@@ -176,6 +182,7 @@ impl<'de> Deserialize<'de> for LlmModel {
             level,
             level_chosen: get(o, "level_chosen", false),
             disabled_tools: get(o, "disabled_tools", def.disabled_tools.clone()),
+            enabled_tools: get(o, "enabled_tools", def.enabled_tools.clone()),
             ask_write: get(o, "ask_write", def.ask_write),
             max_steps: get(o, "max_steps", def.max_steps),
             tools: get(o, "tools", None),
@@ -202,6 +209,8 @@ impl LlmModel {
         self.prompt_family = self.prompt_family.take().map(|f| f.trim().to_string()).filter(|f| !f.is_empty());
         let mut seen = std::collections::HashSet::new();
         self.disabled_tools.retain(|t| !t.trim().is_empty() && seen.insert(t.clone()));
+        let mut seen = std::collections::HashSet::new();
+        self.enabled_tools.retain(|t| !t.trim().is_empty() && seen.insert(t.clone()));
     }
 }
 
@@ -550,6 +559,26 @@ mod tests {
         assert!(serde_json::from_str::<LlmModel>(r#"{"level":"Off"}"#).is_err());
         let s: LlmServer = serde_json::from_str(r#"{"id":"a","models":[{"name":"x","level":"Off","context_length":-1}]}"#).unwrap();
         assert_eq!(s.model_cfg("x").level, McpLevel::Off);
+    }
+
+    /// Eingeschaltete Werkzeuge, die standardmäßig aus sind (#393, seit 3.2.0): optional, tolerant, nur geschrieben, wenn
+    /// gesetzt – alte Einträge laden unverändert (ohne eingeschaltete), Doppelte und Leere fallen weg.
+    #[test]
+    fn enabled_tools_are_optional_and_additive() {
+        let old: LlmModel = serde_json::from_str(r#"{"name":"x","level":"Control","level_chosen":true,"disabled_tools":["screenshot"]}"#).unwrap();
+        assert!(old.enabled_tools.is_empty());
+        assert_eq!(old.disabled_tools, ["screenshot"]);
+        assert!(serde_json::to_value(&old).unwrap().get("enabled_tools").is_none(), "ungesetzt nicht geschrieben");
+        let m: LlmModel = serde_json::from_str(r#"{"name":"x","enabled_tools":["list_alarms","list_alarms"," "]}"#).unwrap();
+        let mut v = vec![LlmServer { id: "a".into(), models: vec![m], ..Default::default() }];
+        sanitize(&mut v);
+        assert_eq!(v[0].models[0].enabled_tools, ["list_alarms"]);
+        let j = serde_json::to_value(&v[0].models[0]).unwrap();
+        assert_eq!(j["enabled_tools"], serde_json::json!(["list_alarms"]));
+        assert_eq!(serde_json::from_value::<LlmModel>(j).unwrap(), v[0].models[0]);
+        // Falscher Typ: leer (nichts eingeschaltet), der Eintrag bleibt lesbar.
+        let m: LlmModel = serde_json::from_str(r#"{"name":"x","level":"Read","enabled_tools":"all"}"#).unwrap();
+        assert!(m.enabled_tools.is_empty() && m.level == McpLevel::Read);
     }
 
     /// Prompt-Teile und Familie je Modell (#341): optional, tolerant, nur geschrieben, wenn gesetzt.

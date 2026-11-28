@@ -131,8 +131,9 @@ pub fn export_project(conn: &Connection, project_id: i64) -> Result<ProjectDoc, 
     }
     let mut comments: HashMap<i64, Vec<DocComment>> = HashMap::new();
     {
-        let mut st = conn.prepare("SELECT c.ticket_id, c.body, c.created_at, c.updated_at FROM comments c JOIN tickets t ON t.id = c.ticket_id WHERE t.project_id = ?1 ORDER BY t.number, c.id")?;
-        for row in st.query_map([project_id], |r| Ok((r.get::<_, i64>(0)?, DocComment { body: r.get(1)?, created_at: r.get(2)?, updated_at: r.get(3)? })))? {
+        let mut st = conn.prepare("SELECT c.ticket_id, c.body, c.created_at, c.updated_at, c.origin, c.origin_detail FROM comments c JOIN tickets t ON t.id = c.ticket_id WHERE t.project_id = ?1 AND c.trashed_at IS NULL ORDER BY t.number, c.id")?;
+        let origin = |s: String| (s != "user").then_some(s);
+        for row in st.query_map([project_id], |r| Ok((r.get::<_, i64>(0)?, DocComment { body: r.get(1)?, created_at: r.get(2)?, updated_at: r.get(3)?, origin: origin(r.get(4)?), origin_detail: r.get(5)? })))? {
             let (tid, c) = row?;
             comments.entry(tid).or_default().push(c);
         }
@@ -236,6 +237,9 @@ pub fn export_project(conn: &Connection, project_id: i64) -> Result<ProjectDoc, 
             flagged: t.flagged,
             starred: t.starred,
             archived: t.archived,
+            private: t.private,
+            origin: t.origin.is_system().then(|| t.origin.as_str().to_string()),
+            origin_detail: t.origin_detail.clone(),
             created_at: t.created_at.clone(),
             updated_at: t.updated_at.clone(),
             values: vals,

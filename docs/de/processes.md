@@ -50,13 +50,13 @@ Der Abschnitt *Prozesse* liegt in der Seitenleiste des Terminal Hubs über den V
 |---|---|
 | Name | Erscheint in der Liste, in Benachrichtigungen und für Agenten. |
 | Befehl | Eine Befehlszeile, ausgeführt über die gewählte Shell – `npm`, `php`, `ng` und andere Programme werden also wie im Terminal über `PATH` gefunden. |
-| Ordner | Arbeitsordner (leer = Standardordner der Shell). Ein Ordner, den es nicht gibt, lässt den Start fehlschlagen – ebenso ein Netzwerkordner, der nicht rasch antwortet (dann erneut versuchen). |
+| Ordner | Arbeitsordner (leer = Standardordner der Shell). Das Feld folgt der Shell: für WSL ein Linux-Pfad (`/home/ich/app`, `~/app`) mit dem Umschalter *Windows-Pfad / WSL-Pfad*, für Git Bash auch `/c/x` und `~`. Ein Ordner, den es nicht gibt, lässt den Start fehlschlagen – ebenso ein Netzwerkordner, der nicht rasch antwortet (dann erneut versuchen); ein Ordner einer anderen WSL-Distribution wird abgelehnt, ebenso ein Netzwerk- oder WSL-Ordner (UNC-Pfad) mit cmd, das dort nicht arbeiten kann. |
 | Shell | Standard ist PowerShell (PowerShell 7, falls installiert, sonst Windows PowerShell); oder jede erkannte Shell – cmd, Git Bash, WSL. PowerShell startet ohne dein Profil (`-NoProfile`). Bei cmd wird `%NAME%` im Befehl wie bei einer getippten Befehlszeile ersetzt (z. B. `cd %USERPROFILE%\app && npm start`); unbekannte Variablen bleiben stehen, `%X:~0,3%` und `%X:a=b%` werden nicht ausgewertet. |
 | Projekt | Das Projekt, zu dem der Eintrag gehört (oder keins). |
 | Gruppe, Reihenfolge | Einträge derselben Gruppe starten und stoppen gemeinsam: beim Starten aufsteigend nach *Reihenfolge* (z. B. Backend 1, Frontend 2), beim Stoppen umgekehrt. *Reihenfolge* ist nur die Reihenfolge des Startens: Der nächste Eintrag startet, sobald der vorige gestartet ist – Paneldeck wartet nicht, bis er bereit ist (z. B. an seinem Port lauscht). |
 | Automatisch starten | *Nie (nur von Hand)* (Standard), *Mit Paneldeck* oder *Wenn das Projekt geöffnet wird* (auch beim Start, wenn es das geöffnete Projekt ist; einmal je Lauf). |
 | Protokolldatei | Die Ausgabe zusätzlich nach `process-logs/<id>-<name>.log` im Datenordner schreiben (standardmäßig aus). Jede Zeile bekommt einen Zeitstempel; ab 5 MB wird rotiert (`.1` … `.3`). |
-| Umgebungsvariablen | Name und Wert. Werte werden **verschlüsselt** gespeichert (Windows-DPAPI, nur für denselben Windows-Benutzer auf demselben Rechner lesbar), nie Agenten gezeigt und nie protokolliert. Beim Bearbeiten behält ein leerer Wert den gespeicherten. |
+| Umgebungsvariablen | Name und Wert. Werte werden **verschlüsselt** gespeichert (Windows-DPAPI, nur für denselben Windows-Benutzer auf demselben Rechner lesbar), nie Agenten gezeigt und nie protokolliert. Beim Bearbeiten behält ein leerer Wert den gespeicherten. Mit einer WSL-Shell kommen sie über `WSLENV` beim Linux-Prozess an (seit 3.2.0). |
 
 Änderungen an einem laufenden Eintrag gelten ab seinem nächsten Start. Löschen lässt sich ein Eintrag nur, wenn er nicht läuft.
 

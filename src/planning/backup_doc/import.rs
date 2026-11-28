@@ -316,9 +316,9 @@ fn run(conn: &Connection, doc: &ProjectDoc, key: &str, renumber: bool, progress:
         check_ts(w, &t.updated_at)?;
         let number = if renumber { i as i64 + 1 } else { t.number };
         conn.prepare_cached(
-            "INSERT INTO tickets (project_id, number, type_id, title, status_id, parent_id, rank, flagged, starred, created_at, updated_at, archived) VALUES (?1, ?2, ?3, ?4, ?5, NULL, ?6, ?7, ?8, ?9, ?10, ?11)",
+            "INSERT INTO tickets (project_id, number, type_id, title, status_id, parent_id, rank, flagged, starred, created_at, updated_at, archived, private, origin, origin_detail) VALUES (?1, ?2, ?3, ?4, ?5, NULL, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
         )?
-        .execute(params![pid, number, type_id, title, status, t.rank, t.flagged as i64, t.starred as i64, t.created_at, t.updated_at, t.archived as i64])?;
+        .execute(params![pid, number, type_id, title, status, t.rank, t.flagged as i64, t.starred as i64, t.created_at, t.updated_at, t.archived as i64, t.private as i64, crate::planning::access::Origin::parse(t.origin.as_deref().unwrap_or("user")).as_str(), t.origin_detail])?;
         let id = conn.last_insert_rowid();
         map.tickets.insert(t.number, id);
         real_type.insert(t.number, type_id);
@@ -393,7 +393,14 @@ fn run(conn: &Connection, doc: &ProjectDoc, key: &str, renumber: bool, progress:
             }
             check_ts(w, &c.created_at)?;
             check_ts(w, &c.updated_at)?;
-            conn.prepare_cached("INSERT INTO comments (ticket_id, body, created_at, updated_at) VALUES (?1, ?2, ?3, ?4)")?.execute(params![id, body, c.created_at, c.updated_at])?;
+            conn.prepare_cached("INSERT INTO comments (ticket_id, body, created_at, updated_at, origin, origin_detail) VALUES (?1, ?2, ?3, ?4, ?5, ?6)")?.execute(params![
+                id,
+                body,
+                c.created_at,
+                c.updated_at,
+                crate::planning::access::Origin::parse(c.origin.as_deref().unwrap_or("user")).as_str(),
+                c.origin_detail
+            ])?;
             report.comments += 1;
         }
     }

@@ -156,6 +156,10 @@ pub(super) enum Store {
     Starred,
     /// Archiviert (Wartung, #308). Ohne Bedingung auf `archived` blendet die Abfrage archivierte Tickets aus.
     Archived,
+    /// Privat (#386): nie für Agenten sichtbar (Agenten finden damit nichts).
+    Private,
+    /// Systemnotiz (#386): von einem Agenten oder Paneldeck angelegt.
+    SystemNote,
     ChangedBy,
     Sprint,
     Type(OptionSet),
@@ -356,12 +360,20 @@ pub fn schema_for(conn: &Connection, scope: Scope, lang: Lang) -> SRes<Schema> {
 
 /// Das vollständige Schema samt Bindungen (für `compile`).
 pub fn search_schema(conn: &Connection, scope: Scope, lang: Lang) -> SRes<SearchSchema> {
+    search_schema_only(conn, scope, lang, None)
+}
+
+/// [`search_schema`] nur mit den Projekten `only` (Sicht eines Agenten, #386): Typen, Status, Felder, Werte und Projekt-
+/// namen gesperrter Projekte kommen weder im Schema noch in Fehlermeldungen vor.
+pub fn search_schema_only(conn: &Connection, scope: Scope, lang: Lang, only: Option<&[i64]>) -> SRes<SearchSchema> {
     let sid = scope_id(scope);
+    let keep = |pid: i64| only.is_none_or(|o| o.contains(&pid));
     // ---- Projekte
     let projects: Vec<ProjectRow> = {
         let mut st = conn.prepare("SELECT id, key, name, use_sprints FROM projects WHERE system = 0 AND (?1 IS NULL OR id = ?1) ORDER BY position, id")?;
         let rows = st.query_map(params![sid], |r| Ok(ProjectRow { id: r.get(0)?, key: r.get(1)?, name: r.get(2)?, use_sprints: r.get::<_, i64>(3)? != 0 }))?;
-        rows.collect::<Result<_, _>>()?
+        let v: Vec<ProjectRow> = rows.collect::<Result<_, _>>()?;
+        v.into_iter().filter(|p| keep(p.id)).collect()
     };
     if let Scope::Project(p) = scope {
         if projects.is_empty() {
@@ -377,13 +389,15 @@ pub fn search_schema(conn: &Connection, scope: Scope, lang: Lang) -> SRes<Search
     let mut types: Vec<TypeRow> = {
         let mut st = conn.prepare("SELECT id, project_id, key, name FROM ticket_types WHERE system = 0 AND (?1 IS NULL OR project_id = ?1) ORDER BY position, id")?;
         let rows = st.query_map(params![sid], |r| Ok(TypeRow { id: r.get(0)?, project_id: r.get(1)?, key: r.get(2)?, name: r.get(3)? }))?;
-        rows.collect::<Result<_, _>>()?
+        let v: Vec<TypeRow> = rows.collect::<Result<_, _>>()?;
+        v.into_iter().filter(|t| keep(t.project_id)).collect()
     };
     types.sort_by_key(|t| order_of(t.project_id, &projects)); // stabil: je Projekt bleibt die Reihenfolge der Typen
     let mut statuses: Vec<StatusRow> = {
         let mut st = conn.prepare("SELECT id, project_id, key, name FROM statuses WHERE project_id IN (SELECT id FROM projects WHERE system = 0 AND (?1 IS NULL OR id = ?1)) ORDER BY position, id")?;
         let rows = st.query_map(params![sid], |r| Ok(StatusRow { id: r.get(0)?, project_id: r.get(1)?, key: r.get(2)?, name: r.get(3)? }))?;
-        rows.collect::<Result<_, _>>()?
+        let v: Vec<StatusRow> = rows.collect::<Result<_, _>>()?;
+        v.into_iter().filter(|s| keep(s.project_id)).collect()
     };
     statuses.sort_by_key(|s| order_of(s.project_id, &projects));
     let all_fields: Vec<Field> = {
@@ -392,7 +406,8 @@ pub fn search_schema(conn: &Connection, scope: Scope, lang: Lang) -> SRes<Search
             fields::COLS
         ))?;
         let rows = st.query_map(params![sid], fields::from_row)?;
-        rows.collect::<Result<_, _>>()?
+        let v: Vec<Field> = rows.collect::<Result<_, _>>()?;
+        v.into_iter().filter(|f| types.iter().any(|t| t.id == f.type_id)).collect()
     };
     // Felder in der Reihenfolge Projekt, Typ, Feld
     let mut fields_in_order: Vec<&Field> = Vec::new();
@@ -438,10 +453,12 @@ pub fn search_schema(conn: &Connection, scope: Scope, lang: Lang) -> SRes<Search
     reg.add(&nm("flagged", "Markiert"), FieldType::Bool, false, Store::Flagged);
     reg.add(&nm("starred", "Stern"), FieldType::Bool, false, Store::Starred);
     reg.add(&nm("archived", "Archiviert"), FieldType::Bool, false, Store::Archived);
+    reg.add(&nm("private", "Privat"), FieldType::Bool, false, Store::Private);
+    reg.add(&nm("systemNote", "Systemnotiz"), FieldType::Bool, false, Store::SystemNote);
     reg.add(&nm("project", "Projekt"), FieldType::Option(project_set.flat_names()), false, Store::Project(project_set));
     if projects.iter().any(|p| p.use_sprints) {
         // Auswahlwerte: die Namen der Sprints (siehe `pending.rs`)
-        reg.add(&["sprint".to_string()], FieldType::Option(pending::sprint_names(conn, scope)?), false, Store::Sprint);
+        reg.add(&["sprint".to_string()], FieldType::Option(pending::sprint_names(conn, scope, only)?), false, Store::Sprint);
     }
     reg.add(&nm("changedBy", "GeändertVon"), FieldType::Option(CHANGED_BY.iter().map(|s| s.to_string()).collect()), false, Store::ChangedBy);
     let terminal_idx = reg
@@ -505,7 +522,7 @@ pub fn search_schema(conn: &Connection, scope: Scope, lang: Lang) -> SRes<Search
             conflicts.push(Conflict { name: groups[win].names[0].clone(), kept: groups[win].fields.first().map(|f| f.0.kind), dropped });
         }
     }
-    let versions_on = pending::versions_enabled(conn, scope)?;
+    let versions_on = pending::versions_enabled(conn, scope, only)?;
     for wi in winners {
         let g = &groups[wi];
         // ohne Versionen im Bereich (Schalter `use_versions` überall aus) gibt es diese Felder in der Abfrage nicht
@@ -550,7 +567,7 @@ pub fn search_schema(conn: &Connection, scope: Scope, lang: Lang) -> SRes<Search
             Class::Labels => (FieldType::Labels, true),
             Class::Ticket => (FieldType::TicketRef, false),
             Class::Terminal => (FieldType::Terminal, false),
-            Class::Version | Class::Milestone => (FieldType::Option(pending::version_names(conn, scope, g.class == Class::Milestone)?), false),
+            Class::Version | Class::Milestone => (FieldType::Option(pending::version_names(conn, scope, g.class == Class::Milestone, only)?), false),
         };
         let store = |opts: OptionSet| Store::Values(Vals { class: g.class, fields: g.fields.iter().map(|f| f.0).collect(), opts, links: false });
         if reg.add(&g.names, ty.clone(), multi, store(opts.clone())).is_some() {
@@ -599,7 +616,7 @@ pub fn search_schema(conn: &Connection, scope: Scope, lang: Lang) -> SRes<Search
     schema.fields = reg.defs;
     schema.predicates = keyword_names(conn, true, &broken)?;
     schema.sort_keywords = keyword_names(conn, false, &broken)?;
-    let active_sprints = if projects.iter().any(|p| p.use_sprints) { pending::active_sprints(conn, scope)? } else { Vec::new() };
+    let active_sprints = if projects.iter().any(|p| p.use_sprints) { pending::active_sprints(conn, scope, only)? } else { Vec::new() };
     Ok(SearchSchema { schema, scope, conflicts, bindings: reg.bindings, by_name: reg.by_name, preds, sorts, kw_fields, active_sprints })
 }
 

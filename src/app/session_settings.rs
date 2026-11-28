@@ -8,7 +8,9 @@
 //!   Chats haben keinen Prozess: dort gibt es kein Neu laden.
 //! * Einstellungen: „Einstellungen …“ im Kontextmenü einer Sitzung. Alles, was beim Anlegen einstellbar ist (Profil,
 //!   Shell, Arbeitsordner, Name, Farbe, Ordner im Baum, Tags, Notizen, Claude an/aus, „Fortsetzen nach Neustart“).
-//!   Startbefehl und Umgebungsvariablen gehören zum Profil. Chats bleiben Chats (nur Name, Farbe, Ordner, Tags, Notizen).
+//!   Der Startbefehl gehört zum Profil; eigene Umgebungsvariablen der Sitzung stehen im Reiter *Umgebung* (#384, nach dem
+//!   Speichern einer laufenden Sitzung: *Neu starten / Jetzt setzen / Später*). Chats bleiben Chats (nur Name, Farbe,
+//!   Ordner, Tags, Notizen).
 //!   Ändert sich etwas, das erst beim Start wirkt (Profil, Shell, Arbeitsordner, Claude an/aus), fragt der Dialog nach dem
 //!   Speichern „Jetzt neu laden?“; sonst gilt die Änderung beim nächsten Neu laden.
 
@@ -206,6 +208,8 @@ pub(super) enum Problem {
     /// Die Prüfung des Linux-Ordners in WSL läuft noch (#216).
     FolderCheckPending,
     InvalidClaudeOption,
+    /// Ungültige Umgebungsvariable oder ein geheimer Wert ließ sich nicht verschlüsseln (#384).
+    Env,
 }
 
 impl Problem {
@@ -216,6 +220,7 @@ impl Problem {
             Problem::MissingFolder => lang.t("Den Arbeitsordner gibt es nicht.", "The working folder does not exist."),
             Problem::FolderCheckPending => lang.t("Der Arbeitsordner wird in WSL noch geprüft – bitte gleich noch einmal speichern.", "The working folder is still being checked in WSL – please save again in a moment."),
             Problem::InvalidClaudeOption => lang.t("Ungültige Claude-Option (Modell oder Agent).", "Invalid Claude option (model or agent)."),
+            Problem::Env => lang.t("Ungültige Umgebungsvariable (siehe Reiter „Umgebung“).", "Invalid environment variable (see the “Environment” tab)."),
         }
     }
 }
@@ -331,6 +336,13 @@ pub(super) struct SessionForm {
     pub(super) wsl_recent: std::collections::BTreeMap<String, Vec<String>>,
     /// Tags aller Sitzungen mit Anzahl (Vorschläge im Tag-Feld, #239; beim Öffnen gezählt).
     pub(super) tag_values: Vec<value_suggest::Counted>,
+    /// Reiter „Umgebung“ (#384) und der Stand beim Öffnen (gespeichert wird nur eine Änderung).
+    pub(super) env: super::env_ui::EnvEditor,
+    pub(super) orig_env: Vec<crate::session_env::EnvVar>,
+    /// Namen der Profilvariablen und Profilname (Anzeige; setzt die App).
+    pub(super) profile_env: Option<(String, String)>,
+    /// Reiter beim Öffnen (Standard *Allgemein*; „Variablen bearbeiten …“ öffnet *Umgebung*).
+    pub(super) start_tab: Option<super::opts_tabs::Tab>,
 }
 
 impl SessionForm {
@@ -353,6 +365,10 @@ impl SessionForm {
             picker_cwd: String::new(),
             wsl_recent: Default::default(),
             tag_values: Vec::new(),
+            env: super::env_ui::EnvEditor::of(&meta.env),
+            orig_env: meta.env.clone(),
+            profile_env: None,
+            start_tab: None,
         }
     }
 
@@ -489,18 +505,11 @@ impl SessionForm {
     }
 }
 
-/// Feld „Arbeitsordner“: Text und Auswahl-Knopf. Eigene Funktion, damit hier die WSL-fähige Ordnerauswahl (#172)
-/// eingesetzt werden kann; `shell_id` = gewählte Shell (bestimmt, welche Pfade gelten). `locked` = Ordner eines
-/// Git-Worktrees (nicht änderbar).
-pub(super) fn folder_field(ui: &mut Ui, cwd: &mut String, _shell_id: &str, locked: bool, lang: Lang) {
-    ui.horizontal(|ui| {
-        ui.add_enabled(!locked, egui::TextEdit::singleline(cwd).desired_width(290.0).hint_text(lang.t("leer = Benutzerordner", "empty = home folder")));
-        if ui.add_enabled(!locked, egui::Button::new("…")).on_hover_text(lang.t("Ordner wählen", "Choose folder")).clicked() {
-            if let Some(p) = notify::pick_folder(cwd) {
-                *cwd = p;
-            }
-        }
-    });
+/// Feld „Arbeitsordner“ (#392): dünne Hülle um das WSL-fähige Ordnerfeld (`folder_picker::field`) mit dem Ziel der
+/// gewählten Shell – Windows, Git Bash (`/c/x`, `~`) oder WSL (Umschalter, Vervollständigung, Prüfung, zuletzt
+/// benutzt). `locked` = Ordner eines Git-Worktrees (nicht änderbar).
+pub(super) fn folder_field(ui: &mut Ui, id_salt: impl std::hash::Hash, cwd: &mut String, target: &folder_picker::Target, locked: bool, lang: Lang, recent: &std::collections::BTreeMap<String, Vec<String>>) -> folder_picker::PickerResponse {
+    folder_picker::field(ui, id_salt, cwd, target.clone(), locked, lang, recent)
 }
 
 /// Gibt es den Arbeitsordner (`wsl` = die Shell startet in WSL)? Nie blockierend im UI-Thread (#216): Ein Linux-Pfad
@@ -553,13 +562,19 @@ pub(super) fn session_form_ui(ctx: &egui::Context, f: &mut SessionForm, shells: 
     // Reiter wie im Dialog „Neue Sitzung“ (#292): öffnet auf „Allgemein“, Strg+Tab/Alt+1 … wechseln, Enter speichert.
     let win = Id::new("session_settings");
     if f.focus {
-        tabs::set(ctx, SALT, Tab::General);
+        let start = f.start_tab.take().unwrap_or(Tab::General);
+        tabs::set(ctx, SALT, start);
         tabs::activate(ctx, SALT);
+        // Das Namensfeld (und damit das Ende von `focus`) gibt es nur auf „Allgemein“: Öffnet der Dialog auf einem
+        // anderen Reiter (z. B. „Umgebung“), sonst setzte das nächste Bild ihn wieder auf „Allgemein“ zurück.
+        if start != Tab::General {
+            f.focus = false;
+        }
     }
     // Nicht modal: nur mit der Tastatur im Fenster (Enter im Terminal speichert nicht).
     let enter = esc_ok && !value_suggest::wants_enter(ctx, egui::Id::new(("session_tags", f.id))) && tabs::enter_confirms(ctx, SALT, win);
     let claude_on = f.v.claude && !f.chat;
-    let tab_list = tabs::session_tabs(claude_on);
+    let tab_list = tabs::session_tabs_env(claude_on, !f.chat);
     tabs::handle_keys(ctx, SALT, win, &tab_list);
     let defaults = super::dialogs::user_defaults(ctx);
     let width = tabs::dialog_width(ctx);
@@ -576,9 +591,21 @@ pub(super) fn session_form_ui(ctx: &egui::Context, f: &mut SessionForm, shells: 
             if claude_on {
                 infos.extend(super::dialogs::claude_tab_infos(&f.v.copts, &defaults, &chk));
             }
+            if !f.chat {
+                infos.push(f.env.tab_info(lang));
+            }
             let tab = tabs::strip(ui, lang, SALT, &infos);
             let invalid = tabs::invalid_hint(lang, &infos);
             tabs::body(ui, SALT, tab, body_h, |ui| {
+                if tab == Tab::Environment {
+                    let wsl = matches!(target, folder_picker::Target::Wsl { .. });
+                    let pe = f.profile_env.clone();
+                    let opts = super::env_ui::EnvUiOpts { lang, salt: SALT, wsl, claude: f.v.claude, profile: pe.as_ref().map(|(n, p)| (n.as_str(), p.as_str())) };
+                    super::env_ui::env_tab_ui(ui, &mut f.env, opts);
+                    ui.add_space(S1);
+                    super::dialogs::hint_label(ui, lang.t("Läuft die Sitzung, fragt Paneldeck nach dem Speichern: neu starten, jetzt im Terminal setzen oder später.", "If the session is running, Paneldeck asks after saving: restart, set in the terminal now, or later."), style::dim(ui));
+                    return;
+                }
                 if tab != Tab::General {
                     let SessionForm { v, .. } = &mut *f;
                     let FormValues { copts, resume_mode, .. } = v;
@@ -673,8 +700,8 @@ pub(super) fn session_form_ui(ctx: &egui::Context, f: &mut SessionForm, shells: 
                     ui.end_row();
                     ui.label(lang.t("Arbeitsordner", "Working folder"));
                     if f.worktree.is_some() {
-                        let shell = f.v.shell_id.clone();
-                        folder_field(ui, &mut f.v.cwd, &shell, true, lang);
+                        let target = f.target.clone();
+                        folder_field(ui, ("sset_wt", f.id), &mut f.v.cwd, &target, true, lang, &f.wsl_recent);
                     } else {
                         // Wie im Dialog „Neue Sitzung“: bei einer WSL-Shell Linux-Pfade, Prüfung und Auswahl in WSL (#216).
                         let target = f.target.clone();
@@ -706,8 +733,8 @@ pub(super) fn session_form_ui(ctx: &egui::Context, f: &mut SessionForm, shells: 
                     ui.label("");
                     let prof = profiles.iter().find(|p| p.id == f.v.profile);
                     let start_note = match prof {
-                        Some(p) if !p.startup.trim().is_empty() || !p.env.trim().is_empty() => format!("{} {}", lang.t("Startbefehl und Umgebungsvariablen kommen aus dem Profil", "Start command and environment variables come from the profile"), lang.q(&p.name)),
-                        _ => lang.t("Startbefehl und Umgebungsvariablen legt ein Profil fest (Einstellungen → Profile).", "A profile sets the start command and environment variables (Settings → Profiles).").to_string(),
+                        Some(p) if !p.startup.trim().is_empty() || !p.env.trim().is_empty() => format!("{} {} {}", lang.t("Startbefehl und Umgebungsvariablen kommen aus dem Profil", "Start command and environment variables come from the profile"), lang.q(&p.name), lang.t("– eigene Variablen der Sitzung im Reiter „Umgebung“.", "– the session's own variables are in the “Environment” tab.")),
+                        _ => lang.t("Den Startbefehl legt ein Profil fest (Einstellungen → Profile); eigene Umgebungsvariablen stehen im Reiter „Umgebung“.", "A profile sets the start command (Settings → Profiles); the session's own environment variables are in the “Environment” tab.").to_string(),
                     };
                     super::dialogs::hint_label(ui, &start_note, style::dim(ui));
                     ui.end_row();
@@ -948,6 +975,7 @@ impl App {
         if let Some(e) = self.entries.get(&id) {
             let auto = if e.meta.custom_name { e.live.as_ref().and_then(|s| s.title()).unwrap_or_default() } else { e.display_name() };
             let mut f = SessionForm::from_meta(&e.meta, auto);
+            f.profile_env = self.profile_env_names(e.meta.profile);
             f.wsl_recent = self.settings.wsl_recent.clone();
             f.tag_values = self.session_tag_counts();
             self.session_settings = Some(f);
@@ -992,6 +1020,19 @@ impl App {
                 } else if f.folder_checking() && !f.problems.contains(&Problem::MissingFolder) {
                     f.problems.push(Problem::FolderCheckPending);
                 }
+                // Umgebungsvariablen (#384): geheime Werte jetzt verschlüsseln; gespeichert nur bei einer Änderung.
+                let env_new = if f.chat {
+                    None
+                } else {
+                    match f.env.to_vars(lang) {
+                        Ok(v) => (v != f.orig_env).then_some(v),
+                        Err(e) => {
+                            f.env.note = Some(e);
+                            f.problems.push(Problem::Env);
+                            None
+                        }
+                    }
+                };
                 if !f.problems.is_empty() {
                     self.session_settings = Some(f);
                     return;
@@ -999,6 +1040,11 @@ impl App {
                 let id = f.id;
                 let Some(e) = self.entries.get_mut(&id) else { return };
                 let reload = f.apply(&mut e.meta, &self.settings.profiles, &default_shell);
+                let env_old = env_new.as_ref().map(|v| std::mem::replace(&mut e.meta.env, v.clone()));
+                if env_old.is_some() && reload {
+                    // Neu laden wird ohnehin gefragt: die Variablen gelten dann mit.
+                    e.env_pending = true;
+                }
                 if let Some(p) = f.picker.as_ref().filter(|_| f.v.cwd.trim() != f.orig.cwd.trim()) {
                     p.remember(&mut self.settings.wsl_recent);
                 }
@@ -1008,6 +1054,10 @@ impl App {
                     models_ui::release_focus(ctx);
                     let lingering = self.lingering_of(&[id]);
                     self.reload_ask = Some(ReloadAsk { id, after_settings: true, detached: false, lingering });
+                } else if let Some(old) = env_old {
+                    // Nur Variablen geändert: läuft die Sitzung, *Neu starten / Jetzt setzen / Später* (#384).
+                    models_ui::release_focus(ctx);
+                    self.env_changed(id, old);
                 } else {
                     self.want_focus = Some(self.focused);
                 }
@@ -1634,6 +1684,27 @@ mod tests {
             d.frame(&mut f, true, vec![]);
             assert_eq!(win(&d), first);
         }
+    }
+
+    /// „Umgebung bearbeiten“ (#384) öffnet den Dialog auf dem Reiter „Umgebung“ und bleibt dort (sprang nach dem ersten
+    /// Bild auf „Allgemein“ zurück, weil nur das Namensfeld `focus` beendete).
+    #[test]
+    fn a_start_tab_stays_selected() {
+        use super::super::opts_tabs::{self as tabs, Tab};
+        let mut d = Dlg::new();
+        let env = vec![crate::session_env::EnvVar::plain("API_URL", "http://localhost:3000")];
+        let mut f = form(&SessionMeta { id: 1, shell_id: "pwsh".into(), env, ..SessionMeta::default() });
+        f.start_tab = Some(Tab::Environment);
+        for _ in 0..4 {
+            d.frame(&mut f, true, vec![]);
+            assert_eq!(tabs::current(&d.ctx, "sset", &tabs::session_tabs_env(false, true)), Tab::Environment);
+        }
+        assert!(!f.focus);
+        // Name und Wert behalten ihre Breite, auch wenn der Reiter schon im ersten Bild offen ist (das Raster merkte sich
+        // sonst die Spaltenbreiten des noch schmalen Fensters, und die Felder blieben wenige Zeichen breit).
+        let w = |key: &'static str| d.ctx.data(|m| m.get_temp::<Rect>(Id::new(("env_mark", key, 0usize)))).map(|r| r.width()).unwrap_or(0.0);
+        assert!(w("name") >= 100.0, "Name {}", w("name"));
+        assert!(w("value") >= 150.0, "Wert {}", w("value"));
     }
 
     #[test]

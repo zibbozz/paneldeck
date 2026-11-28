@@ -766,6 +766,30 @@ impl App {
                 actions.push(Action::OpenNotes(id));
                 ui.close();
             }
+            // Umgebungsvariablen (#384): kopieren bleibt in Paneldeck (geheime Werte nie in der Zwischenablage), *Als .env
+            // kopieren* lässt geheime Werte leer. Chats haben keine.
+            if !is_chat {
+                let has = self.entries.get(&id).is_some_and(|e| !e.meta.env.is_empty());
+                let clip = self.env_clip.is_some();
+                ui.menu_button(lang.t("Umgebungsvariablen", "Environment variables"), |ui| {
+                    if ui.button(lang.t("Bearbeiten …", "Edit …")).clicked() {
+                        actions.push(Action::EnvEdit(id));
+                        ui.close();
+                    }
+                    if ui.add_enabled(has, egui::Button::new(lang.t("Variablen kopieren", "Copy variables"))).on_hover_text(lang.t("Für „Variablen einfügen“ in einer anderen Sitzung; geheime Werte bleiben in Paneldeck.", "For “Paste variables” in another session; secret values stay inside Paneldeck.")).clicked() {
+                        actions.push(Action::EnvCopy(id));
+                        ui.close();
+                    }
+                    if ui.add_enabled(clip, egui::Button::new(lang.t("Variablen einfügen", "Paste variables"))).clicked() {
+                        actions.push(Action::EnvPaste(id));
+                        ui.close();
+                    }
+                    if ui.add_enabled(has, egui::Button::new(lang.t("Als .env kopieren", "Copy as .env"))).on_hover_text(lang.t("In die Zwischenablage, geheime Werte leer.", "To the clipboard, secret values empty.")).clicked() {
+                        actions.push(Action::EnvCopyDotenv(id));
+                        ui.close();
+                    }
+                });
+            }
             // Nur der Nutzer kann die Markierung aufheben (nie über MCP, #152).
             if tainted
                 && ui

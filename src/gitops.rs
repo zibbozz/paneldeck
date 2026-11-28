@@ -6,13 +6,87 @@ use std::process::Command;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
-pub fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
+/// Gerät, auf das `core.hooksPath` bei lesenden Befehlen zeigt (dort liegen nie Hooks).
+const NO_HOOKS: &str = if cfg!(windows) { "NUL" } else { "/dev/null" };
+
+/// **Der eine** gehärtete Aufbau jedes `git`-Aufrufs der App (#385): Eine fremde `.git/config` (z. B. aus einem entpackten
+/// ZIP) darf über automatische Aufrufe (Status, Änderungsmarken, Vergleich) nichts starten und nichts übers Netz holen.
+/// - `core.fsmonitor=false` (fsmonitor startet ein Programm), Pfade wörtlich (`--literal-pathspecs`, sonst stagt
+///   „a[1].txt“ auch „a1.txt“);
+/// - kein Netz: `protocol.allow=never` und je Protokoll (eine Repository-Einstellung `protocol.ext.allow=always` wäre
+///   sonst genauer), `GIT_NO_LAZY_FETCH=1` (Partial Clone/Promisor würde sonst beim Lesen eines fehlenden Objekts
+///   nachladen – mit `ext::` ein beliebiges Programm), kein Credential-Helfer, keine Rückfragen
+///   (`GIT_TERMINAL_PROMPT=0`, `GCM_INTERACTIVE=never`);
+/// - `read`: zusätzlich keine Hooks (`core.hooksPath` auf ein Gerät) und keine Signaturprüfung
+///   (`log.showSignature=false`, sonst startet `gpg.program`). Schreibende Befehle des Nutzers (Commit, Merge, Worktree)
+///   behalten seine Hooks.
+pub fn command(dir: &Path, read: bool) -> Command {
     let mut cmd = Command::new("git");
-    // core.fsmonitor aus: eine fremde .git/config (z. B. aus einem entpackten ZIP) könnte darüber beliebige
-    // Befehle starten, sobald die Hub-Ansicht automatisch `git status` aufruft. Pfade immer wörtlich
-    // nehmen (sonst stagt „a[1].txt“ auch „a1.txt“).
-    cmd.args(["-c", "core.fsmonitor=false", "--literal-pathspecs"]).args(args).current_dir(dir);
+    cmd.args(["-c", "core.fsmonitor=false", "-c", "protocol.allow=never"]);
+    for p in ["ext", "file", "http", "https", "ssh", "git", "fd"] {
+        cmd.arg("-c").arg(format!("protocol.{p}.allow=never"));
+    }
+    cmd.args(["-c", "credential.helper=", "-c", "core.askPass="]);
+    if read {
+        cmd.arg("-c").arg(format!("core.hooksPath={NO_HOOKS}"));
+        cmd.args(["-c", "log.showSignature=false", "-c", "core.quotepath=off"]);
+    }
+    cmd.arg("--literal-pathspecs").current_dir(dir);
+    cmd.env("GIT_NO_LAZY_FETCH", "1").env("GIT_TERMINAL_PROMPT", "0").env("GCM_INTERACTIVE", "never").env("GIT_PROTOCOL_FROM_USER", "0").env_remove("GIT_ASKPASS").env_remove("SSH_ASKPASS");
     crate::platform::process::hide_window(&mut cmd);
+    cmd
+}
+
+/// Prozess mit Zeitgrenze ausführen (`stdin` wird geschrieben): danach wird er beendet und ein Fehler gemeldet – eine
+/// hängende Freigabe oder ein blockierter Index lässt so nie eine Anzeige ewig warten.
+pub fn output_timeout(mut cmd: Command, stdin: Option<Vec<u8>>, timeout: Duration) -> Result<std::process::Output, String> {
+    use std::io::{Read, Write};
+    use std::process::Stdio;
+    cmd.stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() }).stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = cmd.spawn().map_err(|e| format!("{}: {e}", crate::state::t("git nicht gefunden", "git not found")))?;
+    let writer = child.stdin.take().zip(stdin).map(|(mut s, data)| {
+        std::thread::spawn(move || {
+            let _ = s.write_all(&data);
+        })
+    });
+    let mut out = child.stdout.take().ok_or("stdout")?;
+    let mut err = child.stderr.take().ok_or("stderr")?;
+    let ro = std::thread::spawn(move || {
+        let mut b = Vec::new();
+        let _ = out.read_to_end(&mut b);
+        b
+    });
+    let re = std::thread::spawn(move || {
+        let mut b = Vec::new();
+        let _ = err.read_to_end(&mut b);
+        b
+    });
+    let start = std::time::Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(s)) => break s,
+            Ok(None) if start.elapsed() >= timeout => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(crate::state::t("git antwortet nicht (Zeitgrenze überschritten).", "git does not respond (time limit exceeded).").to_string());
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(5)),
+            Err(e) => return Err(e.to_string()),
+        }
+    };
+    if let Some(w) = writer {
+        let _ = w.join();
+    }
+    Ok(std::process::Output { status, stdout: ro.join().unwrap_or_default(), stderr: re.join().unwrap_or_default() })
+}
+
+pub fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
+    run(dir, args, false)
+}
+
+fn run(dir: &Path, args: &[&str], read: bool) -> Result<String, String> {
+    let mut cmd = command(dir, read);
+    cmd.args(args);
     let out = cmd.output().map_err(|e| format!("{}: {e}", crate::state::t("git nicht gefunden", "git not found")))?;
     if out.status.success() {
         Ok(String::from_utf8_lossy(&out.stdout).to_string())
@@ -99,7 +173,7 @@ pub fn git_read(dir: &Path, args: &[&str]) -> Result<String, String> {
     let ov = read_only_overrides(dir);
     let mut all: Vec<&str> = ov.iter().map(String::as_str).collect();
     all.extend_from_slice(args);
-    git(dir, &all)
+    run(dir, &all, true)
 }
 
 pub fn repo_root(dir: &Path) -> Option<PathBuf> {
@@ -390,6 +464,36 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    /// #385: jeder Aufruf ist gehärtet (kein Netz, kein Nachladen, keine Helfer; lesend auch ohne Hooks und Signaturen).
+    #[test]
+    fn every_git_command_is_hardened() {
+        let args = |c: &Command| c.get_args().map(|a| a.to_string_lossy().to_string()).collect::<Vec<_>>();
+        let env = |c: &Command, k: &str| c.get_envs().find(|(n, _)| *n == k).and_then(|(_, v)| v.map(|v| v.to_string_lossy().to_string()));
+        for read in [false, true] {
+            let c = command(Path::new("."), read);
+            let a = args(&c);
+            for want in ["core.fsmonitor=false", "protocol.allow=never", "protocol.ext.allow=never", "protocol.file.allow=never", "credential.helper=", "--literal-pathspecs"] {
+                assert!(a.iter().any(|x| x == want), "{want} fehlt: {a:?}");
+            }
+            assert_eq!(env(&c, "GIT_NO_LAZY_FETCH").as_deref(), Some("1"));
+            assert_eq!(env(&c, "GIT_TERMINAL_PROMPT").as_deref(), Some("0"));
+            assert_eq!(env(&c, "GCM_INTERACTIVE").as_deref(), Some("never"));
+            assert_eq!(a.iter().any(|x| x.starts_with("core.hooksPath=")), read, "Hooks nur beim Lesen aus");
+            assert_eq!(a.iter().any(|x| x == "log.showSignature=false"), read);
+        }
+        // Zeitgrenze: ein hängender Prozess wird beendet
+        let mut slow = if cfg!(windows) { Command::new("ping") } else { Command::new("sleep") };
+        if cfg!(windows) {
+            slow.args(["-n", "30", "127.0.0.1"]);
+        } else {
+            slow.arg("30");
+        }
+        crate::platform::process::hide_window(&mut slow);
+        let t = std::time::Instant::now();
+        assert!(output_timeout(slow, None, Duration::from_millis(300)).is_err());
+        assert!(t.elapsed() < Duration::from_secs(10));
     }
 
     fn init(d: &Path) {

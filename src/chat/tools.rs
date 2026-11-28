@@ -62,6 +62,91 @@ pub struct ToolPolicy {
     /// Editor-Schalter der Agenten (#54, Bits wie `editor_svc::settings::AGENT_SWITCHES`, beim Anlegen gelesen):
     /// schreibende Editor-Werkzeuge bekommt das Modell nur, wenn ihr Schalter an ist.
     pub editor_switches: u8,
+    /// Obergrenze für die Paneldeck-Werkzeuge (#386): die Stufe des Projekts, in dem der Chat liegt („wie global“ = wie das
+    /// Modell). Die eigenen Agenten-Werkzeuge des Chats (Dateien, Befehle) gelten unabhängig davon weiter.
+    pub project_cap: McpLevel,
+    /// Stufe des Bereichs „Allgemein“ für diesen Chat (#386, Review 3.2.0; Editor, Zeit, Themes, Modelle …): Aufrufe
+    /// dorthin prüft [`ToolPolicy::check`] mit ihrer Stufe nach den Argumenten (`mcp::call_level`) schon vor der
+    /// Freigabe-Frage; der Hub prüft beim Ausführen noch einmal.
+    pub general_cap: McpLevel,
+    /// Schalter „Projekte anlegen“/„Löschen“ (#386, `access::AGENT_SWITCHES`), beim Anlegen gelesen.
+    pub access_switches: u8,
+    /// Über `more_tools` nachgeladene Werkzeuge (#393, `more_tools::loaded` aus dem Verlauf): Die Kurzfassung listet sie
+    /// zusätzlich zum Kern – sofern [`ToolPolicy::specs`] sie erlaubt. Ändert nie, was erlaubt ist.
+    pub loaded: Vec<String>,
+}
+
+/// Werkzeuge, die Chats nie bekommen – weder in der Werkzeug-Liste noch über `more_tools` noch beim Aufruf (#393: die eine
+/// Stelle dafür; `ToolPolicy::allowed` und `ToolPolicy::check`).
+///
+/// Derzeit leer: Reiter „Zeit“ und Kalender (#164) standen hier, der Nutzer hat sie für Chats freigegeben (schaltbar je
+/// Modell, standardmäßig aus: [`CHAT_DEFAULT_OFF`]). Der Mechanismus bleibt für künftige Werkzeuge. Platz im Chat-Prompt
+/// ist **kein** Grund für einen Eintrag hier (Entscheidung des Nutzers: nichts kürzen, nichts aus Platzgründen ausschließen).
+pub const NOT_FOR_CHATS: &[&str] = &[];
+
+/// Werkzeuge, die Chats nur bekommen, wenn der Nutzer sie für das Modell anhakt (*Einstellungen → Modelle*, Liste der
+/// Werkzeuge; `LlmModel::enabled_tools`, #393). Alle neu in 3.2.0; die Stelle, an der ein Standard umgestellt wird – ein
+/// Werkzeug aus der Liste nehmen = für alle Modelle an (abwählbar wie jedes andere über `disabled_tools`).
+///
+/// Angehakt gelten für sie dieselben Regeln wie für jedes andere Werkzeug: Stufe und Modus, Schalter (Editor, „Projekte
+/// anlegen“, „Löschen“), Zugriff je Projekt (#386), Plan-Modus und Freigabe – in kleinen Kontexten über `more_tools`, in
+/// großen direkt in der Liste. Externe Agenten betrifft die Liste nicht.
+pub const CHAT_DEFAULT_OFF: &[&str] = &[
+    // Reiter „Zeit“ (#164)
+    "list_alarms",
+    "list_timers",
+    "list_stopwatches",
+    "list_clocks",
+    "list_birthdays",
+    "create_alarm",
+    "update_alarm",
+    "create_timer",
+    "update_timer",
+    "create_stopwatch",
+    "control_stopwatch",
+    // Kalender (#164)
+    "list_calendar_events",
+    "create_calendar_event",
+    "update_calendar_event",
+    // Editor: Formatieren (#381), Vergleich (#385), Aktionen beim Speichern (#383)
+    "format_file",
+    "editor_diff",
+    "list_save_actions",
+    // Projekte anlegen, Papierkorb, Kommentare von Agenten (#386; dazu ihre Schalter in *Einstellungen → Agenten*)
+    "create_project",
+    "delete_ticket",
+    "update_comment",
+    "delete_comment",
+];
+
+/// Ist das Werkzeug für Chats standardmäßig aus ([`CHAT_DEFAULT_OFF`])?
+pub fn default_off(name: &str) -> bool {
+    CHAT_DEFAULT_OFF.contains(&name)
+}
+
+/// Ist das Werkzeug für dieses Modell angehakt (*Einstellungen → Modelle*)? Abgewählt (`disabled_tools`) geht vor; ein
+/// Werkzeug aus [`CHAT_DEFAULT_OFF`] nur, wenn es in `enabled_tools` steht; alle anderen, solange sie nicht abgewählt sind.
+/// Sagt nichts über Stufe, Modus oder Schalter (die prüft [`ToolPolicy`]).
+pub fn tool_checked(cfg: &LlmModel, name: &str) -> bool {
+    if cfg.disabled_tools.iter().any(|t| t == name) {
+        return false;
+    }
+    !default_off(name) || cfg.enabled_tools.iter().any(|t| t == name)
+}
+
+/// Häkchen eines Werkzeugs setzen (Liste in *Einstellungen → Modelle*): bei Standard-aus-Werkzeugen über `enabled_tools`,
+/// sonst über `disabled_tools`. Anhaken nimmt das Werkzeug immer auch aus `disabled_tools`.
+pub fn set_tool_checked(cfg: &mut LlmModel, name: &str, on: bool) {
+    if on {
+        cfg.disabled_tools.retain(|t| t != name);
+        if default_off(name) && !cfg.enabled_tools.iter().any(|t| t == name) {
+            cfg.enabled_tools.push(name.to_string());
+        }
+    } else if default_off(name) {
+        cfg.enabled_tools.retain(|t| t != name);
+    } else if !cfg.disabled_tools.iter().any(|t| t == name) {
+        cfg.disabled_tools.push(name.to_string());
+    }
 }
 
 impl ToolPolicy {
@@ -72,7 +157,13 @@ impl ToolPolicy {
             cfg.level = McpLevel::Off;
         }
         let editor_switches = crate::editor_svc::settings::AGENT_SWITCHES.load(std::sync::atomic::Ordering::Relaxed);
-        ToolPolicy { cfg, tools_supported, expert, origin_sessions: Vec::new(), agent: AgentEnv::default(), editor_switches }
+        ToolPolicy { cfg, tools_supported, expert, origin_sessions: Vec::new(), agent: AgentEnv::default(), editor_switches, project_cap: McpLevel::Control, general_cap: McpLevel::Control, access_switches: crate::access::AGENT_SWITCHES.load(std::sync::atomic::Ordering::Relaxed), loaded: Vec::new() }
+    }
+
+    /// Dieselbe Momentaufnahme mit den über `more_tools` nachgeladenen Werkzeugen (#393).
+    pub fn with_loaded(mut self, loaded: Vec<String>) -> Self {
+        self.loaded = loaded;
+        self
     }
 
     /// Dieselbe Momentaufnahme mit anderen Editor-Schaltern (Tests, ohne die globalen Schalter anzufassen).
@@ -80,6 +171,30 @@ impl ToolPolicy {
     pub fn with_editor_switches(mut self, bits: u8) -> Self {
         self.editor_switches = bits;
         self
+    }
+
+    /// Dieselbe Momentaufnahme mit anderen Schaltern „Projekte anlegen“/„Löschen“ (#386; Tests).
+    #[cfg(test)]
+    pub fn with_access_switches(mut self, bits: u8) -> Self {
+        self.access_switches = bits;
+        self
+    }
+
+    /// Dieselbe Momentaufnahme mit der Stufe des Projekts des Chats (#386): es gilt die niedrigere von Modell und Projekt.
+    pub fn with_project_cap(mut self, cap: McpLevel) -> Self {
+        self.project_cap = cap;
+        self
+    }
+
+    /// Dieselbe Momentaufnahme mit der Stufe des Bereichs „Allgemein“ für diesen Chat (#386, Review 3.2.0).
+    pub fn with_general_cap(mut self, cap: McpLevel) -> Self {
+        self.general_cap = cap;
+        self
+    }
+
+    /// Stufe für die Paneldeck-Werkzeuge: die niedrigere von Modell und Projekt (#386).
+    pub fn paneldeck_level(&self) -> McpLevel {
+        self.cfg.level.min(self.project_cap)
     }
 
     /// Dieselbe Momentaufnahme mit den Sitzungen der auslösenden Agenten-Kette.
@@ -110,22 +225,42 @@ impl ToolPolicy {
         self.tools_supported != Some(false) && self.cfg.level != McpLevel::Off
     }
 
-    /// Stufe, für die der Systemprompt gerendert wird: ohne Werkzeuge „Aus“.
+    /// Stufe, für die der Systemprompt gerendert wird: die wirksame Stufe der Paneldeck-Werkzeuge (Modell und Projekt,
+    /// Review 3.2.0); ohne Werkzeuge „Aus“.
     pub fn prompt_level(&self) -> McpLevel {
-        if self.enabled() { self.cfg.level } else { McpLevel::Off }
+        if self.enabled() { self.paneldeck_level() } else { McpLevel::Off }
+    }
+
+    /// Begrenzt das Projekt die Paneldeck-Werkzeuge unter die Stufe des Modells (#386)? Dann nennt der Prompt das.
+    pub fn project_limited(&self) -> bool {
+        self.enabled() && self.project_cap < self.cfg.level
+    }
+
+    /// Kann der Chat etwas ändern (Paneldeck-Werkzeuge der Stufe Steuern oder eigene schreibende Werkzeuge)? `defs` = die
+    /// angebotenen Werkzeuge. Bestimmt die Sätze zu Freigaben im Prompt.
+    pub fn can_write(&self, defs: &[mcp::ToolDef]) -> bool {
+        self.prompt_level() == McpLevel::Control || defs.iter().any(|d| d.level >= McpLevel::Control)
     }
 
     fn allowed(&self, def: &mcp::ToolDef) -> bool {
-        def.level <= self.cfg.level
+        def.level <= self.paneldeck_level()
             && def.group.available(self.expert)
-            && !self.cfg.disabled_tools.iter().any(|t| t == def.name)
+            // Angehakt (Einstellungen → Modelle): nicht abgewählt, Standard-aus-Werkzeuge nur eingeschaltet (#393).
+            && tool_checked(&self.cfg, def.name)
             // Editor (#54): schreibende Werkzeuge nur, wenn ihr Schalter an ist (geprüft wird beim Ausführen ohnehin).
             && crate::editor_svc::tools::offered_to_chats(def.name, self.editor_switches)
+            // #386: Projekte anlegen, Papierkorb, Kommentare löschen nur mit ihrem Schalter der Einstellungen (zusätzlich
+            // zum Häkchen beim Modell).
+            && crate::access::offered_to_chats(def.name, self.access_switches)
+            // Was Chats nie bekommen, steht in `NOT_FOR_CHATS` (derzeit nichts) – Platz in der Kurzfassung ist seit
+            // #393 kein Grund mehr (`more_tools`).
+            && !NOT_FOR_CHATS.contains(&def.name)
     }
 
-    /// Werkzeuge für die Anfrage: alle, die Stufe und Modus erlauben und die nicht einzeln gesperrt sind.
+    /// Alle Werkzeuge, die das Modell nutzen darf: alle, die Stufe und Modus erlauben und die nicht einzeln gesperrt sind.
     /// Dazu die Agenten-Werkzeuge (#338), die Stufe, Projektordner und Einstellungen erlauben; `run_command` in der
-    /// Fassung des Chats (ohne `session` im Terminal des Chats) statt der des MCP-Servers.
+    /// Fassung des Chats (ohne `session` im Terminal des Chats) statt der des MCP-Servers. Die volle Fassung des Prompts
+    /// sendet genau diese; die Kurzfassung davon nur den Kern samt `more_tools` ([`ToolPolicy::listed_specs`], #393).
     pub fn specs(&self) -> Vec<ToolSpec> {
         if !self.enabled() {
             return Vec::new();
@@ -139,17 +274,74 @@ impl ToolPolicy {
         v
     }
 
+    /// Werkzeuge der Kurzfassung (#393): der Kern (`more_tools::CORE`) und die nachgeladenen aus [`ToolPolicy::specs`],
+    /// dazu `more_tools`, wenn es weitere gibt. Erlaubt ist weiter alles aus [`ToolPolicy::specs`].
+    pub fn listed_specs(&self) -> Vec<ToolSpec> {
+        super::more_tools::listed(self)
+    }
+
     /// Darf der Aufruf jetzt laufen? `Ok(freigabepflichtig)` = Stufe „Steuern“ und nicht in [`NO_APPROVAL`]; sonst die
     /// Ergebnis-Nachricht für das Modell (Status, Inhalt).
     /// Geprüft wird bei der Ausführung, nicht beim Senden: die Einstellungen können sich dazwischen ändern.
     pub fn check(&self, call: &ToolCall) -> Result<bool, (ToolStatus, String)> {
+        self.check_with(call, None)
+    }
+
+    /// [`ToolPolicy::check`] mit schon ermittelter Antwort auf „berührt eine sensible Datei“ (`agent::file_check` im
+    /// Hintergrund, Review 3.2.0): dann ohne Plattenzugriff. `None` = selbst prüfen (blockiert; Tests, einmalige Prüfungen).
+    pub fn check_with(&self, call: &ToolCall, sensitive: Option<bool>) -> Result<bool, (ToolStatus, String)> {
+        // `more_tools` (#393): liest nur – ab Stufe Lesen, ohne Freigabe; was es nennt, folgt `specs`.
+        if call.name == super::more_tools::NAME {
+            if !self.enabled() {
+                return Err((ToolStatus::Denied, error_json("forbidden", "This tool is not allowed for this model (Settings → Models).")));
+            }
+            if let Err(msg) = super::repair::validate(&call.name, &super::more_tools::schema(), &call.arguments) {
+                return Err((ToolStatus::Error, error_json("bad_args", &msg)));
+            }
+            return Ok(false);
+        }
         if agent::is_local(call) {
-            return self.check_agent(call);
+            return self.check_agent(call, sensitive);
         }
         let Some(def) = mcp::tools().into_iter().find(|d| d.name == call.name) else {
             return Err((ToolStatus::Error, error_json("unknown_tool", &self.unknown_tool_message(&call.name))));
         };
-        if !self.enabled() || def.level > self.cfg.level || self.cfg.disabled_tools.iter().any(|t| t == def.name) {
+        // Stufe nach den Argumenten (`format_file` liest nur mit `op` = `validate`, #381).
+        let level = mcp::call_level(def.name, &call.arguments).unwrap_or(def.level);
+        // Nicht angehakt (abgewählt oder standardmäßig aus und nicht eingeschaltet, #393): verboten, auch wenn das Modell
+        // den Namen errät oder ihn aus einem früheren Verlauf kennt.
+        if !tool_checked(&self.cfg, def.name) {
+            return Err((ToolStatus::Denied, error_json("forbidden", "This tool is not allowed for this model (Settings → Models).")));
+        }
+        // `format_file` (#381) wie bei externen Agenten: `validate` ohne Schalter, alles andere nur mit „Agenten dürfen
+        // formatieren“ – geprüft vor der Freigabe-Frage (der Hub prüft beim Ausführen noch einmal).
+        if def.name == "format_file" && level >= McpLevel::Control && self.editor_switches & crate::editor_svc::settings::FORMAT == 0 {
+            return Err((ToolStatus::Denied, error_json("forbidden", "The user has not allowed this (Settings -> Editor -> Agents: \"Agents may format\"); only op validate works without it.")));
+        }
+        if !crate::access::allowed_for_chats(def.name, self.access_switches) {
+            return Err((ToolStatus::Denied, error_json("forbidden", "The user has not allowed this (Settings -> Agents: \"Agents may create projects\" / \"Agents may delete tickets/comments\").")));
+        }
+        // Das Projekt des Chats begrenzt die Paneldeck-Werkzeuge (#386): gesperrt = `project_locked`, sonst `forbidden`.
+        if self.enabled() && level <= self.cfg.level && level > self.project_cap {
+            let (code, msg) = if self.project_cap == McpLevel::Off {
+                (crate::access::LOCKED_CODE, "The project of this chat is locked for agents: no Paneldeck tools (only the user can release it in Settings -> Agents).")
+            } else {
+                ("forbidden", "The project of this chat only allows reading for agents (Settings -> Agents).")
+            };
+            return Err((ToolStatus::Denied, error_json(code, msg)));
+        }
+        // Werkzeuge ohne Projekt (Bereich „Allgemein“) mit ihrer Stufe nach den Argumenten (Review 3.2.0: `format_file`
+        // mit `op` ≠ `validate` braucht Steuern auch dort).
+        if self.enabled() && level <= self.paneldeck_level() && level > self.general_cap && crate::access::tool_scope(def.name, &call.arguments) == crate::access::ToolScope::General {
+            let (code, msg) = if self.general_cap == McpLevel::Off {
+                (crate::access::LOCKED_CODE, "The area General (tools without a project: editor, time, themes, models, history) is locked for agents (only the user can release it in Settings -> Agents).")
+            } else {
+                ("forbidden", "The area General (tools without a project: editor, time, themes, models, history) only allows reading for agents (Settings -> Agents).")
+            };
+            return Err((ToolStatus::Denied, error_json(code, msg)));
+        }
+        // Listung spielt keine Rolle (#393): ein erlaubtes Werkzeug läuft auch, wenn die Kurzfassung es nicht nennt.
+        if !self.enabled() || level > self.paneldeck_level() || NOT_FOR_CHATS.contains(&def.name) {
             return Err((ToolStatus::Denied, error_json("forbidden", "This tool is not allowed for this model (Settings → Models).")));
         }
         if !def.group.available(self.expert) {
@@ -173,13 +365,13 @@ impl ToolPolicy {
         if let Some(msg) = spawn_forbidden(&call.name, &call.arguments, &self.origin_sessions) {
             return Err((ToolStatus::Denied, error_json("forbidden", msg)));
         }
-        Ok(def.level >= McpLevel::Control && !approval_free(def.name, &call.arguments))
+        Ok(level >= McpLevel::Control && !approval_free(def.name, &call.arguments))
     }
 
     /// [`ToolPolicy::check`] für ein Agenten-Werkzeug (#338): Stufe, Sperre, angeboten (Projektordner, Einstellungen),
     /// Argumente; dann `Ok(fragen)` nach seiner Freigaberegel. Die Kette der auslösenden Agenten gilt auch hier (kein
     /// Start der MCP-Brücke über `run_command`).
-    fn check_agent(&self, call: &ToolCall) -> Result<bool, (ToolStatus, String)> {
+    fn check_agent(&self, call: &ToolCall, sensitive: Option<bool>) -> Result<bool, (ToolStatus, String)> {
         let Some(def) = agent::def(&call.name) else {
             return Err((ToolStatus::Error, error_json("unknown_tool", &self.unknown_tool_message(&call.name))));
         };
@@ -199,7 +391,10 @@ impl ToolPolicy {
         if let Some(msg) = spawn_forbidden(&call.name, &call.arguments, &self.origin_sessions) {
             return Err((ToolStatus::Denied, error_json("forbidden", msg)));
         }
-        Ok(agent::asks(&def, call, &self.agent))
+        Ok(match sensitive {
+            Some(s) => agent::asks_with(&def, call, s),
+            None => agent::asks(&def, call, &self.agent),
+        })
     }
 
     /// Meldung für einen Aufruf ohne oder mit unbekanntem Werkzeugnamen: nennt die Werkzeuge, die das Modell hat (#340).
@@ -217,8 +412,19 @@ impl ToolPolicy {
     /// Chats (passen nur bei gleichem Werkzeug und gleicher Ziel-Sitzung).
     /// Aufrufe, die eine sensible Datei berühren (#338: lesen, ändern, verschieben), fragen immer – auch wenn „Vor
     /// Schreib-Aktionen nachfragen“ aus ist und trotz „Immer für diesen Chat“.
+    #[cfg(test)]
     pub fn needs_approval(&self, ask: bool, call: &ToolCall, always: &[AllowRule]) -> bool {
-        if ask && agent::must_ask(call, &self.agent) {
+        self.needs_approval_with(ask, call, always, None)
+    }
+
+    /// [`ToolPolicy::needs_approval`] mit schon ermittelter Antwort auf „sensibel“ (`agent::file_check`, Review 3.2.0);
+    /// `None` = selbst prüfen (blockiert).
+    pub fn needs_approval_with(&self, ask: bool, call: &ToolCall, always: &[AllowRule], sensitive: Option<bool>) -> bool {
+        let must = match sensitive {
+            Some(s) => agent::is_local(call) && s,
+            None => agent::must_ask(call, &self.agent),
+        };
+        if ask && must {
             return true;
         }
         ask && self.cfg.ask_write && !always.iter().any(|r| r.matches(call))
@@ -586,6 +792,27 @@ mod tests {
         ToolPolicy::new(cfg, None, expert)
     }
 
+    /// Dieselbe Momentaufnahme mit allen Standard-aus-Werkzeugen angehakt (#393).
+    pub(crate) fn all_checked(mut p: ToolPolicy) -> ToolPolicy {
+        p.cfg.enabled_tools = CHAT_DEFAULT_OFF.iter().map(|s| s.to_string()).collect();
+        p
+    }
+
+    #[test]
+    fn the_lower_of_model_and_project_level_applies() {
+        let model = LlmModel { level: McpLevel::Control, level_chosen: true, ..LlmModel::named("m") };
+        let p = ToolPolicy::new(model.clone(), None, false).with_project_cap(McpLevel::Read);
+        assert_eq!(p.paneldeck_level(), McpLevel::Read);
+        assert!(names(&p).contains(&"list_sessions".to_string()) && !names(&p).contains(&"send_text".to_string()));
+        assert!(p.check(&call("send_text", json!({"session": 1, "text": "x"}))).unwrap_err().1.contains("forbidden"));
+        let locked = ToolPolicy::new(model.clone(), None, false).with_project_cap(McpLevel::Off);
+        assert!(locked.enabled(), "die eigenen Werkzeuge des Chats bleiben");
+        assert!(!names(&locked).iter().any(|n| crate::mcp::tool_level(n).is_some() && !super::agent::is_agent_tool(n)), "keine Paneldeck-Werkzeuge: {:?}", names(&locked));
+        assert!(locked.check(&call("list_sessions", json!({}))).unwrap_err().1.contains(crate::access::LOCKED_CODE));
+        let low = ToolPolicy::new(LlmModel { level: McpLevel::Read, level_chosen: true, ..LlmModel::named("m") }, None, false).with_project_cap(McpLevel::Control);
+        assert_eq!(low.paneldeck_level(), McpLevel::Read, "das Modell begrenzt auch");
+    }
+
     #[test]
     fn an_unchosen_level_counts_as_off() {
         let p = ToolPolicy::new(LlmModel { level: McpLevel::Control, level_chosen: false, ..LlmModel::named("m") }, None, false);
@@ -595,6 +822,70 @@ mod tests {
 
     fn call(name: &str, args: Value) -> ToolCall {
         ToolCall { id: "c".into(), name: name.into(), arguments: args }
+    }
+
+    /// #381: `format_file` mit `validate` gilt als Lesen (ohne Freigabe, ohne Schalter), alles andere als Steuern (mit
+    /// Freigabe) und nur mit dem Schalter „Agenten dürfen formatieren“ – wie bei externen Agenten. Für Chats ist es
+    /// standardmäßig aus (#393) und erst angehakt da.
+    #[test]
+    fn format_file_level_follows_the_op() {
+        use crate::editor_svc::settings::{DOCS_OPEN, FORMAT};
+        let fc = |op: &str| call("format_file", json!({"path": "C:\\a.json", "op": op}));
+        // standardmäßig aus
+        assert!(policy(McpLevel::Control, &[], false).with_editor_switches(DOCS_OPEN | FORMAT).check(&fc("validate")).unwrap_err().1.contains("Settings → Models"));
+        assert!(!names(&policy(McpLevel::Read, &[], false).with_editor_switches(DOCS_OPEN)).contains(&"format_file".to_string()));
+        // angehakt, ohne Schalter: Prüfen ab Lesen, angeboten mit offenem Dokument
+        let read = all_checked(policy(McpLevel::Read, &[], false)).with_editor_switches(DOCS_OPEN);
+        assert!(names(&read).contains(&"format_file".to_string()), "validate ohne Schalter");
+        assert!(!names(&all_checked(policy(McpLevel::Read, &[], false)).with_editor_switches(0)).contains(&"format_file".to_string()), "nur mit offenem Dokument");
+        assert_eq!(read.check(&fc("validate")), Ok(false));
+        assert!(read.check(&fc("format")).unwrap_err().1.contains("forbidden"));
+        let ctl = all_checked(policy(McpLevel::Control, &[], false)).with_editor_switches(DOCS_OPEN);
+        assert_eq!(ctl.check(&fc("validate")), Ok(false));
+        let (st, body) = ctl.check(&fc("minify")).unwrap_err();
+        assert!(st == ToolStatus::Denied && body.contains("forbidden") && body.contains("Agents may format"), "ohne Schalter: vor der Freigabe abgelehnt: {body}");
+        // mit Schalter: schreibend mit Freigabe
+        let on = all_checked(policy(McpLevel::Control, &[], false)).with_editor_switches(DOCS_OPEN | FORMAT);
+        assert_eq!(on.check(&fc("minify")), Ok(true), "schreibend: Freigabe");
+        assert_eq!(on.check(&fc("validate")), Ok(false));
+        assert!(all_checked(policy(McpLevel::Control, &["format_file"], false)).with_editor_switches(DOCS_OPEN | FORMAT).check(&call("format_file", json!({"op": "validate"}))).unwrap_err().1.contains("forbidden"), "abwählbar");
+    }
+
+    /// Review 3.2.0 (Blocker): Ein Chat in einem Projekt mit *Steuern* formatiert nicht, wenn „Allgemein“ nur Lesen
+    /// erlaubt – geprüft mit der Stufe nach den Argumenten, vor der Freigabe-Frage.
+    #[test]
+    fn general_read_blocks_writing_format_calls_of_chats() {
+        use crate::editor_svc::settings::{DOCS_OPEN, FORMAT};
+        let fc = |op: &str| call("format_file", json!({"path": "C:\\a.json", "op": op}));
+        let base = all_checked(policy(McpLevel::Control, &[], false)).with_editor_switches(DOCS_OPEN | FORMAT).with_project_cap(McpLevel::Control);
+        let ro = base.clone().with_general_cap(McpLevel::Read);
+        for op in ["format", "minify", "sort_keys"] {
+            let (st, body) = ro.check(&fc(op)).unwrap_err();
+            assert!(st == ToolStatus::Denied && body.contains("forbidden") && body.contains("General"), "{op}: {body}");
+        }
+        assert_eq!(ro.check(&fc("validate")), Ok(false), "Lesen bleibt");
+        let off = base.clone().with_general_cap(McpLevel::Off);
+        assert!(off.check(&fc("validate")).unwrap_err().1.contains(crate::access::LOCKED_CODE));
+        assert!(off.check(&call("list_alarms", json!({}))).unwrap_err().1.contains(crate::access::LOCKED_CODE), "alle Werkzeuge ohne Projekt");
+        assert!(off.check(&call("list_sessions", json!({}))).is_ok(), "Werkzeuge mit eigener Prüfung bleiben");
+        assert_eq!(base.check(&fc("format")), Ok(true), "Allgemein Steuern: schreibend mit Freigabe");
+    }
+
+    /// Review 3.2.0: Die Anfrage nennt die wirksame Stufe (Modell und Projekt); `auto_context_cap` rechnet mit ihr.
+    #[test]
+    fn the_prompt_level_is_the_effective_level() {
+        let ctl = policy(McpLevel::Control, &[], false);
+        assert_eq!(ctl.prompt_level(), McpLevel::Control);
+        assert!(!ctl.project_limited());
+        let ro = ctl.clone().with_project_cap(McpLevel::Read);
+        assert_eq!(ro.prompt_level(), McpLevel::Read);
+        assert!(ro.project_limited());
+        assert!(!names(&ro).iter().any(|n| n == "send_text" || n == "create_session"), "keine schreibenden Paneldeck-Werkzeuge");
+        assert_eq!(crate::chat::llm_backend::auto_context_cap(&ro), None, "Grenze für Steuern gilt nicht");
+        assert_eq!(crate::chat::llm_backend::auto_context_cap(&ctl), Some(crate::chat::llm_backend::CONTROL_SIMPLE_AUTO_CONTEXT));
+        let locked = ctl.clone().with_project_cap(McpLevel::Off);
+        assert_eq!(locked.prompt_level(), McpLevel::Off);
+        assert!(locked.enabled(), "eigene Werkzeuge des Chats bleiben");
     }
 
     fn names(p: &ToolPolicy) -> Vec<String> {
@@ -634,9 +925,142 @@ mod tests {
         assert!(read < crate::llm::config::DEFAULT_CONTEXT as usize / 2, "{read}");
     }
 
+    /// #393: Die neuen Werkzeuge von 3.2.0 in [`CHAT_DEFAULT_OFF`] sind für Chats standardmäßig aus – nicht in der Liste,
+    /// nicht über `more_tools`, beim Aufruf `forbidden` – und je Modell einschaltbar; dann gelten Stufe, Modus und
+    /// Schalter wie für jedes andere Werkzeug. Häkchen setzen und wegnehmen geht über `set_tool_checked`.
+    #[test]
+    fn new_tools_are_off_by_default_and_can_be_checked_per_model() {
+        assert!(NOT_FOR_CHATS.is_empty(), "derzeit nichts ausgeschlossen: {NOT_FOR_CHATS:?}");
+        assert_eq!(CHAT_DEFAULT_OFF.len(), 21, "14 Zeit/Kalender + format_file + editor_diff + list_save_actions + 4 aus #386");
+        for t in crate::time::agent::TOOLS.iter().chain(crate::calendar::agent::TOOLS.iter()).chain(["format_file", "editor_diff", "list_save_actions", "create_project", "delete_ticket", "update_comment", "delete_comment"].iter()) {
+            assert!(default_off(t), "{t}");
+        }
+        let mut seen = std::collections::HashSet::new();
+        for t in CHAT_DEFAULT_OFF {
+            assert!(seen.insert(*t), "{t}: doppelt");
+            assert!(mcp::tool_level(t).is_some(), "{t}: kein MCP-Werkzeug");
+            assert!(!super::super::more_tools::is_core(t), "{t}: Standard-aus-Werkzeuge gehören nicht zum Kern");
+        }
+        let off = names(&policy(McpLevel::Control, &[], true).with_access_switches(crate::access::SW_CREATE | crate::access::SW_DELETE).with_editor_switches(0xff));
+        for t in CHAT_DEFAULT_OFF {
+            assert!(!off.contains(&t.to_string()), "{t}: standardmäßig aus");
+            let p = policy(McpLevel::Control, &[], true);
+            let r = p.check(&call(t, json!({})));
+            assert!(matches!(&r, Err((ToolStatus::Denied, b)) if b.contains("forbidden") && b.contains("Settings → Models")), "{t}: {r:?}");
+            assert!(super::super::more_tools::run(&p, &json!({"name": t})).unwrap_err().0 == "forbidden", "{t}: more_tools beschreibt es nicht");
+        }
+        // Häkchen setzen/wegnehmen
+        let mut cfg = LlmModel::named("m");
+        cfg.disabled_tools = vec!["list_alarms".into()];
+        assert!(!tool_checked(&cfg, "list_alarms") && tool_checked(&cfg, "list_sessions"));
+        set_tool_checked(&mut cfg, "list_alarms", true);
+        assert!(tool_checked(&cfg, "list_alarms") && cfg.disabled_tools.is_empty() && cfg.enabled_tools == ["list_alarms"]);
+        set_tool_checked(&mut cfg, "list_alarms", true);
+        assert_eq!(cfg.enabled_tools, ["list_alarms"], "nicht doppelt");
+        set_tool_checked(&mut cfg, "list_alarms", false);
+        assert!(!tool_checked(&cfg, "list_alarms") && cfg.enabled_tools.is_empty() && cfg.disabled_tools.is_empty());
+        set_tool_checked(&mut cfg, "list_sessions", false);
+        assert!(!tool_checked(&cfg, "list_sessions") && cfg.disabled_tools == ["list_sessions"]);
+        set_tool_checked(&mut cfg, "list_sessions", true);
+        assert!(tool_checked(&cfg, "list_sessions") && cfg.disabled_tools.is_empty() && cfg.enabled_tools.is_empty());
+        // abgewählt geht vor eingeschaltet
+        cfg.enabled_tools = vec!["list_alarms".into()];
+        cfg.disabled_tools = vec!["list_alarms".into()];
+        assert!(!tool_checked(&cfg, "list_alarms"));
+    }
+
+    /// Reiter „Zeit“ und Kalender (#164), angehakt (#393): Chats bekommen sie wie externe Agenten – Lesen ab Stufe Lesen,
+    /// Schreiben erst bei Steuern und mit Freigabe; der Plan-Modus sperrt die schreibenden.
+    #[test]
+    fn checked_time_and_calendar_tools_are_offered_to_chats_by_level() {
+        let all: Vec<&str> = crate::time::agent::TOOLS.iter().chain(crate::calendar::agent::TOOLS.iter()).copied().collect();
+        assert_eq!(all.len(), 14, "11 Zeit + 3 Kalender");
+        let read = names(&all_checked(policy(McpLevel::Read, &[], false)));
+        let ctl = names(&all_checked(policy(McpLevel::Control, &[], false)));
+        for t in all {
+            let level = mcp::tool_level(t).unwrap_or_else(|| panic!("{t}: kein MCP-Werkzeug"));
+            assert_eq!(read.contains(&t.to_string()), level == McpLevel::Read, "{t}: Lesen");
+            assert!(ctl.contains(&t.to_string()), "{t}: Steuern");
+            assert_eq!(crate::chat::plan::is_read_only(t), level == McpLevel::Read, "{t}: Plan-Modus");
+            let r = all_checked(policy(McpLevel::Control, &[], false)).check(&call(t, json!({})));
+            assert!(!matches!(r, Err((ToolStatus::Denied, _))), "{t}: nicht gesperrt: {r:?}");
+            let r = all_checked(policy(McpLevel::Read, &[], false)).check(&call(t, json!({})));
+            assert_eq!(matches!(r, Err((ToolStatus::Denied, _))), level != McpLevel::Read, "{t}: Lesen: {r:?}");
+            // abgewählt bleibt abgewählt, auch wenn eingeschaltet
+            assert!(matches!(all_checked(policy(McpLevel::Control, &[t], false)).check(&call(t, json!({}))), Err((ToolStatus::Denied, _))), "{t}");
+        }
+        // Schreibende fragen nach (Stufe Steuern, keine Ausnahme), lesende nicht.
+        let log = call("create_alarm", json!({"time": "07:30"}));
+        assert_eq!(all_checked(policy(McpLevel::Control, &[], false)).check(&log), Ok(true));
+        assert_eq!(all_checked(policy(McpLevel::Control, &[], false)).check(&call("list_alarms", json!({}))), Ok(false));
+        assert!(crate::chat::more_tools::run(&all_checked(policy(McpLevel::Control, &[], true)), &json!({"name": "create_calendar_event"})).is_ok());
+        // Nur ein einzelnes eingeschaltet: genau das kommt dazu.
+        let mut one = policy(McpLevel::Read, &[], false);
+        one.cfg.enabled_tools = vec!["list_alarms".into()];
+        let n = names(&one);
+        assert!(n.contains(&"list_alarms".to_string()) && !n.contains(&"list_timers".to_string()));
+    }
+
+    /// #385/#383: `editor_diff` und `list_save_actions` angehakt: `editor_diff` wie `editor_read` (Stufe Lesen, nur mit
+    /// offenem Dokument), `list_save_actions` ab Lesen; beide lesen nur (auch im Plan-Modus erlaubt, ohne Freigabe).
+    #[test]
+    fn checked_diff_and_save_action_list_are_read_tools() {
+        let docs = crate::editor_svc::settings::DOCS_OPEN;
+        let with_docs = names(&all_checked(policy(McpLevel::Read, &[], false)).with_editor_switches(docs));
+        assert!(with_docs.contains(&"editor_diff".to_string()) && with_docs.contains(&"list_save_actions".to_string()));
+        let no_docs = names(&all_checked(policy(McpLevel::Read, &[], false)).with_editor_switches(0));
+        assert!(!no_docs.contains(&"editor_diff".to_string()) && no_docs.contains(&"list_save_actions".to_string()), "Vergleich nur mit offenem Dokument");
+        for t in ["editor_diff", "list_save_actions"] {
+            let args = if t == "editor_diff" { json!({"doc": 1}) } else { json!({}) };
+            assert_eq!(all_checked(policy(McpLevel::Read, &[], false)).with_editor_switches(docs).check(&call(t, args)), Ok(false), "{t}: liest, ohne Freigabe");
+            assert!(crate::chat::plan::is_read_only(t), "{t}: Plan-Modus");
+        }
+    }
+
+    /// #386 mit #393: Projekte anlegen, Papierkorb und Kommentare ändern sind für Chats standardmäßig aus. Angehakt gelten
+    /// zusätzlich die Schalter der Einstellungen wie für externe Agenten (`create_project` nur mit „Projekte anlegen“,
+    /// `delete_ticket`/`delete_comment` nur mit „Löschen“, `update_comment` mit Steuern allein); jeder Aufruf schreibt
+    /// (Freigabe). `create_session` hat im Chat dasselbe Schema wie für externe Agenten (mit `project`; der Hub prüft das
+    /// Zielprojekt nach dem Zugriff des Chats).
+    #[test]
+    fn project_access_extension_is_off_by_default_and_follows_its_switches() {
+        let both = crate::access::SW_CREATE | crate::access::SW_DELETE;
+        let four = ["create_project", "delete_ticket", "update_comment", "delete_comment"];
+        let args = json!({"comment": 1, "body": "x", "ticket": "A-1", "key": "AB", "name": "n"});
+        let unchecked = policy(McpLevel::Control, &[], true).with_access_switches(both);
+        for t in four {
+            assert!(!names(&unchecked).contains(&t.to_string()), "{t}: standardmäßig aus");
+            assert!(matches!(unchecked.check(&call(t, args.clone())), Err((ToolStatus::Denied, _))), "{t}");
+        }
+        let checked = all_checked(policy(McpLevel::Control, &[], true));
+        let none = names(&checked.clone().with_access_switches(0));
+        assert_eq!(four.map(|t| none.contains(&t.to_string())), [false, false, true, false], "ohne Schalter nur update_comment");
+        let on = checked.clone().with_access_switches(both);
+        for t in four {
+            assert!(names(&on).contains(&t.to_string()), "{t}: angehakt + Schalter");
+            assert!(!matches!(on.check(&call(t, args.clone())), Err((ToolStatus::Denied, _))), "{t}");
+        }
+        assert!(matches!(checked.clone().with_access_switches(0).check(&call("delete_ticket", json!({"ticket": "A-1"}))), Err((ToolStatus::Denied, _))), "Schalter gilt zusätzlich");
+        // Lesen reicht nicht
+        assert!(!names(&all_checked(policy(McpLevel::Read, &[], true)).with_access_switches(both)).iter().any(|n| four.contains(&n.as_str())));
+        // `create_session`: volles Schema wie bei externen Agenten
+        let cs = checked.specs().into_iter().find(|s| s.name == "create_session").unwrap();
+        let ext = mcp::tools().into_iter().find(|d| d.name == "create_session").unwrap();
+        assert!(cs.parameters["properties"].get("project").is_some(), "project wieder da");
+        assert!(ext.schema["properties"]["env"]["description"].as_str().unwrap().starts_with("Terminals only"));
+        assert_eq!(cs.parameters["properties"]["env"]["description"].as_str().map(|d| d.chars().count() <= COMPACT_PARAM_CHARS + 1), Some(true), "knapp wie jede Parameter-Beschreibung");
+    }
+
+    /// Standard und alle Standard-aus-Werkzeuge angehakt (#393): jede knappe Beschreibung behält Name, Parameter und
+    /// Sicherheitshinweise, das Schema entspricht dem der externen Agenten.
     #[test]
     fn compact_specs_keep_names_parameters_and_safety_notes() {
-        let p = policy(McpLevel::Control, &[], true);
+        for p in [policy(McpLevel::Control, &[], true), all_checked(policy(McpLevel::Control, &[], true)).with_access_switches(crate::access::SW_CREATE | crate::access::SW_DELETE).with_editor_switches(crate::editor_svc::settings::DOCS_OPEN)] {
+            compact_specs_of(&p);
+        }
+    }
+
+    fn compact_specs_of(p: &ToolPolicy) {
         // Nur die Paneldeck-Werkzeuge (die Agenten-Werkzeuge haben eigene, kurze Beschreibungen, #338).
         let specs: Vec<ToolSpec> = p.specs().into_iter().filter(|s| !agent::is_agent_tool(&s.name)).collect();
         let full: Vec<mcp::ToolDef> = mcp::tools().into_iter().filter(|d| specs.iter().any(|s| s.name == d.name)).collect();
@@ -1060,10 +1484,16 @@ mod tests {
     fn agent_tool_specs_fit_into_the_default_context() {
         let (d, env) = agent::paths::tests::tmp_root("specsize");
         let size = |p: &ToolPolicy| crate::llm::tokens::estimate_tokens(&serde_json::to_string(&p.specs()).unwrap());
+        // Standard (#393: ohne die Standard-aus-Werkzeuge) – die Grenze gilt für ihn.
         let read = size(&policy(McpLevel::Read, &[], false).with_agent(env.clone()));
-        let all = size(&policy(McpLevel::Control, &[], true).with_agent(env));
+        let all = size(&policy(McpLevel::Control, &[], true).with_agent(env.clone()));
         eprintln!("tool spec tokens with agent tools: read {read}, control+expert {all}");
         assert!(read < crate::llm::config::DEFAULT_CONTEXT as usize / 2, "{read}");
+        // Alles angehakt: nur die Zahlen (ein kleiner Kontext bekommt die Kurzfassung mit `more_tools`, siehe
+        // `master_prompt::tests::all_default_off_tools_checked_still_give_a_working_prompt`).
+        let read_all = size(&all_checked(policy(McpLevel::Read, &[], false)).with_agent(env.clone()));
+        let all_all = size(&all_checked(policy(McpLevel::Control, &[], true)).with_agent(env).with_access_switches(crate::access::SW_CREATE | crate::access::SW_DELETE));
+        eprintln!("tool spec tokens with agent tools, all default-off tools checked: read {read_all}, control+expert {all_all}");
         let _ = std::fs::remove_dir_all(&d);
     }
 

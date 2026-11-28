@@ -346,6 +346,23 @@ pub struct WriteResult {
     pub atomic: bool,
 }
 
+/// A save prepared by [`Document::begin_save`], written in another thread (#392).
+pub struct SaveJob {
+    pub path: PathBuf,
+    rope: ropey::Rope,
+    fmt: FileFormat,
+    /// Text state that is written ([`Document::state_id`]).
+    pub state: u64,
+}
+
+impl SaveJob {
+    /// Write the file atomically (blocking).
+    pub fn write(&self) -> Result<WriteResult, SaveError> {
+        let (rope, fmt) = (&self.rope, self.fmt);
+        atomic_write(&self.path, |out| encoding::write_encoded(rope, fmt.encoding, fmt.eol, out).map(|_| ()))
+    }
+}
+
 /// Write a file atomically: `write` fills a temp file in the same folder, which then replaces `path` (symbolic links
 /// are followed, so the link stays). Permissions of an existing file are kept; read-only files are refused.
 /// On error the temp file is removed and `path` is untouched.
@@ -628,6 +645,41 @@ impl Document {
         self.save_to(sels, path, true)
     }
 
+    /// Prepare saving in a background thread (slow file systems such as WSL, #392): applies the save fixes, checks the
+    /// encoding and takes a copy of the text. Write it with [`SaveJob::write`] (any thread), then apply the result with
+    /// [`Document::finish_save`].
+    pub fn begin_save(&mut self, sels: &mut Selections, path: Option<&Path>) -> Result<SaveJob, SaveError> {
+        let path = path.map(Path::to_path_buf).or_else(|| self.path.clone()).ok_or(SaveError::NoPath)?;
+        if let Some(u) = self.first_unencodable() {
+            return Err(SaveError::Unencodable(u));
+        }
+        self.apply_save_fixes(sels);
+        Ok(SaveJob { path, rope: self.rope().clone(), fmt: self.format, state: self.state_id() })
+    }
+
+    /// Result of a [`SaveJob`]: the file holds the text of the job's state (newer edits keep the document dirty).
+    pub fn finish_save(&mut self, path: &Path, state: u64, w: WriteResult) {
+        self.path = Some(path.to_path_buf());
+        self.disk = Some(w.snapshot);
+        self.load_info.file_size = w.bytes;
+        self.mark_saved_state(state);
+    }
+
+    /// Replace the buffer by file content read elsewhere (background reload, #392); like [`Document::reload_from_disk`].
+    pub fn reload_with_bytes(&mut self, sels: &mut Selections, bytes: Vec<u8>, meta: &std::fs::Metadata) -> Result<DiffSummary, OpenError> {
+        let enc = self.forced_encoding();
+        self.reload_from(sels, bytes, meta, enc)
+    }
+
+    /// Does file content read elsewhere differ from the snapshot of the last load/save?
+    pub fn differs_from_disk(&self, bytes: &[u8], meta: &std::fs::Metadata) -> bool {
+        let s = DiskSnapshot::from_parts(bytes, meta);
+        match &self.disk {
+            Some(k) => !(k.len == s.len && k.hash == s.hash),
+            None => true,
+        }
+    }
+
     /// Write a copy to `path` without changing the document (no save fixes, still dirty).
     #[allow(dead_code)] // API („Kopie speichern unter“, später)
     pub fn save_copy(&self, path: &Path) -> Result<SaveReport, SaveError> {
@@ -701,7 +753,11 @@ impl Document {
         let path = self.path.clone().ok_or(OpenError::NotAFile)?;
         let bytes = std::fs::read(&path)?;
         let meta = std::fs::metadata(&path)?;
-        let snap = DiskSnapshot::from_parts(&bytes, &meta);
+        self.reload_from(sels, bytes, &meta, enc)
+    }
+
+    fn reload_from(&mut self, sels: &mut Selections, bytes: Vec<u8>, meta: &std::fs::Metadata, enc: Option<TextEncoding>) -> Result<DiffSummary, OpenError> {
+        let snap = DiskSnapshot::from_parts(&bytes, meta);
         // A BOM in the new file wins over the remembered encoding.
         let bom = encoding::detect(&bytes);
         let enc = match bom {
@@ -783,6 +839,38 @@ mod tests {
         let mut c = ContentHasher::new();
         c.update(&data[..999]);
         assert_ne!(a.finish(), c.finish());
+    }
+
+    /// #392: Speichern in einem anderen Thread (WSL) – getippt wird weiter, das Dokument bleibt dann ungespeichert.
+    #[test]
+    fn background_save_and_reload_with_read_bytes() {
+        let dir = test_dir("bg-save");
+        let p = dir.join("a.txt");
+        std::fs::write(&p, "one\n").unwrap();
+        let (mut d, _) = Document::open(&p, &OpenOptions::default()).unwrap();
+        let mut s = d.new_selections(0);
+        d.insert_text(&mut s, "x", crate::editor::EditOrigin::User);
+        assert!(d.is_dirty());
+        let job = d.begin_save(&mut s, None).unwrap();
+        let state = job.state;
+        // Während des Schreibens weiter tippen
+        d.insert_text(&mut s, "y", crate::editor::EditOrigin::User);
+        let w = std::thread::spawn(move || job.write()).join().unwrap().unwrap();
+        d.finish_save(&p, state, w);
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "xone\n");
+        assert!(d.is_dirty(), "die neuere Eingabe ist noch nicht gespeichert");
+        assert_eq!(d.check_disk().unwrap(), DiskState::Unchanged);
+        // Eingelesene Bytes: gleich → unverändert; anders → neu laden
+        let bytes = std::fs::read(&p).unwrap();
+        let meta = std::fs::metadata(&p).unwrap();
+        assert!(!d.differs_from_disk(&bytes, &meta));
+        std::fs::write(&p, "other\n").unwrap();
+        let (bytes, meta) = (std::fs::read(&p).unwrap(), std::fs::metadata(&p).unwrap());
+        assert!(d.differs_from_disk(&bytes, &meta));
+        d.reload_with_bytes(&mut s, bytes, &meta).unwrap();
+        assert_eq!(d.text(), "other\n");
+        assert!(!d.is_dirty());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -21,6 +21,18 @@ pub const D_BASE: f32 = 0.20;
 
 static ANIMATIONS: AtomicBool = AtomicBool::new(true);
 
+/// Zeigt das gerade gezeichnete Fenster den eigenen Hintergrund des Themes (#387)? Dann füllen Flächen nur einmal in der
+/// Deckkraft ihres Bereichs (keine doppelten Schichten).
+static BACKDROP: AtomicBool = AtomicBool::new(false);
+
+pub fn set_backdrop(on: bool) {
+    BACKDROP.store(on, Ordering::Relaxed);
+}
+
+pub fn backdrop_on() -> bool {
+    BACKDROP.load(Ordering::Relaxed)
+}
+
 /// Zusatz für Animations-Ids: das gerade gezeichnete Paneldeck-Fenster (0 = Hauptfenster, #110). egui führt Animationen
 /// für alle Fenster gemeinsam nach Id; ohne Zusatz kämpften gleiche Knöpfe zweier Fenster um denselben Wert.
 static ID_SALT: AtomicU64 = AtomicU64::new(0);
@@ -258,7 +270,9 @@ pub fn build_style(style: &mut egui::Style, theme: &Theme, opacity: f32, accent:
         base
     };
     let dark = theme.dark;
-    let a = opacity.clamp(0.3, 1.0);
+    // Mit eigenem Hintergrund des Themes (#387) darf die Seitenleiste durchscheinender sein als der Regler (30 %); Titelleiste
+    // und Design-Prüfung nutzen denselben Wert.
+    let a = opacity.clamp(0.0, 1.0);
     let fade = |c: Color32| c.gamma_multiply(a);
 
     let mut v = if dark { egui::Visuals::dark() } else { egui::Visuals::light() };
@@ -376,6 +390,8 @@ pub enum Icon {
     Play,
     /// Quadrat: Prozess stoppen (#243).
     Stop,
+    /// Schloss: für Agenten gesperrt (#386).
+    Lock,
 }
 
 fn arc(p: &Painter, c: Pos2, r: f32, a0: f32, a1: f32, st: Stroke) {
@@ -600,6 +616,13 @@ pub fn paint_icon(p: &Painter, icon: Icon, c: Pos2, col: Color32) {
         Icon::Stop => {
             p.rect_stroke(Rect::from_center_size(c, v(9.0, 9.0)), 1.5, st, StrokeKind::Inside);
         }
+        Icon::Lock => {
+            // Schloss: Körper und Bügel (Projekt für Agenten gesperrt, #386)
+            p.rect_stroke(Rect::from_center_size(c + v(0.0, 2.0), v(10.0, 7.0)), 1.5, st, StrokeKind::Inside);
+            arc(p, c + v(0.0, -2.0), 3.0, std::f32::consts::PI, 2.0 * std::f32::consts::PI, st);
+            l(v(-3.0, -2.0), v(-3.0, -1.5));
+            l(v(3.0, -2.0), v(3.0, -1.5));
+        }
     }
 }
 
@@ -664,10 +687,15 @@ pub fn danger_icon_at(ui: &mut Ui, rect: Rect, id: egui::Id, tip: &str, enabled:
 
 /// Pill (Segment) – z. B. für Projekte. Gibt die Antwort zurück.
 pub fn pill(ui: &mut Ui, text: &str, count: Option<usize>, color: Color32, active: bool) -> Response {
+    pill_ex(ui, text, count, color, active, false)
+}
+
+/// [`pill`] mit Schloss am Ende (`locked`: Projekt für Agenten gesperrt, #386).
+pub fn pill_ex(ui: &mut Ui, text: &str, count: Option<usize>, color: Color32, active: bool, locked: bool) -> Response {
     let font = FontId::proportional(12.5);
     let label = ui.painter().layout_no_wrap(text.to_string(), font.clone(), Color32::PLACEHOLDER);
     let cnt = count.map(|n| ui.painter().layout_no_wrap(n.to_string(), FontId::proportional(11.0), Color32::PLACEHOLDER));
-    let w = 12.0 + 8.0 + label.size().x + cnt.as_ref().map(|c| c.size().x + 6.0).unwrap_or(0.0) + 8.0;
+    let w = 12.0 + 8.0 + label.size().x + cnt.as_ref().map(|c| c.size().x + 6.0).unwrap_or(0.0) + 8.0 + if locked { 14.0 } else { 0.0 };
     let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, 24.0), Sense::click());
     let v = ui.visuals();
     let (text_c, hover_bg) = (v.text_color(), v.widgets.hovered.bg_fill);
@@ -682,7 +710,12 @@ pub fn pill(ui: &mut Ui, text: &str, count: Option<usize>, color: Color32, activ
     ui.painter().galley(Pos2::new(x, rect.center().y - label.size().y / 2.0), label.clone(), tc);
     x += label.size().x + 6.0;
     if let Some(c) = cnt {
+        let cw = c.size().x;
         ui.painter().galley(Pos2::new(x, rect.center().y - c.size().y / 2.0), c, tc.gamma_multiply(0.6));
+        x += cw + 6.0;
+    }
+    if locked {
+        paint_icon(ui.painter(), Icon::Lock, Pos2::new(x + 4.0, rect.center().y), tc.gamma_multiply(0.8));
     }
     if resp.hovered() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);

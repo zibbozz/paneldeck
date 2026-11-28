@@ -277,13 +277,20 @@ impl App {
             }
             self.chat_add_image_files(ctx, id, imgs);
         } else if let Some(s) = self.entries.get(&id).and_then(|e| e.live.as_ref()) {
-            let text: Vec<String> = files
-                .iter()
-                .filter_map(|f| f.path.as_ref())
-                .map(|p| pathfmt::for_shell(&s.spec, &p.to_string_lossy()))
-                .collect();
+            // Für die Shell umgerechnet und gequotet (#392); eine Datei einer anderen WSL-Distribution nicht (Hinweis).
+            let mut text: Vec<String> = Vec::new();
+            let mut refused = None;
+            for p in files.iter().filter_map(|f| f.path.as_ref()) {
+                match crate::targetpath::for_insert(&s.spec, &p.to_string_lossy()) {
+                    Ok(t) => text.push(t),
+                    Err(e) => refused = Some(e),
+                }
+            }
             if !text.is_empty() {
                 s.send_text(&format!("{} ", text.join(" ")), false);
+            }
+            if let Some(e) = refused {
+                self.path_refused_toast(&e);
             }
         }
         self.activate(id);
@@ -304,6 +311,9 @@ impl App {
                 .with_transparent(true);
             let mut close = false;
             ctx.show_viewport_immediate(vid, builder, |ctx, _class| {
+                // Abgedockte Fenster zeigen keinen eigenen Hintergrund des Themes (#387).
+                crate::style::set_backdrop(false);
+                crate::termview::set_backdrop(None);
                 if ctx.input(|i| i.viewport().close_requested()) {
                     close = true;
                 }
@@ -345,6 +355,7 @@ impl App {
                         tl: &self.tlinks,
                         alt_wheel: self.settings.alt_screen_wheel,
                         hide_key: "",
+                        chat_bg: theme.bg,
                     };
                     show_pane(ui, id, rect, &mut cx);
                 });

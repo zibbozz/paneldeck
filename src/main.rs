@@ -1,10 +1,12 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod access;
 mod afford;
 mod app;
 mod backup;
 mod boxdraw;
 mod calc;
+mod calendar;
 mod chat;
 mod cleanup;
 mod claude_opts;
@@ -15,6 +17,7 @@ mod clip;
 mod conhost_wrap;
 mod emoji;
 mod pathfmt;
+mod targetpath;
 mod quote;
 mod gitinfo;
 mod glyphs;
@@ -33,11 +36,13 @@ mod paths;
 mod planning;
 mod platform;
 mod procs;
+mod save_actions;
 // Dienste des Editor-Reiters (#54): MCP-Werkzeuge, Suche in Dateien, Plattenänderungen, Einstellungen.
 mod editor_svc;
 mod prompts;
 mod query;
 mod search;
+mod session_env;
 mod layout;
 mod links;
 mod llm;
@@ -55,6 +60,8 @@ mod undo;
 mod vtkeys;
 mod termview;
 mod theme;
+// Reiter „Zeit“ (#164): Wecker, Timer, Stoppuhren, Weltuhren, Geburtstage, Benachrichtigungen, Klänge (ohne egui).
+mod time;
 mod usage;
 mod vtnotify;
 mod wsl;
@@ -231,7 +238,7 @@ fn main() -> eframe::Result<()> {
     // siehe `app::update::install::remove_old_exe`.
     let cmd = match (&cli.open, &cli.edit) {
         (Some(p), _) => hooks::IpcCmd::Open { path: p.clone(), claude: cli.claude, origin: None },
-        (None, Some(f)) => hooks::IpcCmd::Edit { path: f.clone() },
+        (None, Some(f)) => hooks::IpcCmd::Edit { path: f.clone(), origin: None },
         (None, None) => hooks::IpcCmd::Show,
     };
     // `--reset-settings` nur, wenn keine Instanz mit diesem Datenordner läuft (sie würde die Datei wieder schreiben).

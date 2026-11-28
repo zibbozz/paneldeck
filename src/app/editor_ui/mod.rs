@@ -7,23 +7,39 @@
 //! - `text`: das Textfeld (nur sichtbare Zeilen, Cursor, Auswahl, Maus, Tastatur, Minimap),
 //! - `view`: Bereich zeichnen (Baum, Teilungen, Reiterleisten, Hinweisleisten, Statusleiste, Dialoge),
 //! - `find`: Suchen/Ersetzen-Leiste und „Gehe zu Zeile“,
-//! - `tree`: Ordnerbaum, `persist`: `editor-state.json`.
+//! - `menu`: Menüleiste je Teilung (#381, *Datei · Bearbeiten · Ansicht · Format*),
+//! - `format`: JSON/XML formatieren im Hintergrund, Fortschritt, Meldungen (#381; formatiert wird nie von allein),
+//! - `tree`: Ordnerbaum, `persist`: `editor-state.json`,
+//! - `diff_tab`, `diff_menu`, `marks`: Vergleichs-Reiter, seine Menüeinträge/Revisionsauswahl und die Änderungsmarken am
+//!   Rand (#385, 3.2.0).
 //!
 //! Der Zustand ist für alle Fenster gemeinsam (`App::ed`, nicht in `view_fields!`): Ein weiteres Fenster im Editor-Reiter
 //! zeigt dieselben Dateien und Teilungen. Ein Dokument gibt es genau einmal (`docs`), auch wenn es in mehreren Teilungen
 //! offen ist; jeder Reiter hat seine eigene Ansicht (Cursor, Bildlauf).
 
+mod diff_menu;
+mod diff_tab;
 mod doc;
+pub(crate) use doc::DiskJobDone;
 mod find;
+pub(crate) mod format;
+mod hscroll;
+#[cfg(test)]
+mod hscroll_tests;
+mod menu;
+mod marks;
 mod panes;
 mod persist;
 mod text;
 mod tree;
 mod view;
 #[cfg(test)]
+mod diff_tests;
+#[cfg(test)]
 mod tests;
 
 pub(crate) use doc::DocInfo;
+pub(crate) use doc::ENCODINGS as ENCODING_CHOICES;
 pub(crate) use view::lang_label;
 use doc::DocEntry;
 use panes::Panes;
@@ -43,13 +59,45 @@ pub(crate) struct EditorPrefs {
     pub autosave: Option<std::time::Duration>,
     /// Syntax-Modus (#312): Standard-Modus, Modus je Sprache, eigene Zuordnungen.
     pub syntax: SyntaxPrefs,
+    /// Menüleiste je Teilung (#381, Standard an).
+    pub menu_bar: bool,
+    /// Tastenkürzel für die Menüs (Kennung → Kürzel wie in `keys::DEFAULTS`, z. B. `ed_format` → `Alt+Shift+F`).
+    pub keys: BTreeMap<String, String>,
+    /// Änderungsmarken am Rand (#385; Standard aus) und ihre Grundlage.
+    pub markers: bool,
+    pub marker_base: crate::editor_svc::settings::MarkerBase,
+    /// Vorgaben neuer Vergleichs-Reiter: Kontextzeilen, Darstellung, Leerraum ignorieren.
+    pub diff_context: usize,
+    pub diff_layout: crate::editor_svc::settings::DiffLayout,
+    pub diff_ignore_ws: bool,
 }
+
+/// Kennungen der Kürzel, die die Menüleiste anzeigt.
+pub(crate) const MENU_KEYS: [&str; 10] = ["split_r", "split_d", "palette", "ed_format", "ed_minify", "ed_validate", "ed_sort_keys", "save_no_actions", "ed_next_change", "ed_prev_change"];
 
 impl Default for EditorPrefs {
     fn default() -> Self {
-        EditorPrefs { font_size: 14.0, large_file_bytes: crate::editor::DEFAULT_LARGE_FILE_THRESHOLD, autosave: None, syntax: SyntaxPrefs::default() }
+        let keys = MENU_KEYS.iter().filter_map(|id| crate::keys::DEFAULTS.iter().find(|(i, _)| i == id).map(|(i, d)| (i.to_string(), d.to_string()))).collect();
+        EditorPrefs {
+            font_size: 14.0,
+            large_file_bytes: crate::editor::DEFAULT_LARGE_FILE_THRESHOLD,
+            autosave: None,
+            syntax: SyntaxPrefs::default(),
+            menu_bar: true,
+            keys,
+            markers: false,
+            marker_base: Default::default(),
+            diff_context: crate::editor_svc::settings::DEFAULT_DIFF_CONTEXT as usize,
+            diff_layout: Default::default(),
+            diff_ignore_ws: false,
+        }
     }
 }
+
+/// Befehl des Editors für die Befehlspalette (#385): von außen undurchsichtig, ausgeführt mit
+/// [`super::App::editor_run_action`].
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct EditorAction(view::Cmd);
 
 /// Einstellungen des Syntax-Modus (#312) aus *Einstellungen → Editor* (`settings.json` → `editor`).
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -83,6 +131,17 @@ impl SyntaxPrefs {
 pub(super) struct CloseAsk {
     /// Zu schließende Reiter (Gruppe, Dokument); die Rückfrage gilt dem ersten mit ungespeicherten Änderungen.
     pub tabs: Vec<(u64, u64)>,
+    /// „Speichern“ gewählt, das Schreiben läuft noch im Hintergrund (WSL, #392): statt der Rückfrage ein Hinweis
+    /// „wird gespeichert …“; geschlossen wird mit dem Ergebnis (`DiskJobDone::Saved`).
+    pub saving: bool,
+    /// Speichern ist gescheitert: die Rückfrage zeigt den Fehler.
+    pub error: Option<String>,
+}
+
+impl CloseAsk {
+    pub(super) fn new(tabs: Vec<(u64, u64)>) -> Self {
+        CloseAsk { tabs, saving: false, error: None }
+    }
 }
 
 /// Gerade gezogener Reiter.
@@ -111,8 +170,6 @@ pub(crate) struct EditorUi {
     pub(super) find: find::FindBar,
     pub(super) goto: Option<find::GotoLine>,
     pub(super) close_ask: Option<CloseAsk>,
-    /// Fenster „Unterschied anzeigen“ (Datei auf der Platte gegen den Puffer) für dieses Dokument.
-    pub(super) diff_doc: Option<u64>,
     pub(super) drag: Option<TabDrag>,
     /// Kurzer Hinweis (z. B. „neu geladen“), unten in der Statusleiste.
     pub(super) hint: Option<(String, Instant)>,
@@ -136,6 +193,31 @@ pub(crate) struct EditorUi {
     pub(super) lang_search_focus: bool,
     /// Knöpfe Sprache / Modus der Statusleiste im letzten Bild (Tests).
     pub(super) status_rects: (Option<eframe::egui::Rect>, Option<eframe::egui::Rect>),
+    /// Formatieren (#381): laufende Läufe, Meldungen, Rückfrage.
+    pub(super) fmt: format::FmtState,
+    /// Menüleiste je Teilung im letzten Bild: Fläche und ob sie zusammengeklappt ist (Tests, Tutorial).
+    pub(super) menu_rects: HashMap<u64, (eframe::egui::Rect, bool)>,
+    /// Aktionen beim Speichern (#383): Stand für Statusleiste und Reiter, Klicks zurück an die App.
+    pub(crate) on_save: super::save_actions_ui::OnSaveView,
+    /// Vergleichs-Reiter (#385), Kennung → Zustand.
+    pub(super) diffs: BTreeMap<u64, diff_tab::DiffTab>,
+    next_diff: u64,
+    /// Offenes Fenster einer Änderungsmarke.
+    pub(super) mark_popup: Option<marks::MarkPopup>,
+    /// Fenster „Vergleichen mit Revision …“.
+    pub(super) rev_picker: Option<diff_menu::RevPicker>,
+    /// Wächst nach dem Speichern und wenn das Fenster den Fokus bekommt: Vergleiche und Marken lesen die Stände in
+    /// git und auf der Platte neu.
+    pub(super) generation: u64,
+    pub(super) was_active: bool,
+    /// Zu dieser Zeile springen, sobald das (im Hintergrund geladene) Dokument da ist (#392: Strg+Klick auf
+    /// `datei:12` aus WSL).
+    pub(super) pending_goto: Option<(u64, usize)>,
+    /// Speichern im Hintergrund (WSL, #392), dessen Formatieren/Text-Aktionen bei einem Fehler zurückzunehmen sind.
+    pub(super) pending_saves: HashMap<u64, format::PendingSave>,
+    /// *Speichern unter* auf eine Datei, die in einem anderen Reiter offen ist, schreibt im Hintergrund (WSL, #392):
+    /// gespeichertes Dokument → anderes Dokument, das nach dem Schreiben neu lädt (bzw. die Leiste zeigt).
+    pub(super) reload_after_save: HashMap<u64, u64>,
 }
 
 impl EditorUi {
@@ -149,7 +231,9 @@ impl EditorUi {
     }
 
     fn apply_saved(&mut self, s: persist::Saved, dir: &Path) {
-        self.root = s.root.map(PathBuf::from).filter(|p| p.is_dir());
+        // WSL-Ordner und -Dateien (#392) beim Start nie prüfen (das könnte die WSL-VM starten und den Start blockieren);
+        // ein Fehler zeigt sich erst beim Lesen im Hintergrund.
+        self.root = s.root.map(PathBuf::from).filter(|p| doc::is_wsl_path(p) || p.is_dir());
         self.tree.expanded = s.expanded.into_iter().map(PathBuf::from).collect();
         self.recent_folders = s.recent_folders;
         self.recent_files = s.recent_files;
@@ -167,7 +251,7 @@ impl EditorUi {
             let path = d.path.map(PathBuf::from);
             // Datei weg und nichts Ungespeichertes: Reiter nicht wiederherstellen.
             let hot = d.hot.and_then(|k| entries.iter().find(|e| e.id == k).cloned()).map(|e| (store.clone(), e));
-            if path.as_ref().is_some_and(|p| !p.is_file()) && hot.is_none() {
+            if path.as_ref().is_some_and(|p| !doc::is_wsl_path(p) && !p.is_file()) && hot.is_none() {
                 continue;
             }
             if path.is_none() && hot.is_none() {
@@ -180,16 +264,30 @@ impl EditorUi {
             self.docs.insert(id, entry);
             self.next_doc = self.next_doc.max(id + 1);
         }
+        for sd in &s.diffs {
+            if let Some(dt) = diff_tab::DiffTab::from_saved(sd, &self.docs) {
+                let id = sd.id.max(1);
+                self.diffs.insert(id, dt);
+                self.next_diff = self.next_diff.max(id + 1);
+            }
+        }
         for g in s.groups {
-            let tabs: Vec<panes::Tab<View>> = g.tabs.into_iter().filter(|t| self.docs.contains_key(&t.doc)).map(|t| panes::Tab { doc: t.doc, view: View::restored(t.line, t.col, t.top) }).collect();
+            let tabs: Vec<panes::Tab<View>> = g
+                .tabs
+                .into_iter()
+                .filter(|t| self.docs.contains_key(&t.doc) && t.diff.is_none_or(|d| self.diffs.contains_key(&d)) && t.extra.is_none_or(|e| self.docs.contains_key(&e)))
+                .map(|t| panes::Tab { doc: t.doc, view: View::restored(t.line, t.col, t.top), diff: t.diff, extra: t.extra.filter(|_| t.diff.is_some()) })
+                .collect();
             self.panes.insert_group(g.id.max(1), panes::Group { tabs, active: g.active });
         }
         self.panes.layout = s.layout;
         self.panes.focused = s.focused;
         self.panes.normalize();
-        // Dokumente ohne Reiter wieder vergessen.
+        // Dokumente und Vergleiche ohne Reiter wieder vergessen.
         let shown = self.panes.docs();
         self.docs.retain(|id, _| shown.contains(id));
+        let diffs = self.panes.diffs();
+        self.diffs.retain(|id, _| diffs.contains(id));
     }
 
     /// Zustand für `editor-state.json` und ungespeicherte Puffer in den Hot-Exit-Speicher schreiben.
@@ -216,7 +314,7 @@ impl EditorUi {
                         .iter()
                         .map(|t| {
                             let (line, col) = self.docs.get(&t.doc).map(|d| t.view.cursor_linecol(d)).unwrap_or(t.view.restore_pos());
-                            persist::SavedTab { doc: t.doc, line, col, top: t.view.top_f32() }
+                            persist::SavedTab { doc: t.doc, line, col, top: t.view.top_f32(), diff: t.diff, extra: t.extra }
                         })
                         .collect(),
                 }
@@ -237,6 +335,7 @@ impl EditorUi {
             wrap: self.wrap,
             minimap: self.minimap,
             next_untitled: self.next_untitled,
+            diffs: self.diffs.iter().filter_map(|(id, d)| d.to_saved(*id)).collect(),
         };
         persist::save(dir, &s);
         doc::prune_hot(dir, &self.docs.values().filter_map(|d| d.hot_key()).collect::<Vec<_>>());
@@ -302,6 +401,41 @@ impl EditorUi {
         id
     }
 
+    /// Fertige Hintergrund-Läufe (Speichern/Neu laden von WSL-Dateien, #392) übernehmen: (Titel, Ergebnis). `busy`: es
+    /// läuft noch einer.
+    pub(super) fn poll_disk_jobs(&mut self, lang: crate::state::Lang) -> (Vec<(u64, String, doc::DiskJobDone)>, bool) {
+        let mut out = Vec::new();
+        let mut busy = false;
+        for (id, d) in self.docs.iter_mut() {
+            if let Some(r) = d.poll_disk_job(lang) {
+                out.push((*id, d.title(lang), r));
+            }
+            busy |= d.disk_busy();
+        }
+        // Geschlossene Dokumente: nichts mehr zurückzunehmen.
+        let docs = &self.docs;
+        self.pending_saves.retain(|id, _| docs.contains_key(id));
+        self.reload_after_save.retain(|id, _| docs.contains_key(id));
+        (out, busy)
+    }
+
+    /// Wartenden Sprung zur Zeile ausführen, sobald das Dokument geladen ist und sein Reiter vorn steht.
+    pub(super) fn apply_pending_goto(&mut self) {
+        let Some((id, line)) = self.pending_goto else { return };
+        match self.docs.get(&id) {
+            None => self.pending_goto = None,
+            Some(d) if d.doc.is_some() => {
+                let active = self.panes.groups.get(&self.panes.focused).and_then(|g| g.active_tab()).map(|t| t.doc);
+                if active == Some(id) {
+                    self.goto_line(line, 0);
+                }
+                self.pending_goto = None;
+            }
+            Some(d) if d.load_error.is_some() => self.pending_goto = None,
+            Some(_) => {}
+        }
+    }
+
     /// Ordner als Wurzel des Baums öffnen.
     pub(super) fn set_root(&mut self, dir: &Path) {
         self.root = Some(dir.to_path_buf());
@@ -318,14 +452,267 @@ impl EditorUi {
     /// Reiter freigeben: das Dokument verschwindet, wenn es in keinem Reiter mehr offen ist (Hot-Exit-Daten mit).
     pub(super) fn release_doc(&mut self, doc: u64, dir: &Path) {
         if !self.panes.shows(doc) {
+            self.cancel_format(doc);
+            self.fmt.notes.remove(&doc);
+            self.fmt.ask.retain(|a| a.doc != doc);
             if let Some(mut d) = self.docs.remove(&doc) {
                 d.drop_hot(dir);
             }
-            if self.diff_doc == Some(doc) {
-                self.diff_doc = None;
+            if self.mark_popup.as_ref().is_some_and(|p| p.doc == doc) {
+                self.mark_popup = None;
             }
         }
     }
+
+    // ---- Vergleich (#385)
+
+    fn alloc_diff(&mut self) -> u64 {
+        let id = self.next_diff.max(self.diffs.keys().next_back().map(|k| k + 1).unwrap_or(1)).max(1);
+        self.next_diff = id + 1;
+        id
+    }
+
+    /// Vergleich als Reiter der fokussierten Gruppe öffnen (hinter dem aktiven Reiter). Ist derselbe Vergleich schon
+    /// offen, wird sein Reiter aktiv. Liefert die Kennung.
+    pub(super) fn open_diff(&mut self, dt: diff_tab::DiffTab) -> Option<u64> {
+        let (doc, extra) = dt.tab_docs()?;
+        if let Some(id) = self.diffs.iter().find(|(_, d)| d.same_sides(&dt)).map(|(id, _)| *id)
+            && let Some((g, i)) = self.panes.diff_tab(id)
+        {
+            self.panes.focused = g;
+            if let Some(grp) = self.panes.groups.get_mut(&g) {
+                grp.active = i;
+            }
+            self.want_focus = true;
+            return Some(id);
+        }
+        let id = self.alloc_diff();
+        self.diffs.insert(id, dt);
+        self.panes.open_diff(id, doc, extra);
+        self.want_focus = true;
+        Some(id)
+    }
+
+    /// Neues Dokument zu einem Pfad ohne Reiter (Tests).
+    #[cfg(test)]
+    pub(super) fn alloc_doc_for_test(&mut self, path: &Path) -> u64 {
+        let id = self.alloc_doc();
+        self.docs.insert(id, DocEntry::pending(Some(path.to_path_buf()), 0, None));
+        id
+    }
+
+    /// Dokument zu einer Datei: schon offen, sonst neu (noch ohne Reiter – der Vergleich hält es offen).
+    fn doc_for_file(&mut self, path: &Path) -> u64 {
+        match self.doc_for_path(path) {
+            Some(id) => id,
+            None => {
+                let id = self.alloc_doc();
+                self.docs.insert(id, DocEntry::pending(Some(path.to_path_buf()), 0, None));
+                id
+            }
+        }
+    }
+
+    /// Dokument `doc` mit `target` vergleichen: das Ziel links, das Dokument rechts. `Ok(None)`, wenn erst ein Dialog
+    /// gebraucht wird (Datei, Revision – das erledigt der Aufrufer).
+    pub(super) fn compare(&mut self, doc: u64, target: diff_tab::Target, prefs: &EditorPrefs, lang: crate::state::Lang) -> Result<Option<u64>, String> {
+        use crate::editor_svc::git_base::Rev;
+        use diff_tab::{Side, Source, StaticSide, Target};
+        let path = self.docs.get(&doc).ok_or_else(|| lang.t("Kein solches Dokument", "No such document").to_string())?.path.clone();
+        let need = || path.clone().ok_or_else(|| lang.t("Die Datei ist noch nicht gespeichert – es gibt keinen gespeicherten Stand.", "The file has not been saved yet – there is no saved state.").to_string());
+        let git = |rev: Rev| -> Result<Side, String> { Ok(Side::Text(Box::new(StaticSide::new(Source::Git { path: need()?, rev })))) };
+        let left = match target {
+            Target::Disk => Side::Text(Box::new(StaticSide::new(Source::Disk(need()?)))),
+            Target::Head => git(Rev::Head)?,
+            Target::Index => git(Rev::Index)?,
+            Target::Rev(r) => {
+                crate::editor_svc::git_base::check_ref(&r)?;
+                git(Rev::Commit(r))?
+            }
+            Target::Clipboard => {
+                let t = crate::platform::clipboard::get_text().filter(|t| !t.is_empty()).ok_or_else(|| lang.t("Die Zwischenablage enthält keinen Text.", "The clipboard contains no text.").to_string())?;
+                Side::Text(Box::new(StaticSide::clipboard(&t)))
+            }
+            Target::File(p) => {
+                // WSL-Dateien (#392) ungeprüft: sie laden im Hintergrund, ein Fehler erscheint im Vergleich.
+                if !doc::is_wsl_path(&p) && !p.is_file() {
+                    return Err(format!("{}: {}", lang.t("Datei nicht gefunden", "File not found"), p.display()));
+                }
+                let id = self.doc_for_file(&p);
+                if id == doc {
+                    return Err(lang.t("Eine Datei mit sich selbst vergleichen? Wähle eine andere.", "Compare a file with itself? Choose another one.").to_string());
+                }
+                Side::Doc(id)
+            }
+            Target::Doc(o) if self.docs.contains_key(&o) && o != doc => Side::Doc(o),
+            Target::Doc(_) => return Err(lang.t("Kein solches Dokument", "No such document").to_string()),
+            Target::PickFile => return Ok(None),
+        };
+        Ok(self.open_diff(diff_tab::DiffTab::new(left, diff_tab::Side::Doc(doc), prefs)))
+    }
+
+    /// Zwei Dateien vergleichen (Ordnerbaum): `a` links, `b` rechts.
+    pub(super) fn compare_paths(&mut self, a: &Path, b: &Path, prefs: &EditorPrefs) -> Option<u64> {
+        let file = |p: &Path| doc::is_wsl_path(p) || p.is_file();
+        if !file(a) || !file(b) {
+            return None;
+        }
+        let (x, y) = (self.doc_for_file(a), self.doc_for_file(b));
+        if x == y {
+            return None;
+        }
+        self.open_diff(diff_tab::DiffTab::new(diff_tab::Side::Doc(x), diff_tab::Side::Doc(y), prefs))
+    }
+
+    /// Vergleichs-Reiter schließen. Ein Dokument, das nur dort offen war und ungespeicherte Änderungen hat (z. B. durch
+    /// einen Blockpfeil), bleibt als normaler Reiter offen – nichts geht verloren.
+    pub(super) fn close_diff(&mut self, g: u64, diff: u64, dir: &Path) {
+        let Some(i) = self.panes.groups.get(&g).and_then(|grp| grp.find_diff(diff)) else { return };
+        let docs: Vec<u64> = {
+            let t = &self.panes.groups[&g].tabs[i];
+            std::iter::once(t.doc).chain(t.extra).collect()
+        };
+        self.panes.close_tab(g, i);
+        self.diffs.remove(&diff);
+        for d in docs {
+            if self.panes.shows(d) {
+                continue;
+            }
+            if self.docs.get(&d).is_some_and(|e| e.dirty()) {
+                if self.panes.groups.contains_key(&g) {
+                    self.panes.focused = g;
+                }
+                self.panes.open(d);
+            } else {
+                self.release_doc(d, dir);
+            }
+        }
+        self.want_focus = true;
+    }
+
+    /// Nach dem Teilen: ein kopierter Vergleichs-Reiter bekommt einen eigenen Vergleich (eigener Bildlauf).
+    pub(super) fn fix_split_diff(&mut self, g: u64) {
+        let Some(t) = self.panes.groups.get(&g).and_then(|grp| grp.active_tab()) else { return };
+        let Some(old) = t.diff else { return };
+        let Some(copy) = self.diffs.get(&old).map(|d| d.duplicate()) else { return };
+        let id = self.alloc_diff();
+        self.diffs.insert(id, copy);
+        if let Some(t) = self.panes.groups.get_mut(&g).and_then(|grp| grp.active_tab_mut()) {
+            t.diff = Some(id);
+        }
+    }
+
+    /// Seiten eines Vergleichs tauschen (der Reiter merkt sich die Dokumente in neuer Reihenfolge).
+    pub(super) fn swap_diff(&mut self, diff: u64) {
+        let Some(dt) = self.diffs.get_mut(&diff) else { return };
+        dt.swap();
+        let docs = dt.tab_docs();
+        if let (Some((g, i)), Some((doc, extra))) = (self.panes.diff_tab(diff), docs)
+            && let Some(t) = self.panes.groups.get_mut(&g).and_then(|grp| grp.tabs.get_mut(i))
+        {
+            t.doc = doc;
+            t.extra = extra;
+        }
+    }
+
+    /// Dokument im aktiven Reiter (im Vergleichs-Reiter: die fokussierte Seite, sonst die andere).
+    pub(super) fn active_file_doc(&self) -> Option<u64> {
+        let t = self.panes.groups.get(&self.panes.focused)?.active_tab()?;
+        match t.diff {
+            None => Some(t.doc),
+            Some(d) => self.diffs.get(&d).and_then(|x| x.focused_doc()),
+        }
+    }
+
+    /// Aktiver Vergleichs-Reiter der fokussierten Gruppe: (Gruppe, Kennung).
+    pub(super) fn active_diff(&self) -> Option<(u64, u64)> {
+        let g = self.panes.focused;
+        self.panes.groups.get(&g)?.active_tab()?.diff.map(|d| (g, d))
+    }
+
+    /// Änderungsmarke in Zeile `line` zurücksetzen: die alten Zeilen wiederherstellen (ein Rückgängig-Schritt). Liefert, ob
+    /// sich etwas geändert hat.
+    /// Veraltete Marken (der Text hat sich seitdem geändert, die Neuberechnung läuft noch) setzen nichts zurück: Fehler
+    /// mit Hinweis, die Marken werden sofort neu berechnet.
+    pub(super) fn revert_mark(&mut self, doc: u64, line: usize, lang: crate::state::Lang) -> Result<bool, String> {
+        let Some(d) = self.docs.get_mut(&doc) else { return Ok(false) };
+        if !d.marks.fresh_for(d.revision()) {
+            d.marks.recompute();
+            return Err(lang.t("Die Änderungsmarken werden gerade neu berechnet – gleich noch einmal.", "The change markers are being recomputed – try again in a moment.").to_string());
+        }
+        let mut changed = false;
+        if let Some(m) = d.marks.result.clone()
+            && let Some(k) = m.at(line)
+            && m.hunks[k].revertable
+            && let Some(text) = d.text()
+        {
+            changed = d.apply_user_edit(crate::editor::linemarks::revert_edit(&text, &m.hunks[k]));
+        }
+        self.mark_popup = None;
+        self.want_focus = true;
+        Ok(changed)
+    }
+
+    /// Linke Seite eines Vergleichs ersetzen (andere Revision). Ein Dokument, das dadurch aus dem Vergleich fällt, bleibt
+    /// mit ungespeicherten Änderungen als Datei-Reiter offen (nichts geht verloren, auch kein Hot-Exit-Inhalt), sonst
+    /// wird es frei. Der Reiter merkt sich die neuen Dokumente.
+    pub(super) fn set_diff_left(&mut self, diff: u64, side: diff_tab::Side, dir: &Path) {
+        let Some(dt) = self.diffs.get_mut(&diff) else { return };
+        let old = dt.left.doc();
+        dt.set_left(side);
+        let docs = dt.tab_docs();
+        let place = self.panes.diff_tab(diff);
+        if let (Some((g, i)), Some((doc, extra))) = (place, docs)
+            && let Some(t) = self.panes.groups.get_mut(&g).and_then(|grp| grp.tabs.get_mut(i))
+        {
+            t.doc = doc;
+            t.extra = extra;
+        }
+        if let Some(o) = old
+            && !self.panes.shows(o)
+        {
+            if self.docs.get(&o).is_some_and(|e| e.dirty()) {
+                if let Some((g, _)) = place {
+                    self.panes.focused = g;
+                }
+                self.panes.open(o);
+                // Der Vergleich bleibt der aktive Reiter.
+                if let Some((g, i)) = self.panes.diff_tab(diff)
+                    && let Some(grp) = self.panes.groups.get_mut(&g)
+                {
+                    grp.active = i;
+                }
+            } else {
+                self.release_doc(o, dir);
+            }
+        }
+    }
+
+    /// Nächste bzw. vorige Änderung (F7 / Umschalt+F7): im Vergleichs-Reiter der nächste Block, im normalen Reiter die
+    /// nächste Änderungsmarke (der Cursor springt dorthin). Liefert einen Hinweis, wenn es nichts gibt.
+    pub(super) fn step_change(&mut self, forward: bool, prefs: &EditorPrefs, lang: crate::state::Lang) -> Option<String> {
+        if let Some((_, d)) = self.active_diff() {
+            if let Some(dt) = self.diffs.get_mut(&d) {
+                dt.step(forward);
+            }
+            return None;
+        }
+        let g = self.panes.focused;
+        let t = self.panes.groups.get(&g)?.active_tab()?;
+        let d = self.docs.get(&t.doc)?;
+        let Some(m) = d.marks.result.clone().filter(|_| prefs.markers) else {
+            return Some(lang.t("Keine Änderungsmarken – Ansicht → Änderungsmarken schaltet sie ein.", "No change markers – View → Change markers turns them on.").to_string());
+        };
+        let (line, _) = t.view.cursor_linecol(d);
+        let k = m.step(line, forward)?;
+        let target = m.hunks[k].lines.start;
+        self.goto_line(target, 0);
+        if let Some(p) = self.mark_popup.as_mut().filter(|p| p.group == g) {
+            p.line = target;
+        }
+        None
+    }
+
 
     /// Sprache eines Dokuments wählen (`None` = wieder erkennen; #312).
     pub(super) fn set_doc_language(&mut self, id: u64, lang: Option<String>) {
@@ -450,26 +837,43 @@ impl super::App {
         self.editor_prefs_from_settings()
     }
 
-    /// Jedes Bild im Hauptdurchgang, auch außerhalb des Editor-Reiters: automatisches Speichern.
+    /// Jedes Bild im Hauptdurchgang, auch außerhalb des Editor-Reiters: fertige Formatier-Läufe übernehmen (#381),
+    /// automatisches Speichern (Auslöser „automatisch“ für die Aktionen beim Speichern, #383).
     pub(crate) fn editor_tick(&mut self, ctx: &eframe::egui::Context) {
+        self.ed.poll_formats(self.settings.language);
         let prefs = self.editor_prefs();
         let Some(delay) = prefs.autosave else { return };
-        let lang = self.settings.language;
         let mut next: Option<std::time::Duration> = None;
-        for d in self.ed.docs.values_mut() {
+        let mut due = Vec::new();
+        for (id, d) in self.ed.docs.iter() {
             let Some(at) = d.edited_at else { continue };
             if d.path.is_none() || !d.dirty() || d.disk_conflict {
                 continue;
             }
+            // WSL (#392): Speichern/Lesen läuft noch im Hintergrund – nicht jetzt (scheiterte mit „wird noch
+            // gespeichert“), aber `edited_at` bleibt, damit es danach erneut versucht wird.
+            if d.disk_busy() {
+                let rest = std::time::Duration::from_millis(250);
+                next = Some(next.map_or(rest, |n| n.min(rest)));
+                continue;
+            }
             let age = at.elapsed();
             if age >= delay {
-                if d.save(None, lang).is_ok() {
-                    d.drop_hot(&self.dir);
-                }
-                d.edited_at = None;
+                due.push(*id);
             } else {
                 let rest = delay - age;
                 next = Some(next.map_or(rest, |n| n.min(rest)));
+            }
+        }
+        let dir = self.dir.clone();
+        for id in due {
+            let ok = self.editor_save_with(id, None, crate::save_actions::SaveOrigin::Autosave).is_ok();
+            if let Some(d) = self.ed.docs.get_mut(&id) {
+                // WSL (#392): Speichern läuft noch im Hintergrund – die Hot-Exit-Kopie bleibt, bis es geschrieben ist.
+                if ok && !d.disk_busy() {
+                    d.drop_hot(&dir);
+                }
+                d.edited_at = None;
             }
         }
         if let Some(n) = next {
@@ -521,6 +925,31 @@ impl super::App {
     /// wird als „von einem Agenten geöffnet“ markiert und bekommt **nicht** die Tastatur (nur Aktionen des Nutzers
     /// fokussieren das Textfeld, [`EditorUi::end_agent`]). Liefert die Dokument-Id; Fehler, wenn der Pfad keine lesbare
     /// Datei ist (Text für Menschen in der eingestellten Sprache).
+    /// Datei für den Nutzer öffnen (#392: Strg+Klick auf einen Pfad, `--edit`), optional an Zeile `line` (ab 1).
+    /// WSL-Dateien (`\\wsl.localhost\…`) werden nie im UI-Thread geprüft oder gelesen (das könnte die WSL-VM
+    /// starten): Sie laden im Hintergrund, der Sprung zur Zeile folgt dann.
+    pub(crate) fn editor_open_user(&mut self, path: &Path, line: Option<usize>) -> Result<u64, String> {
+        let lang = self.settings.language;
+        let wsl = crate::wsl::is_wsl_unc(&path.to_string_lossy());
+        if !wsl && !path.is_file() {
+            return Err(lang.t("Datei nicht gefunden", "File not found").to_string());
+        }
+        let id = self.ed.open_path(path, false);
+        let prefs = self.editor_prefs();
+        if let Some(d) = self.ed.docs.get_mut(&id) {
+            d.ensure_loaded(&prefs);
+            if let Some(e) = &d.load_error {
+                return Err(e.clone());
+            }
+        }
+        self.set_mode(super::titlebar::Mode::Editor);
+        if let Some(l) = line.filter(|l| *l > 0) {
+            self.ed.pending_goto = Some((id, l - 1));
+            self.ed.apply_pending_goto();
+        }
+        Ok(id)
+    }
+
     pub(crate) fn editor_open(&mut self, path: &Path, show: bool, by_agent: bool) -> Result<u64, String> {
         if by_agent {
             let mark = self.ed.begin_agent();
@@ -583,7 +1012,12 @@ impl super::App {
     pub(crate) fn editor_text(&mut self, id: u64) -> Option<String> {
         let prefs = self.editor_prefs();
         let d = self.ed.docs.get_mut(&id)?;
-        d.ensure_loaded_now(&prefs);
+        // WSL-Dateien (#392) nie im UI-Thread abwarten: noch nicht geladen = `None` (später erneut).
+        if d.path.as_deref().is_some_and(doc::is_wsl_path) {
+            d.ensure_loaded(&prefs);
+        } else {
+            d.ensure_loaded_now(&prefs);
+        }
         d.text()
     }
 
@@ -594,7 +1028,7 @@ impl super::App {
             return false;
         }
         let mark = self.ed.begin_agent();
-        if let Some((g, i)) = self.ed.panes.tabs_of(id).first().copied() {
+        if let Some((g, i)) = self.ed.panes.file_tabs_of(id).first().copied().or_else(|| self.ed.panes.tabs_of(id).first().copied()) {
             self.ed.panes.focused = g;
             if let Some(grp) = self.ed.panes.groups.get_mut(&g) {
                 grp.active = i;
@@ -607,11 +1041,54 @@ impl super::App {
         true
     }
 
-    /// Dokument speichern (für `editor_save`; der Aufrufer prüft die Regeln, z. B. nur vorhandene Dateien).
-    pub(crate) fn editor_save_doc(&mut self, id: u64) -> Result<(), String> {
+    /// Hat der aktive Reiter genau eine nicht leere Auswahl (dann formatiert ein Befehl nur sie)?
+    pub(crate) fn editor_active_selection(&self) -> bool {
+        self.ed.focused_view_and_doc().is_some_and(|(v, d)| {
+            let (Some(s), Some(doc)) = (v.sels.as_ref(), d.doc.as_ref()) else { return false };
+            let mut s = s.clone();
+            doc.sync(&mut s);
+            !s.is_multi() && !s.primary().is_empty()
+        })
+    }
+
+    /// Gibt es einen aktiven Reiter (für die Einträge der Befehls-Palette)?
+    pub(crate) fn ed_has_active_doc(&self) -> bool {
+        self.ed.active_doc().is_some()
+    }
+
+    /// Formatieren über die Palette bzw. von außen (#381): Befehl auf den aktiven Reiter der fokussierten Teilung.
+    pub(crate) fn editor_format_active(&mut self, ctx: &eframe::egui::Context, op: crate::editor::format::Op) {
+        let g = self.ed.panes.focused;
         let lang = self.settings.language;
-        let d = self.ed.docs.get_mut(&id).ok_or_else(|| lang.t("Kein solches Dokument", "No such document").to_string())?;
-        d.save(None, lang)
+        let c = ctx.clone();
+        self.ed.start_format(g, op, false, move || c.request_repaint(), lang);
+    }
+
+    /// Art des aktiven Dokuments für Formatier-Befehle (Palette; `None` = keins oder weder JSON noch XML).
+    pub(crate) fn editor_active_format_kind(&self) -> Option<crate::editor::format::Kind> {
+        self.ed.active_doc().and_then(|id| self.ed.docs.get(&id)).and_then(|d| d.format_kind())
+    }
+
+    /// Lauf für MCP `format_file` starten (#381; der Aufrufer hat Stufe, Schalter und Dokument geprüft).
+    pub(crate) fn editor_start_agent_format(&mut self, ctx: &eframe::egui::Context, doc: u64, op: crate::editor::format::Op, confirmed: bool) -> Result<crate::editor_svc::format_job::Job, String> {
+        let prefs = self.editor_prefs();
+        let c = ctx.clone();
+        self.ed.start_agent_format(doc, op, confirmed, &prefs, move || c.request_repaint())
+    }
+
+    /// Ergebnis eines Agenten-Laufs anwenden: markiert, ungespeichert, ein Rückgängig-Schritt, nie mit Tastatur
+    /// ([`EditorUi::end_agent`]).
+    pub(crate) fn editor_apply_agent_format(&mut self, doc: u64, revision: u64, edits: Vec<crate::editor::TextEdit>) -> Result<(), (&'static str, &'static str)> {
+        let mark = self.ed.begin_agent();
+        let r = self.ed.apply_agent_format(doc, revision, edits);
+        self.ed.end_agent(mark);
+        r
+    }
+
+    /// Dokument speichern (für `editor_save` und Chats; der Aufrufer prüft die Regeln, z. B. nur vorhandene Dateien).
+    /// Auslöser „Agent“ für die Aktionen beim Speichern (#383).
+    pub(crate) fn editor_save_doc(&mut self, id: u64) -> Result<(), String> {
+        self.editor_save_with(id, None, crate::save_actions::SaveOrigin::Agent)
     }
 
     /// Pfade der offenen Dateien (für die Überwachung auf Änderungen).
@@ -634,5 +1111,55 @@ impl super::App {
             }
             doc::DiskReaction::Asked | doc::DiskReaction::Nothing => {}
         }
+    }
+}
+
+impl super::App {
+    /// Einträge der Befehlspalette im Editor-Reiter (#385): Vergleichen mit …, Änderungsmarken, nächste/vorige Änderung.
+    pub(crate) fn editor_palette_items(&self) -> Vec<(String, String, EditorAction)> {
+        let prefs = self.editor_prefs();
+        let (next, prev) = (self.binding_text("ed_next_change"), self.binding_text("ed_prev_change"));
+        diff_menu::palette_entries(&self.ed, &prefs, self.settings.language, &next, &prev).into_iter().map(|(l, h, c)| (l, h, EditorAction(c))).collect()
+    }
+
+    /// Befehl der Palette ausführen.
+    pub(crate) fn editor_run_action(&mut self, ctx: &eframe::egui::Context, a: EditorAction) {
+        self.editor_cmd(ctx, a.0);
+    }
+}
+
+// ------------------------------------------------------------------------------------------------ Bilder für die Doku
+
+#[cfg(feature = "readme-shots")]
+pub(crate) fn shot_target_disk() -> diff_tab::Target {
+    diff_tab::Target::Disk
+}
+
+#[cfg(feature = "readme-shots")]
+impl super::App {
+    /// Bilder `editor-diff`/`editor-gutter` (#385): ungespeicherte Änderungen in der Beispieldatei `src/orders.rs`.
+    pub(crate) fn editor_shot_edits(&mut self, id: u64) {
+        let Some(d) = self.ed.docs.get_mut(&id) else { return };
+        let Some(old) = d.text() else { return };
+        let new = old
+            .replace("//! Orders: create, find and cancel.", "//! Orders: create, find, cancel and refund.")
+            .replace("    pub total_cents: u64,
+    pub cancelled: bool,", "    pub total_cents: u64,
+    pub currency: String,
+    pub cancelled: bool,")
+            .replace("total_cents: 1999, cancelled: false", "total_cents: 2499, currency: \"EUR\".into(), cancelled: false")
+            .replace("    pub fn find_order(&self, id: u64) -> Option<&Order> {
+        self.orders.get(&id)
+    }
+
+", "");
+        d.apply_user_edit(crate::editor::compare::minimal_edit(&old, &new));
+    }
+
+    /// Fenster der Änderungsmarke unter Zeile `line` (ab 0) zeigen.
+    pub(crate) fn editor_shot_popup(&mut self, id: u64, line: usize) {
+        let g = self.ed.panes.focused;
+        let line = self.ed.docs.get(&id).and_then(|d| d.marks.result.clone()).and_then(|m| m.hunks.iter().map(|h| h.lines.start).min_by_key(|s| s.abs_diff(line))).unwrap_or(line);
+        self.ed.mark_popup = Some(marks::MarkPopup { group: g, doc: id, line });
     }
 }

@@ -123,6 +123,17 @@ pub fn pick_file(_start: &str) -> Option<std::path::PathBuf> {
     None
 }
 
+/// Klangdatei wählen (Reiter „Zeit“, #164): WAV oder MP3.
+#[cfg(any(windows, unix))]
+pub fn pick_sound() -> Option<std::path::PathBuf> {
+    rfd::FileDialog::new().add_filter("WAV/MP3", &["wav", "mp3"]).pick_file()
+}
+
+#[cfg(not(any(windows, unix)))]
+pub fn pick_sound() -> Option<std::path::PathBuf> {
+    None
+}
+
 /// Öffnen-Dialog für Bilder (Büroklammer im Chat, #357; mehrere möglich); `start` wie bei [`pick_file`].
 #[cfg(any(windows, unix))]
 pub fn pick_images(start: &str) -> Vec<std::path::PathBuf> {
@@ -175,6 +186,39 @@ pub fn save_json(_default_name: &str) -> Option<std::path::PathBuf> {
     None
 }
 
+/// Öffnen-Dialog für ein Hintergrundbild eines Themes (#387); anderswo `None`.
+#[cfg(any(windows, unix))]
+pub fn pick_background_image() -> Option<std::path::PathBuf> {
+    rfd::FileDialog::new().add_filter(crate::state::t("Bilder", "Images"), crate::theme::background::IMAGE_EXTENSIONS).pick_file()
+}
+
+#[cfg(not(any(windows, unix)))]
+pub fn pick_background_image() -> Option<std::path::PathBuf> {
+    None
+}
+
+/// Öffnen-Dialog für den Import eines Themes: `.json` oder `.zip` mit Hintergrundbild (#387); anderswo `None`.
+#[cfg(any(windows, unix))]
+pub fn open_theme() -> Option<std::path::PathBuf> {
+    rfd::FileDialog::new().add_filter("Theme", &["json", "zip"]).pick_file()
+}
+
+#[cfg(not(any(windows, unix)))]
+pub fn open_theme() -> Option<std::path::PathBuf> {
+    None
+}
+
+/// Speichern-Dialog für ZIP-Dateien (Theme mit Hintergrundbild, #387); anderswo `None`.
+#[cfg(any(windows, unix))]
+pub fn save_zip(default_name: &str) -> Option<std::path::PathBuf> {
+    rfd::FileDialog::new().set_file_name(default_name).add_filter("ZIP", &["zip"]).save_file()
+}
+
+#[cfg(not(any(windows, unix)))]
+pub fn save_zip(_default_name: &str) -> Option<std::path::PathBuf> {
+    None
+}
+
 /// Öffnen-Dialog für JSON-Dateien (Vorlagen); anderswo `None`.
 #[cfg(any(windows, unix))]
 pub fn open_json() -> Option<std::path::PathBuf> {
@@ -216,6 +260,28 @@ pub fn open_csv() -> Option<std::path::PathBuf> {
 
 #[cfg(not(any(windows, unix)))]
 pub fn open_csv() -> Option<std::path::PathBuf> {
+    None
+}
+
+/// Öffnen-Dialog für iCal-Dateien (Kalender-Import, #164); anderswo `None`.
+#[cfg(any(windows, unix))]
+pub fn open_ics() -> Option<std::path::PathBuf> {
+    rfd::FileDialog::new().add_filter("iCalendar", &["ics", "ical", "ifb", "icalendar"]).pick_file()
+}
+
+#[cfg(not(any(windows, unix)))]
+pub fn open_ics() -> Option<std::path::PathBuf> {
+    None
+}
+
+/// Speichern-Dialog für iCal-Dateien (Kalender-Export, #164); anderswo `None`.
+#[cfg(any(windows, unix))]
+pub fn save_ics(default_name: &str) -> Option<std::path::PathBuf> {
+    rfd::FileDialog::new().set_file_name(default_name).add_filter("iCalendar", &["ics"]).save_file()
+}
+
+#[cfg(not(any(windows, unix)))]
+pub fn save_ics(_default_name: &str) -> Option<std::path::PathBuf> {
     None
 }
 

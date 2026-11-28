@@ -304,6 +304,17 @@ impl Document {
         self.format.eol
     }
 
+    /// Format for saving plus its dirty flag – to put both back when a save fails after the actions on save changed them.
+    pub fn format_state(&self) -> (FileFormat, bool) {
+        (self.format, self.format_dirty)
+    }
+
+    /// Put back what [`Document::format_state`] returned.
+    pub fn restore_format_state(&mut self, s: (FileFormat, bool)) {
+        self.format = s.0;
+        self.format_dirty = s.1;
+    }
+
     /// Save with another encoding (marks the document dirty; the text is unchanged). To re-read the file in another
     /// encoding use [`Document::reload_with_encoding`].
     pub fn set_encoding(&mut self, enc: TextEncoding) {
@@ -394,6 +405,14 @@ impl Document {
         self.history.break_group();
     }
 
+    /// The text state `state` (from [`Document::state_id`]) matches the file – after a save that ran in the background
+    /// while the user may have kept typing (then the document stays dirty).
+    pub(crate) fn mark_saved_state(&mut self, state: u64) {
+        self.saved_state = Some(state);
+        self.format_dirty = false;
+        self.history.break_group();
+    }
+
     /// Mark as unsaved (restored from hot exit).
     pub(crate) fn mark_unsaved(&mut self) {
         self.saved_state = None;
@@ -415,6 +434,12 @@ impl Document {
     /// The next edit starts a new undo step (call when the cursor was moved by click/keys, focus changed …).
     pub fn break_undo_group(&mut self) {
         self.history.break_group();
+    }
+
+    /// Join all undo steps made since the state `mark` (a [`Document::state_id`]) into one, so a single undo takes them
+    /// back together (the actions on save before writing).
+    pub fn join_undo_since(&mut self, mark: u64) {
+        self.history.join_since(mark);
     }
 
     pub fn set_history_limits(&mut self, limits: HistoryLimits) {
@@ -657,6 +682,53 @@ mod tests {
         assert_eq!(d.byte_to_char(1), 0);
         assert_eq!(d.pos_to_linecol(3), LineCol::new(1, 0));
         assert_eq!(d.linecol_to_pos(LineCol::new(0, 5)), 2);
+    }
+
+    /// Mehrere Aktionen beim Speichern (#383): ein Rückgängig-Schritt.
+    #[test]
+    fn join_undo_since_makes_one_step() {
+        let mut d = Document::from_text("a  
+b");
+        let mut s = d.new_selections(0);
+        d.apply_edits(&mut s, vec![TextEdit::insert(0, "x")], EditOrigin::User).unwrap();
+        let mark = d.state_id();
+        d.replace_all_text(&mut s, "xa
+b", EditOrigin::User);
+        d.replace_all_text(&mut s, "xa
+b
+", EditOrigin::User);
+        d.join_undo_since(mark);
+        assert!(d.undo(&mut s));
+        assert_eq!(d.text(), "xa  
+b", "beide Schritte auf einmal zurück");
+        assert_eq!(d.state_id(), mark);
+        assert!(d.redo(&mut s));
+        assert_eq!(d.text(), "xa
+b
+");
+        // Unbekannte Marke bzw. nur ein Schritt danach: nichts zusammengelegt.
+        let m2 = d.state_id();
+        d.join_undo_since(9999);
+        d.replace_all_text(&mut s, "y", EditOrigin::User);
+        d.join_undo_since(m2);
+        assert!(d.undo(&mut s));
+        assert_eq!(d.text(), "xa
+b
+");
+        // Vom Anfang an (Marke = Ausgangszustand ohne Schritte).
+        let mut e = Document::from_text("q");
+        let mut se = e.new_selections(0);
+        let m0 = e.state_id();
+        e.replace_all_text(&mut se, "q1", EditOrigin::User);
+        e.replace_all_text(&mut se, "q12", EditOrigin::User);
+        e.join_undo_since(m0);
+        assert!(e.undo(&mut se) && e.text() == "q" && !e.can_undo());
+        // Format: gesetzt und wieder hergestellt, auch das „ungespeichert“ des Formats.
+        let st = e.format_state();
+        e.set_eol(if st.0.eol == LineEnding::Lf { LineEnding::CrLf } else { LineEnding::Lf });
+        assert!(e.format_state() != st);
+        e.restore_format_state(st);
+        assert!(e.format_state() == st);
     }
 
     #[test]

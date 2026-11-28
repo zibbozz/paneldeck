@@ -70,6 +70,14 @@ A WSL session can start in a folder **inside WSL**:
 - *Open in Paneldeck* in Explorer on a `\\wsl.localhost\<distro>\…` folder opens a WSL session of that distribution in the matching Linux path.
 - A WSL session without a start folder starts in the Linux home (`~`). A restored WSL session whose saved folder cannot be used starts in `~` with a note. Folders containing `"` or `\` are rejected.
 
+### Path kinds: Windows, WSL and Git Bash
+Wherever you enter, pick, drop, insert or click a path, Paneldeck uses the path kind of the target shell and converts in both directions:
+- **Folder fields** – *New session*, session settings, terminal templates, *Start folder* of profiles, the folder of a process, default folders of tree folders and projects and the working folder of a planning project (following the default shell) – are the same field everywhere: for a WSL shell with the *Windows path / WSL path* switch, completion, check and recently used folders; for Git Bash also `/c/x` and `~`; for every shell `~` and `~/x` (the home folder of the target – the Linux home of the distribution, otherwise your Windows user folder). What a typed path stands for is shown small underneath. Folders are stored as you entered them; only a `\wsl.localhost\<distro>\…` path of the session's own distribution becomes the Linux path.
+- **Drag & drop and *Insert path*** (file tree, double-click) convert for the terminal: in WSL `C:\x` becomes `/mnt/c/x` (or the mount point set in `/etc/wsl.conf`) and `\wsl.localhost\<distro>\x` becomes `/x`; in Git Bash `C:\x` becomes `/c/x`. A file of another WSL distribution is not inserted – a note says why.
+- ***New session here*** in the file tree on a WSL folder starts a WSL session of that distribution, like *Open in Paneldeck* in Explorer.
+- **Ctrl+click** on a Linux path in the terminal output (`/home/me/x.rs:12`, `~/notes.md`, `/mnt/c/…`, Git Bash `/c/…`) opens text files in the Paneldeck editor at that line and folders in Explorer. Links set by programs (OSC 8, `file:///home/…`) from a WSL session point to the file in that distribution.
+- **cmd.exe** cannot start in a network or WSL folder; such a session starts in your user folder with a note.
+
 ## Organization
 - **Projects** with their own layout, plus **folders**, groups, colors, tags, filters (`Filter: name or #tag`) and notes. The sidebar shows the sessions as a list or a folder tree; drag & drop moves sessions and folders.
 - Folders can have a working folder and **defaults for new sessions** (profile); *Save as template …* stores a group of sessions as a **session template**.
@@ -95,7 +103,28 @@ A WSL session can start in a folder **inside WSL**:
 
 ## Reload and session settings
 - **Reload** (button in the pane header – also in detached windows –, *Reload …* in the sidebar context menu, *Reload session …* in the palette, optional shortcut *Reload session* without a default) restarts the session's shell, or Claude Code according to the session's options. While a program is running it asks first (*Reload session?*); if the session has background programs, see [Closing sessions](#closing-sessions-and-background-programs). *Restart* of an ended session and *Restart ended sessions* ask first in the same way.
-- **Session settings** (*Settings …* in the sidebar context menu, *Session settings …* in the palette) change an existing session: profile, shell, start folder, name, color, tree folder, tags, notes, Claude on/off and the Claude start options (see [Claude Code](claude-code.md#start-options)). Changes that only take effect on the next start offer *Reload now?*. For a WSL session the start folder has the same **Windows path / WSL path** switch as *New session*, so Linux paths work here too.
+- **Session settings** (*Settings …* in the sidebar context menu, *Session settings …* in the palette) change an existing session: profile, shell, start folder, name, color, tree folder, tags, notes, Claude on/off, the Claude start options (see [Claude Code](claude-code.md#start-options)) and the session's [environment variables](#environment-variables). Changes that only take effect on the next start offer *Reload now?*. For a WSL session the start folder has the same **Windows path / WSL path** switch as *New session*, so Linux paths work here too.
+
+## Environment variables
+Every terminal session can have its **own environment variables** (e.g. `API_URL=http://localhost:3000`, `NODE_ENV=development`) – tab **Environment** in *New session*, in the session settings and in the template editor.
+
+![The Environment tab of the session settings with normal, secret, prepended and removed variables](../images/session-env.png)
+
+- **Table:** *Name*, *Value*, *Secret*, *Mode*, *Remove* (and *Path* for WSL), **+ Variable**, up to 100 variables. **Paste KEY=VALUE …** takes over several `KEY=VALUE` lines at once (comments, empty lines and `export ` are ignored; an existing name gets the new value). **Import from .env …** reads a `.env` file once (not linked) and shows a preview with a checkbox per line; names that look like secrets become secret.
+- **Secret:** the value is stored **encrypted** (like the process list: Windows DPAPI for your user, on Linux/macOS the keyring or the master password), masked in the table and never typed into a terminal, copied, exported or given to agents. The checkbox is ticked automatically for names containing `TOKEN`, `KEY`, `SECRET`, `PASS`, `PWD` or `AUTH`. Normal values are readable in `state.json`.
+- **Order:** profile < template < session – a variable of the same name wins over the profile's (and the template's). On Windows names are case-insensitive.
+- **Mode:** *Replace* (default), *Prepend* or *Append* puts the value before or after the inherited value with the platform separator (`;` on Windows, `:` on Linux/macOS) – for `PATH` and other lists. **Remove** removes an inherited variable.
+- **Values are literal:** `%VAR%` and `$VAR` are not expanded.
+- **Protected names:** `PANELDECK_*` and Paneldeck's internal variables cannot be set by a profile, a template or a session (a profile could overwrite `PANELDECK_SESSION`/`PANELDECK_SESSION_KEY` before 3.2.0). Names that shell integration sets itself (`PROMPT`, `PROMPT_COMMAND`, `PS0`, `ZDOTDIR`, `WSLENV`) get a warning icon: Paneldeck's value wins, `WSLENV` is merged.
+- **WSL:** all variables reach WSL via `WSLENV`; *Path* converts a Windows path (`/p`, a list with `;` as `/l`) and is only available with *Replace*. *Prepend*, *Append* and *Remove* act on the Linux values, so Paneldeck types them as a visible command (with a leading space, in the syntax of the detected login shell, fish included) before the start command; without shell integration, for secret values and for values that cannot be typed literally they are left out with a note.
+- **Names** must not contain `=`, `:`, `/`, spaces or invisible characters (`:` and `/` would break `WSLENV`).
+- **Claude sessions:** Claude Code and every tool it starts see all values, secret ones too. Names that Claude Code evaluates itself (`ANTHROPIC_*`, `CLAUDE_CODE_*`) get a warning.
+- **Running session:** after saving changed variables of a running session, Paneldeck asks **Restart / Set now / Later**. *Set now* first clears the input line (Ctrl+U in bash/zsh/fish, Esc in PowerShell and cmd) and then types the normal values into the shell as a visible command with a leading space (PowerShell `$env:NAME = '…'`, cmd `set "NAME=…"`, bash/zsh `export NAME='…'`, fish `set -gx NAME '…'`, also in WSL) – only for a shell with shell integration that is waiting at its prompt; otherwise the button is greyed out with the reason. *Prepend*/*Append* checks whether the variable exists (cmd `if defined`, conditionals in PowerShell/fish, `${NAME:+…}` in bash/zsh); in Git Bash they only apply after a restart (Windows paths in a `:` list). Secret values, deleted rows and changed *Prepend*/*Append* variables only apply after a restart. The orange dot compares with what the running shell has (taken at its start plus what *Set now* typed).
+- **Pane header:** `$ n` shows how many variables the session has; the tooltip lists them (normal values with their value, secret ones as ••••). An **orange dot** means a change only applies after a restart.
+- **Split and duplicate** copy the variables (independent afterwards). The sidebar context menu *Environment variables* has *Edit …*, *Copy variables* / *Paste variables* (between sessions; secret values stay inside Paneldeck and never reach the clipboard) and **Copy as .env** (secret values empty; *Prepend*/*Append* is written as a comment line `# paneldeck: prepend` / `# paneldeck: append` before the variable, which *Paste KEY=VALUE …* and the import read back – other `.env` tools ignore it).
+- **Templates:** a session copies the template's variables when it starts. *Save as terminal template …* takes the session's secret values only when you tick *Include the session's secret values*; a group template keeps only their names. Encrypted values only work for your user on this computer – on another one they must be entered again.
+- **Locked restore:** if a secret value cannot be decrypted at start (Linux/macOS: master password not entered yet), the session waits: *Secret variables locked – unlock and start*. If decrypting is impossible (another user or computer), *Edit variables …* opens the tab to enter the values again.
+- Chats and the [process list](processes.md) do not get these variables; agents only see names and flags (see [Agent interface](agent-interface.md#environment-variables)).
 
 ## Closing sessions and background programs
 - **Close** a session with the × in the pane header, the context menus or a **middle-click** on the session in the sidebar (with the same confirmation as the close button, if *Settings → General → Confirm close* is on).
@@ -137,6 +166,7 @@ All shortcuts can be changed under *Settings → Shortcuts*.
 | `Ctrl+Shift+Up` / `Ctrl+Shift+Down` | Jump to previous / next command |
 | `Ctrl+Tab` / `Ctrl+Shift+Tab` | Next / previous session (also minimized ones) |
 | `Ctrl+1` / `Ctrl+2` (also `Alt+Shift+1` / `Alt+Shift+2`) | *Terminal Hub* / *Todo list* tab |
+| `Alt+Shift+3` / `Alt+Shift+4` | *Editor* / *Time* tab |
 | `Ctrl`+click on a title bar tab | Open the tab in a new window |
 | (none) | *Reload session*, *Close all sessions* – assign a key under *Settings → Shortcuts* |
 | `Ctrl+Shift+1`…`9` (fixed) | Switch to project 1–9 |

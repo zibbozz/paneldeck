@@ -91,6 +91,9 @@ fn write_demo_project(dir: &Path) {
         ("src/orders.rs", "//! Orders: create, find and cancel.\n\nuse std::collections::BTreeMap;\n\n#[derive(Clone, Debug, PartialEq)]\npub struct Order {\n    pub id: u64,\n    pub customer: String,\n    pub total_cents: u64,\n    pub cancelled: bool,\n}\n\nimpl Order {\n    pub fn sample() -> Order {\n        Order { id: 1, customer: \"demo\".into(), total_cents: 1999, cancelled: false }\n    }\n}\n\n#[derive(Default)]\npub struct OrderStore {\n    next_id: u64,\n    orders: BTreeMap<u64, Order>,\n}\n\nimpl OrderStore {\n    pub fn create_order(&mut self, customer: &str, total_cents: u64) -> u64 {\n        self.next_id += 1;\n        let id = self.next_id;\n        self.orders.insert(id, Order { id, customer: customer.into(), total_cents, cancelled: false });\n        id\n    }\n\n    pub fn find_order(&self, id: u64) -> Option<&Order> {\n        self.orders.get(&id)\n    }\n\n    pub fn cancel_order(&mut self, id: u64) -> bool {\n        match self.orders.get_mut(&id) {\n            Some(order) if !order.cancelled => {\n                order.cancelled = true;\n                true\n            }\n            _ => false,\n        }\n    }\n}\n"),
         ("src/payments.rs", "//! Payments: charge an order with a saved card.\n\nuse crate::orders::Order;\n\n#[derive(Debug)]\npub enum PaymentError {\n    Declined,\n    Expired,\n}\n\npub fn charge(order: &Order, card: &str) -> Result<String, PaymentError> {\n    if card.ends_with(\"0000\") {\n        return Err(PaymentError::Declined);\n    }\n    Ok(format!(\"ch_{}_{}\", order.id, order.total_cents))\n}\n"),
         ("tests/orders.rs", "use acme_shop::orders::OrderStore;\n\n#[test]\nfn cancel_order_only_once() {\n    let mut store = OrderStore::default();\n    let id = store.create_order(\"bob\", 500);\n    assert!(store.cancel_order(id));\n    assert!(!store.cancel_order(id));\n}\n"),
+        // Formatieren (#381): kompaktes JSON zum Formatieren und eines mit einem Fehler (fehlendes Komma).
+        ("config/shop.json", "{\"name\":\"acme-shop\",\"port\":8080,\"currency\":\"EUR\",\"payments\":{\"provider\":\"demo\",\"retries\":3,\"cards\":[\"visa\",\"mastercard\"]},\"features\":{\"coupons\":true,\"gift_cards\":false}}\n"),
+        ("config/orders.json", "{\n  \"orders\": [\n    { \"id\": 1, \"customer\": \"alice\", \"total_cents\": 4200 },\n    { \"id\": 2, \"customer\": \"bob\" \"total_cents\": 500 }\n  ]\n}\n"),
     ];
     for (name, text) in FILES {
         let p = dir.join(name);
@@ -184,7 +187,7 @@ impl App {
 
     /// Projekt anlegen (nur in der Seitenleiste der Aufnahme).
     fn shot_project(&mut self, name: &str, folder: &Path) -> u64 {
-        let id = self.projects.iter().map(|p| p.id).max().unwrap_or(0) + 1;
+        let id = self.alloc_project_id();
         self.projects.push(Project { id, name: name.to_string(), color: hub_color(id + 2), folder: folder.to_string_lossy().to_string(), ..Project::default() });
         id
     }
@@ -228,19 +231,18 @@ impl App {
     }
 
     /// Claude-Status der Beispielsitzungen (jedes Bild neu: ohne echten Claude fiele er sonst zurück).
+    /// Die wartende Sitzung zeigt in der Karte „Wartet auf dich“, was sie verlangt (#390) – wie von Claude gemeldet
+    /// (die Meldung ist immer Englisch).
     fn shot_status(&mut self) {
-        let lang = self.settings.language;
         let ids = self.shot_sessions();
-        let states = [
-            (ClaudeStatus::Permission, lang.t("Bash: cargo test --release", "Bash: cargo test --release")),
-            (ClaudeStatus::Working, ""),
-            (ClaudeStatus::Idle, ""),
-        ];
+        let states = [(ClaudeStatus::Permission, "Claude needs your permission to use Bash"), (ClaudeStatus::Working, ""), (ClaudeStatus::Idle, "")];
         for (id, (st, msg)) in ids.iter().zip(states) {
             if let Some(e) = self.entries.get_mut(id) {
                 e.launched_claude = true;
                 e.status = st;
                 e.status_msg = msg.to_string();
+                let call = crate::hooks::ToolCall { seq: 1, id: None, detail: "cargo test --release".into() };
+                e.track.request = (st == ClaudeStatus::Permission).then(|| crate::hooks::ToolRequest { tool: "Bash".into(), calls: vec![call], confirmed: true });
             }
         }
     }
@@ -416,6 +418,39 @@ impl App {
         self.activate(id);
     }
 
+    /// Umgebungsvariablen einer Sitzung (#384): Sitzung im Beispielprojekt mit normalen, einer geheimen, einer
+    /// vorangestellten und einer entfernten Variable; die Einstellungen der Sitzung öffnen auf dem Reiter „Umgebung“.
+    fn shot_session_env(&mut self, ctx: &egui::Context) {
+        use crate::session_env::{EnvVar, Mode};
+        let demo = demo_dir(&self.dir);
+        write_demo_project(&demo);
+        self.set_mode(titlebar::Mode::Terminals);
+        let pid = self.active_project;
+        if let Some(p) = self.projects.iter_mut().find(|p| p.id == pid) {
+            p.name = "Acme Shop".into();
+            p.folder = demo.to_string_lossy().to_string();
+        }
+        let mut env = vec![
+            EnvVar::plain("API_URL", "http://localhost:3000"),
+            EnvVar::plain("NODE_ENV", "development"),
+            EnvVar { mode: Mode::Prepend, ..EnvVar::plain("PATH", r"C:\Dev\acme-shop\tools") },
+            EnvVar { remove: true, ..EnvVar::plain("HTTP_PROXY", "") },
+        ];
+        // Beispielwert, verschlüsselt im Datenordner der Aufnahme (geht das nicht, fehlt die Zeile).
+        if let Ok(s) = EnvVar::secret("GITHUB_TOKEN", "ghp_example_only") {
+            env.insert(2, s);
+        }
+        let id = self.new_session(ctx, NewOpts { project: Some(pid), cwd: Some(demo.to_string_lossy().to_string()), name: Some("api-server".into()), env, ..NewOpts::default() });
+        self.shot_name(id, "api-server");
+        self.activate(id);
+        self.open_session_settings(id);
+        if let Some(f) = self.session_settings.as_mut() {
+            f.start_tab = Some(super::opts_tabs::Tab::Environment);
+            // neutraler Ordner statt des Aufnahme-Ordners (nur im Formular, gespeichert wird nichts)
+            f.v.cwd = if cfg!(windows) { r"C:\Dev\acme-shop".into() } else { "/home/dev/acme-shop".into() };
+        }
+    }
+
     /// Ansicht aufbauen (einmal).
     fn shot_setup(&mut self, ctx: &egui::Context, view: &str, arg: &str) {
         let demo = demo_dir(&self.dir);
@@ -456,6 +491,18 @@ impl App {
                 self.shot_procs_demo(ctx, pid);
                 self.shot_proc_editor(pid);
             }
+            // ---- Kalender (#164): Beispieltermine rund um heute
+            "calendar-month" | "calendar-week" | "calendar-dialog" => {
+                let zone = crate::calendar::zone::SystemZone;
+                let env = calendar_ui::CalEnv { conn: self.db.as_ref().map(|d| &d.conn), lang: self.settings.language, now: chrono::Local::now().naive_local(), zone: &zone };
+                if let Some(c) = env.conn {
+                    calendar_ui::demo_seed(c, env.now.date(), env.lang);
+                }
+                self.cal.demo_prepare(&env, view.trim_start_matches("calendar-"));
+                // im Unterreiter „Kalender“ des Zeit-Reiters
+                self.set_mode(titlebar::Mode::Time);
+                self.time.sub = time_ui::Sub::Calendar;
+            }
             // ---- Aufräumen
             "cleanup" => self.open_cleanup(ctx),
             "cleanup-confirm" => self.shot_cleanup_confirm(ctx),
@@ -487,10 +534,53 @@ impl App {
                     self.editor_svc.find.start(demo.clone(), q, move || repaint.request_repaint());
                 }
             }
+            // Menüleiste und Formatieren (#381): links das formatierte JSON, rechts ein Fehler mit „Gehe zu“.
+            "editor-format" => {
+                write_demo_project(&demo);
+                self.set_mode(titlebar::Mode::Editor);
+                self.ed.set_root(&demo);
+                let _ = self.editor_open(&demo.join("config/shop.json"), true, false);
+                self.ed.open_path(&demo.join("config/orders.json"), true);
+            }
+            // Aktionen beim Speichern (#383): Regel-Dialog über dem Editor.
+            "editor-on-save" => {
+                write_demo_project(&demo);
+                self.set_mode(titlebar::Mode::Editor);
+                self.ed.set_root(&demo);
+                let _ = self.editor_open(&demo.join("src/orders.rs"), true, false);
+                self.shot_save_actions_demo(&demo);
+            }
+            // Vergleich und Änderungsmarken (#385): ungespeicherte Änderungen in orders.rs gegen die gespeicherte Datei.
+            "editor-diff" | "editor-gutter" => {
+                write_demo_project(&demo);
+                self.set_mode(titlebar::Mode::Editor);
+                self.ed.set_root(&demo);
+                if view == "editor-gutter" {
+                    self.settings.editor.change_markers = true;
+                    self.settings.editor.marker_base = crate::editor_svc::settings::MarkerBase::Disk;
+                }
+                let p = demo.join("src/orders.rs");
+                if let Ok(id) = self.editor_open(&p, true, false) {
+                    self.editor_shot_edits(id);
+                    if view == "editor-diff" {
+                        let prefs = self.editor_prefs();
+                        let lang = self.settings.language;
+                        let _ = self.ed.compare(id, super::editor_ui::shot_target_disk(), &prefs, lang);
+                    }
+                }
+            }
             "editor-settings" => {
                 self.set_mode(titlebar::Mode::Editor);
                 self.settings_open = true;
                 self.settings_tab = editor_services::SETTINGS_TAB;
+            }
+            // ---- Reiter „Zeit“ (#164): Beispieldaten in der Datenbank der Aufnahme
+            "time-alarms" | "time-timers" | "time-clocks" => {
+                self.set_mode(titlebar::Mode::Time);
+                let lang = self.settings.language;
+                if let Some(db) = self.db.as_ref() {
+                    self.time.shot_demo(&db.conn, view, lang);
+                }
             }
             // ---- Themes
             "theme-appearance" => {
@@ -521,6 +611,8 @@ impl App {
             }
             // ---- Chats (#355, #356): Verlauf nur im Speicher, kein Server nötig
             "chat-background-command" | "chat-ask-form" => self.shot_chat(ctx, view == "chat-ask-form"),
+            // ---- Umgebungsvariablen (#384)
+            "session-env" => self.shot_session_env(ctx),
             _ => eprintln!("{SHOT_MARK}: unknown view {view}"),
         }
     }
@@ -643,6 +735,12 @@ impl App {
                     self.shot_usage();
                 }
             }
+            // neutraler Prompt hinter dem Dialog (kein Pfad des Aufnahme-Rechners)
+            "session-env" if n == 30 => {
+                if let Some(id) = self.shot_sessions().first().copied() {
+                    self.shot_run(id, &demo, None);
+                }
+            }
             "processes" | "process-output" | "process-new" if n == 40 => {
                 if let Some(id) = self.shot_sessions().first().copied() {
                     self.shot_run(id, &demo, Some("Get-ChildItem -Name"));
@@ -661,6 +759,22 @@ impl App {
                 f.regex = true;
                 f.replacement = "fn ${1}_purchase".into();
                 f.replace_mode = true;
+            }
+            "editor-format" if n == 10 => {
+                let groups: Vec<(u64, u64)> = self.ed.panes.groups.iter().filter_map(|(g, grp)| grp.active_tab().map(|t| (*g, t.doc))).collect();
+                let lang = self.settings.language;
+                for (g, doc) in groups {
+                    let validate = self.ed.docs.get(&doc).and_then(|d| d.path.as_ref()).is_some_and(|p| p.ends_with("orders.json"));
+                    let op = if validate { crate::editor::format::Op::Validate } else { crate::editor::format::Op::Format };
+                    let c = ctx.clone();
+                    self.ed.start_format(g, op, false, move || c.request_repaint(), lang);
+                }
+            }
+            "editor-gutter" if n == 15 => {
+                let p = demo.join("src/orders.rs");
+                if let Some(id) = self.ed.doc_for_path(&p) {
+                    self.editor_shot_popup(id, 26);
+                }
             }
             "editor-disk-changed" if n == 15 => {
                 // eigene, ungespeicherte Änderung im Puffer und eine fremde auf der Platte

@@ -352,14 +352,23 @@ fn chat(ui: &mut Ui, u: &UiColors, lang: Lang, m: &mut Marks) {
         ui.set_width(ui.available_width());
         ui.label(RichText::new(lang.t("run_command wartet auf Freigabe", "run_command needs approval")).color(u.warning));
         ui.label(RichText::new("cargo test --release").monospace());
+        // Freigabe-Knöpfe ohne eigene Farbe wie im Chat (#390).
         ui.horizontal(|ui| {
-            let r = ui.add(egui::Button::new(RichText::new(lang.t("Erlauben", "Allow")).strong()).fill(u.chat_send));
-            mark(m, r.rect, "chat_send");
-            let r = ui.button(lang.t("Ablehnen", "Deny"));
-            mark(m, r.rect, "widget_bg");
+            for label in [lang.t("Erlauben", "Allow"), lang.t("Ablehnen", "Deny")] {
+                let r = ui.button(label);
+                mark(m, r.rect, "widget_bg");
+            }
         });
     });
     mark(m, r.response.rect, "chat_approval_bg");
+    ui.add_space(4.0);
+    ui.horizontal(|ui| {
+        ui.label(RichText::new(lang.t("Nachricht …", "Message …")).color(u.text_dim));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let r = ui.add(egui::Button::new(RichText::new(lang.t("Senden", "Send")).strong()).fill(u.chat_send));
+            mark(m, r.rect, "chat_send");
+        });
+    });
 }
 
 fn terminal(ui: &mut Ui, t: &Theme, m: &mut Marks) {
@@ -424,6 +433,37 @@ fn diff(ui: &mut Ui, u: &UiColors, m: &mut Marks) {
         for (line, c, tok) in [("@@ -12,3 +12,4 @@", u.diff_rename, "diff_rename"), ("-    let accent = ACCENT;", u.diff_remove, "diff_remove"), ("+    let accent = style::brand();", u.diff_add, "diff_add"), ("     apply(ctx, &theme);", u.text_dim, "text_dim")] {
             let r = ui.label(RichText::new(line).monospace().color(c));
             mark(m, r.rect, tok);
+        }
+        // Vergleichs-Reiter und Änderungsmarken des Editors (#385)
+        ui.add_space(6.0);
+        let lh = 16.0;
+        let (rect, _) = ui.allocate_exact_size(Vec2::new(314.0, lh * 4.0 + 4.0), egui::Sense::hover());
+        let p = ui.painter();
+        let font = egui::FontId::monospace(12.0);
+        let rows: [(&str, Color32, &'static str, Color32, &'static str); 2] = [("let size = 3;", u.diff_remove_bg, "diff_remove_bg", u.diff_remove_word, "diff_remove_word"), ("let size = 4;", u.diff_add_bg, "diff_add_bg", u.diff_add_word, "diff_add_word")];
+        for (i, (text, bg, bg_tok, word, word_tok)) in rows.into_iter().enumerate() {
+            let r = Rect::from_min_size(rect.min + Vec2::new(10.0, i as f32 * lh), Vec2::new(rect.width() - 10.0, lh));
+            p.rect_filled(r, 0.0, bg);
+            mark(m, r, bg_tok);
+            let cw = 7.2;
+            let w = Rect::from_min_size(r.min + Vec2::new(4.0 + 11.0 * cw, 1.0), Vec2::new(cw, lh - 2.0));
+            p.rect_filled(w, 2.0, word);
+            mark(m, w, word_tok);
+            p.text(r.min + Vec2::new(4.0, 1.0), egui::Align2::LEFT_TOP, text, font.clone(), u.text);
+        }
+        let fill = Rect::from_min_size(rect.min + Vec2::new(10.0, 2.0 * lh), Vec2::new(rect.width() - 10.0, lh));
+        let hp = p.with_clip_rect(fill);
+        let mut x = fill.left() - lh;
+        while x < fill.right() {
+            hp.line_segment([egui::pos2(x, fill.bottom()), egui::pos2(x + lh, fill.top())], egui::Stroke::new(1.0_f32, u.diff_filler));
+            x += 7.0;
+        }
+        mark(m, fill, "diff_filler");
+        let markers = [(u.marker_added, "marker_added"), (u.marker_modified, "marker_modified"), (u.marker_deleted, "marker_deleted"), (u.marker_staged_added, "marker_staged_added"), (u.marker_staged_modified, "marker_staged_modified"), (u.marker_staged_deleted, "marker_staged_deleted")];
+        for (i, (c, tok)) in markers.into_iter().enumerate() {
+            let r = Rect::from_min_size(rect.min + Vec2::new(10.0 + i as f32 * 50.0, 3.0 * lh + 4.0), Vec2::new(40.0, lh - 4.0));
+            p.rect_filled(r, 2.0, c);
+            mark(m, r, tok);
         }
     });
     mark(m, r.response.rect, "code_bg");

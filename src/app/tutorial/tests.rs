@@ -160,20 +160,25 @@ enum Home {
     Palette,
     /// Editor-Reiter; `true` = braucht eine offene Datei (die Beispieldatei der Tour).
     Editor(bool),
+    /// Reiter „Zeit“ mit diesem Unterreiter (#164).
+    Time(super::super::time_ui::Sub),
 }
 
 fn home(s: Spot) -> Home {
     use Spot::*;
     match s {
-        TabEditor | EditorSearchSettings | EditorAgentSwitches => Home::Settings(super::super::editor_services::SETTINGS_TAB),
+        TabEditor | EditorSearchSettings | EditorAgentSwitches | EditorSaveActions => Home::Settings(super::super::editor_services::SETTINGS_TAB),
         EditorTree => Home::Editor(false),
-        EditorTabBar | EditorSplit | EditorText | EditorFind | EditorStatus | EditorMinimap | EditorSearchFiles => Home::Editor(true),
-        TitlebarEditor => Home::Hub,
-        ThemeManage => Home::Settings(1),
+        EditorTabBar | EditorSplit | EditorText | EditorFind | EditorStatus | EditorMinimap | EditorSearchFiles | EditorMenuBar => Home::Editor(true),
+        TitlebarEditor | TitlebarTime => Home::Hub,
+        TimeSubTabs | TimeNewAlarm | TimeOptions => Home::Time(super::super::time_ui::Sub::Alarms),
+        TimePresets => Home::Time(super::super::time_ui::Sub::Timers),
+        CalendarViews => Home::Time(super::super::time_ui::Sub::Calendar),
+        ThemeManage | ReduceTransparency => Home::Settings(1),
         ClaudeMode | ClaudeDefaults | ClaudeBudget => Home::Settings(2),
         TabShortcuts => Home::Settings(5),
         TabProfiles => Home::Settings(6),
-        McpLevel | McpRegister | McpSysprompt | McpLog => Home::Settings(7),
+        McpLevel | McpRegister | McpSysprompt | McpSessionEnv | McpLog | AgentAccess => Home::Settings(7),
         DataBackups | DataCleanup => Home::Settings(8),
         AboutInfo | AboutUpdates | AboutTutorial => Home::Settings(9),
         TabModels | ModelsServers | ModelsCommands => Home::Settings(super::super::models_ui::SETTINGS_TAB),
@@ -206,6 +211,7 @@ fn preparations_open_the_home_of_each_target() {
                 assert!(has(Prep::Editor) && has(Prep::NoSettings), "{}: Editor-Reiter ohne Einstellungen", s.id);
                 assert!(!file || has(Prep::EditorFile), "{}: Beispieldatei der Tour offen", s.id);
             }
+            Home::Time(sub) => assert!(has(Prep::Time(sub)) && has(Prep::NoSettings), "{}: Reiter Zeit, Unterreiter {sub:?}", s.id),
         }
         // Ziele, die eine Sitzung brauchen
         if matches!(spot, Spot::SessionRow | Spot::PaneSplit | Spot::PaneMinimize) {
@@ -253,6 +259,18 @@ fn step(id: &str) -> &'static Step {
     all_steps().find(|(_, s)| s.id == id).map(|(_, s)| s).unwrap_or_else(|| panic!("Schritt {id}"))
 }
 
+/// #393: Der Schritt zur Stufe eines Modells erklärt die Werkzeugliste mit genau dem Kennzeichen, das die Liste in
+/// *Einstellungen → Modelle* neben standardmäßig ausgeschalteten Werkzeugen zeigt.
+#[test]
+fn the_model_level_step_names_the_off_by_default_mark() {
+    let s = step("chat.levels");
+    assert_eq!(s.spot, Some(Spot::ModelsServers));
+    for (lang, text) in [(Lang::De, s.body.de), (Lang::En, s.body.en)] {
+        let mark = crate::app::models_ui::default_off_mark(lang);
+        assert!(text.contains(mark), "{lang:?}: {text}");
+    }
+}
+
 #[test]
 fn actions_are_recognised_from_the_state() {
     let base = Probe::default();
@@ -294,6 +312,11 @@ fn actions_are_recognised_from_the_state() {
     assert!(done("editor.cursors", &one, &Probe { editor_cursors: 2, ..base.clone() }));
     assert!(!done("editor.cursors", &base, &one), "ein Cursor ist kein weiterer");
     assert!(step("editor.disk").done.is_none() && step("editor.disk").spot.is_none(), "Blase in der Mitte, nur Weiter");
+    // Reiter „Zeit“ (#164)
+    assert!(done("time.intro", &base, &Probe { time: true, ..base.clone() }));
+    assert!(!done("time.intro", &Probe { time: true, ..base.clone() }, &Probe { time: true, ..base.clone() }), "schon offen beim Betreten");
+    assert!(done("time.alarm", &base, &Probe { alarms: 1, ..base.clone() }));
+    assert!(!done("time.alarm", &Probe { alarms: 2, ..base.clone() }, &Probe { alarms: 1, ..base.clone() }), "Löschen zählt nicht");
     // Ohne Erkennung: nur „Weiter“.
     assert!(step("basics.welcome").done.is_none() && step("mcp.register").done.is_none());
 }
@@ -312,7 +335,26 @@ fn whats_new_lists_the_steps_since_a_version() {
     // Der Editor (#54) kam mit 3.0.0: die Tour „Was ist neu“ für 2.x zeigt ihn, mit dem Schritt der kurzen Tour zuerst.
     let editor = ids("2.7.0", "3.0.0");
     assert!(editor.contains(&"basics.editor") && editor.contains(&"editor.agents") && editor.contains(&"editor.search"), "{editor:?}");
-    assert!(steps::tour("editor").is_some_and(|t| t.steps.iter().all(|s| s.since == "3.0.0")));
+    // Ab 3.2.0 kommen Schritte dazu (Menüleiste und Formatieren #381, Aktionen beim Speichern #383); die übrigen der
+    // Tour sind von 3.0.0.
+    assert!(steps::tour("editor").is_some_and(|t| t.steps.iter().all(|s| s.since == "3.0.0" || s.since == "3.2.0")));
+    let fmt = ids("3.1.0", "3.2.0");
+    assert!(fmt.contains(&"editor.format") && !fmt.contains(&"editor.status"), "{fmt:?}");
+    // Waagerechte Bildlaufleiste (#389) kam mit 3.2.0, Ziel ist das Textfeld.
+    assert!(fmt.contains(&"editor.hscroll") && !fmt.contains(&"editor.minimap"), "{fmt:?}");
+    assert_eq!(steps::tour("editor").and_then(|t| t.steps.iter().find(|s| s.id == "editor.hscroll")).map(|s| s.spot), Some(Some(Spot::EditorText)));
+    assert_eq!(steps::tour("editor").and_then(|t| t.steps.iter().find(|s| s.id == "editor.format")).map(|s| s.spot), Some(Some(Spot::EditorMenuBar)));
+    assert!(steps::tour("time").is_some_and(|t| t.steps.iter().all(|s| s.since == "3.2.0")));
+    // Vergleich und Änderungsmarken (#385) kamen mit 3.2.0.
+    let diff = ids("3.1.0", "3.2.0");
+    assert!(diff.contains(&"editor.diff") && diff.contains(&"editor.markers"), "{diff:?}");
+    // Pfadarten des Ziels (#392) kamen mit 3.2.0, im Kapitel Werkzeuge hinter dem Dateibaum.
+    assert!(fmt.contains(&"tools.paths") && !fmt.contains(&"tools.files"), "{fmt:?}");
+    let tools = steps::tour("tools").map(|t| t.steps.iter().map(|s| s.id).collect::<Vec<_>>()).unwrap_or_default();
+    let at = |id: &str| tools.iter().position(|s| *s == id);
+    assert_eq!(at("tools.paths"), at("tools.files").map(|i| i + 1), "{tools:?}");
+    let step = steps::tour("tools").and_then(|t| t.steps.iter().find(|s| s.id == "tools.paths")).expect("tools.paths");
+    assert_eq!(step.spot, Some(Spot::SidebarFiles));
 }
 
 /// Die Schritte im Editor arbeiten in einer eigenen Beispieldatei der Tour im Temp-Ordner, nie in einer des Nutzers.

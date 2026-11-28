@@ -172,6 +172,23 @@ fn ime_output(ui: &Ui, rect: Rect, inner: Rect, session: &Session, theme: &Theme
 
 /// Einstellung „Blinkender Cursor“ (#183); die App schreibt sie jedes Bild (wie `mcp::LEVEL`).
 pub static CURSOR_BLINK: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+/// Mittlere Farbe des (gefilterten) eigenen Hintergrunds hinter den Terminals des gerade gezeichneten Fensters (#387),
+/// `0` = keiner (Fenster ohne Hintergrund, abgedockte Fenster). Der Mindestkontrast der Schrift auf dem
+/// Standardhintergrund wird gegen dessen Mischung mit dieser Farbe gerechnet ([`contrast_bg`]) – mit dem Theme, das das
+/// Terminal wirklich nutzt (auch ein Profil-Theme).
+static BACKDROP: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// Mittlere Farbe des Hintergrunds hinter den Terminals setzen (`None` = ohne eigenen Hintergrund).
+pub fn set_backdrop(c: Option<Color32>) {
+    let v = c.map(|c| 0x0100_0000 | ((c.r() as u32) << 16) | ((c.g() as u32) << 8) | c.b() as u32).unwrap_or(0);
+    BACKDROP.store(v, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn backdrop() -> Option<Color32> {
+    let v = BACKDROP.load(std::sync::atomic::Ordering::Relaxed);
+    (v != 0).then(|| Color32::from_rgb((v >> 16) as u8, (v >> 8) as u8, v as u8))
+}
 /// Halbe Blinkperiode (Sekunden), wie der Standard von Windows.
 const BLINK_HALF: f64 = 0.53;
 /// Nach so langer Zeit ohne Eingabe hört der Cursor auf zu blinken (spart Neuzeichnen).
@@ -378,7 +395,8 @@ fn paint(
             bg = theme.cursor;
             fg = theme.bg.to_opaque();
         }
-        fg = ensure_contrast(fg, bg);
+        // Standardhintergrund über dem eigenen Hintergrund des Themes: Kontrast gegen die Mischfarbe (#387).
+        fg = ensure_contrast(fg, contrast_bg(bg, theme.bg, backdrop()));
         let cell_rect = Rect::from_min_size(Pos2::new(x, y), Vec2::new(width, cs.y));
         if bg != theme.bg {
             painter.rect_filled(cell_rect, 0.0, bg);
@@ -802,10 +820,12 @@ fn handle_links(ui: &Ui, response: &Response, session: &mut Session, inner: Rect
     };
     if let Some(h) = osc8 {
         use crate::hyperlink::LinkKind;
-        let kind = crate::hyperlink::classify(h.uri());
+        // Dateien aus WSL/Git Bash (`file:///home/…`) als Windows-Ziel (#392).
+        let uri = crate::hyperlink::for_kind(h.uri(), &crate::targetpath::PathKind::of(&session.spec));
+        let kind = crate::hyperlink::classify(&uri);
         let (resting, idle) = ui.input(|i| (i.pointer.time_since_last_movement(), !i.pointer.any_down()));
         if idle && (ctrl || resting >= TOOLTIP_DELAY) {
-            link_tooltip(ui, response, h.uri(), &kind);
+            link_tooltip(ui, response, &uri, &kind);
         } else if idle {
             ui.ctx().request_repaint_after(std::time::Duration::from_secs_f32(TOOLTIP_DELAY - resting + 0.02));
         }
@@ -817,8 +837,8 @@ fn handle_links(ui: &Ui, response: &Response, session: &mut Session, inner: Rect
         }
         if response.clicked_by(egui::PointerButton::Primary) {
             match kind {
-                LinkKind::Web => crate::hyperlink::open(h.uri()),
-                LinkKind::Ask { .. } => crate::hyperlink::request_confirm(ui.ctx(), h.uri()),
+                LinkKind::Web => crate::hyperlink::open(&uri),
+                LinkKind::Ask { .. } => crate::hyperlink::request_confirm(ui.ctx(), &uri),
                 LinkKind::Denied(_) => {}
             }
             return (true, Some(h));
@@ -829,7 +849,7 @@ fn handle_links(ui: &Ui, response: &Response, session: &mut Session, inner: Rect
         return (false, None);
     }
     let chars = session.row_chars(row as usize);
-    let Some(link) = crate::links::find(&chars, col as usize, cwd, &session.shell_id) else {
+    let Some(link) = crate::links::find_kind(&chars, col as usize, cwd, &crate::targetpath::PathKind::of(&session.spec)) else {
         // Pfad auf einem Netzlaufwerk/`\\wsl$` wird gerade im Hilfsthread geprüft (#251): gleich noch einmal schauen.
         if crate::links::checks_pending() {
             ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
@@ -839,7 +859,8 @@ fn handle_links(ui: &Ui, response: &Response, session: &mut Session, inner: Rect
     ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     session.hover_link = Some((row as usize, link.start, link.end, link.target.clone()));
     if response.clicked_by(egui::PointerButton::Primary) {
-        crate::links::open(&link.target);
+        // Linux-Pfade (#392): Textdatei im Editor an der Zeile, Ordner im Explorer.
+        crate::links::activate(&link);
         return (true, None);
     }
     (false, None)
@@ -1185,6 +1206,23 @@ mod tests {
     use alacritty_terminal::term::{test::TermSize, Config, Term};
     use alacritty_terminal::vte::ansi::Processor;
     use MouseEncoding::{Normal, Sgr, Utf8};
+
+    #[test]
+    fn contrast_against_the_background_uses_the_terminals_own_theme() {
+        // Profil-Theme mit hellem, halb durchscheinendem Hintergrund über einem dunklen Bild: Mischung mit dem eigenen bg.
+        let light = Color32::from_rgba_unmultiplied(240, 240, 240, 128);
+        let dark_image = Color32::from_rgb(10, 10, 10);
+        let mixed = contrast_bg(light, light, Some(dark_image));
+        assert!(mixed.r() > 100 && mixed.r() < 140, "{mixed:?}");
+        // Anderer Zellhintergrund (Programmfarbe, Auswahl): unverändert; ohne Hintergrund (abgedockt): unverändert.
+        let red = Color32::from_rgb(200, 0, 0);
+        assert_eq!(contrast_bg(red, light, Some(dark_image)), red);
+        assert_eq!(contrast_bg(light, light, None), light);
+        set_backdrop(Some(dark_image));
+        assert_eq!(backdrop(), Some(dark_image));
+        set_backdrop(None);
+        assert_eq!(backdrop(), None);
+    }
 
     fn some(v: &[u8]) -> Option<Vec<u8>> {
         Some(v.to_vec())
@@ -1571,6 +1609,16 @@ fn contrast(a: Color32, b: Color32) -> f32 {
 }
 
 /// Mindestkontrast für Terminaltext (z. B. dunkelblau auf schwarz): Vordergrund wird bei Bedarf aufgehellt/abgedunkelt.
+/// Hintergrund, gegen den der Mindestkontrast einer Zelle gerechnet wird: der Zellhintergrund; ist es der (durchscheinende)
+/// Standardhintergrund `theme_bg` und liegt ein eigener Hintergrund mit der mittleren Farbe `behind` darunter, die
+/// Mischung beider (#387).
+fn contrast_bg(cell_bg: Color32, theme_bg: Color32, behind: Option<Color32>) -> Color32 {
+    match behind {
+        Some(m) if cell_bg == theme_bg => crate::theme::color::over(theme_bg, m),
+        _ => cell_bg,
+    }
+}
+
 fn ensure_contrast(fg: Color32, bg: Color32) -> Color32 {
     const MIN: f32 = 2.6;
     if bg.a() == 0 || contrast(fg, bg) >= MIN {

@@ -151,7 +151,8 @@ pub(super) fn plan_card(ui: &mut Ui, session: u64, p: &Plan, doc: &markdown::Doc
                 ui.horizontal_wrapped(|ui| {
                     if p.status == PlanStatus::Proposed {
                         let busy_tip = lang.t("Erst, wenn die Antwort fertig ist.", "Only when the answer is done.");
-                        let exec = egui::Button::new(RichText::new(lang.t("Ausführen", "Execute")).strong()).fill(crate::style::ui().chat_send);
+                        // Freigabe ohne eigene Farbe (#390): erst den Plan lesen.
+                        let exec = egui::Button::new(lang.t("Ausführen", "Execute"));
                         let r = ui
                             .add_enabled(decidable, exec)
                             .on_hover_text(lang.t("Plan freigeben: Schreib-Werkzeuge frei, die Schritte kommen in die To-do-Liste.", "Approve the plan: writing tools are unlocked, the steps go to the to-do list."))
@@ -333,6 +334,16 @@ mod tests {
                 assert!(h.has(label), "{label} fehlt: {:?}", h.texts());
             }
             assert!(h.texts().iter().any(|s| s.contains(t("Fassung", "revision")) && s.contains(PlanLevel::High.label(lang))), "Stufe und Fassung: {:?}", h.texts());
+            // #390: *Ausführen* ohne eigene Farbe – wie die anderen Knöpfe der Karte
+            let fill = |label: &str| {
+                let p = h.pos_of(label).unwrap();
+                h.shapes.iter().filter_map(|s| match &s.shape {
+                    egui::Shape::Rect(r) if r.rect.contains(p) && r.rect.width() < 300.0 => Some((r.rect.area(), r.fill)),
+                    _ => None,
+                }).min_by(|a, b| a.0.total_cmp(&b.0)).map(|x| x.1)
+            };
+            assert_eq!(fill(t("Ausführen", "Execute")), fill(t("Verwerfen", "Discard")));
+            assert_ne!(fill(t("Ausführen", "Execute")), Some(crate::style::ui().chat_send));
             assert_eq!(h.click(&mut c, lang, t("Ausführen", "Execute")).plan, Some(PlanAction::Execute));
             assert_eq!(h.click(&mut c, lang, t("Verwerfen", "Discard")).plan, Some(PlanAction::Discard));
             assert_eq!(h.click(&mut c, lang, t("Exportieren …", "Export …")).plan, Some(PlanAction::Export));

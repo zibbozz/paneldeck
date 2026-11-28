@@ -32,15 +32,40 @@ pub const DEFAULTS: &[(&str, &str)] = &[
     ("mode_tasks_alt", "Ctrl+2"),
     // Editor (#54): zweite Belegung standardmäßig leer – Strg+3 gehört dem Terminal (#183).
     ("mode_editor_alt", ""),
+    // Reiter „Zeit“ (#164): Alt+Shift+4; zweite Belegung leer (Strg+4 gehört dem Terminal, #183).
+    ("mode_time", "Alt+Shift+4"),
+    ("mode_time_alt", ""),
     // Alle Sitzungen schließen (#156): standardmäßig ohne Kürzel (leer = keins)
     ("close_all", ""),
     // Sitzung neu laden (#169): standardmäßig ohne Kürzel
     ("reload", ""),
+    // Editor: Formatieren (#381). Nicht Strg+Alt+Buchstabe – das ist AltGr auf vielen Tastaturen (AltGr+M = µ auf
+    // deutschen); Alt+Umschalt+F wie „Dokument formatieren“ in VS Code. Schlüssel sortieren ohne Standard.
+    ("ed_format", "Alt+Shift+F"),
+    ("ed_minify", "Alt+Shift+M"),
+    ("ed_validate", "Alt+Shift+V"),
+    ("ed_sort_keys", ""),
+    // Zweite Belegung (wie bei `mode_*`): Alt+Umschalt schaltet bei mehreren Eingabesprachen die Sprache um. Strg+Umschalt+I
+    // wie „Dokument formatieren“ in VS Code unter Linux.
+    ("ed_format_alt", "Ctrl+Shift+I"),
+    ("ed_minify_alt", ""),
+    ("ed_validate_alt", ""),
+    // Editor: Ohne Aktionen speichern (#383): standardmäßig ohne Kürzel
+    ("save_no_actions", ""),
+    // Editor (#385): nächste/vorige Änderung im Vergleich und bei den Änderungsmarken – nur im Editor-Reiter.
+    ("ed_next_change", "F7"),
+    ("ed_prev_change", "Shift+F7"),
 ];
 
 /// Kürzel, die in jedem Bereich gelten (Reiterwechsel) – die übrigen nur im Terminal-Bereich.
 pub fn is_global(id: &str) -> bool {
     id.starts_with("mode_")
+}
+
+/// Kürzel nur des Editor-Reiters (Formatieren #381, *Ohne Aktionen speichern* #383, …) – dort ausgewertet; der
+/// Terminal-Bereich lässt diese Tasten den Terminals.
+pub fn is_editor(id: &str) -> bool {
+    id.starts_with("ed_") || id == "save_no_actions"
 }
 
 pub fn label(id: &str, de: bool) -> &'static str {
@@ -70,8 +95,20 @@ pub fn label(id: &str, de: bool) -> &'static str {
         "mode_tasks_alt" => ("Reiter „Todo-Liste“ (zweite Belegung)", "“Todo list” tab (alternative)"),
         "mode_editor" => ("Reiter „Editor“", "“Editor” tab"),
         "mode_editor_alt" => ("Reiter „Editor“ (zweite Belegung)", "“Editor” tab (alternative)"),
+        "mode_time" => ("Reiter „Zeit“", "“Time” tab"),
+        "mode_time_alt" => ("Reiter „Zeit“ (zweite Belegung)", "“Time” tab (alternative)"),
         "close_all" => ("Alle Sitzungen schließen", "Close all sessions"),
         "reload" => ("Sitzung neu laden", "Reload session"),
+        "ed_format" => ("Editor: JSON/XML formatieren", "Editor: format JSON/XML"),
+        "ed_minify" => ("Editor: JSON/XML minifizieren", "Editor: minify JSON/XML"),
+        "ed_validate" => ("Editor: JSON/XML prüfen", "Editor: validate JSON/XML"),
+        "ed_sort_keys" => ("Editor: JSON-Schlüssel sortieren", "Editor: sort JSON keys"),
+        "ed_format_alt" => ("Editor: JSON/XML formatieren (zweite Belegung)", "Editor: format JSON/XML (alternative)"),
+        "ed_minify_alt" => ("Editor: JSON/XML minifizieren (zweite Belegung)", "Editor: minify JSON/XML (alternative)"),
+        "ed_validate_alt" => ("Editor: JSON/XML prüfen (zweite Belegung)", "Editor: validate JSON/XML (alternative)"),
+        "save_no_actions" => ("Editor: Ohne Aktionen speichern", "Editor: Save without actions"),
+        "ed_next_change" => ("Editor: nächste Änderung", "Editor: next change"),
+        "ed_prev_change" => ("Editor: vorige Änderung", "Editor: previous change"),
         _ => ("?", "?"),
     };
     if de { d } else { e }
@@ -139,6 +176,13 @@ pub fn pretty(s: &str, de: bool) -> String {
 mod tests {
     use super::*;
 
+    /// *Ohne Aktionen speichern* gilt nur im Editor-Reiter (im Terminal-Bereich gehören die Tasten dem Terminal).
+    #[test]
+    fn editor_only_shortcuts() {
+        assert!(is_editor("save_no_actions") && !is_global("save_no_actions"));
+        assert!(!is_editor("new") && label("save_no_actions", false) != "?");
+    }
+
     #[test]
     fn roundtrip() {
         for (_, d) in DEFAULTS.iter().filter(|(_, d)| !d.is_empty()) {
@@ -162,6 +206,23 @@ mod tests {
             assert_ne!(label(id, true), label(id, false), "{id}: Texte gleich in beiden Sprachen");
         }
         assert!(is_global("mode_tasks") && is_global("mode_terminals") && !is_global("new"));
+        assert!(is_editor("ed_format") && !is_editor("editor") && !is_global("ed_format"));
+    }
+
+    /// #381: Die Editor-Kürzel kollidieren nicht mit festen Kürzeln des Editors und nicht mit AltGr (Strg+Alt).
+    #[test]
+    fn editor_format_keys_avoid_altgr_and_fixed_editor_keys() {
+        let fixed = ["Ctrl+N", "Ctrl+O", "Ctrl+Shift+O", "Ctrl+S", "Ctrl+Shift+S", "Ctrl+W", "Ctrl+F4", "Ctrl+B", "Alt+Z", "Ctrl+F", "Ctrl+H", "Ctrl+G", "Ctrl+Shift+F", "Ctrl+Z", "Ctrl+Y", "Ctrl+A", "Ctrl+D", "Ctrl+L", "Ctrl+Shift+L", "Ctrl+Shift+K", "Alt+Up", "Alt+Down", "Alt+Shift+Up", "Alt+Shift+Down"];
+        for (id, d) in DEFAULTS.iter().filter(|(id, d)| is_editor(id) && !d.is_empty()) {
+            let (m, _) = parse(d).unwrap();
+            assert!(!(m.ctrl && m.alt), "{id}: Strg+Alt ist AltGr");
+            assert!(!fixed.contains(d), "{id}: {d} gehört schon dem Editor");
+        }
+        assert_eq!(DEFAULTS.iter().find(|(id, _)| *id == "ed_format").map(|(_, d)| *d), Some("Alt+Shift+F"));
+        // Zweite Belegung ohne Alt+Umschalt (Umschalten der Eingabesprache, Review #381).
+        let alt = DEFAULTS.iter().find(|(id, _)| *id == "ed_format_alt").map(|(_, d)| *d).unwrap();
+        let (m, _) = parse(alt).unwrap();
+        assert!(!(m.alt && m.shift) && is_editor("ed_format_alt"));
     }
 
     #[test]

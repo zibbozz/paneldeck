@@ -356,10 +356,10 @@ impl App {
         if let Some(id) = self.tut.p.project.filter(|id| self.projects.iter().any(|p| p.id == *id)) {
             return id;
         }
-        let id = self.projects.iter().map(|p| p.id).max().unwrap_or(0) + 1;
+        let id = self.alloc_project_id();
         // Standardprofil wie das aktive Projekt: Tutorial-Terminals starten wie die gewohnten.
         let profile = self.projects.iter().find(|p| p.id == self.active_project).map(|p| p.profile).unwrap_or(0);
-        self.projects.push(Project { id, name: "Tutorial".to_string(), color: hub_color(id), profile, ..Project::default() });
+        self.projects.push(Project { id, name: "Tutorial".to_string(), color: hub_color(id), profile, agent_access: crate::access::AgentAccess::LOCKED, ..Project::default() });
         self.tut.p.project = Some(id);
         id
     }
@@ -507,6 +507,8 @@ impl App {
         let (todos, todos_done, tickets) = self.tut.db_counts;
         let ed = self.editor_probe();
         Probe {
+            time: self.mode == titlebar::Mode::Time,
+            alarms: self.time.data.alarms.len(),
             editor: self.mode == titlebar::Mode::Editor,
             editor_docs: ed.docs,
             editor_groups: ed.groups,
@@ -588,6 +590,10 @@ impl App {
                 Prep::PlanProject => self.tut_plan_project(),
                 Prep::PlanTab(k) => self.plan.set_tab_key(k),
                 Prep::Editor => self.set_mode(titlebar::Mode::Editor),
+                Prep::Time(sub) => {
+                    self.set_mode(titlebar::Mode::Time);
+                    self.time.sub = sub;
+                }
                 Prep::EditorTree => self.editor_show_tree(),
                 Prep::EditorFile => self.tut_editor_sample(),
                 Prep::EditorFind(open) => self.editor_find_bar(open),

@@ -240,6 +240,7 @@ pub(super) fn mode_key(m: titlebar::Mode) -> &'static str {
         titlebar::Mode::Terminals => "terminals",
         titlebar::Mode::Tasks => "tasks",
         titlebar::Mode::Editor => "editor",
+        titlebar::Mode::Time => "time",
     }
 }
 
@@ -247,6 +248,7 @@ pub(super) fn mode_from_key(s: &str) -> titlebar::Mode {
     match s {
         "tasks" => titlebar::Mode::Tasks,
         "editor" => titlebar::Mode::Editor,
+        "time" => titlebar::Mode::Time,
         _ => titlebar::Mode::Terminals,
     }
 }
@@ -437,6 +439,12 @@ pub(super) struct Wins {
 impl Wins {
     pub(super) fn is_empty(&self) -> bool {
         self.list.is_empty()
+    }
+
+    /// Zeigen alle weiteren Fenster den Terminal Hub (Review 3.2.0: Bedingung für einen Screenshot des ganzen Fensters)?
+    /// Auch verborgene zählen (sicherer Fall).
+    pub(super) fn all_show_terminals(&self) -> bool {
+        self.list.iter().all(|w| w.view.mode == titlebar::Mode::Terminals)
     }
 }
 
@@ -798,6 +806,8 @@ impl App {
         // Eigene Akzentfarbe (Projektfarbe der Todo-Ansicht dieses Fensters); der Stil kommt aus dem Zwischenspeicher.
         self.sync_accent();
         self.ensure_style(ctx);
+        // Eigener Hintergrund des Themes (#387) in der Größe dieses Fensters, unter allen Flächen.
+        self.backdrop_frame(ctx);
         let (close_req, focused, minimized, maximized, outer, inner) = ctx.input(|i| {
             let v = i.viewport();
             (v.close_requested(), v.focused.unwrap_or(false), v.minimized.unwrap_or(false), v.maximized.unwrap_or(false), v.outer_rect, v.inner_rect)
@@ -844,10 +854,13 @@ impl App {
             // Der Editor (#54) ist für alle Fenster gemeinsam: dasselbe Layout und dieselben Dateien wie im Hauptfenster.
             titlebar::Mode::Editor => self.editor_view(ctx),
             titlebar::Mode::Tasks => self.tasks_view(ctx),
+            // Reiter „Zeit“ (#164): ein Zustand für alle Fenster; der Takt läuft nur im Hauptfenster.
+            titlebar::Mode::Time => self.time_view(ctx),
         }
         if self.overlay_window() == w.id {
             self.notice_ui(ctx);
             self.toasts_ui(ctx);
+            self.time_overlay(ctx);
         }
         self.text_prompt_ui(ctx, &mut actions);
         self.dialogs(ctx, &mut actions);
@@ -1293,7 +1306,7 @@ mod tests {
 
     #[test]
     fn mode_keys_round_trip_and_unknown_is_terminals() {
-        for m in [titlebar::Mode::Terminals, titlebar::Mode::Tasks, titlebar::Mode::Editor] {
+        for m in [titlebar::Mode::Terminals, titlebar::Mode::Tasks, titlebar::Mode::Editor, titlebar::Mode::Time] {
             assert_eq!(mode_from_key(mode_key(m)), m);
         }
         assert_eq!(mode_from_key(""), titlebar::Mode::Terminals);

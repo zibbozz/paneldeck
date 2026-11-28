@@ -49,6 +49,8 @@ pub(super) enum Cmd {
     DismissAgent(u64),
     Drop(TabDrag, PaneDrop),
     CopyPath(PathBuf),
+    /// Linux-Pfad einer WSL-Datei kopieren (#392).
+    CopyLinuxPath(PathBuf),
     SetEncoding(u64, &'static str),
     SetEol(u64, bool),
     ForgetRecent,
@@ -60,6 +62,57 @@ pub(super) enum Cmd {
     SetLangMode(u64, String, Option<Mode>),
     /// Standard-Modus für alle übrigen Dateien (Einstellung). Die eigene Wahl im Dokument fällt weg.
     SetDefaultMode(u64, Mode),
+    // ---- Menüleiste und Formatieren (#381)
+    /// Teilung fokussieren (vor jedem Befehl aus ihrer Menüleiste).
+    FocusGroup(u64),
+    /// Befehl des Textfelds auf den aktiven Reiter der Teilung (Rückgängig, Zwischenablage, Zeilen, Vorkommen …).
+    EditOp(u64, super::doc::Op),
+    /// Suchleiste öffnen (`true` = mit Ersetzen).
+    OpenFind(bool),
+    GotoLineAsk,
+    /// Fenster „In Dateien suchen“.
+    FindInFiles,
+    /// Alle ungespeicherten Dateien mit Pfad speichern.
+    SaveAll,
+    ToggleWrap,
+    ToggleMinimap,
+    ToggleTree,
+    /// Befehls-Palette öffnen.
+    OpenPalette,
+    /// Formatieren/Minify/Prüfen/Schlüssel sortieren im aktiven Reiter der Teilung.
+    Format(u64, crate::editor::format::Op),
+    FormatCancel(u64),
+    /// Zur Fehlerstelle springen (Dokument, Zeile, Spalte; 1-basiert).
+    FormatGoto(u64, usize, usize),
+    FormatDismiss(u64),
+    /// Antwort auf die Rückfrage vor *Minify* von JSONC.
+    MinifyConfirm(bool),
+    /// Einträge der Aktionen beim Speichern im Menü *Datei* (#383).
+    OnSaveMenu(super::super::save_actions_dialog::OnSaveMenu),
+    // ---- Vergleich und Änderungsmarken (#385)
+    /// Dokument mit einem Ziel vergleichen (Ziel links, Dokument rechts).
+    Compare(u64, super::diff_tab::Target),
+    /// Zwei Dateien vergleichen (links, rechts).
+    ComparePaths(PathBuf, PathBuf),
+    /// Vergleichs-Reiter schließen (Gruppe, Vergleich).
+    CloseDiff(u64, u64),
+    SwapDiff(u64),
+    /// Revisionsauswahl für diese Datei öffnen; mit Vergleich: dessen linke Seite ersetzen.
+    PickRevision(PathBuf, Option<u64>),
+    SavePatch(u64),
+    /// Dokument im Datei-Reiter zeigen, Cursor auf Zeile (ab 0).
+    OpenAt(u64, usize),
+    /// Kurzer Hinweis in der Statusleiste.
+    Hint(String),
+    SetMarkers(bool),
+    SetMarkerBase(crate::editor_svc::settings::MarkerBase),
+    /// Nächste/vorige Änderung (F7 / Umschalt+F7).
+    StepChange(bool),
+    /// Marke in dieser Zeile des Dokuments zurücksetzen (ein Rückgängig-Schritt).
+    RevertMark(u64, usize),
+    /// Marke in dieser Zeile im Vergleich öffnen.
+    MarkToDiff(u64, usize),
+    ClosePopup,
 }
 
 impl super::super::App {
@@ -67,7 +120,8 @@ impl super::super::App {
     pub(crate) fn editor_view(&mut self, ctx: &egui::Context) {
         let lang = self.settings.language;
         let prefs = self.editor_prefs();
-        let theme = self.theme();
+        // Deckkraft des Bereichs „Editor“ (#387).
+        let theme = self.theme_for(crate::theme::background::Area::Editor);
         let mut cmds: Vec<Cmd> = Vec::new();
         self.editor_keys(ctx, &mut cmds);
         // Dateien aus dem Explorer ablegen: Dateien öffnen, ein Ordner wird die Wurzel.
@@ -75,11 +129,14 @@ impl super::super::App {
         for p in dropped {
             cmds.push(if p.is_dir() { Cmd::SetRoot(p) } else { Cmd::OpenPath(p, false) });
         }
+        // Aktionen beim Speichern (#383): Stand für Statusleiste/Reiter, danach Klicks daraus.
+        self.sa_publish_view();
         draw(ctx, &mut self.ed, &theme, &prefs, lang, &mut cmds);
         self.editor_dialogs(ctx, &mut cmds);
         for c in cmds {
             self.editor_cmd(ctx, c);
         }
+        self.sa_take_clicks();
         if let Some((_, t)) = &self.ed.hint {
             if t.elapsed() > Duration::from_secs(4) {
                 self.ed.hint = None;
@@ -91,12 +148,40 @@ impl super::super::App {
 
     /// Tastenkürzel des Editors (nur im Editor-Reiter). Teilen nutzt die Belegung des Terminal Hub (`split_r`/`split_d`).
     fn editor_keys(&mut self, ctx: &egui::Context, cmds: &mut Vec<Cmd>) {
-        if self.capture_key.is_some() || self.ed.close_ask.is_some() {
+        // Auch nicht, solange die Rückfrage „JSONC minifizieren?“ offen ist (#381).
+        if self.capture_key.is_some() || self.ed.close_ask.is_some() || !self.ed.fmt.ask.is_empty() {
             return;
         }
         let g = self.ed.panes.focused;
-        let doc = self.ed.active_doc();
-        let binds: Vec<(&str, Option<(Modifiers, Key)>)> = vec![("split_r", self.binding("split_r")), ("split_d", self.binding("split_d"))];
+        let doc = self.ed.active_file_doc();
+        let diff = self.ed.active_diff();
+        let binds: Vec<(&str, Option<(Modifiers, Key)>)> = vec![
+            ("split_r", self.binding("split_r")),
+            ("split_d", self.binding("split_d")),
+            ("ed_next_change", self.binding("ed_next_change")),
+            ("ed_prev_change", self.binding("ed_prev_change")),
+            ("palette", self.binding("palette")),
+        ];
+        let mut palette = false;
+        // Formatieren (#381) und die Befehls-Palette: Belegung aus Einstellungen → Tastenkürzel.
+        use crate::editor::format::Op as FmtOp;
+        let fmt_binds: Vec<(FmtOp, Option<(Modifiers, Key)>)> =
+            [
+                (FmtOp::Format, "ed_format"),
+                (FmtOp::Minify, "ed_minify"),
+                (FmtOp::Validate, "ed_validate"),
+                (FmtOp::SortKeys, "ed_sort_keys"),
+                // Zweite Belegung (Alt+Umschalt schaltet bei mehreren Eingabesprachen die Sprache um).
+                (FmtOp::Format, "ed_format_alt"),
+                (FmtOp::Minify, "ed_minify_alt"),
+                (FmtOp::Validate, "ed_validate_alt"),
+            ]
+            .into_iter()
+            .map(|(o, id)| (o, self.binding(id)))
+            .collect();
+        // *Ohne Aktionen speichern* (#383): eigenes Kürzel, standardmäßig keins.
+        let no_actions = self.binding("save_no_actions");
+        let mut save_plain = false;
         let ctrl = Modifiers::CTRL;
         let cs = Modifiers::CTRL | Modifiers::SHIFT;
         let ca = Modifiers::CTRL | Modifiers::ALT;
@@ -106,8 +191,34 @@ impl super::super::App {
                 if let Some((m, k)) = b
                     && super::super::consume_key_exact(i, *m, *k, false)
                 {
-                    cmds.push(Cmd::Split(g, if *id == "split_r" { Dir::Horizontal } else { Dir::Vertical }));
+                    match *id {
+                        "split_r" => cmds.push(Cmd::Split(g, Dir::Horizontal)),
+                        "split_d" => cmds.push(Cmd::Split(g, Dir::Vertical)),
+                        "ed_next_change" => cmds.push(Cmd::StepChange(true)),
+                        "ed_prev_change" => cmds.push(Cmd::StepChange(false)),
+                        _ => palette = true,
+                    }
                 }
+            }
+            // Formatieren nur in Datei-Reitern, nicht im Vergleich (#385).
+            if doc.is_some() && diff.is_none() {
+                for (op, b) in &fmt_binds {
+                    if let Some((m, k)) = b
+                        && super::super::consume_key_exact(i, *m, *k, false)
+                    {
+                        cmds.push(Cmd::Format(g, *op));
+                        // Alt+Umschalt+Buchstabe darf nicht zusätzlich als Text ankommen.
+                        if m.alt && !m.ctrl {
+                            drop_alt_text(i, *k);
+                        }
+                    }
+                }
+            }
+            if doc.is_some()
+                && let Some((m, k)) = no_actions
+                && super::super::consume_key_exact(i, m, k, false)
+            {
+                save_plain = true;
             }
             let mut take = |m: Modifiers, k: Key| super::super::consume_key_exact(i, m, k, false);
             if let Some(d) = doc {
@@ -118,7 +229,10 @@ impl super::super::App {
                     cmds.push(Cmd::Save(d));
                 }
                 if take(ctrl, Key::W) || take(ctrl, Key::F4) {
-                    cmds.push(Cmd::Close(vec![(g, d)]));
+                    match diff {
+                        Some((dg, id)) => cmds.push(Cmd::CloseDiff(dg, id)),
+                        None => cmds.push(Cmd::Close(vec![(g, d)])),
+                    }
                 }
             }
             if take(ctrl, Key::N) {
@@ -151,7 +265,7 @@ impl super::super::App {
                     }
                 }
             }
-            if doc.is_some() {
+            if doc.is_some() && diff.is_none() {
                 if take(ctrl, Key::F) {
                     self.ed.find.open(false);
                 }
@@ -163,11 +277,18 @@ impl super::super::App {
                 }
             }
         });
+        if save_plain && let Some(d) = doc {
+            self.sa_save_without(d);
+        }
         if let Some(n) = nav
             && let Some(t) = super::super::focus_target(&self.ed.group_rects, g, n)
         {
             self.ed.panes.focused = t;
             self.ed.want_focus = true;
+        }
+        // Befehlspalette auch im Editor (#385: Vergleichen, Änderungsmarken, F7).
+        if palette && self.palette.is_none() {
+            self.palette = Some(super::super::Palette { query: String::new(), sel: 0 });
         }
         // Suchtext aus der Auswahl übernehmen, wenn die Leiste gerade aufgeht.
         if self.ed.find.just_opened()
@@ -180,13 +301,14 @@ impl super::super::App {
     }
 
     /// Befehl aus dem Bild ausführen.
-    fn editor_cmd(&mut self, ctx: &egui::Context, c: Cmd) {
+    pub(super) fn editor_cmd(&mut self, ctx: &egui::Context, c: Cmd) {
         let lang = self.settings.language;
         let prefs = self.editor_prefs();
         let dir = self.dir.clone();
         match c {
             Cmd::OpenPath(p, side) => {
-                if p.is_file() {
+                // WSL-Dateien ungeprüft (#392; sie laden im Hintergrund, ein Fehler erscheint im Reiter).
+                if crate::wsl::is_wsl_unc(&p.to_string_lossy()) || p.is_file() {
                     self.ed.open_path(&p, side);
                 } else {
                     self.ed.set_hint(format!("{}: {}", lang.t("Datei nicht gefunden", "File not found"), p.display()));
@@ -228,11 +350,12 @@ impl super::super::App {
                 self.ed.want_focus = true;
             }
             Cmd::Close(tabs) => {
-                self.ed.close_ask = Some(CloseAsk { tabs });
+                self.ed.close_ask = Some(CloseAsk::new(tabs));
                 self.editor_close_step(&dir);
             }
             Cmd::Split(g, d) => {
-                if self.ed.panes.split(g, d).is_some() {
+                if let Some(ng) = self.ed.panes.split(g, d) {
+                    self.ed.fix_split_diff(ng);
                     self.ed.want_focus = true;
                 }
             }
@@ -240,57 +363,38 @@ impl super::super::App {
                 let untitled = self.ed.docs.get(&id).is_some_and(|d| d.path.is_none());
                 if untitled {
                     self.editor_cmd(ctx, Cmd::SaveAs(id));
-                } else if let Some(d) = self.ed.docs.get_mut(&id) {
-                    match d.save(None, lang) {
+                } else if self.ed.docs.contains_key(&id) {
+                    // Aktionen beim Speichern (#383): nie auf Kosten des Speicherns.
+                    match self.editor_save_with(id, None, crate::save_actions::SaveOrigin::User) {
                         Ok(()) => {
-                            d.drop_hot(&dir);
-                            let t = d.title(lang);
-                            self.ed.set_hint(format!("{t}: {}", lang.t("gespeichert", "saved")));
+                            // WSL (#392): läuft das Schreiben noch im Hintergrund, folgen Hinweis und Löschen der
+                            // Hot-Exit-Kopie erst mit dem Ergebnis (`editor_background_saved`).
+                            if let Some(d) = self.ed.docs.get_mut(&id)
+                                && !d.disk_busy()
+                            {
+                                d.drop_hot(&dir);
+                                let t = d.title(lang);
+                                self.ed.set_hint(format!("{t}: {}", lang.t("gespeichert", "saved")));
+                            }
                         }
                         Err(e) => self.notify_text(e),
                     }
                 }
             }
-            Cmd::SaveAs(id) => {
-                let Some(d) = self.ed.docs.get(&id) else { return };
-                let name = d.path.as_ref().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| format!("{}.txt", d.title(lang)));
-                let start = d.path.as_ref().and_then(|p| p.parent()).map(|p| p.to_path_buf()).or_else(|| self.ed.root.clone());
-                if let Some(p) = crate::platform::notify::save_any(start.as_deref(), &name) {
-                    let other = self.ed.doc_for_path(&p).filter(|o| *o != id);
-                    if let Some(d) = self.ed.docs.get_mut(&id) {
-                        match d.save(Some(p.clone()), lang) {
-                            Ok(()) => {
-                                d.drop_hot(&dir);
-                                super::persist::push_recent(&mut self.ed.recent_files, &p.to_string_lossy());
-                                if other.is_some() {
-                                    // Dieselbe Datei war noch in einem anderen Reiter offen: der lädt sie neu.
-                                    if let Some(o) = other.and_then(|o| self.ed.docs.get_mut(&o)) {
-                                        let _ = o.reload_from_disk(&prefs);
-                                    }
-                                }
-                            }
-                            Err(e) => self.notify_text(e),
-                        }
-                    }
-                }
-            }
+            Cmd::SaveAs(id) => self.editor_save_as_dialog(id),
             Cmd::Reload(id) => {
                 if let Some(d) = self.ed.docs.get_mut(&id) {
                     let _ = d.reload_from_disk(&prefs);
                 }
-                if self.ed.diff_doc == Some(id) {
-                    self.ed.diff_doc = None;
-                }
+                self.ed.generation += 1;
             }
             Cmd::KeepMine(id) => {
                 if let Some(d) = self.ed.docs.get_mut(&id) {
                     d.keep_mine();
                 }
-                if self.ed.diff_doc == Some(id) {
-                    self.ed.diff_doc = None;
-                }
             }
-            Cmd::ShowDiff(id) => self.ed.diff_doc = Some(id),
+            // „Unterschied anzeigen“ der Hinweisleiste: Vergleichs-Reiter gespeicherte Datei ↔ Puffer (#385).
+            Cmd::ShowDiff(id) => self.editor_cmd(ctx, Cmd::Compare(id, super::diff_tab::Target::Disk)),
             Cmd::DismissLarge(id) => {
                 if let Some(d) = self.ed.docs.get_mut(&id) {
                     d.large_dismissed = true;
@@ -306,6 +410,11 @@ impl super::super::App {
                 self.ed.want_focus = true;
             }
             Cmd::CopyPath(p) => ctx.copy_text(p.to_string_lossy().to_string()),
+            Cmd::CopyLinuxPath(p) => {
+                if let Some((_, l)) = crate::wsl::unc_to_linux(&p.to_string_lossy()) {
+                    ctx.copy_text(l);
+                }
+            }
             Cmd::SetEncoding(id, enc) => {
                 if let Some(d) = self.ed.docs.get_mut(&id)
                     && let Err(e) = d.set_encoding(enc, lang)
@@ -339,12 +448,288 @@ impl super::super::App {
                 self.settings.editor.default_mode = m;
                 self.ed.set_doc_mode(id, None);
             }
+            Cmd::Compare(doc, target) => {
+                use super::diff_tab::Target;
+                match target {
+                    Target::PickFile => {
+                        let start = self.ed.docs.get(&doc).and_then(|d| d.path.as_ref()).and_then(|p| p.parent()).map(|p| p.to_string_lossy().to_string()).or_else(|| self.ed.root.as_ref().map(|p| p.to_string_lossy().to_string())).unwrap_or_default();
+                        if let Some(p) = crate::platform::notify::pick_file(&start) {
+                            self.editor_cmd(ctx, Cmd::Compare(doc, Target::File(p)));
+                        }
+                    }
+                    t => {
+                        if let Err(e) = self.ed.compare(doc, t, &prefs, lang) {
+                            self.ed.set_hint(e);
+                        }
+                    }
+                }
+            }
+            Cmd::ComparePaths(a, b) => {
+                if self.ed.compare_paths(&a, &b, &prefs).is_none() {
+                    self.ed.set_hint(lang.t("Diese Dateien lassen sich nicht vergleichen.", "These files cannot be compared.").to_string());
+                }
+            }
+            Cmd::CloseDiff(g, id) => self.ed.close_diff(g, id, &dir),
+            Cmd::SwapDiff(id) => self.ed.swap_diff(id),
+            Cmd::PickRevision(p, diff) => {
+                if p.as_os_str().is_empty() {
+                    self.ed.set_hint(lang.t("Die Datei ist noch nicht gespeichert.", "The file has not been saved yet.").to_string());
+                } else {
+                    self.ed.rev_picker = Some(super::diff_menu::RevPicker::new(p, diff));
+                }
+            }
+            Cmd::SavePatch(id) => {
+                let Some(dt) = self.ed.diffs.get(&id) else { return };
+                match dt.patch(&self.ed.docs, true) {
+                    Some(p) if !p.is_empty() => {
+                        let name = dt.patch_file_name(&self.ed.docs);
+                        let start = dt.folder(&self.ed.docs).or_else(|| self.ed.root.clone());
+                        if let Some(path) = crate::platform::notify::save_any(start.as_deref(), &name) {
+                            match crate::state::write_atomic(&path, p.as_bytes()) {
+                                Ok(()) => self.ed.set_hint(format!("{}: {}", lang.t("Patch gespeichert", "Patch saved"), path.display())),
+                                Err(e) => self.notify_text(format!("{}: {e}", lang.t("Patch ließ sich nicht speichern", "Could not save the patch"))),
+                            }
+                        }
+                    }
+                    Some(_) => self.ed.set_hint(lang.t("Keine Unterschiede – kein Patch.", "No differences – no patch.").to_string()),
+                    None => self.ed.set_hint(lang.t("Für diesen Vergleich gibt es keinen Patch.", "There is no patch for this comparison.").to_string()),
+                }
+            }
+            Cmd::OpenAt(doc, line) => {
+                if self.ed.docs.contains_key(&doc) {
+                    self.ed.show_doc(doc, false);
+                    self.ed.goto_line(line, 0);
+                }
+            }
+            Cmd::Hint(t) => self.ed.set_hint(t),
+            Cmd::SetMarkers(on) => {
+                self.settings.editor.change_markers = on;
+                if !on {
+                    self.ed.mark_popup = None;
+                }
+            }
+            Cmd::SetMarkerBase(b) => self.settings.editor.marker_base = b,
+            Cmd::StepChange(forward) => {
+                if let Some(h) = self.ed.step_change(forward, &prefs, lang) {
+                    self.ed.set_hint(h);
+                }
+            }
+            Cmd::RevertMark(doc, line) => {
+                if let Err(e) = self.ed.revert_mark(doc, line, lang) {
+                    self.ed.set_hint(e);
+                }
+            }
+            Cmd::MarkToDiff(doc, line) => {
+                let target = self.ed.docs.get(&doc).and_then(|d| {
+                    let m = d.marks.result.clone()?;
+                    let k = m.at(line)?;
+                    Some(super::marks::diff_target(&m.hunks[k], d.marks.base.as_deref()))
+                });
+                self.ed.mark_popup = None;
+                if let Some(t) = target {
+                    self.editor_cmd(ctx, Cmd::Compare(doc, t));
+                }
+            }
+            Cmd::ClosePopup => {
+                self.ed.mark_popup = None;
+                self.ed.want_focus = true;
+            }
+            Cmd::FocusGroup(g) => {
+                if self.ed.panes.groups.contains_key(&g) {
+                    self.ed.panes.focused = g;
+                }
+                self.ed.want_focus = true;
+            }
+            Cmd::EditOp(g, op) => self.ed.menu_edit_op(ctx, g, op),
+            Cmd::OpenFind(replace) => {
+                if self.ed.active_doc().is_some() {
+                    self.ed.find.open(replace);
+                }
+            }
+            Cmd::GotoLineAsk => {
+                if self.ed.active_doc().is_some() {
+                    self.ed.goto = Some(super::find::GotoLine::default());
+                }
+            }
+            Cmd::FindInFiles => {
+                self.editor_svc.search_open = true;
+                self.editor_svc.search.focus = true;
+            }
+            Cmd::SaveAll => self.editor_save_all(),
+            Cmd::ToggleWrap => self.ed.wrap = !self.ed.wrap,
+            Cmd::ToggleMinimap => self.ed.minimap = !self.ed.minimap,
+            Cmd::ToggleTree => self.ed.tree_open = !self.ed.tree_open,
+            Cmd::OpenPalette => self.palette = Some(super::super::Palette { query: String::new(), sel: 0 }),
+            Cmd::Format(g, op) => {
+                let c = ctx.clone();
+                self.ed.start_format(g, op, false, move || c.request_repaint(), lang);
+            }
+            Cmd::FormatCancel(doc) => self.ed.cancel_format(doc),
+            Cmd::FormatGoto(doc, line, col) => self.ed.format_goto(doc, line, col),
+            Cmd::FormatDismiss(doc) => {
+                self.ed.fmt.notes.remove(&doc);
+            }
+            Cmd::MinifyConfirm(yes) => {
+                if self.ed.fmt.ask.is_empty() {
+                    return;
+                }
+                let a = self.ed.fmt.ask.remove(0);
+                // In der Teilung der Anfrage, sonst in einem Reiter, der das Dokument zeigt.
+                let here = self.ed.panes.groups.get(&a.group).and_then(|g| g.active_tab()).is_some_and(|t| t.doc == a.doc);
+                let at = if here { Some(a.group) } else { self.ed.panes.tabs_of(a.doc).first().map(|&(g, i)| {
+                    if let Some(grp) = self.ed.panes.groups.get_mut(&g) {
+                        grp.active = i;
+                    }
+                    g
+                }) };
+                if yes && let Some(g) = at {
+                    let c = ctx.clone();
+                    self.ed.start_format(g, crate::editor::format::Op::Minify, true, move || c.request_repaint(), lang);
+                }
+            }
+            Cmd::OnSaveMenu(m) => self.on_save_menu_items(m),
+        }
+    }
+
+    /// *Datei → Alle speichern*: alle ungespeicherten Dateien mit Pfad (Aktionen beim Speichern wie bei
+    /// *Speichern*, Auslöser „Alle speichern“; je Datei ein Lauf); unbenannte Reiter brauchen *Speichern unter*.
+    fn editor_save_all(&mut self) {
+        let lang = self.settings.language;
+        let dir = self.dir.clone();
+        let ids: Vec<u64> = self.ed.docs.iter().filter(|(_, d)| d.dirty() && d.path.is_some()).map(|(id, _)| *id).collect();
+        let mut saved = 0;
+        let mut pending = 0;
+        for id in ids {
+            match self.editor_save_with(id, None, crate::save_actions::SaveOrigin::SaveAll) {
+                Ok(_) => match self.ed.docs.get_mut(&id) {
+                    // WSL (#392): schreibt noch im Hintergrund – Hot-Exit-Kopie bleibt bis zum Ergebnis.
+                    Some(d) if d.disk_busy() => pending += 1,
+                    Some(d) => {
+                        d.drop_hot(&dir);
+                        saved += 1;
+                    }
+                    None => {}
+                },
+                Err(e) => {
+                    let t = self.ed.docs.get(&id).map(|d| d.title(lang)).unwrap_or_default();
+                    self.notify_text(format!("{t}: {e}"));
+                }
+            }
+        }
+        let untitled = self.ed.docs.values().filter(|d| d.path.is_none() && d.dirty()).count();
+        let mut msg = match lang {
+            Lang::De => format!("{saved} Datei(en) gespeichert"),
+            Lang::En => format!("{saved} file(s) saved"),
+        };
+        if pending > 0 {
+            msg.push_str(&match lang {
+                Lang::De => format!(" – {pending} werden noch gespeichert (WSL)"),
+                Lang::En => format!(" – {pending} still being saved (WSL)"),
+            });
+        }
+        if untitled > 0 {
+            msg.push_str(&match lang {
+                Lang::De => format!(" – {untitled} unbenannte(r) Reiter: „Speichern unter …“"),
+                Lang::En => format!(" – {untitled} untitled tab(s): “Save as …”"),
+            });
+        }
+        self.ed.set_hint(msg);
+    }
+
+    /// *Speichern unter …* (Dateidialog) für ein Dokument; Auslöser „Speichern unter“ der Aktionen beim Speichern.
+    pub(crate) fn editor_save_as_dialog(&mut self, id: u64) {
+        let lang = self.settings.language;
+        let prefs = self.editor_prefs();
+        let dir = self.dir.clone();
+        let Some(d) = self.ed.docs.get(&id) else { return };
+        let name = d.path.as_ref().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| format!("{}.txt", d.title(lang)));
+        let start = d.path.as_ref().and_then(|p| p.parent()).map(|p| p.to_path_buf()).or_else(|| self.ed.root.clone());
+        if let Some(p) = crate::platform::notify::save_any(start.as_deref(), &name) {
+            let other = self.ed.doc_for_path(&p).filter(|o| *o != id);
+            match self.editor_save_with(id, Some(p.clone()), crate::save_actions::SaveOrigin::SaveAs) {
+                Ok(()) => {
+                    super::persist::push_recent(&mut self.ed.recent_files, &p.to_string_lossy());
+                    if self.ed.docs.get(&id).is_some_and(|d| d.disk_busy()) {
+                        // WSL (#392): Schreiben läuft noch – Hot-Exit-Kopie und der andere Reiter folgen mit dem
+                        // Ergebnis (`editor_background_saved`).
+                        if let Some(o) = other {
+                            self.ed.reload_after_save.insert(id, o);
+                        }
+                    } else {
+                        if let Some(d) = self.ed.docs.get_mut(&id) {
+                            d.drop_hot(&dir);
+                        }
+                        if let Some(o) = other {
+                            self.editor_refresh_other(o, &prefs);
+                        }
+                    }
+                }
+                Err(e) => self.notify_text(e),
+            }
+        }
+    }
+
+    /// Dieselbe Datei ist noch in einem anderen Reiter offen und wurde eben per *Speichern unter* überschrieben: ohne
+    /// eigene Änderungen neu laden, sonst nie überschreiben – die Leiste „auf der Platte geändert“ (*Meine behalten* /
+    /// *Von der Platte laden* / *Unterschied*) entscheidet.
+    pub(super) fn editor_refresh_other(&mut self, other: u64, prefs: &super::EditorPrefs) {
+        let Some(o) = self.ed.docs.get_mut(&other) else { return };
+        if o.doc.is_none() {
+            // Noch nicht gelesen: liest beim Zeigen ohnehin den neuen Stand.
+            return;
+        }
+        if o.dirty() {
+            o.disk_conflict = true;
+        } else {
+            let _ = o.reload_from_disk(prefs);
+        }
+        self.ed.generation += 1;
+    }
+
+    /// Ein Speichern im Hintergrund (WSL, #392) ist geschrieben: Hot-Exit-Kopie löschen (nur ohne neue Änderungen), den
+    /// anderen Reiter derselben Datei auffrischen (*Speichern unter*), eine wartende Schließen-Rückfrage fortsetzen.
+    pub(in crate::app) fn editor_background_saved(&mut self, id: u64) {
+        let dir = self.dir.clone();
+        let prefs = self.editor_prefs();
+        if let Some(d) = self.ed.docs.get_mut(&id)
+            && !d.dirty()
+        {
+            d.drop_hot(&dir);
+        }
+        if let Some(o) = self.ed.reload_after_save.remove(&id) {
+            self.editor_refresh_other(o, &prefs);
+        }
+        let first = self.ed.close_ask.as_ref().and_then(|a| a.tabs.first()).map(|(_, d)| *d);
+        if first == Some(id)
+            && let Some(ask) = self.ed.close_ask.as_mut()
+            && ask.saving
+        {
+            ask.saving = false;
+            ask.error = None;
+            // Sauber: weiter schließen; während des Schreibens weiter bearbeitet: noch einmal fragen.
+            if self.ed.docs.get(&id).is_some_and(|d| !d.dirty()) {
+                self.editor_close_step(&dir);
+            }
+        }
+    }
+
+    /// Ein Speichern im Hintergrund ist gescheitert: Hot-Exit-Kopie bleibt; eine wartende Schließen-Rückfrage fragt
+    /// wieder und zeigt den Fehler.
+    pub(in crate::app) fn editor_background_save_failed(&mut self, id: u64, msg: &str) {
+        self.ed.reload_after_save.remove(&id);
+        let first = self.ed.close_ask.as_ref().and_then(|a| a.tabs.first()).map(|(_, d)| *d);
+        if first == Some(id)
+            && let Some(ask) = self.ed.close_ask.as_mut()
+            && ask.saving
+        {
+            ask.saving = false;
+            ask.error = Some(msg.to_string());
         }
     }
 
     /// Nächster Schritt einer Schließen-Rückfrage: Reiter ohne ungespeicherte Änderungen (oder deren Dokument noch in
     /// einem anderen Reiter offen ist) schließen, beim ersten mit Änderungen anhalten und fragen.
-    fn editor_close_step(&mut self, dir: &Path) {
+    pub(in crate::app) fn editor_close_step(&mut self, dir: &Path) {
         let Some(mut ask) = self.ed.close_ask.take() else { return };
         while let Some(&(g, doc)) = ask.tabs.first() {
             let elsewhere = self.ed.panes.tabs_of(doc).len() > 1;
@@ -354,6 +739,9 @@ impl super::super::App {
                 return;
             }
             ask.tabs.remove(0);
+            // Hinweis und Fehler galten dem eben geschlossenen Reiter.
+            ask.saving = false;
+            ask.error = None;
             self.editor_close_now(g, doc, dir);
         }
     }
@@ -373,68 +761,119 @@ impl super::super::App {
         let dir = self.dir.clone();
         // Schließen mit ungespeicherten Änderungen
         if let Some(ask) = self.ed.close_ask.clone() {
-            let Some(&(g, doc)) = ask.tabs.first() else {
-                self.ed.close_ask = None;
-                return;
-            };
-            let name = self.ed.docs.get(&doc).map(|d| d.title(lang)).unwrap_or_default();
-            let mut choice = None;
-            let r = style::modal(Id::new("ed_close_ask")).show(ctx, |ui| {
-                ui.set_max_width(420.0);
-                ui.heading(lang.t("Änderungen speichern?", "Save changes?"));
-                ui.add_space(style::S2);
-                ui.label(format!("{} {}", lang.q(&name), lang.t("hat ungespeicherte Änderungen.", "has unsaved changes.")));
-                if ask.tabs.len() > 1 {
-                    ui.weak(format!("{} {}", ask.tabs.len() - 1, lang.t("weitere Reiter werden danach geschlossen.", "more tabs will be closed afterwards.")));
-                }
-                ui.add_space(style::S3);
-                ui.horizontal(|ui| {
-                    if ui.button(lang.t("Speichern", "Save")).clicked() || ui.input(|i| i.key_pressed(Key::Enter)) {
-                        choice = Some(0);
-                    }
-                    if ui.button(lang.t("Nicht speichern", "Don't save")).clicked() {
-                        choice = Some(1);
-                    }
-                    if ui.button(lang.t("Abbrechen", "Cancel")).clicked() {
-                        choice = Some(2);
-                    }
-                });
-            });
-            if r.should_close() && choice.is_none() {
-                choice = Some(2);
-            }
-            match choice {
-                Some(0) => {
-                    let untitled = self.ed.docs.get(&doc).is_some_and(|d| d.path.is_none());
-                    if untitled {
-                        self.ed.close_ask = None;
-                        self.editor_cmd(ctx, Cmd::SaveAs(doc));
-                        if self.ed.docs.get(&doc).is_some_and(|d| !d.dirty()) {
-                            self.ed.close_ask = Some(ask);
-                            self.editor_close_step(&dir);
+            'ask: {
+                let Some(&(g, doc)) = ask.tabs.first() else {
+                    self.ed.close_ask = None;
+                    return;
+                };
+                let name = self.ed.docs.get(&doc).map(|d| d.title(lang)).unwrap_or_default();
+                let mut choice = None;
+                // WSL (#392): „Speichern“ gewählt, das Schreiben läuft noch – Hinweis statt Rückfrage, geschlossen wird mit
+                // dem Ergebnis (`editor_background_saved`). Läuft nichts mehr, ohne dass ein Ergebnis kam, gilt wieder die
+                // Rückfrage.
+                if ask.saving {
+                    if self.ed.docs.get(&doc).is_some_and(|d| d.disk_busy()) {
+                        let mut stop = false;
+                        style::modal(Id::new("ed_close_ask")).show(ctx, |ui| {
+                            ui.set_max_width(420.0);
+                            ui.horizontal(|ui| {
+                                ui.spinner();
+                                ui.label(format!("{} {}", lang.q(&name), lang.t("wird gespeichert …", "is being saved …")));
+                            });
+                            if ask.tabs.len() > 1 {
+                                ui.weak(format!("{} {}", ask.tabs.len() - 1, lang.t("weitere Reiter werden danach geschlossen.", "more tabs will be closed afterwards.")));
+                            }
+                            ui.add_space(style::S3);
+                            // Hängt WSL: nicht schließen, das Speichern läuft weiter (Ergebnis wie sonst als Hinweis).
+                            if ui.button(lang.t("Nicht schließen", "Don't close")).clicked() {
+                                stop = true;
+                            }
+                        });
+                        if stop {
+                            self.ed.close_ask = None;
+                        } else {
+                            ctx.request_repaint_after(std::time::Duration::from_millis(100));
                         }
-                    } else if let Some(d) = self.ed.docs.get_mut(&doc) {
-                        match d.save(None, lang) {
-                            Ok(()) => self.editor_close_step(&dir),
-                            Err(e) => {
-                                self.ed.close_ask = None;
-                                self.notify_text(e);
+                        break 'ask;
+                    }
+                    if let Some(a) = self.ed.close_ask.as_mut() {
+                        a.saving = false;
+                    }
+                }
+                let r = style::modal(Id::new("ed_close_ask")).show(ctx, |ui| {
+                    ui.set_max_width(420.0);
+                    ui.heading(lang.t("Änderungen speichern?", "Save changes?"));
+                    ui.add_space(style::S2);
+                    ui.label(format!("{} {}", lang.q(&name), lang.t("hat ungespeicherte Änderungen.", "has unsaved changes.")));
+                    if let Some(e) = &ask.error {
+                        ui.add_space(style::S2);
+                        ui.colored_label(style::ui().error, e);
+                    }
+                    if ask.tabs.len() > 1 {
+                        ui.weak(format!("{} {}", ask.tabs.len() - 1, lang.t("weitere Reiter werden danach geschlossen.", "more tabs will be closed afterwards.")));
+                    }
+                    ui.add_space(style::S3);
+                    ui.horizontal(|ui| {
+                        if ui.button(lang.t("Speichern", "Save")).clicked() || ui.input(|i| i.key_pressed(Key::Enter)) {
+                            choice = Some(0);
+                        }
+                        if ui.button(lang.t("Nicht speichern", "Don't save")).clicked() {
+                            choice = Some(1);
+                        }
+                        if ui.button(lang.t("Abbrechen", "Cancel")).clicked() {
+                            choice = Some(2);
+                        }
+                    });
+                });
+                if r.should_close() && choice.is_none() {
+                    choice = Some(2);
+                }
+                match choice {
+                    Some(0) => {
+                        let untitled = self.ed.docs.get(&doc).is_some_and(|d| d.path.is_none());
+                        if untitled {
+                            self.ed.close_ask = None;
+                            self.editor_cmd(ctx, Cmd::SaveAs(doc));
+                            if self.ed.docs.get(&doc).is_some_and(|d| d.disk_busy()) {
+                                // *Speichern unter* auf einen WSL-Pfad (#392): schließen, wenn das Schreiben fertig ist.
+                                self.ed.close_ask = Some(CloseAsk { saving: true, error: None, ..ask });
+                            } else if self.ed.docs.get(&doc).is_some_and(|d| !d.dirty()) {
+                                self.ed.close_ask = Some(ask);
+                                self.editor_close_step(&dir);
+                            }
+                        } else if self.ed.docs.get(&doc).is_some_and(|d| d.disk_busy()) {
+                            // WSL (#392): Es wird gerade schon gespeichert (z. B. automatisch) oder gelesen – abwarten; danach
+                            // schließt es (sauber) bzw. fragt erneut.
+                            self.ed.close_ask = Some(CloseAsk { saving: true, error: None, ..ask });
+                        } else if self.ed.docs.contains_key(&doc) {
+                            match self.editor_save_with(doc, None, crate::save_actions::SaveOrigin::Close) {
+                                // WSL (#392): Schreiben läuft noch – „wird gespeichert …“, geschlossen wird mit dem Ergebnis.
+                                Ok(_) if self.ed.docs.get(&doc).is_some_and(|d| d.disk_busy()) => {
+                                    self.ed.close_ask = Some(CloseAsk { saving: true, error: None, ..ask });
+                                }
+                                Ok(_) => self.editor_close_step(&dir),
+                                Err(e) => {
+                                    self.ed.close_ask = None;
+                                    self.notify_text(e);
+                                }
                             }
                         }
                     }
-                }
-                Some(1) => {
-                    if let Some(d) = self.ed.docs.get_mut(&doc) {
-                        d.discard_changes();
+                    Some(1) => {
+                        if let Some(d) = self.ed.docs.get_mut(&doc) {
+                            d.discard_changes();
+                        }
+                        let mut ask = ask;
+                        ask.tabs.remove(0);
+                        ask.saving = false;
+                        ask.error = None;
+                        self.editor_close_now(g, doc, &dir);
+                        self.ed.close_ask = Some(ask);
+                        self.editor_close_step(&dir);
                     }
-                    let mut ask = ask;
-                    ask.tabs.remove(0);
-                    self.editor_close_now(g, doc, &dir);
-                    self.ed.close_ask = Some(ask);
-                    self.editor_close_step(&dir);
+                    Some(_) => self.ed.close_ask = None,
+                    None => {}
                 }
-                Some(_) => self.ed.close_ask = None,
-                None => {}
             }
         }
         // Gehe zu Zeile
@@ -468,63 +907,44 @@ impl super::super::App {
                 self.ed.goto_line(line, col);
             }
         }
-        // Unterschied Platte ↔ Puffer
-        if let Some(id) = self.ed.diff_doc {
-            let mut open = true;
-            let lines = self.ed.docs.get(&id).map(|d| d.disk_diff(lang)).unwrap_or_default();
-            let title = self.ed.docs.get(&id).map(|d| d.title(lang)).unwrap_or_default();
-            let mono = FontId::monospace(self.settings.font_size.min(14.0));
-            // Esc schließt das Fenster (wie die anderen Fenster), außer ein Menü ist offen.
-            if self.ed.close_ask.is_none() && !egui::Popup::is_any_open(ctx) && ctx.input(|i| i.key_pressed(Key::Escape)) {
-                open = false;
-            }
-            diff_window(ctx, format!("{} – {title}", lang.t("Unterschied", "Difference"))).open(&mut open).show(ctx, |ui| diff_body(ui, id, &lines, &mono, lang, cmds));
-            if !open {
-                self.ed.diff_doc = None;
+        // Vergleichen mit Revision … (#385)
+        if let Some(p) = self.ed.rev_picker.as_mut() {
+            match p.show(ctx, lang) {
+                Some(super::diff_menu::Picked::Rev(rev)) => {
+                    let (path, diff) = (p.path.clone(), p.diff);
+                    self.ed.rev_picker = None;
+                    self.editor_pick_revision(ctx, path, diff, rev);
+                }
+                Some(super::diff_menu::Picked::Close) => {
+                    self.ed.rev_picker = None;
+                    self.ed.want_focus = true;
+                }
+                None => {}
             }
         }
+        let _ = cmds;
     }
-}
 
-/// Fenster „Unterschied anzeigen“: so groß wie es passt, nie größer als das Hauptfenster (Titelleiste mit Schließen und
-/// die Knöpfe unten bleiben erreichbar).
-pub(super) fn diff_window<'a>(ctx: &egui::Context, title: String) -> egui::Window<'a> {
-    style::fit_to_screen(ctx, style::movable(ctx, Id::new("ed_diff_win"), egui::Window::new(title)), [720.0, 480.0], [360.0, 220.0]).collapsible(false)
-}
-
-/// Inhalt des Unterschied-Fensters. Die Rollfläche nimmt nur die Höhe über den Knöpfen – mit allem Platz schob sie die
-/// Knöpfe unter den Rand, und das Fenster wuchs jedes Bild weiter.
-pub(super) fn diff_body(ui: &mut Ui, id: u64, lines: &[(char, String)], mono: &FontId, lang: Lang, cmds: &mut Vec<Cmd>) {
-    ui.horizontal(|ui| {
-        ui.colored_label(style::ui().diff_remove, lang.t("− auf der Platte", "− on disk"));
-        ui.colored_label(style::ui().diff_add, lang.t("+ im Editor", "+ in the editor"));
-    });
-    ui.separator();
-    let sp = ui.spacing();
-    let footer = sp.interact_size.y.max(24.0) + sp.item_spacing.y * 3.0 + 10.0;
-    egui::ScrollArea::both().id_salt("ed_diff_scroll").auto_shrink([false, false]).max_height((ui.available_height() - footer).max(60.0)).show(ui, |ui| {
-        if lines.is_empty() {
-            ui.weak(lang.t("Keine Unterschiede.", "No differences."));
+    /// Gewählte Revision: im Vergleich die linke Seite ersetzen, sonst einen neuen Vergleich mit dem Dokument öffnen.
+    fn editor_pick_revision(&mut self, ctx: &egui::Context, path: PathBuf, diff: Option<u64>, rev: crate::editor_svc::git_base::Rev) {
+        use super::diff_tab::{Side, Source, StaticSide, Target};
+        use crate::editor_svc::git_base::Rev;
+        if let Some(d) = diff.filter(|d| self.ed.diffs.contains_key(d)) {
+            let dir = self.dir.clone();
+            self.ed.set_diff_left(d, Side::Text(Box::new(StaticSide::new(Source::Git { path, rev }))), &dir);
+            return;
         }
-        for (kind, text) in lines {
-            let (c, p) = match kind {
-                '+' => (style::ui().diff_add, "+ "),
-                '-' => (style::ui().diff_remove, "- "),
-                '@' => (style::ui().info, ""),
-                _ => (style::dim(ui), "  "),
-            };
-            ui.add(egui::Label::new(RichText::new(format!("{p}{text}")).font(mono.clone()).color(c)).extend());
-        }
-    });
-    ui.separator();
-    ui.horizontal(|ui| {
-        if ui.button(lang.t("Meine behalten", "Keep mine")).clicked() {
-            cmds.push(Cmd::KeepMine(id));
-        }
-        if ui.button(lang.t("Von der Platte laden", "Load from disk")).clicked() {
-            cmds.push(Cmd::Reload(id));
-        }
-    });
+        let doc = match self.ed.doc_for_path(&path) {
+            Some(d) => d,
+            None => self.ed.open_path(&path, false),
+        };
+        let t = match rev {
+            Rev::Head => Target::Head,
+            Rev::Index => Target::Index,
+            Rev::Commit(c) => Target::Rev(c),
+        };
+        self.editor_cmd(ctx, Cmd::Compare(doc, t));
+    }
 }
 
 impl EditorUi {
@@ -547,8 +967,22 @@ impl EditorUi {
 
 // -------------------------------------------------------------------------------------------------------- Bausteine
 
+/// Alt+Umschalt+Buchstabe als Kürzel verbraucht: einen Text desselben Buchstabens im selben Bild verwerfen (manche
+/// Tastaturtreiber liefern ihn zusätzlich).
+fn drop_alt_text(i: &mut egui::InputState, k: Key) {
+    let name = k.name();
+    if name.len() == 1
+        && let Some(pos) = i.events.iter().position(|e| matches!(e, egui::Event::Text(t) if t.eq_ignore_ascii_case(name)))
+    {
+        i.events.remove(pos);
+    }
+}
+
 /// Statusleiste, Ordnerbaum und Teilungen zeichnen (ohne Dialoge); sammelt die Befehle in `cmds`.
 pub(super) fn draw(ctx: &egui::Context, ed: &mut EditorUi, theme: &crate::theme::Theme, prefs: &super::EditorPrefs, lang: Lang, cmds: &mut Vec<Cmd>) {
+    // Fertige Formatier-Läufe übernehmen (#381) – vor dem Zeichnen, damit das Bild den neuen Text zeigt.
+    ed.poll_formats(lang);
+    super::format::dialogs(ctx, ed, lang, cmds);
     // Ein Agent hat Reiter oder Teilung gewechselt: Tasten des Nutzers dürfen nicht in dessen Datei landen (#54).
     if std::mem::take(&mut ed.blur)
         && let Some(f) = ctx.memory(|m| m.focused())
@@ -561,6 +995,12 @@ pub(super) fn draw(ctx: &egui::Context, ed: &mut EditorUi, theme: &crate::theme:
     if !keep_focus_across_deactivation(ctx, ed) {
         return;
     }
+    // Fenster bekommt den Fokus: Vergleiche und Änderungsmarken lesen die Stände in git/auf der Platte neu (#385).
+    let active = ctx.input(|i| i.focused);
+    if active && !ed.was_active {
+        ed.generation += 1;
+    }
+    ed.was_active = active;
     egui::TopBottomPanel::bottom(style::salted(Id::new("ed_status")))
         .exact_height(STATUS_H)
         .frame(egui::Frame::NONE.fill(ctx.style().visuals.panel_fill).inner_margin(Margin::symmetric(10, 0)))
@@ -666,17 +1106,45 @@ fn show_node(ui: &mut Ui, node: &mut Node, rect: Rect, ed: &mut EditorUi, cx: &G
     }
 }
 
-/// Eine Gruppe: Reiterleiste, Hinweisleisten, ggf. Suchleiste, Textfeld.
+/// Eine Gruppe: Menüleiste (#381), Reiterleiste, Hinweisleisten, Fortschritt/Meldung des Formatierens, ggf.
+/// Suchleiste, Textfeld.
 fn show_group(ui: &mut Ui, g: u64, rect: Rect, ed: &mut EditorUi, cx: &GroupCx, cmds: &mut Vec<Cmd>) {
     ed.group_rects.insert(g, rect);
     let focused = ed.panes.focused == g;
-    let bar = Rect::from_min_size(rect.min, Vec2::new(rect.width(), BAR_H));
+    let mut top = rect.top();
+    if cx.prefs.menu_bar {
+        let mr = Rect::from_min_size(rect.min, Vec2::new(rect.width(), super::menu::MENU_H));
+        let narrow = super::menu::menu_bar(ui, mr, g, ed, cx.prefs, cx.lang, cmds);
+        ed.menu_rects.insert(g, (mr, narrow));
+        if focused {
+            spot_rect(ui, Spot::EditorMenuBar, mr);
+        }
+        top = mr.bottom();
+    } else {
+        ed.menu_rects.remove(&g);
+    }
+    let bar = Rect::from_min_size(Pos2::new(rect.left(), top), Vec2::new(rect.width(), BAR_H));
     tab_bar(ui, g, bar, ed, cx.lang, cmds);
     let mut body = Rect::from_min_max(Pos2::new(rect.left(), bar.bottom()), rect.max);
-    let Some((doc_id, idx)) = ed.panes.groups.get(&g).and_then(|grp| grp.active_tab().map(|t| (t.doc, grp.active))) else {
+    let Some((doc_id, idx, diff)) = ed.panes.groups.get(&g).and_then(|grp| grp.active_tab().map(|t| (t.doc, grp.active, t.diff))) else {
         ui.painter().text(body.center(), Align2::CENTER_CENTER, cx.lang.t("Keine Datei offen", "No file open"), FontId::proportional(13.0), style::dim(ui));
         return;
     };
+    // Vergleichs-Reiter (#385)
+    if let Some(diff) = diff {
+        let want = focused && std::mem::take(&mut ed.want_focus);
+        let Some(mut dt) = ed.diffs.remove(&diff) else { return };
+        let dcx = super::diff_tab::DiffCx { id: diff_id(g), font: editor_font(ui.ctx(), cx.prefs.font_size), theme: cx.theme, prefs: cx.prefs, lang: cx.lang, wrap: ed.wrap, request_focus: want, diff };
+        let out = super::diff_tab::show(ui, body, &mut dt, &mut ed.docs, ed.generation, &dcx, cmds);
+        ed.diffs.insert(diff, dt);
+        if out.focused || out.clicked {
+            ed.panes.focused = g;
+        }
+        if focused && ed.panes.groups.len() > 1 {
+            ui.painter().rect_stroke(rect.shrink(0.5), 0.0, Stroke::new(1.0_f32, style::accent().gamma_multiply(0.5)), StrokeKind::Inside);
+        }
+        return;
+    }
     // Datei erst jetzt lesen (zuerst sichtbar).
     if let Some(d) = ed.docs.get_mut(&doc_id) {
         d.ensure_loaded(cx.prefs);
@@ -686,6 +1154,18 @@ fn show_group(ui: &mut Ui, g: u64, rect: Rect, ed: &mut EditorUi, cx: &GroupCx, 
         let r = Rect::from_min_size(body.min, Vec2::new(body.width(), INFO_H));
         info_bar(ui, r, doc_id, bar_kind, cx.lang, cmds);
         body.min.y += INFO_H;
+    }
+    // Formatieren (#381): Fortschritt mit *Abbrechen*, danach die Meldung (gültig, Fehler mit *Gehe zu*).
+    if let Some(j) = ed.fmt.job_for(doc_id) {
+        let r = Rect::from_min_size(body.min, Vec2::new(body.width(), super::format::LINE_H));
+        let large = ed.docs.get(&doc_id).is_some_and(|d| d.is_large(cx.prefs));
+        super::format::progress_line(ui, r, doc_id, j, large, cx.lang, cmds);
+        body.min.y += super::format::LINE_H;
+    }
+    if let Some((n, _)) = ed.fmt.notes.get(&doc_id).cloned() {
+        let r = Rect::from_min_size(body.min, Vec2::new(body.width(), super::format::LINE_H));
+        super::format::note_line(ui, r, doc_id, &n, cx.lang, cmds);
+        body.min.y += super::format::LINE_H;
     }
     // Suchleiste (nur in der fokussierten Gruppe)
     if focused && ed.find.visible {
@@ -709,10 +1189,27 @@ fn show_group(ui: &mut Ui, g: u64, rect: Rect, ed: &mut EditorUi, cx: &GroupCx, 
     let wrap = ed.wrap;
     let minimap = ed.minimap;
     let find_hl = ed.find.highlight();
+    let generation = ed.generation;
+    let popup_line = ed.mark_popup.as_ref().filter(|p| p.group == g && p.doc == doc_id).map(|p| p.line);
     let Some(d) = ed.docs.get_mut(&doc_id) else { return };
+    // Änderungsmarken (#385): im Hintergrund lesen und vergleichen.
+    if super::marks::tick(d, cx.prefs, generation, std::time::Instant::now()) {
+        ui.ctx().request_repaint_after(Duration::from_millis(60));
+    }
+    let marks = d.marks.result.clone().filter(|_| cx.prefs.markers);
+    let base_git = d.marks.base.as_ref().is_some_and(|b| b.is_git());
     let Some(view) = ed.panes.groups.get_mut(&g).and_then(|grp| grp.tabs.get_mut(idx)).map(|t| &mut t.view) else { return };
-    let tcx = TextCx { id: text_id(g), font: editor_font(ui.ctx(), cx.prefs.font_size), theme: cx.theme, prefs: cx.prefs, wrap, minimap, request_focus: want, find: find_hl.as_ref(), lang: cx.lang };
+    let tcx = TextCx { id: text_id(g), font: editor_font(ui.ctx(), cx.prefs.font_size), theme: cx.theme, prefs: cx.prefs, wrap, minimap, request_focus: want, find: find_hl.as_ref(), lang: cx.lang, marks: marks.as_deref(), popup_line };
     let out = text::show(ui, body, d, view, &tcx);
+    if let Some(line) = out.strip_click {
+        let same = ed.mark_popup.as_ref().is_some_and(|p| p.group == g && p.doc == doc_id && p.line == line);
+        ed.mark_popup = (!same).then_some(super::marks::MarkPopup { group: g, doc: doc_id, line });
+    }
+    if let (Some((anchor, width)), Some(m)) = (out.popup_anchor, marks.as_deref())
+        && let Some(line) = popup_line
+    {
+        mark_popup(ui, anchor, width.min(680.0), g, doc_id, line, m, base_git, cx, cmds);
+    }
     if focused {
         spot_rect(ui, Spot::EditorText, body);
     }
@@ -731,6 +1228,84 @@ fn show_group(ui: &mut Ui, g: u64, rect: Rect, ed: &mut EditorUi, cx: &GroupCx, 
 /// Id des Textfelds einer Gruppe (Tastaturfokus).
 pub(super) fn text_id(g: u64) -> Id {
     style::salted(Id::new(("ed_text", g)))
+}
+
+/// Id der Fläche eines Vergleichs-Reiters einer Gruppe (Tastaturfokus, #385).
+pub(super) fn diff_id(g: u64) -> Id {
+    style::salted(Id::new(("ed_diff", g)))
+}
+
+/// Fenster einer Änderungsmarke unter ihrer Zeile (#385): die alten Zeilen, *Zurücksetzen*, vorige/nächste Änderung,
+/// *Im Vergleich öffnen*. Klick daneben oder Esc schließt es.
+#[allow(clippy::too_many_arguments)]
+fn mark_popup(ui: &mut Ui, anchor: Pos2, width: f32, g: u64, doc: u64, line: usize, m: &crate::editor::linemarks::LineMarks, git: bool, cx: &GroupCx, cmds: &mut Vec<Cmd>) {
+    let Some(k) = m.at(line) else {
+        cmds.push(Cmd::ClosePopup);
+        return;
+    };
+    let h = &m.hunks[k];
+    let lang = cx.lang;
+    let u = style::ui();
+    let id = style::salted(Id::new(("ed_mark_popup", g)));
+    let area = egui::Area::new(id).order(egui::Order::Foreground).fixed_pos(anchor).constrain(true).show(ui.ctx(), |ui| {
+        egui::Frame::popup(ui.style()).show(ui, |ui| {
+            ui.set_width(width.max(260.0));
+            let what = match h.kind {
+                crate::editor::compare::HunkKind::Added => lang.t("Hinzugefügt", "Added"),
+                crate::editor::compare::HunkKind::Modified => lang.t("Geändert", "Modified"),
+                crate::editor::compare::HunkKind::Deleted => lang.t("Entfernt", "Removed"),
+            };
+            let state = match (git, h.staged) {
+                (true, true) => lang.t("gestagt (Index ↔ HEAD)", "staged (index ↔ HEAD)"),
+                (true, false) => lang.t("nicht gestagt (Datei ↔ Index)", "unstaged (file ↔ index)"),
+                _ => lang.t("ungespeichert (Datei ↔ Platte)", "unsaved (file ↔ disk)"),
+            };
+            ui.horizontal(|ui| {
+                ui.painter().rect_filled(Rect::from_min_size(ui.cursor().min + Vec2::new(0.0, 3.0), Vec2::new(4.0, 12.0)), 1.0, super::marks::color(h, &u));
+                ui.add_space(8.0);
+                ui.label(RichText::new(format!("{what} · {state}")).strong());
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.small_button("✕").on_hover_text(lang.t("Schließen (Esc)", "Close (Esc)")).clicked() {
+                        cmds.push(Cmd::ClosePopup);
+                    }
+                });
+            });
+            ui.add_space(2.0);
+            let mono = editor_font(ui.ctx(), (cx.prefs.font_size - 1.0).max(9.0));
+            if h.old.is_empty() {
+                ui.label(RichText::new(lang.t("Neue Zeilen – vorher stand hier nichts.", "New lines – there was nothing here before.")).small().color(style::dim(ui)));
+            } else {
+                egui::ScrollArea::vertical().max_height(260.0).auto_shrink([false, true]).show(ui, |ui| {
+                    for l in h.old.iter().take(2000) {
+                        let text = RichText::new(format!("− {l}")).font(mono.clone()).color(cx.theme.fg).background_color(u.diff_remove_bg);
+                        ui.add(egui::Label::new(text).extend());
+                    }
+                });
+            }
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                let revert = ui.add_enabled(h.revertable, egui::Button::new(lang.t("Zurücksetzen", "Revert")));
+                let revert = if h.revertable { revert.on_hover_text(lang.t("Die alten Zeilen wiederherstellen (ein Schritt zum Rückgängigmachen)", "Restore the old lines (one undo step)")) } else { revert.on_disabled_hover_text(lang.t("Die gestagte Änderung wurde danach noch einmal geändert.", "The staged change was changed again afterwards.")) };
+                if revert.clicked() {
+                    cmds.push(Cmd::RevertMark(doc, line));
+                }
+                if style::icon_btn_small(ui, Icon::Up, lang.t("Vorige Änderung (Umschalt+F7)", "Previous change (Shift+F7)")).clicked() {
+                    cmds.push(Cmd::StepChange(false));
+                }
+                if style::icon_btn_small(ui, Icon::Down, lang.t("Nächste Änderung (F7)", "Next change (F7)")).clicked() {
+                    cmds.push(Cmd::StepChange(true));
+                }
+                if ui.button(lang.t("Im Vergleich öffnen", "Open in diff")).clicked() {
+                    cmds.push(Cmd::MarkToDiff(doc, line));
+                }
+            });
+        });
+    });
+    let r = area.response.rect;
+    let (pressed, pos, esc) = ui.input(|i| (i.pointer.any_pressed(), i.pointer.interact_pos(), i.key_pressed(Key::Escape)));
+    if esc || (pressed && pos.is_some_and(|p| !r.contains(p) && p.x > anchor.x - 40.0 && !(p.y > anchor.y - 30.0 && p.y < anchor.y && p.x < anchor.x))) {
+        cmds.push(Cmd::ClosePopup);
+    }
 }
 
 /// Tastatur über einen Fensterwechsel retten (#54): Wird das Fenster inaktiv oder minimiert, merkt es sich (je Fenster),
@@ -782,7 +1357,7 @@ fn editor_font(ctx: &egui::Context, size: f32) -> FontId {
 
 impl EditorUi {
     /// Ansicht des Reiters `idx` der Gruppe `g` und das Dokument dazu (getrennt ausgeliehen).
-    fn view_doc_mut(&mut self, g: u64, idx: usize) -> (Option<&mut text::View>, Option<&mut DocEntry>) {
+    pub(super) fn view_doc_mut(&mut self, g: u64, idx: usize) -> (Option<&mut text::View>, Option<&mut DocEntry>) {
         let Some(t) = self.panes.groups.get_mut(&g).and_then(|grp| grp.tabs.get_mut(idx)) else { return (None, None) };
         let doc = t.doc;
         (Some(&mut t.view), self.docs.get_mut(&doc))
@@ -910,11 +1485,14 @@ fn tab_bar(ui: &mut Ui, g: u64, bar: Rect, ed: &mut EditorUi, lang: Lang, cmds: 
     let titles: Vec<(String, bool, bool, Option<PathBuf>)> = grp
         .tabs
         .iter()
-        .map(|t| match ed.docs.get(&t.doc) {
-            Some(d) => (d.title(lang), d.dirty(), d.agent_edited || d.opened_by_agent, d.path.clone()),
-            None => ("?".into(), false, false, None),
+        .map(|t| match (t.diff.and_then(|d| ed.diffs.get(&d)), ed.docs.get(&t.doc)) {
+            (Some(dt), _) => (dt.title(&ed.docs, lang), dt.dirty(&ed.docs), false, None),
+            (None, Some(d)) => (d.title(lang), d.dirty(), d.agent_edited || d.opened_by_agent, d.path.clone()),
+            (None, None) => ("?".into(), false, false, None),
         })
         .collect();
+    // Aktionen beim Speichern (#383): roter Punkt, bis ein Lauf für die Datei wieder klappt.
+    let failed: Vec<bool> = titles.iter().map(|(.., p)| p.as_ref().is_some_and(|p| ed.on_save.failed.contains(&crate::save_actions::path_key(p)))).collect();
     let widths: Vec<f32> = titles.iter().map(|(t, ..)| (ui.painter().layout_no_wrap(t.clone(), font.clone(), Color32::PLACEHOLDER).size().x + 44.0).clamp(TAB_MIN_W, TAB_MAX_W)).collect();
     let total: f32 = widths.iter().sum();
     // Bildlauf der Leiste, wenn die Reiter nicht passen (Mausrad über der Leiste); der aktive bleibt sichtbar.
@@ -961,7 +1539,11 @@ fn tab_bar(ui: &mut Ui, g: u64, bar: Rect, ed: &mut EditorUi, lang: Lang, cmds: 
         painter.line_segment([r.right_top(), r.right_bottom()], Stroke::new(1.0_f32, u.border.gamma_multiply(0.6)));
         let tc = if active { ui.visuals().strong_text_color() } else { ui.visuals().text_color().gamma_multiply(0.8) };
         let tc = if *agent { style::mix(tc, u.info, 0.6) } else { tc };
-        let text_r = Rect::from_min_max(Pos2::new(r.left() + 10.0, r.top()), Pos2::new(r.right() - 26.0, r.bottom()));
+        let lead = if failed[i] { 10.0 } else { 0.0 };
+        if failed[i] {
+            painter.circle_filled(Pos2::new(r.left() + 9.0, r.center().y), 3.5, u.danger);
+        }
+        let text_r = Rect::from_min_max(Pos2::new(r.left() + 10.0 + lead, r.top()), Pos2::new(r.right() - 26.0, r.bottom()));
         let gal = painter.layout_no_wrap(title.clone(), font.clone(), tc);
         painter.with_clip_rect(text_r.intersect(tabs_r)).galley(Pos2::new(text_r.left(), r.center().y - gal.size().y / 2.0), gal, tc);
         // Rechts: Schließen beim Überfahren, sonst Punkt bei ungespeicherten Änderungen
@@ -979,39 +1561,68 @@ fn tab_bar(ui: &mut Ui, g: u64, bar: Rect, ed: &mut EditorUi, lang: Lang, cmds: 
         } else if *dirty {
             painter.circle_filled(close_r.center(), 3.5, tc);
         }
-        resp.clone().on_hover_text(tab_tooltip(path.as_deref(), *dirty, *agent, lang));
+        let tip = tab_tooltip(path.as_deref(), *dirty, *agent, lang);
+        let tip = if failed[i] { format!("{tip}\n{}", lang.t("Aktionen beim Speichern: letzter Lauf mit Fehler", "Actions on save: last run had an error")) } else { tip };
+        resp.clone().on_hover_text(tip);
         if resp.hovered() {
             ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
         }
         let doc = grp.tabs[i].doc;
+        let tab_diff = grp.tabs[i].diff;
+        let close_cmd = match tab_diff {
+            Some(d) => Cmd::CloseDiff(g, d),
+            None => Cmd::Close(vec![(g, doc)]),
+        };
         if resp.clicked() {
             if close_hover {
-                cmds.push(Cmd::Close(vec![(g, doc)]));
+                cmds.push(close_cmd.clone());
             } else {
                 cmds.push(Cmd::Activate(g, i));
             }
         }
         if resp.middle_clicked() {
-            cmds.push(Cmd::Close(vec![(g, doc)]));
+            cmds.push(close_cmd.clone());
         }
         if resp.drag_started() && ed.drag.is_none() {
             ed.drag = Some(TabDrag { group: g, index: i, doc });
         }
-        let others: Vec<(u64, u64)> = grp.tabs.iter().filter(|t| t.doc != doc).map(|t| (g, t.doc)).collect();
-        let all: Vec<(u64, u64)> = grp.tabs.iter().map(|t| (g, t.doc)).collect();
+        // Schließen mehrerer Reiter: Datei-Reiter über die Rückfrage, Vergleiche direkt.
+        let closing = |keep: Option<usize>| -> Vec<Cmd> {
+            let files: Vec<(u64, u64)> = grp.tabs.iter().enumerate().filter(|(j, t)| Some(*j) != keep && t.diff.is_none()).map(|(_, t)| (g, t.doc)).collect();
+            let mut v: Vec<Cmd> = grp.tabs.iter().enumerate().filter(|(j, _)| Some(*j) != keep).filter_map(|(_, t)| t.diff.map(|d| Cmd::CloseDiff(g, d))).collect();
+            if !files.is_empty() {
+                v.push(Cmd::Close(files));
+            }
+            v
+        };
+        let others = closing(Some(i));
+        let all = closing(None);
         let path = path.clone();
         resp.context_menu(|ui| {
             if ui.button(lang.t("Schließen", "Close")).clicked() {
-                cmds.push(Cmd::Close(vec![(g, doc)]));
+                cmds.push(close_cmd.clone());
                 ui.close();
             }
             if ui.add_enabled(!others.is_empty(), egui::Button::new(lang.t("Andere schließen", "Close others"))).clicked() {
-                cmds.push(Cmd::Close(others.clone()));
+                cmds.extend(others.iter().cloned());
                 ui.close();
             }
             if ui.button(lang.t("Alle schließen", "Close all")).clicked() {
-                cmds.push(Cmd::Close(all.clone()));
+                cmds.extend(all.iter().cloned());
                 ui.close();
+            }
+            match tab_diff {
+                Some(d) => {
+                    ui.separator();
+                    if ui.button(lang.t("Seiten tauschen", "Swap sides")).clicked() {
+                        cmds.push(Cmd::SwapDiff(d));
+                        ui.close();
+                    }
+                }
+                None => {
+                    ui.separator();
+                    super::diff_menu::compare_submenu(ui, ed, doc, lang, cmds);
+                }
             }
             ui.separator();
             if ui.button(lang.t("Rechts teilen", "Split right")).clicked() {
@@ -1028,6 +1639,10 @@ fn tab_bar(ui: &mut Ui, g: u64, bar: Rect, ed: &mut EditorUi, lang: Lang, cmds: 
                 ui.separator();
                 if ui.button(lang.t("Pfad kopieren", "Copy path")).clicked() {
                     cmds.push(Cmd::CopyPath(p.clone()));
+                    ui.close();
+                }
+                if crate::wsl::is_wsl_unc(&p.to_string_lossy()) && ui.button(lang.t("Als Linux-Pfad kopieren", "Copy as Linux path")).clicked() {
+                    cmds.push(Cmd::CopyLinuxPath(p.clone()));
                     ui.close();
                 }
                 if crate::platform::open::FILE_MANAGER && ui.button(if cfg!(windows) { lang.t("Im Explorer anzeigen", "Show in Explorer") } else { lang.t("Im Dateimanager anzeigen", "Show in file manager") }).clicked() {
@@ -1077,7 +1692,11 @@ fn drag_overlay(ui: &mut Ui, ed: &mut EditorUi, lang: Lang, cmds: &mut Vec<Cmd>)
         painter.rect_stroke(r, 4.0, Stroke::new(2.0_f32, style::accent()), StrokeKind::Inside);
     }
     if let Some(p) = pos {
-        let name = ed.docs.get(&drag.doc).map(|d| d.title(lang)).unwrap_or_default();
+        let diff = ed.panes.groups.get(&drag.group).and_then(|grp| grp.tabs.get(drag.index)).and_then(|t| t.diff).and_then(|d| ed.diffs.get(&d));
+        let name = match diff {
+            Some(dt) => dt.title(&ed.docs, lang),
+            None => ed.docs.get(&drag.doc).map(|d| d.title(lang)).unwrap_or_default(),
+        };
         let g = painter.layout_no_wrap(name, FontId::proportional(12.5), ui.visuals().strong_text_color());
         let r = Rect::from_min_size(p + Vec2::new(12.0, 8.0), g.size() + Vec2::new(16.0, 8.0));
         painter.rect_filled(r, CornerRadius::same(5), style::ui().window_bg);
@@ -1097,7 +1716,9 @@ fn drag_overlay(ui: &mut Ui, ed: &mut EditorUi, lang: Lang, cmds: &mut Vec<Cmd>)
 /// Ablageziel unter dem Zeiger: Reiterleiste (Position zwischen Reitern) oder Rand/Mitte einer Gruppe.
 pub(super) fn drop_target(ed: &EditorUi, p: Pos2) -> Option<(PaneDrop, Rect)> {
     for (g, (bar, tabs)) in &ed.bar_rects {
-        if bar.contains(p) {
+        // Die Menüleiste darüber (#381) zählt wie die Reiterleiste.
+        let over_menu = ed.menu_rects.get(g).is_some_and(|(m, _)| m.contains(p));
+        if bar.contains(p) || over_menu {
             let idx = tabs.iter().position(|r| p.x < r.center().x).unwrap_or(tabs.len());
             let x = tabs.get(idx).map(|r| r.left()).or_else(|| tabs.last().map(|r| r.right())).unwrap_or(bar.left());
             return Some((PaneDrop::Bar { group: *g, index: idx }, Rect::from_center_size(Pos2::new(x, bar.center().y), Vec2::new(4.0, bar.height()))));
@@ -1107,7 +1728,9 @@ pub(super) fn drop_target(ed: &EditorUi, p: Pos2) -> Option<(PaneDrop, Rect)> {
         if !r.contains(p) {
             continue;
         }
-        let body = Rect::from_min_max(Pos2::new(r.left(), r.top() + BAR_H), r.max);
+        // Unter Menü- und Reiterleiste (die Reiterleiste kennt ihre Lage aus dem letzten Bild).
+        let top = ed.bar_rects.get(g).map(|(b, _)| b.bottom()).unwrap_or(r.top() + BAR_H);
+        let body = Rect::from_min_max(Pos2::new(r.left(), top), r.max);
         let (fx, fy) = ((p.x - body.left()) / body.width().max(1.0), (p.y - body.top()) / body.height().max(1.0));
         let edge = 0.25;
         let half = |dir: Dir, before: bool| -> Rect {
@@ -1174,7 +1797,17 @@ fn tree_panel(ui: &mut Ui, ed: &mut EditorUi, lang: Lang, cmds: &mut Vec<Cmd>) {
                         TreeOut::Open(p) => Cmd::OpenPath(p, false),
                         TreeOut::OpenSide(p) => Cmd::OpenPath(p, true),
                         TreeOut::CopyPath(p) => Cmd::CopyPath(p),
+                        TreeOut::CopyLinuxPath(p) => Cmd::CopyLinuxPath(p),
                         TreeOut::SetRoot(p) => Cmd::SetRoot(p),
+                        TreeOut::RulesFor(p) => {
+                            ed.on_save.clicked = Some(super::super::save_actions_ui::OnSaveClick::RulesFor(p));
+                            continue;
+                        }
+                        TreeOut::NewRule(p, dir) => {
+                            ed.on_save.clicked = Some(super::super::save_actions_ui::OnSaveClick::NewRule(p, dir));
+                            continue;
+                        }
+                        TreeOut::Compare(a, b) => Cmd::ComparePaths(a, b),
                     });
                 }
             });
@@ -1278,6 +1911,7 @@ fn status_bar(ui: &mut Ui, ed: &mut EditorUi, lang: Lang, prefs: &super::EditorP
             ui.add_space(style::S3);
             ui.label(RichText::new(t).small().color(style::ui().info));
         }
+        on_save_status(ui, ed, doc, lang);
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             let (Some(id), Some((s, ..)), Some(syn)) = (doc, info, syn) else { return };
             language_picker(ui, ed, id, &syn, lang, cmds);
@@ -1304,6 +1938,45 @@ fn status_bar(ui: &mut Ui, ed: &mut EditorUi, lang: Lang, prefs: &super::EditorP
             ui.label(RichText::new(&s.indent).small()).on_hover_text(lang.t("Einrückung (erkannt bzw. aus .editorconfig)", "Indentation (detected or from .editorconfig)"));
         });
     });
+}
+
+/// Aktionen beim Speichern in der Statusleiste (#383): „⟳ 2 Aktionen“ während Läufen, rot bei einem Fehler der aktiven
+/// Datei (Klick öffnet die Ausgabe), „✓“ nach einem erfolgreichen Lauf, „⏸“ bei Pause (Klick setzt fort).
+fn on_save_status(ui: &mut Ui, ed: &mut EditorUi, doc: Option<u64>, lang: Lang) {
+    use super::super::save_actions_ui::OnSaveClick;
+    let v = &ed.on_save;
+    let key = doc.and_then(|d| ed.docs.get(&d)).and_then(|d| d.path.as_ref()).map(|p| crate::save_actions::path_key(p));
+    let last = key.as_ref().and_then(|k| v.last.get(k)).copied();
+    let mut click = None;
+    let u = style::ui();
+    if v.paused {
+        ui.add_space(style::S3);
+        let b = ui.add(egui::Button::new(RichText::new(lang.t("⏸ Aktionen pausiert", "⏸ actions paused")).small().color(u.warning)).frame(false));
+        if b.on_hover_text(lang.t("Aktionen beim Speichern sind bis zum Neustart pausiert – klicken zum Fortsetzen", "Actions on save are paused until restart – click to resume")).clicked() {
+            click = Some(OnSaveClick::Resume);
+        }
+    }
+    if v.running > 0 {
+        ui.add_space(style::S3);
+        let t = format!("⟳ {} {}", v.running, if v.running == 1 { lang.t("Aktion", "action") } else { lang.t("Aktionen", "actions") });
+        let b = ui.add(egui::Button::new(RichText::new(t).small().color(u.info)).frame(false));
+        if b.on_hover_text(lang.t("Aktionen beim Speichern laufen – klicken für die Ausgabe", "Actions on save are running – click for the output")).clicked() {
+            click = Some(OnSaveClick::Output);
+        }
+    } else if let Some(failed) = last {
+        ui.add_space(style::S3);
+        let (t, c, tip) = if failed {
+            (lang.t("✗ Aktionen beim Speichern", "✗ actions on save"), u.danger, lang.t("Der letzte Lauf hatte einen Fehler – klicken für die Ausgabe", "The last run had an error – click for the output"))
+        } else {
+            ("✓", style::dim(ui), lang.t("Aktionen beim Speichern erfolgreich – klicken für die Ausgabe", "Actions on save succeeded – click for the output"))
+        };
+        if ui.add(egui::Button::new(RichText::new(t).small().color(c)).frame(false)).on_hover_text(tip).clicked() {
+            click = Some(OnSaveClick::Output);
+        }
+    }
+    if click.is_some() {
+        ed.on_save.clicked = click;
+    }
 }
 
 /// Anzeigename einer Sprache (reiner Text in der Sprache der Oberfläche).

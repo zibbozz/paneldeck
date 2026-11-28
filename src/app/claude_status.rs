@@ -72,6 +72,15 @@ pub(super) struct Track {
     pub(super) input_base: u64,
     /// Werkzeug, für das die offene Freigabe-Frage gestellt wurde (aus der Benachrichtigung), sonst leer.
     pub(super) perm_tool: String,
+    /// Begonnene, noch nicht beendete Werkzeugaufrufe (#390) – daraus [`Self::request`].
+    pub(super) tools: hooks::ToolLog,
+    /// Was die offene Freigabe-Frage verlangen kann (Werkzeug, Befehl/Pfad …) für die Karte „Wartet auf dich“; `None`
+    /// ohne Frage oder ohne passenden Aufruf (dann zeigt die Karte die Meldung). Nur im Speicher.
+    pub(super) request: Option<hooks::ToolRequest>,
+    /// Ankunft der Benachrichtigung, die die offene Freigabe-Frage stellte (Bezug für die Kandidaten).
+    pub(super) asked_at: Option<Instant>,
+    /// `Session::input_stamp` beim Stellen der Frage: Eingaben danach können sie beantwortet haben.
+    pub(super) request_input: u64,
     /// Zeilen des Startbefehls (Startbefehl des Profils, `claude …`): So viele Prompts zeigt die Shell, bevor der
     /// letzte davon läuft. Nur eine zusätzliche Hürde für „Claude ist gar nicht gestartet“ – Themes mit doppeltem
     /// Prompt zählen anders, entscheidend bleibt, was an der Konsole hängt.
@@ -133,6 +142,51 @@ impl Entry {
         self.track.mark_seq = next_mark();
         self.track.mark_pending = true;
         self.track.input_base = self.live.as_ref().map_or(0, |s| s.input_stamp());
+    }
+
+    /// Meldung der Rückfrage und was sie verlangt (#390) verwerfen – die Frage ist beantwortet oder weg.
+    pub(super) fn clear_status_msg(&mut self) {
+        self.status_msg.clear();
+        self.track.request = None;
+        self.track.asked_at = None;
+    }
+
+    /// Was die offene Freigabe-Frage verlangen kann (#390), nur solange sie offen ist.
+    pub(super) fn perm_request(&self) -> Option<&hooks::ToolRequest> {
+        self.track.request.as_ref().filter(|_| self.status == ClaudeStatus::Permission)
+    }
+
+    /// Kandidaten der offenen Freigabe-Frage neu bestimmen (#390). Bleiben es dieselben Aufrufe, bleibt auch die
+    /// Bestätigung über den Bildschirm; sonst gilt die Anfrage wieder als unbestätigt.
+    fn refresh_request(&mut self) {
+        let fresh = match (self.status, self.track.asked_at) {
+            (ClaudeStatus::Permission, Some(at)) => self.track.tools.request_for(&self.track.perm_tool, at),
+            _ => None,
+        };
+        let keep = matches!((&self.track.request, &fresh), (Some(a), Some(b)) if a.calls == b.calls && a.confirmed);
+        self.track.request = fresh.map(|r| hooks::ToolRequest { confirmed: keep, ..r });
+    }
+
+    /// Anfrage der offenen Freigabe-Frage gegen das Terminal prüfen (#390, jede halbe Sekunde): Wurde seit der Frage
+    /// ins Terminal getippt, kann sie beantwortet sein – die Anfrage fällt weg. Sonst gilt sie nur als bestätigt,
+    /// solange genau ein Kandidat im Dialog auf dem Bildschirm steht (`screen` liest ihn nur dann). `true` bei Änderung.
+    pub(super) fn request_tick(&mut self, input_stamp: u64, screen: impl FnOnce() -> String) -> bool {
+        if self.status != ClaudeStatus::Permission {
+            return false;
+        }
+        let Some(r) = self.track.request.as_mut() else { return false };
+        if input_stamp > self.track.request_input {
+            self.track.request = None;
+            return true;
+        }
+        let ok = r.single().is_some() && r.confirms(&screen());
+        std::mem::replace(&mut r.confirmed, ok) != ok
+    }
+
+    /// Darf die Karte die Frage jetzt mit „Ja“/„Nein“ beantworten (#390)? Nur wenn sie noch genau den gezeigten Aufruf
+    /// `seq` verlangt und der Dialog auf dem Bildschirm ihn gerade zeigt.
+    pub(super) fn answerable(&self, seq: u64, screen: &str) -> bool {
+        self.perm_request().is_some_and(|r| r.confirmed && r.single().is_some_and(|c| c.seq == seq) && r.confirms(screen))
     }
 
     /// Der Hub hat Claude gerade etwas zu tun gegeben (Prompt aus der Warteschlange, `send_text`, Freigabe erteilt):
@@ -201,6 +255,8 @@ impl Entry {
             return None;
         }
         self.track.stop_last = m.event == "Stop";
+        let now = Instant::now();
+        self.track.tools.note(m, now);
         let old = self.status;
         self.hook_seen = true;
         self.track.claude_seen = true;
@@ -229,11 +285,33 @@ impl Entry {
         self.stamp_event();
         // Eine (neue) Rückfrage: ab hier zählen Eingaben als mögliche Antwort; kurze Sperre gegen Fehlklicks.
         if asking(new) && (new != old || hooks::notification_asks(m)) {
-            self.perm_since = Some(Instant::now());
+            // Eine neue Frage löst eine offene ab: Die alte ist beantwortet – galt sie sicher einem Aufruf, ist der
+            // erledigt (#390).
+            if asking(old) {
+                if let Some(seq) = self.track.request.as_ref().and_then(|r| r.single()).map(|c| c.seq) {
+                    self.track.tools.forget(seq);
+                }
+            }
+            self.perm_since = Some(now);
             self.track.perm_tool = m.message.as_deref().and_then(hooks::permission_tool).unwrap_or("").to_string();
             self.status_msg = m.message.clone().unwrap_or_default();
+            // Was verlangt wird (#390): offene Aufrufe des genannten Werkzeugs kurz vor der Frage – nur bei einer
+            // Freigabe-Frage; bestätigt erst, wenn der Dialog auf dem Bildschirm genau einen davon zeigt.
+            self.track.asked_at = (new == ClaudeStatus::Permission).then_some(now);
+            self.track.request_input = self.live.as_ref().map_or(0, |s| s.input_stamp());
+            self.track.request = None;
+            self.refresh_request();
         } else if new != old {
+            if asking(old) {
+                // Die Frage ist beantwortet: Was bis jetzt begann, kommt für die nächste nicht mehr in Frage.
+                self.track.tools.answered();
+            }
             self.status_msg = m.message.clone().unwrap_or_default();
+            self.track.request = None;
+            self.track.asked_at = None;
+        } else if new == ClaudeStatus::Permission && matches!(m.event.as_str(), "PreToolUse" | "PostToolUse" | "PermissionRequest") {
+            // Ein PreToolUse, das erst nach der Benachrichtigung ankam, oder ein beendeter Aufruf: neu bestimmen.
+            self.refresh_request();
         }
         // Warteschlange: von selbst nur für den Claude, den der Hub gestartet hat – wenn er sich nach dem Start bereit
         // meldet (Start-Prompt) und am Ende einer Runde, die mit einem abgeschickten Prompt begann. Nie nach einem
@@ -316,7 +394,7 @@ impl Entry {
         self.track.stop_last = false;
         if self.status != ClaudeStatus::Unknown {
             self.status = ClaudeStatus::Unknown;
-            self.status_msg.clear();
+            self.clear_status_msg();
             self.perm_since = None;
         }
         self.end_launch()
@@ -331,7 +409,7 @@ impl Entry {
         let derived = self.is_claude() && !self.hook_seen;
         if (self.track.claude_seen || derived) && matches!(self.status, ClaudeStatus::Idle | ClaudeStatus::Working) {
             self.status = ClaudeStatus::Unknown;
-            self.status_msg.clear();
+            self.clear_status_msg();
             self.track.turn.tentative = None;
             self.track.turn.stale = false;
             return true;
@@ -423,8 +501,10 @@ impl Entry {
     /// los und meldet nichts: Nach einer Unterbrechung oder einem Fehler entscheidet der Nutzer, wie es weitergeht.
     pub(super) fn apply_fallback(&mut self, new: ClaudeStatus) {
         self.status = new;
-        self.status_msg.clear();
+        self.clear_status_msg();
         self.perm_since = None;
+        // Eine offene Frage ist damit erledigt (#390): Was bis jetzt begann, zählt für die nächste nicht.
+        self.track.tools.answered();
         self.track.turn.tentative = None;
         // Unbekannt, weil Meldungen ausblieben: ein späterer Beleg im Transkript macht daraus noch „bereit“.
         self.track.turn.stale = new == ClaudeStatus::Unknown;
@@ -478,6 +558,13 @@ impl App {
             let Some(s) = e.live.as_ref() else { continue };
             let seq = shell_seq(&s.shell_state.lock().unwrap_or_else(|x| x.into_inner()));
             let (exited, shell_pid) = (s.has_exited(), s.shell_pid());
+            // Anfrage der Freigabe-Frage gegen Eingaben und Dialog prüfen (#390); den Bildschirm liest das nur bei
+            // genau einem Kandidaten.
+            let stamp = s.input_stamp();
+            let screen = (check && e.track.request.as_ref().is_some_and(|r| r.single().is_some())).then(|| s.screen_text());
+            if check || stamp > e.track.request_input {
+                changed |= e.request_tick(stamp, || screen.unwrap_or_default());
+            }
             // Ein Prompt der Shell zählt nur für Sitzungen, in denen Claude eine Rolle spielt.
             if e.note_shell_seq(seq) && !exited && (e.is_claude() || e.hook_seen) {
                 if e.track.confirmable && shell_pid.is_some() {
@@ -673,6 +760,80 @@ mod tests {
         // Ein abgeschickter Prompt oder ein Stop beenden die Frage immer
         e.take_hook(&ask);
         assert_eq!(feed(&mut e, "Stop"), ClaudeStatus::Idle);
+    }
+
+    /// #390: Die Karte erfährt, was die Freigabe-Frage verlangen kann – aus dem PreToolUse davor (Werkzeug laut
+    /// Benachrichtigung). Sicher („bestätigt“) nur, wenn der Dialog auf dem Bildschirm genau diesen Aufruf zeigt;
+    /// Eingaben, ein anderer Dialog, ein spätes zweites PreToolUse, die Antwort oder der Rückfall nehmen es zurück.
+    #[test]
+    fn a_permission_question_knows_the_requested_command() {
+        let pre = |tool: &str, id: &str, detail: &str| HookMsg { tool_name: Some(tool.into()), tool_use_id: Some(id.into()), tool_detail: Some(detail.into()), ..msg("PreToolUse") };
+        let ask = |tool: &str| HookMsg { kind: Some("permission_prompt".into()), message: Some(format!("Claude needs your permission to use {tool}")), ..msg("Notification") };
+        let dialog = |cmd: &str| format!("Bash command\n\n  {cmd}\n  Push it\n\nDo you want to proceed?\n❯ 1. Yes\n  2. No, and tell Claude what to do differently (esc)");
+        let details = |e: &Entry| e.perm_request().map(|r| r.calls.iter().map(|c| c.detail.clone()).collect::<Vec<_>>()).unwrap_or_default();
+        let mut e = claude_entry();
+        feed(&mut e, "SessionStart");
+        feed(&mut e, "UserPromptSubmit");
+        e.take_hook(&pre("Read", "r1", "src/lib.rs"));
+        e.take_hook(&pre("Bash", "b1", "git push --force"));
+        assert_eq!(e.perm_request(), None, "noch keine Frage");
+        assert_eq!(e.take_hook(&ask("Bash")).unwrap().new, ClaudeStatus::Permission);
+        assert_eq!(details(&e), ["git push --force"]);
+        assert_eq!(e.status_msg, "Claude needs your permission to use Bash");
+        let seq = e.perm_request().unwrap().calls[0].seq;
+        // Unbestätigt, bis der Dialog ihn zeigt
+        assert!(!e.perm_request().unwrap().confirmed);
+        assert!(!e.request_tick(0, || "> ".into()));
+        assert!(!e.answerable(seq, &dialog("git push --force")), "erst nach der Prüfung");
+        assert!(e.request_tick(0, || dialog("git push --force")));
+        assert!(e.perm_request().unwrap().confirmed);
+        assert!(e.answerable(seq, &dialog("git push --force")));
+        assert!(!e.answerable(seq + 1, &dialog("git push --force")), "ein anderer Aufruf als gezeigt");
+        assert!(!e.answerable(seq, &dialog("rm -rf /")), "der Dialog zeigt inzwischen etwas anderes");
+        // Der Dialog ändert sich: wieder unbestätigt
+        assert!(e.request_tick(0, || dialog("rm -rf /")));
+        assert!(!e.perm_request().unwrap().confirmed);
+        e.request_tick(0, || dialog("git push --force"));
+        // (c) ein spätes PreToolUse desselben Werkzeugs: zwei gleichrangige Kandidaten, nie bestätigt
+        e.take_hook_with(&pre("Bash", "b2", "rm -rf build"), false, || NO_SCREEN);
+        assert_eq!(details(&e), ["git push --force", "rm -rf build"]);
+        assert!(!e.perm_request().unwrap().confirmed);
+        e.request_tick(0, || dialog("git push --force"));
+        assert!(!e.perm_request().unwrap().confirmed && !e.answerable(seq, &dialog("git push --force")));
+        // Eingabe ins Terminal seit der Frage: sie kann beantwortet sein – die Anfrage fällt weg
+        assert!(e.request_tick(e.track.request_input + 1, String::new));
+        assert_eq!(e.perm_request(), None);
+        // Das gefragte Werkzeug läuft durch: Frage beantwortet; was bis dahin begann, zählt für die nächste nicht
+        e.take_hook_with(&HookMsg { tool_name: Some("Bash".into()), tool_use_id: Some("b1".into()), ..msg("PostToolUse") }, false, || NO_SCREEN);
+        assert_eq!((e.status, e.perm_request()), (ClaudeStatus::Working, None));
+        e.take_hook(&ask("Bash"));
+        assert_eq!((e.status, e.perm_request()), (ClaudeStatus::Permission, None), "b2 begann vor der beantworteten Frage");
+        e.apply_fallback(ClaudeStatus::Idle);
+        // (a) zwei parallele Aufrufe: beide gleichrangig, älterer zuerst
+        e.take_hook(&pre("Bash", "b3", "npm run dev"));
+        e.take_hook(&pre("Bash", "b4", "rm -rf dist"));
+        e.take_hook(&ask("Bash"));
+        assert_eq!(details(&e), ["npm run dev", "rm -rf dist"]);
+        e.apply_fallback(ClaudeStatus::Idle);
+        // Nächste Frage für ein Werkzeug ohne offenen Aufruf: keine Anfrage (die Karte zeigt die Meldung)
+        e.take_hook(&ask("Edit"));
+        assert_eq!((e.status, e.perm_request()), (ClaudeStatus::Permission, None));
+        e.apply_fallback(ClaudeStatus::Idle);
+        // Eine neue Frage löst eine eindeutig zugeordnete ab: deren Aufruf ist erledigt
+        e.take_hook(&pre("Bash", "b5", "ls"));
+        e.take_hook(&ask("Bash"));
+        assert_eq!(details(&e), ["ls"]);
+        e.take_hook(&ask("Bash"));
+        assert_eq!(e.perm_request(), None);
+        // Eine Eingabe-Frage (keine Freigabe) hat keine Anfrage
+        let input = HookMsg { kind: Some("elicitation_dialog".into()), message: Some("Claude needs your input".into()), ..msg("Notification") };
+        assert_eq!(e.take_hook(&input).unwrap().new, ClaudeStatus::Input);
+        assert_eq!(e.track.request, None);
+        // Ende räumt auf
+        e.take_hook(&pre("Bash", "b7", "ls"));
+        e.take_hook(&ask("Bash"));
+        e.claude_ended();
+        assert_eq!((e.track.request.as_ref(), e.perm_request()), (None, None));
     }
 
     /// Review #282 (MEDIUM-4): „Claude wartet auf deine Eingabe“ (idle_prompt) macht aus einer offenen Rückfrage kein

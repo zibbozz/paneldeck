@@ -301,7 +301,7 @@ impl Item {
             McpLog => l.t("Dokumentiert, was Agenten über MCP getan haben.", "Documents what agents did through MCP."),
             Prompts => l.t("prompts.json – zurück zu den Standard-Prompts.", "prompts.json – back to the default prompts."),
             Templates => l.t("templates.json", "templates.json"),
-            Themes => l.t("Selbst angelegte Themes (themes\\*.json); eingebaute und das Beispiel bleiben.", "Themes you created (themes\\*.json); built-in ones and the example stay."),
+            Themes => l.t("Selbst angelegte Themes (themes\\*.json) samt Hintergrundbildern (themes\\<name>\\); eingebaute und das Beispiel bleiben.", "Themes you created (themes\\*.json) with their background images (themes\\<name>\\); built-in ones and the example stay."),
             SystemPrompt => l.t("Zurück zur eingebauten Vorlage.", "Back to the built-in template."),
             Database => l.t("paneldeck.db – wird vorher immer gesichert. Neustart.", "paneldeck.db – always backed up first. Restart."),
             Sessions => l.t("state.json, Scrollback, Chats und die Tabs des Editors (editor-state.json); offene Sitzungen werden beendet. Neustart.", "state.json, scrollback, chats and the editor's tabs (editor-state.json); open sessions are ended. Restart."),
@@ -802,11 +802,16 @@ pub fn scan(ctx: &Ctx) -> Scan {
             Item::McpLog => Found { files: files_in_followed(d, |n| n == "mcp-log.jsonl" || n == "mcp-log.old.jsonl"), ..Default::default() },
             Item::Prompts => Found { files: one_file(&d.join("prompts.json")), ..Default::default() },
             Item::Templates => Found { files: one_file(&d.join("templates.json")), ..Default::default() },
-            Item::Themes => Found {
-                files: files_in(&themes_dir, |n| n.to_lowercase().ends_with(".json") && n != EXAMPLE_THEME),
-                linked: if root_is_link(&themes_dir) { vec![themes_dir.clone()] } else { Vec::new() },
-                ..Default::default()
-            },
+            Item::Themes => {
+                // Dazu die Bilder der Hintergründe (#387) in `themes/<datei>/` – mit denselben Regeln wie beim Löschen
+                // eines Themes: nur echte Dateien mit sicheren Bildnamen, Ordner als Link werden nicht berührt.
+                let (imgs, img_links) = theme_image_files(&themes_dir);
+                let mut files = files_in(&themes_dir, |n| n.to_lowercase().ends_with(".json") && n != EXAMPLE_THEME);
+                files.extend(imgs);
+                let mut linked = if root_is_link(&themes_dir) { vec![themes_dir.clone()] } else { Vec::new() };
+                linked.extend(img_links);
+                Found { files, linked, ..Default::default() }
+            }
             Item::SystemPrompt => Found { files: one_file(&d.join(crate::mcp::sysprompt::FILE_NAME)), ..Default::default() },
             Item::Database => Found { files: db_files(d), ..Default::default() },
             Item::Sessions => {
@@ -899,6 +904,27 @@ pub fn delete_files<'a>(files: impl IntoIterator<Item = &'a FileEntry>, r: &mut 
             Err(e) => r.errors.push(format!("{}: {e}", f.path.display())),
         }
     }
+}
+
+/// Bilder der Theme-Hintergründe (#387): Dateien mit sicherem Bildnamen in den echten Unterordnern von `themes/` (nicht
+/// rekursiv). Unterordner, die Links sind, kommen in die zweite Liste (nicht berührt).
+fn theme_image_files(themes_dir: &Path) -> (Vec<FileEntry>, Vec<PathBuf>) {
+    let (mut files, mut links) = (Vec::new(), Vec::new());
+    if root_is_link(themes_dir) {
+        return (files, links);
+    }
+    for e in std::fs::read_dir(themes_dir).into_iter().flatten().flatten() {
+        let Ok(m) = std::fs::symlink_metadata(e.path()) else { continue };
+        if is_link(&m) && m.is_dir() {
+            links.push(e.path());
+            continue;
+        }
+        if !m.is_dir() {
+            continue;
+        }
+        files.extend(files_in(&e.path(), crate::theme::background::safe_file_name));
+    }
+    (files, links)
 }
 
 /// Leere Unterordner unter `dir` entfernen (nach dem Löschen von Dateien; `dir` selbst bleibt). Ist `dir` ein Link,
@@ -1087,6 +1113,9 @@ pub fn execute(ctx: &Ctx, scan: &Scan, sel: &Selection, opts: &Opts, phase: Phas
                 delete_files(files.into_iter().filter(|f| done.insert(f.path.clone())), &mut r);
                 for sub in ["clipboard", HOT_EXIT] {
                     prune_empty_dirs(&ctx.data_dir.join(sub));
+                }
+                if item == Item::Themes {
+                    prune_empty_dirs(&ctx.data_dir.join("themes"));
                 }
                 if item == Item::RunTemp {
                     let d = ctx.temp_dir.join(RUN_TEMP);

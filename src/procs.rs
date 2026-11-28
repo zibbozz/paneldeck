@@ -319,6 +319,16 @@ pub fn save(dir: &Path, list: &[ProcDef], meta: &FileMeta) -> std::io::Result<()
     crate::state::write_atomic(&dir.join(FILE), text.as_bytes())
 }
 
+/// Neue Kennung, die nie eine frühere wiederverwendet (#383: Aktionen beim Speichern merken sich Prozesse per Kennung):
+/// größer als alle vorhandenen und als der gemerkte Zähler `next_id` (oberste Ebene von `processes.json`, optional;
+/// ältere Versionen behalten ihn als unbekanntes Feld). Der Zähler wird hochgesetzt.
+pub fn take_id(list: &[ProcDef], meta: &mut FileMeta) -> u64 {
+    let counter = meta.extra.get("next_id").and_then(|v| v.as_u64()).unwrap_or(0);
+    let id = next_id(list).max(counter).max(1);
+    meta.extra.insert("next_id".into(), serde_json::json!(id + 1));
+    id
+}
+
 /// Nächste freie Kennung.
 pub fn next_id(list: &[ProcDef]) -> u64 {
     list.iter().map(|d| d.id).max().unwrap_or(0) + 1
@@ -348,6 +358,16 @@ pub fn find<'a>(list: &'a [ProcDef], key: &Value) -> Option<&'a ProcDef> {
 }
 
 /// Alle Gruppennamen (sortiert, ohne leere).
+/// Ein Projekt wurde gelöscht (#386): seine Prozesse ziehen mit den Sitzungen nach `to`. Gibt zurück, ob sich etwas änderte.
+pub fn move_project(list: &mut [ProcDef], from: u64, to: u64) -> bool {
+    let mut changed = false;
+    for d in list.iter_mut().filter(|d| d.project == from && from != 0) {
+        d.project = to;
+        changed = true;
+    }
+    changed
+}
+
 pub fn groups(list: &[ProcDef]) -> Vec<String> {
     let mut g: Vec<String> = list.iter().map(|d| d.group.trim().to_string()).filter(|g| !g.is_empty()).collect();
     g.sort_by_key(|s| s.to_lowercase());
@@ -977,6 +997,15 @@ mod tests {
     }
 
     #[test]
+    fn processes_move_with_a_deleted_project() {
+        let mut v = vec![ProcDef { project: 2, ..ProcDef::new(1, "a", "x") }, ProcDef { project: 3, ..ProcDef::new(2, "b", "x") }, ProcDef::new(3, "c", "x")];
+        assert!(move_project(&mut v, 2, 5));
+        assert_eq!(v.iter().map(|d| d.project).collect::<Vec<_>>(), vec![5, 3, 0]);
+        assert!(!move_project(&mut v, 2, 5), "nichts mehr zu verschieben");
+        assert!(!move_project(&mut v, 0, 5), "„Allgemein“ zieht nie um");
+    }
+
+    #[test]
     fn unknown_top_level_fields_are_kept_and_newer_versions_never_overwritten() {
         let dir = temp_dir("top");
         std::fs::write(dir.join(FILE), r#"{"version":1,"later":{"a":1},"processes":[{"id":1,"name":"x","command":"y"}]}"#).unwrap();
@@ -1053,6 +1082,21 @@ mod tests {
         assert_eq!(expand_cmd_vars("echo %NOPE%X%", env), "echo %NOPE1", "Suche geht am schließenden % weiter");
         assert_eq!(expand_cmd_vars("echo %X:~0,1% %% %", env), "echo %X:~0,1% %% %");
         assert_eq!(expand_cmd_vars("ohne", env), "ohne");
+    }
+
+    #[test]
+    fn ids_are_never_reused_after_deleting() {
+        let mut meta = FileMeta::default();
+        let mut list = vec![ProcDef::new(1, "a", "x")];
+        let b = take_id(&list, &mut meta);
+        assert_eq!(b, 2);
+        list.push(ProcDef::new(b, "b", "x"));
+        list.retain(|d| d.id != b);
+        assert_eq!(take_id(&list, &mut meta), 3, "die Kennung des gelöschten Eintrags kommt nicht wieder");
+        // Der Zähler steht in der Datei.
+        let v = to_json_with(&list, &meta.extra);
+        assert_eq!(v["next_id"], 4);
+        assert_eq!(parse_file(&v.to_string()).extra.get("next_id").and_then(|x| x.as_u64()), Some(4));
     }
 
     #[test]

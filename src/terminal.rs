@@ -463,8 +463,11 @@ pub struct SpawnOptions<'a> {
     /// Wird direkt nach dem Start an die Shell gesendet (z.B. "claude\r").
     pub initial_input: Option<&'a str>,
     pub scrollback_lines: usize,
-    /// Zusätzliche Variablen (Paneldecks eigene, Profil, Shell-Integration); gelten immer zuletzt.
+    /// Zusätzliche Variablen (Paneldecks eigene, Shell-Integration); gelten immer zuletzt.
     pub env: Vec<(String, String)>,
+    /// Variablen von Profil, Vorlage und Sitzung (#384): vor `env` angewendet (Paneldecks eigene gewinnen), mit
+    /// Voranstellen/Anhängen an den geerbten Wert und Entfernen. Geschützte Namen werden übergangen.
+    pub user_env: Vec<crate::session_env::Op>,
     /// Theme und Zellgröße für Antworten (Farb-/Größenabfragen) ab dem ersten Byte, auch bevor die Sitzung gezeichnet
     /// wird (Hintergrund-Sitzungen, MCP `create_session`); `None` = Standard bis zum ersten `set_view`.
     pub view: Option<ReplyView>,
@@ -501,9 +504,10 @@ pub fn is_internal_env(name: &str) -> bool {
 
 /// Umgebung des Terminals setzen (#175). `cmd` bringt von portable-pty schon die Standard-Umgebung mit (Prozessumgebung,
 /// darüber System- und Benutzervariablen frisch aus der Registry). `inherit`: stattdessen genau die Prozessumgebung
-/// `process`. In beiden Fällen fallen die internen Variablen ([`INTERNAL_ENV`]) weg, dann gelten `TERM`/`COLORTERM` und
-/// `extra` (Paneldecks eigene Variablen, Profil, Shell-Integration) – sie gewinnen immer.
-fn apply_env(cmd: &mut CommandBuilder, inherit: bool, process: impl IntoIterator<Item = (std::ffi::OsString, std::ffi::OsString)>, extra: &[(String, String)]) {
+/// `process`. In beiden Fällen fallen die internen Variablen ([`INTERNAL_ENV`]) weg, dann gelten `TERM`/`COLORTERM`, die
+/// Variablen von Profil/Vorlage/Sitzung (`user`, #384: ersetzen, voranstellen, anhängen, entfernen; nie geschützte Namen)
+/// und zuletzt `extra` (Paneldecks eigene Variablen, Shell-Integration) – sie gewinnen immer.
+fn apply_env(cmd: &mut CommandBuilder, inherit: bool, process: impl IntoIterator<Item = (std::ffi::OsString, std::ffi::OsString)>, user: &[crate::session_env::Op], extra: &[(String, String)]) {
     if inherit {
         cmd.env_clear();
         for (k, v) in process {
@@ -516,6 +520,14 @@ fn apply_env(cmd: &mut CommandBuilder, inherit: bool, process: impl IntoIterator
     }
     cmd.env("TERM", "xterm-256color");
     cmd.env("COLORTERM", "truecolor");
+    let sep = crate::session_env::list_sep();
+    for op in user.iter().filter(|o| !crate::session_env::is_protected(&o.name)) {
+        let base = cmd.get_env(&op.name).map(|v| v.to_string_lossy().to_string());
+        match crate::session_env::apply_one(&op.kind, base.as_deref(), sep) {
+            Some(v) => cmd.env(&op.name, v),
+            None => cmd.env_remove(&op.name),
+        }
+    }
     for (k, v) in extra {
         cmd.env(k, v);
     }
@@ -525,7 +537,7 @@ fn apply_env(cmd: &mut CommandBuilder, inherit: bool, process: impl IntoIterator
 /// bei [`Session::spawn`] ohne `term_env`; Name ohne Groß-/Kleinschreibung). Für die Prozessliste (#243, `%NAME%` bei cmd).
 pub fn child_env_lookup(inherit: bool, extra: &[(String, String)]) -> impl Fn(&str) -> Option<String> {
     let mut cmd = CommandBuilder::new("cmd");
-    apply_env(&mut cmd, inherit, std::env::vars_os(), extra);
+    apply_env(&mut cmd, inherit, std::env::vars_os(), &[], extra);
     let all: Vec<(String, String)> = cmd.iter_full_env_as_str().map(|(k, v)| (k.to_string(), v.to_string())).collect();
     move |name: &str| all.iter().rev().find(|(k, _)| k.eq_ignore_ascii_case(name)).map(|(_, v)| v.clone())
 }
@@ -555,7 +567,7 @@ impl Session {
         // Umgebung (#175) und dazu Name/Version des Terminals (#183, `term_env`) vor den eigenen Variablen.
         let mut extra: Vec<(String, String)> = term_env().into_iter().map(|(k, v)| (k.to_string(), v)).collect();
         extra.extend(opts.env.iter().cloned());
-        apply_env(&mut cmd, opts.inherit_env, std::env::vars_os(), &extra);
+        apply_env(&mut cmd, opts.inherit_env, std::env::vars_os(), &opts.user_env, &extra);
 
         // Job Object der Sitzung (#168): Die Shell startet schon darin (vendored portable-pty,
         // `PROC_THREAD_ATTRIBUTE_JOB_LIST`) – kein Zeitfenster zwischen Start und Zuweisung. Ihre Nachfahren gehören
@@ -1988,6 +2000,7 @@ mod tests {
                 initial_input: None,
                 scrollback_lines: 1000,
                 env: vec![],
+                user_env: vec![],
                 view: None,
                 inherit_env: false,
             },
@@ -2016,7 +2029,7 @@ mod tests {
         };
         let s = Session::spawn(
             &ctx,
-            SpawnOptions { shell: &shell, cwd: None, restore_text: None, initial_input: None, scrollback_lines: 100, env: vec![], view: None, inherit_env: false },
+            SpawnOptions { shell: &shell, cwd: None, restore_text: None, initial_input: None, scrollback_lines: 100, env: vec![], user_env: vec![], view: None, inherit_env: false },
         )
         .unwrap();
         let mut ok = false;
@@ -2187,7 +2200,7 @@ mod env_tests {
         let ours = vec![("PANELDECK_SESSION".to_string(), "7".to_string()), ("PATH".to_string(), r"C:\profile\bin".to_string())];
         // An: genau die Prozessumgebung (nichts aus der Registry), interne Variablen weg, unsere gewinnen.
         let mut cmd = CommandBuilder::new("cmd.exe");
-        apply_env(&mut cmd, true, process(), &ours);
+        apply_env(&mut cmd, true, process(), &[], &ours);
         let e = envs(&cmd);
         assert_eq!(e.get("MY_VAR").map(String::as_str), Some("from-shell"));
         assert_eq!(e.get("PATH").map(String::as_str), Some(r"C:\profile\bin"), "Profilvariable gewinnt");
@@ -2202,8 +2215,42 @@ mod env_tests {
         assert_eq!(e.keys().map(String::as_str).collect::<Vec<_>>(), want, "nichts sonst (keine Registry)");
         // Ohne Profil-PATH bleibt der geerbte PATH.
         let mut cmd = CommandBuilder::new("cmd.exe");
-        apply_env(&mut cmd, true, process(), &[]);
+        apply_env(&mut cmd, true, process(), &[], &[]);
         assert_eq!(envs(&cmd).get("PATH").map(String::as_str), Some(r"C:\custom\bin"));
+    }
+
+    #[test]
+    fn session_variables_apply_before_paneldecks_own_and_never_override_them() {
+        use crate::session_env::{Op, OpKind};
+        use std::ffi::OsString;
+        let process = vec![(OsString::from("PATH"), OsString::from("base")), (OsString::from("GONE"), OsString::from("x")), (OsString::from("LIST"), OsString::from("a"))];
+        let op = |n: &str, kind: OpKind| Op { name: n.into(), kind, secret: false, wsl_path: false };
+        let user = vec![
+            op("PATH", OpKind::Prepend("first".into())),
+            op("LIST", OpKind::Append("z".into())),
+            op("GONE", OpKind::Remove),
+            op("NEW", OpKind::Set("$HOME %X%".into())),
+            op("PANELDECK_SESSION", OpKind::Set("999".into())),
+            op("PANELDECK_SESSION_KEY", OpKind::Set("stolen".into())),
+            op("ZDOTDIR", OpKind::Set("/mine".into())),
+        ];
+        let ours = vec![("PANELDECK_SESSION".to_string(), "7".to_string()), ("PANELDECK_SESSION_KEY".to_string(), "k".to_string()), ("ZDOTDIR".to_string(), "/paneldeck".to_string())];
+        let mut cmd = CommandBuilder::new("cmd.exe");
+        apply_env(&mut cmd, true, process, &user, &ours);
+        let e = envs(&cmd);
+        let sep = crate::session_env::list_sep();
+        assert_eq!(e.get("PATH").cloned(), Some(format!("first{sep}base")), "voranstellen");
+        assert_eq!(e.get("LIST").cloned(), Some(format!("a{sep}z")), "anhängen");
+        assert!(!e.contains_key("GONE"), "entfernt");
+        assert_eq!(e.get("NEW").map(String::as_str), Some("$HOME %X%"), "wörtlich");
+        assert_eq!(e.get("PANELDECK_SESSION").map(String::as_str), Some("7"), "eigene Sitzung gewinnt");
+        assert_eq!(e.get("PANELDECK_SESSION_KEY").map(String::as_str), Some("k"));
+        assert_eq!(e.get("ZDOTDIR").map(String::as_str), Some("/paneldeck"), "Shell-Integration gewinnt");
+        // Ohne Paneldecks eigene Werte setzt eine Sitzung trotzdem nie PANELDECK_*.
+        let mut cmd = CommandBuilder::new("cmd.exe");
+        apply_env(&mut cmd, true, Vec::<(OsString, OsString)>::new(), &user, &[]);
+        let e = envs(&cmd);
+        assert!(!e.contains_key("PANELDECK_SESSION") && !e.contains_key("PANELDECK_SESSION_KEY"));
     }
 
     #[test]
@@ -2212,7 +2259,7 @@ mod env_tests {
         let mut base = CommandBuilder::new("cmd.exe");
         base.env("PANELDECK_PORT", "1234"); // wie geerbt aus dem Terminal eines anderen Hubs
         let before = envs(&base);
-        apply_env(&mut base, false, vec![(std::ffi::OsString::from("ONLY_IN_ARG"), std::ffi::OsString::from("x"))], &[("PANELDECK_SESSION".into(), "3".into())]);
+        apply_env(&mut base, false, vec![(std::ffi::OsString::from("ONLY_IN_ARG"), std::ffi::OsString::from("x"))], &[], &[("PANELDECK_SESSION".into(), "3".into())]);
         let e = envs(&base);
         assert!(!e.contains_key("ONLY_IN_ARG"));
         assert!(!e.contains_key("PANELDECK_PORT"), "interne Variable entfernt");
@@ -2932,7 +2979,7 @@ mod win_job_tests {
     fn a_windows_session_starts_inside_its_job_and_reports_background_processes() {
         let ctx = egui::Context::default();
         let shell = ShellSpec { id: "cmd".into(), label: "cmd".into(), program: "cmd.exe".into(), args: vec!["/q".into()] };
-        let s = Session::spawn(&ctx, SpawnOptions { shell: &shell, cwd: None, restore_text: None, initial_input: None, scrollback_lines: 100, env: Vec::new(), view: None, inherit_env: false }).expect("Sitzung startet");
+        let s = Session::spawn(&ctx, SpawnOptions { shell: &shell, cwd: None, restore_text: None, initial_input: None, scrollback_lines: 100, env: Vec::new(), user_env: vec![], view: None, inherit_env: false }).expect("Sitzung startet");
         assert!(s.job_key().is_some(), "Sitzung hat einen Job");
         assert!(s.lingering(&crate::platform::process::ProcInfo::default()).is_empty(), "nur die Shell: nichts");
         let pid = s.shell_pid.expect("Shell-PID");
@@ -3365,7 +3412,7 @@ mod conpty_probe {
         let ctx = egui::Context::default();
         let s = Session::spawn(
             &ctx,
-            SpawnOptions { shell: &shell, cwd: None, restore_text: None, initial_input: None, scrollback_lines: 100, env: vec![("PROBE_OUT".into(), out.display().to_string())], view: None, inherit_env: false },
+            SpawnOptions { shell: &shell, cwd: None, restore_text: None, initial_input: None, scrollback_lines: 100, env: vec![("PROBE_OUT".into(), out.display().to_string())], user_env: vec![], view: None, inherit_env: false },
         )
         .unwrap();
         s.set_view(&crate::theme::all()[0], 9, 18);

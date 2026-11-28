@@ -73,6 +73,9 @@ $data = "$dir\paneldeck-data"
 New-Item -ItemType Directory -Force "$data\themes" | Out-Null
 $ansi = '"ansi":["#000000","#cc3333","#33aa33","#ccaa33","#3366cc","#aa33aa","#33aaaa","#cccccc","#555555","#ff5555","#55ff55","#ffff55","#5599ff","#ff55ff","#55ffff","#ffffff"]'
 [IO.File]::WriteAllText("$data\themes\smoke.json", '{"name":"Smoke Theme","dark":true,"fg":"#e0e0e0","bg":"#202020",' + $ansi + ',"ui":{"accent":"#0080ff","border":"@text/20","future_token":"#123456"},"future_field":1}', (New-Object Text.UTF8Encoding $false))
+# Hintergrund (#387): ein Theme mit Verlauf und eines mit ungueltigem Bildpfad (faellt auf die Grundfarbe zurueck).
+[IO.File]::WriteAllText("$data\themes\smoke-bg.json", '{"name":"Smoke Background","dark":true,"fg":"#e0e0e0","bg":"#202020",' + $ansi + ',"background":{"kind":"gradient","gradient":{"type":"linear","angle":90,"stops":[{"pos":0,"color":"#000000"},{"pos":100,"color":"@accent/40"}]},"brightness":-20,"areas":{"terminals":{"on":true,"opacity":70}},"future_bg":1}}', (New-Object Text.UTF8Encoding $false))
+[IO.File]::WriteAllText("$data\themes\smoke-bad-bg.json", '{"name":"Smoke Bad Background","fg":"#e0e0e0","bg":"#202020",' + $ansi + ',"background":{"kind":"image","image":"..\\..\\secret.png","mode":"zoom"}}', (New-Object Text.UTF8Encoding $false))
 [IO.File]::WriteAllText("$data\themes\broken.json", '{"name":"Broken","fg":"white","bg":"#000000",' + $ansi + '}', (New-Object Text.UTF8Encoding $false))
 # Alle PANELDECK_*-Variablen eines umgebenden Paneldeck-Terminals entfernen: PANELDECK_SESSION/PORT/TOKEN (vom Hub in
 # jedes Terminal gesetzt) liessen die Bruecke sonst als "Sitzung 1" der Test-Instanz gelten, und die Pruefungen
@@ -446,6 +449,23 @@ try {
   Check 'unbekannte Shell' ((Code (Tool 'create_session' @{ shell = 'gibtsnicht' })) -eq 'bad_args')
   Check 'ungueltiger Ordner' ((Code (Tool 'create_session' @{ cwd = "$work\gibtsnicht" })) -eq 'bad_args')
 
+  Write-Host "== Pfadarten: ~ und Git Bash (#392)" -ForegroundColor Cyan
+  $tl = Tool 'create_session' @{ shell = 'powershell'; cwd = '~'; name = 'smoke-tilde' }
+  Check 'PowerShell: cwd ~ = Benutzerordner (#392)' (-not $tl.err -and $tl.data.cwd -eq $env:USERPROFILE) $tl.text
+  if (-not $tl.err) { [void](Tool 'close_session' @{ session = $tl.data.id }) }
+  Check 'PowerShell: Linux-Pfad weiter abgelehnt (#392)' ((Code (Tool 'create_session' @{ shell = 'powershell'; cwd = '/home/x' })) -eq 'bad_args')
+  if ($shells -contains 'gitbash') {
+    $gw = Tool 'create_session' @{ shell = 'gitbash'; cwd = '/c/Windows'; name = 'smoke-gb-cwd' }
+    Check 'Git Bash: cwd /c/Windows = C:\Windows (#392)' (-not $gw.err -and $gw.data.cwd -eq 'C:\Windows') $gw.text
+    if (-not $gw.err) { [void](Tool 'close_session' @{ session = $gw.data.id }) }
+    $gh = Tool 'create_session' @{ shell = 'gitbash'; cwd = '~'; name = 'smoke-gb-home' }
+    Check 'Git Bash: cwd ~ = Benutzerordner (#392)' (-not $gh.err -and $gh.data.cwd -eq $env:USERPROFILE) $gh.text
+    if (-not $gh.err) { [void](Tool 'close_session' @{ session = $gh.data.id }) }
+    Check 'Git Bash: fehlender Ordner /c/... -> bad_args (#392)' ((Code (Tool 'create_session' @{ shell = 'gitbash'; cwd = '/c/paneldeck-gibt-es-nicht' })) -eq 'bad_args')
+  } else {
+    Skip 'Git Bash: cwd /c/... und ~' 'kein Git Bash'
+  }
+
   Write-Host "== WSL: Linux-Startordner (#172)" -ForegroundColor Cyan
   # Erkannte WSL-Shells aus der Fehlermeldung zu einer unbekannten Shell; Vorlagen/System-Distributionen auslassen.
   $avail = (Tool 'create_session' @{ shell = 'gibtsnicht' }).text
@@ -457,7 +477,11 @@ try {
     $inj = Tool 'create_session' @{ shell = $wslSh; cwd = '/tmp/x" echo INJECTED-$((6*7)); #'; name = 'smoke-wsl-inj' }
     Check "WSL: cwd mit Anfuehrungszeichen abgelehnt ($wslSh)" ((Code $inj) -eq 'bad_args') $inj.text
     Check 'WSL: cwd mit Backslash abgelehnt' ((Code (Tool 'create_session' @{ shell = $wslSh; cwd = '/tmp/a\b' })) -eq 'bad_args')
-    Check 'WSL: ~/x abgelehnt (nur ~ allein)' ((Code (Tool 'create_session' @{ shell = $wslSh; cwd = '~/x' })) -eq 'bad_args')
+    # #392: ~/x geht (geprueft wird der mit dem Linux-Home aufgeloeste Ordner); ein fehlender -> bad_args
+    $tx = Tool 'create_session' @{ shell = $wslSh; cwd = '~/paneldeck-smoke-gibt-es-nicht'; name = 'smoke-wsl-tilde' } 60000
+    Check 'WSL: ~/fehlt -> bad_args (oder WSL antwortete nicht)' ((Code $tx) -eq 'bad_args' -or $tx.data.cwd_checked -eq $false) $tx.text
+    if (-not $tx.err) { [void](Tool 'close_session' @{ session = $tx.data.id }) }
+    Check 'WSL: ~/x mit Anfuehrungszeichen abgelehnt' ((Code (Tool 'create_session' @{ shell = $wslSh; cwd = '~/x" echo pwned' })) -eq 'bad_args')
     Check 'Linux-cwd fuer Windows-Shell abgelehnt' ((Code (Tool 'create_session' @{ shell = 'powershell'; cwd = '/tmp' })) -eq 'bad_args')
     # Fehlender Ordner: Pruefung in WSL im Hintergrund -> bad_args (antwortet WSL nicht, wird angelegt mit cwd_checked=false)
     $miss = Tool 'create_session' @{ shell = $wslSh; cwd = '/paneldeck-smoke-gibt-es-nicht'; name = 'smoke-wsl-miss' } 60000
@@ -1830,6 +1854,20 @@ c.close()
   $ta = Tool 'theme_get'
   Check 'theme_get ohne Namen: aktives Theme' ($ta.data.name -eq $tl.data.active -and $ta.data.active -eq $true) $ta.text
   Check 'theme_get: unbekannter Name -> not_found' ((Code (Tool 'theme_get' @{ name = 'Gibts nicht' })) -eq 'not_found')
+  # Hintergrund (#387): nur lesbares Feld background, ohne Bilddaten und ohne Pfade.
+  Check 'theme_get: ohne Hintergrund ist background null' ($null -eq $tg.data.background -and ($tg.text -match '"background"\s*:\s*null'))
+  $tb = Tool 'theme_get' @{ name = 'Smoke Background' }
+  Check 'theme_get: background mit Art, Verlauf, Filtern und Bereichen' ($tb.data.background.kind -eq 'gradient' -and $tb.data.background.gradient.type -eq 'linear' -and @($tb.data.background.gradient.stops).Count -eq 2 -and $tb.data.background.brightness -eq -20 -and $tb.data.background.areas.terminals.opacity -eq 70 -and $tb.data.background.areas.editor.on -eq $true -and $tb.data.background.future_bg -eq 1) $tb.text
+  Check 'theme_get: background ohne Bilddaten' ($tb.text -notmatch 'base64' -and $tb.text.Length -lt 20000) $tb.text
+  $mbOk = $false
+  for ($i = 0; $i -lt 20 -and -not $mbOk; $i++) {
+    $tb = Tool 'theme_get' @{ name = 'Smoke Background' }
+    $mbOk = $null -ne $tb.data.background.mean_brightness -and [double]$tb.data.background.mean_brightness -ge 0 -and [double]$tb.data.background.mean_brightness -le 1
+    if (-not $mbOk) { Start-Sleep -Milliseconds 500 }
+  }
+  Check 'theme_get: background.mean_brightness berechnet (0-1)' $mbOk $tb.text
+  $tbad = Tool 'theme_get' @{ name = 'Smoke Bad Background' }
+  Check 'theme_get: ungueltiger Bildpfad laedt, wird nicht zurueckgegeben, nur markiert' ($tbad.data.background.kind -eq 'image' -and $null -eq $tbad.data.background.image -and $tbad.data.background.image_invalid -eq $true -and $tbad.text -notmatch 'secret' -and $tbad.data.background.mode -eq 'zoom' -and $tbad.text -notmatch [regex]::Escape($dir)) $tbad.text
   $script:prestart = $null
 
   Write-Host "== Minimierte Bereiche (#142, #162): Wiederherstellung, kaputtes Layout, focus_session mit placement" -ForegroundColor Cyan
@@ -2278,20 +2316,25 @@ c.close()
   $edB = Join-Path $edDir 'gone.txt'; [IO.File]::WriteAllText($edB, "will be deleted`n", $utf8)
   $edC = Join-Path $edDir 'changed.txt'; [IO.File]::WriteAllText($edC, "one`n", $utf8)
   $edD = Join-Path $edDir 'from-cli.txt'; [IO.File]::WriteAllText($edD, "opened with --edit`n", $utf8)
+  # Formatieren (#381): kompaktes JSON, JSONC mit Kommentar, ungueltiges JSON, XML.
+  $edJ = Join-Path $edDir 'data.json'; [IO.File]::WriteAllText($edJ, "{`"b`":1,`"a`":[1,2]}`n", $utf8)
+  $edJc = Join-Path $edDir 'tsconfig.json'; [IO.File]::WriteAllText($edJc, "{`n  // keep me`n  `"x`": 1,`n}`n", $utf8)
+  $edBad = Join-Path $edDir 'bad.json'; [IO.File]::WriteAllText($edBad, "{`"a`": 1,,}`n", $utf8)
+  $edX = Join-Path $edDir 'doc.xml'; [IO.File]::WriteAllText($edX, "<a><b>1</b><!-- c --></a>`n", $utf8)
   $edBig = Join-Path $edDir 'big.log'
   $sw = New-Object IO.StreamWriter($edBig, $false, $utf8)
   for ($i = 1; $i -le 40000; $i++) { $sw.WriteLine("line $i of a large file generated at runtime for the editor smoke test") }
   $sw.Close()
   # Schalter der Editor-Einstellungen vor jedem Start setzen (settings.json -> editor).
-  $script:edSw = @{ open = $false; edit = $false; save = $false }
+  $script:edSw = @{ open = $false; edit = $false; save = $false; format = $false }
   $script:prestart = {
     $f = "$data\settings.json"; $j = [IO.File]::ReadAllText($f).TrimStart([char]0xFEFF) | ConvertFrom-Json
-    $ed = [pscustomobject]@{ large_file_mb = 1; agent_open = $script:edSw.open; agent_edit = $script:edSw.edit; agent_save = $script:edSw.save }
+    $ed = [pscustomobject]@{ large_file_mb = 1; agent_open = $script:edSw.open; agent_edit = $script:edSw.edit; agent_save = $script:edSw.save; agent_format = [bool]$script:edSw.format }
     $j | Add-Member -Force editor $ed
     [IO.File]::WriteAllText($f, ($j | ConvertTo-Json -Depth 10), (New-Object Text.UTF8Encoding $false))
   }
   # Stufe Lesen: lesen ja, schreiben nein (auch mit eingeschalteten Schaltern).
-  $script:edSw = @{ open = $true; edit = $true; save = $true }
+  $script:edSw = @{ open = $true; edit = $true; save = $true; format = $true }
   Set-Level 'Read' -Empty
   [void](Rpc 'initialize' @{ protocolVersion = '2025-06-18'; capabilities = @{}; clientInfo = @{ name = 'smoke'; version = '1' } })
   Start-Sleep 2
@@ -2300,8 +2343,12 @@ c.close()
   $el = Tool 'editor_list'
   Check 'Editor, Nur lesen: editor_list ohne offene Dokumente, Schalter gemeldet' (-not $el.err -and @($el.data.docs).Count -eq 0 -and $el.data.agents.open -eq $true) $el.text
   Check 'Editor, Nur lesen: editor_open verboten (Stufe)' ((Code (Tool 'editor_open' @{ path = $edA })) -eq 'forbidden')
+  # format_file (#381): validate ab Lesen, alles andere erst bei Steuern.
+  Check 'Format, Nur lesen: format_file in tools/list' ($names -contains 'format_file') ($names -join ',')
+  Check 'Format, Nur lesen: format_file op=format verboten (Stufe)' ((Code (Tool 'format_file' @{ path = $edJ; op = 'format' })) -eq 'forbidden')
+  Check 'Format, Nur lesen: format_file op=validate erlaubt (Datei nicht offen -> not_found)' ((Code (Tool 'format_file' @{ path = $edJ; op = 'validate' })) -eq 'not_found')
   # Stufe Steuern, Schalter aus: forbidden mit Hinweis auf den Schalter.
-  $script:edSw = @{ open = $false; edit = $false; save = $false }
+  $script:edSw = @{ open = $false; edit = $false; save = $false; format = $false }
   Set-Level 'Control' -Empty
   [void](Rpc 'initialize' @{ protocolVersion = '2025-06-18'; capabilities = @{}; clientInfo = @{ name = 'smoke'; version = '1' } })
   Start-Sleep 2
@@ -2311,9 +2358,12 @@ c.close()
   Check 'Editor, Schalter aus: editor_open forbidden mit Hinweis auf den Schalter' ((Code $eo) -eq 'forbidden' -and $eo.text -match 'Agents may open files|Agenten d') $eo.text
   Check 'Editor, Schalter aus: editor_edit forbidden' ((Code (Tool 'editor_edit' @{ doc = 1; old_text = 'a'; new_text = 'b' })) -eq 'forbidden')
   Check 'Editor, Schalter aus: editor_save forbidden' ((Code (Tool 'editor_save' @{ doc = 1 })) -eq 'forbidden')
+  $ff = Tool 'format_file' @{ path = $edJ; op = 'format' }
+  Check 'Format, Schalter aus: format_file op=format forbidden mit Hinweis auf den Schalter' ((Code $ff) -eq 'forbidden' -and $ff.text -match 'Agents may format|Agenten d') $ff.text
+  Check 'Format: format_file ohne op -> bad_args' ((Code (Tool 'format_file' @{ path = $edJ })) -eq 'bad_args')
   Check 'Editor, Schalter aus: Datei unveraendert' ([IO.File]::ReadAllText($edA) -eq "alpha`r`nbeta`r`ngamma`r`n")
   # Steuern, alle Schalter an.
-  $script:edSw = @{ open = $true; edit = $true; save = $true }
+  $script:edSw = @{ open = $true; edit = $true; save = $true; format = $true }
   Set-Level 'Control' -Empty
   [void](Rpc 'initialize' @{ protocolVersion = '2025-06-18'; capabilities = @{}; clientInfo = @{ name = 'smoke'; version = '1' } })
   Start-Sleep 2
@@ -2361,6 +2411,33 @@ c.close()
   $lc = @((Tool 'editor_list').data.docs) | Where-Object { $_.id -eq $oc.data.doc }
   Check 'Editor: Plattenaenderung erkannt (disk = changed)' ($lc.disk -eq 'changed') ($lc | ConvertTo-Json -Compress)
   Check 'Editor: Speichern bei Plattenaenderung -> conflict, Datei bleibt' ((Code (Tool 'editor_save' @{ doc = $oc.data.doc })) -eq 'conflict' -and [IO.File]::ReadAllText($edC) -eq "theirs`n")
+  # format_file (#381): offene JSON/XML-Dokumente, Ergebnis ungespeichert und vom Agenten markiert.
+  $oj = Tool 'editor_open' @{ path = $edJ }
+  $J = $oj.data.doc
+  $fv = Tool 'format_file' @{ path = $edJ; op = 'validate' }
+  Check 'Format: validate -> valid, nichts geaendert' (-not $fv.err -and $fv.data.valid -eq $true -and $fv.data.changed -eq $false -and $fv.data.kind -eq 'json' -and $fv.data.dirty -eq $false) $fv.text
+  $fm = Tool 'format_file' @{ doc = $J; op = 'format' }
+  Check 'Format: format -> geaendert, ungespeichert, vom Agenten markiert' (-not $fm.err -and $fm.data.changed -eq $true -and $fm.data.dirty -eq $true -and $fm.data.agent_edited -eq $true -and $fm.data.lines -gt 2) $fm.text
+  Check 'Format: Datei auf der Platte unveraendert' ([IO.File]::ReadAllText($edJ) -eq "{`"b`":1,`"a`":[1,2]}`n")
+  $fs = Tool 'format_file' @{ doc = $J; op = 'sort_keys' }
+  $tj = (Tool 'editor_read' @{ doc = $J }).data.text
+  Check 'Format: sort_keys sortiert die Schluessel' (-not $fs.err -and $tj.IndexOf('"a"') -lt $tj.IndexOf('"b"')) $tj
+  $fn = Tool 'format_file' @{ doc = $J; op = 'minify' }
+  Check 'Format: minify -> eine Zeile' (-not $fn.err -and ((Tool 'editor_read' @{ doc = $J }).data.text.Trim() -notmatch "`n")) $fn.text
+  [void](Tool 'editor_open' @{ path = $edBad })
+  $fb = Tool 'format_file' @{ path = $edBad; op = 'format' }
+  Check 'Format: ungueltig -> valid false mit Zeile/Spalte, nichts geaendert' (-not $fb.err -and $fb.data.valid -eq $false -and $fb.data.changed -eq $false -and $fb.data.error.line -eq 1 -and $fb.data.error.column -ge 1 -and $fb.data.dirty -eq $false) $fb.text
+  [void](Tool 'editor_open' @{ path = $edJc })
+  Check 'Format: JSONC minify ohne remove_comments -> bad_args' ((Code (Tool 'format_file' @{ path = $edJc; op = 'minify' })) -eq 'bad_args')
+  $fc = Tool 'format_file' @{ path = $edJc; op = 'format' }
+  Check 'Format: JSONC format behaelt den Kommentar' (-not $fc.err -and $fc.data.kind -eq 'jsonc' -and (Tool 'editor_read' @{ doc = $edJc }).data.text -match 'keep me') $fc.text
+  $fcm = Tool 'format_file' @{ path = $edJc; op = 'minify'; remove_comments = $true }
+  Check 'Format: JSONC minify mit remove_comments entfernt ihn' (-not $fcm.err -and (Tool 'editor_read' @{ doc = $edJc }).data.text -notmatch 'keep me') $fcm.text
+  [void](Tool 'editor_open' @{ path = $edX })
+  $fx = Tool 'format_file' @{ path = $edX; op = 'format' }
+  Check 'Format: XML format behaelt den Kommentar' (-not $fx.err -and $fx.data.kind -eq 'xml' -and (Tool 'editor_read' @{ doc = $edX }).data.text -match '<!-- c -->') $fx.text
+  Check 'Format: XML sort_keys -> bad_args' ((Code (Tool 'format_file' @{ path = $edX; op = 'sort_keys' })) -eq 'bad_args')
+  Check 'Format: Text ist weder JSON noch XML -> not_supported' ((Code (Tool 'format_file' @{ path = $edA; op = 'validate' })) -eq 'not_supported')
   # Grosse Datei (zur Laufzeit erzeugt): lesen ja (gedeckelt), bearbeiten nein.
   $og = Tool 'editor_open' @{ path = $edBig }
   Check 'Editor: grosse Datei geoeffnet (large)' (-not $og.err -and $og.data.large -eq $true -and $og.data.lines -ge 40000) $og.text
@@ -2369,6 +2446,7 @@ c.close()
   $rm = Tool 'editor_read' @{ doc = $og.data.doc; limit = 5000 }
   Check 'Editor: editor_read hoechstens 2000 Zeilen / 128 KB' ((($rm.data.end_line - $rm.data.start_line + 1) -le 2000) -and $rm.data.text.Length -le 131072 -and $rm.data.more_below -eq $true) "$($rm.data.start_line)-$($rm.data.end_line)"
   Check 'Editor: grosse Datei nicht bearbeitbar (too_large)' ((Code (Tool 'editor_edit' @{ doc = $og.data.doc; old_text = 'line 1 of'; new_text = 'x' })) -eq 'too_large')
+  Check 'Format: grosse Datei nicht formatierbar (too_large)' ((Code (Tool 'format_file' @{ doc = $og.data.doc; op = 'format' })) -eq 'too_large')
   # --edit aus einer zweiten Instanz: Datei erscheint als Tab (nicht vom Agenten geoeffnet).
   $second = Start-Process "$dir\paneldeck.exe" -PassThru -WindowStyle Hidden -ArgumentList '--edit', "`"$edD`""
   [void]$second.WaitForExit(10000)
@@ -2379,7 +2457,215 @@ c.close()
   # Protokoll ohne Dateiinhalt
   $log = if (Test-Path "$data\mcp-log.jsonl") { [IO.File]::ReadAllText("$data\mcp-log.jsonl") } else { '' }
   Check 'Editor: mcp-log.jsonl nennt editor_*, aber keinen Dateiinhalt' ($log -match 'editor_edit' -and $log -notmatch 'BETA' -and $log -notmatch 'draft') ''
+  Check 'Format: mcp-log.jsonl nennt format_file, aber keinen Dateiinhalt' ($log -match 'format_file' -and $log -notmatch 'keep me') ''
   $script:prestart = $null
+
+  Write-Host "== Reiter Zeit (#164): Wecker, Timer, Stoppuhren, Weltuhren, Geburtstage ueber MCP" -ForegroundColor Cyan
+  Set-Level 'Read'
+  [void](Rpc 'initialize' @{ protocolVersion = '2025-06-18'; capabilities = @{}; clientInfo = @{ name = 'smoke'; version = '1' } })
+  Start-Sleep 2
+  $names = @((Rpc 'tools/list').result.tools | ForEach-Object name)
+  $readT = @('list_alarms', 'list_timers', 'list_stopwatches', 'list_clocks', 'list_birthdays')
+  $ctlT = @('create_alarm', 'update_alarm', 'create_timer', 'update_timer', 'create_stopwatch', 'control_stopwatch')
+  Check 'Zeit, Stufe Lesen: Lese-Werkzeuge da, Steuer-Werkzeuge nicht' ((@($readT | Where-Object { $names -notcontains $_ }).Count -eq 0) -and (@($ctlT | Where-Object { $names -contains $_ }).Count -eq 0)) ($names -join ',')
+  Check 'Zeit: kein Werkzeug zum Loeschen, keins zum Aendern von Weltuhren/Geburtstagen' (-not ($names | Where-Object { $_ -match '^(delete|remove)_(alarm|timer|stopwatch|clock|birthday)' -or $_ -match '^(create|update)_(clock|birthday)' })) ''
+  $la = Tool 'list_alarms'
+  Check 'Zeit: list_alarms liefert eine (leere) Liste' (-not $la.err -and $null -ne $la.data.alarms) $la.text
+  Check 'Zeit, Stufe Lesen: create_alarm verboten (forbidden)' ((Code (Tool 'create_alarm' @{ time = '07:00' })) -eq 'forbidden')
+  Set-Level 'Control'
+  [void](Rpc 'initialize' @{ protocolVersion = '2025-06-18'; capabilities = @{}; clientInfo = @{ name = 'smoke'; version = '1' } })
+  Start-Sleep 2
+  $names = @((Rpc 'tools/list').result.tools | ForEach-Object name)
+  Check 'Zeit, Stufe Steuern: alle elf Werkzeuge da' ((@(($readT + $ctlT) | Where-Object { $names -notcontains $_ }).Count -eq 0)) ($names -join ',')
+  $ca = Tool 'create_alarm' @{ time = '07:30'; name = 'Smoke-Wecker'; days = @('mon', 'fri'); sound = 'bell' }
+  Check 'create_alarm: Wecker mit Tagen, Klang und naechstem Termin' (-not $ca.err -and $ca.data.alarm.time -eq '07:30' -and $ca.data.alarm.once -eq $false -and $ca.data.alarm.sound -eq 'bell' -and $null -ne $ca.data.alarm.next) $ca.text
+  Check 'create_alarm: falsche Uhrzeit -> bad_args' ((Code (Tool 'create_alarm' @{ time = '25:00' })) -eq 'bad_args')
+  Check 'create_alarm: eigene Klangdatei nicht erlaubt -> bad_args' ((Code (Tool 'create_alarm' @{ time = '07:00'; sound = 'file:C:\x.wav' })) -eq 'bad_args')
+  $ua = Tool 'update_alarm' @{ alarm = $ca.data.alarm.id; enabled = $false }
+  Check 'update_alarm: ausschalten, kein naechster Termin' (-not $ua.err -and $ua.data.alarm.enabled -eq $false -and $null -eq $ua.data.alarm.next) $ua.text
+  Check 'update_alarm: unbekannte Kennung -> not_found' ((Code (Tool 'update_alarm' @{ alarm = 99999 })) -eq 'not_found')
+  $ct = Tool 'create_timer' @{ duration = '4m'; name = 'Smoke-Tee' }
+  Check 'create_timer: laeuft mit 240 s' (-not $ct.err -and $ct.data.timer.state -eq 'running' -and $ct.data.timer.duration_seconds -eq 240 -and $ct.data.timer.remaining_seconds -le 240) $ct.text
+  $ut = Tool 'update_timer' @{ timer = $ct.data.timer.id; action = 'pause' }
+  Check 'update_timer: pause' (-not $ut.err -and $ut.data.timer.state -eq 'paused') $ut.text
+  $short = Tool 'create_timer' @{ duration = 1; name = 'Smoke-Kurz' }
+  Start-Sleep 3
+  $lt = Tool 'list_timers'
+  $k = @($lt.data.timers) | Where-Object { $_.id -eq $short.data.timer.id }
+  Check 'Timer laeuft ab: expired mit expired_at, klingelt' ($k.state -eq 'expired' -and [string]$k.expired_at -ne '' -and $k.ringing -eq $true) ($k | ConvertTo-Json -Compress)
+  $rs = Tool 'update_timer' @{ timer = $short.data.timer.id; action = 'reset' }
+  Check 'update_timer reset: bereit, klingelt nicht mehr' (-not $rs.err -and $rs.data.timer.state -eq 'idle' -and $rs.data.timer.ringing -eq $false) $rs.text
+  $cs = Tool 'create_stopwatch' @{ name = 'Smoke-Uhr' }
+  Start-Sleep 1
+  $lp = Tool 'control_stopwatch' @{ stopwatch = $cs.data.stopwatch.id; action = 'lap' }
+  $st = Tool 'control_stopwatch' @{ stopwatch = $cs.data.stopwatch.id; action = 'stop' }
+  Check 'Stoppuhr: Runde und Stopp' (-not $lp.err -and @($lp.data.stopwatch.laps).Count -eq 1 -and $st.data.stopwatch.running -eq $false -and $st.data.stopwatch.elapsed_ms -ge 900) $st.text
+  Check 'Stoppuhr steht: Runde -> not_running' ((Code (Tool 'control_stopwatch' @{ stopwatch = $cs.data.stopwatch.id; action = 'lap' })) -eq 'not_running')
+  $lc = Tool 'list_clocks'; $lb = Tool 'list_birthdays'
+  Check 'list_clocks und list_birthdays lesbar' (-not $lc.err -and -not $lb.err -and $null -ne $lc.data.clocks -and $null -ne $lb.data.birthdays) "$($lc.text) / $($lb.text)"
+  $log = if (Test-Path "$data\mcp-log.jsonl") { [IO.File]::ReadAllText("$data\mcp-log.jsonl") } else { '' }
+  Check 'Zeit: Aufrufe im Agenten-Protokoll' ($log -match 'create_timer' -and $log -match 'control_stopwatch') ''
+  $script:prestart = $null
+  Write-Host "== Kalender (#164): list/create/update_calendar_event" -ForegroundColor Cyan
+  Set-Level 'Read' -Empty
+  [void](Rpc 'initialize' @{ protocolVersion = '2025-06-18'; capabilities = @{}; clientInfo = @{ name = 'smoke'; version = '1' } })
+  Start-Sleep 2
+  $names = @((Rpc 'tools/list').result.tools | ForEach-Object name)
+  Check 'Kalender, Nur lesen: list_calendar_events ja, create/update nein' ($names -contains 'list_calendar_events' -and $names -notcontains 'create_calendar_event' -and $names -notcontains 'update_calendar_event') ($names -join ',')
+  $cl = Tool 'list_calendar_events' @{ from = '2026-11-23'; to = '2026-11-29' }
+  Check 'Kalender, Nur lesen: leere Woche, Zeitzone gemeldet' (-not $cl.err -and $cl.data.total -eq 0 -and [string]$cl.data.timezone -ne '') $cl.text
+  Check 'Kalender, Nur lesen: create_calendar_event verboten' ((Code (Tool 'create_calendar_event' @{ title = 'x'; start = '2026-11-23T09:00' })) -eq 'forbidden')
+  Set-Level 'Control' -Empty
+  [void](Rpc 'initialize' @{ protocolVersion = '2025-06-18'; capabilities = @{}; clientInfo = @{ name = 'smoke'; version = '1' } })
+  Start-Sleep 2
+  $names = @((Rpc 'tools/list').result.tools | ForEach-Object name)
+  Check 'Kalender, Steuern: alle drei Werkzeuge, kein Loeschen' (@('list_calendar_events', 'create_calendar_event', 'update_calendar_event' | Where-Object { $names -contains $_ }).Count -eq 3 -and -not ($names | Where-Object { $_ -match 'delete.*calendar' })) ($names -join ',')
+  $cc = Tool 'create_calendar_event' @{ title = 'Smoke-Standup'; start = '2026-11-23T09:00'; duration_minutes = 15; cron = '0 9 * * MON-FRI'; count = 10; note = 'geheime Notiz' }
+  Check 'create_calendar_event: Serie mit 5 naechsten Terminen' (-not $cc.err -and $cc.data.event.recurrence.cron -eq '0 9 * * MON-FRI' -and @($cc.data.next_occurrences).Count -eq 5 -and $cc.data.event.origin -eq 'agent') $cc.text
+  $cid = $cc.data.event.event_id
+  $co = Tool 'create_calendar_event' @{ title = 'Smoke-Odd'; start = '2026-11-13T00:00'; cron = '0 0 13 * FRI' }
+  Check 'create_calendar_event: ODER-Fall mit warning' (-not $co.err -and [string]$co.data.warning -ne '') $co.text
+  $ca = Tool 'create_calendar_event' @{ title = 'Smoke-Trip'; start = '2026-11-25'; days = 3 }
+  Check 'create_calendar_event: ganztaegig ueber mehrere Tage' ($ca.data.event.all_day -eq $true -and $ca.data.event.duration_minutes -eq 4320) $ca.text
+  $cl = Tool 'list_calendar_events' @{ from = '2026-11-23'; to = '2026-11-29'; limit = 3 }
+  Check 'list_calendar_events: Woche mit Serie, Reise und ODER-Fall, seitenweise' ($cl.data.total -eq 7 -and @($cl.data.items).Count -eq 3 -and $cl.data.more -eq $true -and $cl.data.items[0].event_id -eq $cid) $cl.text
+  $cu = Tool 'update_calendar_event' @{ event = $cid; title = 'Smoke-Daily'; exceptions = @('2026-11-24') }
+  Check 'update_calendar_event: Titel und Ausnahme, Rest unveraendert' (-not $cu.err -and $cu.data.event.title -eq 'Smoke-Daily' -and $cu.data.event.duration_minutes -eq 15 -and @($cu.data.event.recurrence.exceptions)[0] -eq '2026-11-24') $cu.text
+  Check 'update_calendar_event: unbekannte Kennung -> not_found' ((Code (Tool 'update_calendar_event' @{ event = 99999; title = 'x' })) -eq 'not_found')
+  Check 'create_calendar_event: kaputter Ausdruck -> bad_args' ((Code (Tool 'create_calendar_event' @{ title = 'x'; start = '2026-11-23T09:00'; cron = '61 * * * *' })) -eq 'bad_args')
+  Check 'list_calendar_events: mehr als 366 Tage -> bad_args' ((Code (Tool 'list_calendar_events' @{ from = '2026-01-01'; to = '2027-06-01' })) -eq 'bad_args')
+  $log = if (Test-Path "$data\mcp-log.jsonl") { [IO.File]::ReadAllText("$data\mcp-log.jsonl") } else { '' }
+  Check 'Kalender: mcp-log.jsonl nennt die Werkzeuge, aber keine Notiz' ($log -match 'create_calendar_event' -and $log -notmatch 'geheime Notiz') ''
+
+  Write-Host "== Zugriff je Projekt (#386): gesperrtes Projekt, Fuer alle, private Karte, Papierkorb" -ForegroundColor Cyan
+  # Die Bruecke dieses Skripts ist ein externer Agent (keine Sitzung): Sie erreicht nur Bereiche mit "Fuer alle".
+  # Projekt 1 "Standard" = wie global + fuer alle (Stand nach dem Update), 2 "Gesperrt" = aus, 3 "Freigegeben" = nur lesen + fuer alle.
+  if (-not $py) {
+    Skip 'Zugriff je Projekt (#386)' 'kein python fuer die Praeparierung der Datenbank'
+  } else {
+    $u8a = New-Object Text.UTF8Encoding $false
+    function Set-SmokeSetting([string]$name, $value) {
+      $f = "$data\settings.json"
+      $j = [IO.File]::ReadAllText($f).TrimStart([char]0xFEFF) | ConvertFrom-Json
+      $j | Add-Member -Force -NotePropertyName $name -NotePropertyValue $value
+      [IO.File]::WriteAllText($f, ($j | ConvertTo-Json -Depth 10), $u8a)
+    }
+    $seedA = @'
+import sqlite3, sys
+c = sqlite3.connect(sys.argv[1])
+mode = sys.argv[2]
+if mode == 'simple':
+    now = '2026-01-01T00:00:00'
+    pos = (c.execute('SELECT COALESCE(MAX(position), 0) FROM todo_items').fetchone()[0] or 0) + 1
+    c.execute("INSERT INTO todo_items (title, body, position, created_at, updated_at, private) VALUES ('Smoke-Oeffentlich-386', '', ?, ?, ?, 0)", (pos, now, now))
+    c.execute("INSERT INTO todo_items (title, body, position, created_at, updated_at, private) VALUES ('Smoke-Privat-386', '', ?, ?, ?, 1)", (pos + 1, now, now))
+    print(c.execute('SELECT last_insert_rowid()').fetchone()[0])
+c.execute("INSERT INTO meta (key,value) VALUES ('expert_mode', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", ('0' if mode == 'simple' else '1',))
+c.commit()
+c.close()
+'@
+    $seedAFile = "$work\seed-access.py"; [IO.File]::WriteAllText($seedAFile, $seedA, $u8a)
+    Stop-Hub
+    $st = [ordered]@{
+      sessions = @(
+        [ordered]@{ id = 970; name = 'Smoke-Offen'; custom_name = $true; shell_id = 'powershell'; cwd = "$proj"; project = 1 },
+        [ordered]@{ id = 971; name = 'Smoke-Gesperrt'; custom_name = $true; shell_id = 'powershell'; cwd = "$proj"; project = 2 },
+        [ordered]@{ id = 972; name = 'Smoke-Lesen'; custom_name = $true; shell_id = 'powershell'; cwd = "$proj"; project = 3 })
+      next_id = 973
+      projects = @(
+        [ordered]@{ id = 1; name = 'Standard'; agent_access = [ordered]@{ level = 'global'; for_all = $true } },
+        [ordered]@{ id = 2; name = 'Gesperrt'; agent_access = [ordered]@{ level = 'off'; for_all = $false } },
+        [ordered]@{ id = 3; name = 'Freigegeben'; agent_access = [ordered]@{ level = 'read'; for_all = $true } })
+      active_project = 1
+    }
+    [IO.File]::WriteAllText("$data\state.json", ($st | ConvertTo-Json -Depth 8), $u8a)
+    Set-SmokeSetting 'agent_delete' $false
+    Set-SmokeSetting 'agent_create_projects' $false
+    # (a)-(c) im einfachen Modus: eine oeffentliche und eine private Karte (ohne Projekt = "Allgemein").
+    $script:privId = $null
+    $script:prestart = { $env:PYTHONUTF8 = '1'; $script:privId = (& python -I $seedAFile "$data\paneldeck.db" simple | Select-Object -Last 1); if ($LASTEXITCODE -ne 0) { throw 'seed-access.py fehlgeschlagen' } }
+    Set-Level 'Control' -Tray
+    $script:prestart = $null
+    [void](Rpc 'initialize' @{ protocolVersion = '2025-06-18'; capabilities = @{}; clientInfo = @{ name = 'smoke'; version = '1' } })
+    Start-Sleep 4
+    $wa = Tool 'whoami'
+    $acc = $wa.data.access
+    $accIds = @($acc.projects | ForEach-Object { $_.id })
+    Check 'whoami (#386): Feld access nennt nur erreichbare Projekte (Standard, Freigegeben), nicht das gesperrte' (-not $wa.err -and $accIds -contains 1 -and $accIds -contains 3 -and $accIds -notcontains 2) ($acc | ConvertTo-Json -Compress -Depth 5)
+    Check 'whoami (#386): Stufe je Projekt (Freigegeben = read) und general = control' ((@($acc.projects | Where-Object { $_.id -eq 3 })[0].level -eq 'read') -and $acc.general -eq 'control' -and -not (@($acc.projects | Where-Object { $_.home }).Count)) ($acc | ConvertTo-Json -Compress -Depth 5)
+    $lsIds = @((Tool 'list_sessions').data.sessions | ForEach-Object { $_.id })
+    Check 'list_sessions (#386): Sitzung des gesperrten Projekts fehlt, Fuer-alle-Projekte sind da' ($lsIds -contains 970 -and $lsIds -contains 972 -and $lsIds -notcontains 971) ($lsIds -join ',')
+    $lk = Tool 'read_terminal' @{ session = 971; lines = 5 }
+    Check 'read_terminal auf Sitzung des gesperrten Projekts -> project_locked (Projekt nicht genannt)' ((Code $lk) -eq 'project_locked' -and $lk.text -notmatch 'Gesperrt') $lk.text
+    Check 'read_terminal im Fuer-alle-Projekt mit Stufe Nur lesen geht' (-not (Tool 'read_terminal' @{ session = 972; lines = 5 }).err)
+    Check 'rename_session im Projekt mit Stufe Nur lesen -> forbidden' ((Code (Tool 'rename_session' @{ session = 972; name = 'x' })) -eq 'forbidden')
+    Check 'create_session mit project = gesperrtes Projekt -> project_locked' ((Code (Tool 'create_session' @{ shell = 'powershell'; cwd = "$proj"; project = 'Gesperrt' })) -eq 'project_locked')
+    Check 'create_session mit project = Nur-lesen-Projekt -> forbidden' ((Code (Tool 'create_session' @{ shell = 'powershell'; cwd = "$proj"; project = 3 })) -eq 'forbidden')
+    $cp = Tool 'create_session' @{ shell = 'powershell'; cwd = "$proj"; name = 'Smoke-Projekt-1'; project = 'Standard' }
+    Check 'create_session mit project = Standard (Steuern) legt die Sitzung an' (-not $cp.err -and $cp.data.id -gt 0) $cp.text
+    if (-not $cp.err) { [void](Tool 'close_session' @{ session = $cp.data.id }) }
+    Check 'screenshot ohne session bei gesperrtem Bereich -> project_locked' ((Code (Tool 'screenshot' @{})) -eq 'project_locked')
+    $tdl = Tool 'list_todos' @{ state = 'all'; limit = 200 }
+    $tdTitles = @($tdl.data.todos | ForEach-Object { $_.title })
+    Check 'list_todos (#386): oeffentliche Karte da, private Karte fehlt' (-not $tdl.err -and $tdTitles -contains 'Smoke-Oeffentlich-386' -and $tdTitles -notcontains 'Smoke-Privat-386') ($tdTitles -join ',')
+    Check 'list_todos (#386): Karten haben origin' (@($tdl.data.todos | Where-Object { $_.title -eq 'Smoke-Oeffentlich-386' -and $_.origin -eq 'user' }).Count -eq 1) ($tdl.data.todos | ConvertTo-Json -Compress -Depth 4)
+    if ($script:privId -match '^\d+$') {
+      Check 'set_todo_done auf private Karte -> not_found' ((Code (Tool 'set_todo_done' @{ id = [int]$script:privId })) -eq 'not_found')
+    } else {
+      Check 'seed-access.py: Kennung der privaten Karte' $false "'$($script:privId)'"
+    }
+    $logA = if (Test-Path "$data\mcp-log.jsonl") { [IO.File]::ReadAllText("$data\mcp-log.jsonl") } else { '' }
+    Check 'mcp-log.jsonl (#386): Feld project bei Aufrufen auf eine Sitzung' ($logA -match '"project":"(Freigegeben|Standard)"') ''
+
+    # (d) Expertenmodus: Papierkorb nur mit dem Schalter "Agenten duerfen Tickets/Kommentare loeschen".
+    $script:prestart = { $env:PYTHONUTF8 = '1'; & python -I $seedAFile "$data\paneldeck.db" expert | Out-Null; if ($LASTEXITCODE -ne 0) { throw 'seed-access.py fehlgeschlagen' } }
+    Set-Level 'Control' -Tray
+    $script:prestart = $null
+    [void](Rpc 'initialize' @{ protocolVersion = '2025-06-18'; capabilities = @{}; clientInfo = @{ name = 'smoke'; version = '1' } })
+    Start-Sleep 3
+    $names = @((Rpc 'tools/list').result.tools | ForEach-Object name)
+    Check 'Expertenmodus (#386): create_project, delete_ticket, update_comment, delete_comment in tools/list' (@('create_project', 'delete_ticket', 'update_comment', 'delete_comment' | Where-Object { $names -contains $_ }).Count -eq 4) ($names -join ',')
+    $pan = @((Tool 'list_projects').data.projects | Where-Object { $_.key -eq 'PAN' })
+    if (-not $pan.Count) {
+      Skip 'Papierkorb (#386)' 'Projekt PAN fehlt (Ticket-Teil nicht gelaufen)'
+    } else {
+      Check 'list_projects (#386): agent_level und created_by_agent' ($pan[0].agent_level -eq 'control' -and $pan[0].created_by_agent -eq $false) ($pan[0] | ConvertTo-Json -Compress -Depth 4)
+      $td = Tool 'create_ticket' @{ project = 'PAN'; type = 'Note'; title = 'Smoke-Papierkorb-386'; fields = @{} }
+      $tc = Tool 'create_ticket' @{ project = 'PAN'; type = 'Note'; title = 'Smoke-Kommentar-386'; fields = @{} }
+      $tdk = $td.data.ticket.key; $tck = $tc.data.ticket.key
+      Check 'create_ticket (#386): Herkunft agent' (-not $td.err -and -not $tc.err -and $td.data.ticket.origin -eq 'agent') $td.text
+      [void](Tool 'add_comment' @{ ticket = $tck; body = 'Smoke-Agenten-Kommentar' })
+      $gc = Tool 'get_ticket' @{ ticket = $tck }
+      $cm = @($gc.data.comments | Where-Object { $_.origin -eq 'agent' })
+      Check 'get_ticket (#386): Kommentar mit origin agent' ($cm.Count -eq 1) $gc.text
+      if ($cm.Count) {
+        $uc = Tool 'update_comment' @{ comment = $cm[0].id; body = 'Smoke-Agenten-Kommentar (korrigiert)' }
+        Check 'update_comment: Agenten-Kommentar geaendert (ohne Schalter)' (-not $uc.err -and $uc.data.changed -eq $true) $uc.text
+        Check 'delete_comment ohne Schalter -> forbidden' ((Code (Tool 'delete_comment' @{ comment = $cm[0].id })) -eq 'forbidden')
+      }
+      Check 'delete_ticket ohne Schalter -> forbidden' ((Code (Tool 'delete_ticket' @{ ticket = $tdk })) -eq 'forbidden')
+      Check 'create_project ohne Schalter -> forbidden' ((Code (Tool 'create_project' @{ key = 'SMK'; name = 'Smoke' })) -eq 'forbidden')
+      Check 'delete_ticket ohne Schalter: Ticket bleibt' (-not (Tool 'get_ticket' @{ ticket = $tdk }).err)
+      Set-SmokeSetting 'agent_delete' $true
+      Set-SmokeSetting 'agent_create_projects' $true
+      Set-Level 'Control' -Tray
+      [void](Rpc 'initialize' @{ protocolVersion = '2025-06-18'; capabilities = @{}; clientInfo = @{ name = 'smoke'; version = '1' } })
+      Start-Sleep 3
+      $dt = Tool 'delete_ticket' @{ ticket = $tdk }
+      Check 'delete_ticket mit Schalter: in den Papierkorb' (-not $dt.err -and $dt.data.trashed -eq $true) $dt.text
+      Check 'Ticket im Papierkorb: get_ticket -> not_found' ((Code (Tool 'get_ticket' @{ ticket = $tdk })) -eq 'not_found')
+      Check 'Ticket im Papierkorb: search_tickets findet es nicht' ((Tool 'search_tickets' @{ project = 'PAN'; text = 'Smoke-Papierkorb-386' }).data.total -eq 0)
+      if ($cm.Count) {
+        $dc = Tool 'delete_comment' @{ comment = $cm[0].id }
+        Check 'delete_comment mit Schalter: Agenten-Kommentar in den Papierkorb' (-not $dc.err -and $dc.data.trashed -eq $true -and (Tool 'get_ticket' @{ ticket = $tck }).data.comments_total -eq 0) $dc.text
+      }
+      Check 'create_project von aussen (ohne Heimatprojekt) auch mit Schalter -> forbidden' ((Code (Tool 'create_project' @{ key = 'SMK'; name = 'Smoke' })) -eq 'forbidden')
+    }
+    # Zurueck auf die Standards (Schalter aus); state.json mit dem gesperrten Projekt entfernt der naechste Abschnitt (-Empty).
+    Stop-Hub
+    Set-SmokeSetting 'agent_delete' $false
+    Set-SmokeSetting 'agent_create_projects' $false
+  }
 
   Write-Host "== Shell-Integration: Hilfsdateien beim Beenden geloescht (#57)" -ForegroundColor Cyan
   # Eigener Hub ohne Sitzungen (keine Rueckfrage beim Schliessen); Fenster normal schliessen statt Prozess beenden.
@@ -2473,6 +2759,7 @@ c.close()
 
     foreach ($tour in $cat) {
       $tid = $tour.id; $steps = @($tour.steps)
+      $sessions0 = [int](Tut-Status).sessions_total
       Tut-Cmd "start $tid"
       $s = Tut-Wait { param($x) $x.running -and $x.run.tour -eq $tid -and $x.run.index -eq 1 -and $x.run.ready }
       Check "Tutorial ${tid}: startet bei Schritt 1/$($steps.Count)" ($s -and $s.run.total -eq $steps.Count -and $s.project.exists -and $s.project.active) ($s.run | ConvertTo-Json -Compress)
@@ -2486,14 +2773,20 @@ c.close()
         }
         $auto = $null
         switch ($r.step) {
-          'basics.new_terminal' { $auto = { [void](Tool 'create_session' @{ name = 'Smoke-Tutorial' }) } }
+          'basics.new_terminal' {
+            # Seit 3.2.0 (#386) ist das Projekt "Tutorial" fuer Agenten gesperrt (neue Projekte beginnen "Aus"): Ein externer
+            # Agent darf dort keine Sitzung anlegen. Das pruefen, dann die Sitzung wie der Nutzer anlegen ("Neues Terminal").
+            Check 'Tutorial basics: Projekt "Tutorial" fuer Agenten gesperrt (access off)' ($s.project.access -eq 'off') "$($s.project.access)"
+            Check 'Tutorial basics: create_session im Projekt "Tutorial" -> project_locked' ((Code (Tool 'create_session' @{ name = 'Smoke-Tutorial' })) -eq 'project_locked')
+            $auto = { Tut-Cmd 'new_terminal' }
+          }
           'basics.todo_add' { $auto = { [void](Tool 'add_todo' @{ title = 'Smoke-Tutorial-Todo' }) } }
           'todo.list' { $auto = { [void](Tool 'add_todo' @{ title = 'Smoke-Tutorial-Todo-2' }) } }
         }
         if ($auto) {
           & $auto
           $n = Tut-Wait { param($x) -not $x.running -or $x.run.index -gt $i } 15000
-          Check "Tutorial ${tid}: $($r.step) geht nach der Aktion per MCP von selbst weiter" ($n -and (-not $n.running -or $n.run.index -gt $i)) ($n.run | ConvertTo-Json -Compress)
+          Check "Tutorial ${tid}: $($r.step) geht nach der Aktion von selbst weiter" ($n -and (-not $n.running -or $n.run.index -gt $i)) ($n.run | ConvertTo-Json -Compress)
         } else {
           Tut-Cmd 'next'
           $n = Tut-Wait { param($x) -not $x.running -or $x.run.index -gt $i }
@@ -2518,14 +2811,16 @@ c.close()
       if ($tid -eq 'basics') {
         # @(…): eine einzelne Sitzung kaeme sonst als PSCustomObject zurueck, und dessen .Count ist in PowerShell 5.1 $null.
         $mine = @(Tut-Sessions)
-        Check 'Tutorial basics: Sitzungen im Projekt "Tutorial" (list_sessions)' ($mine.Count -ge 1) "$($mine.Count)"
+        Check 'Tutorial basics: Sitzungen im Projekt "Tutorial" (Status der Instanz)' ($s.project.sessions -ge 1) "$($s.project.sessions)"
+        Check 'Tutorial basics: list_sessions zeigt externen Agenten keine Sitzung im gesperrten Projekt "Tutorial"' ($mine.Count -eq 0) "$($mine.Count)"
         Check 'Tutorial basics: in der Tour angelegte To-dos gemerkt' (@($s.todos).Count -ge 1) "$(@($s.todos).Count)"
       }
       Tut-Cmd 'end delete'
       $s = Tut-Wait { param($x) -not $x.ask -and -not $x.project.exists }
       Check "Tutorial ${tid}: Loeschen entfernt das Projekt" ($s -and -not $s.ask -and -not $s.project.exists -and @($s.todos).Count -eq 0 -and $null -eq $s.plan_project) ($s | ConvertTo-Json -Depth 2 -Compress)
-      Start-Sleep -Milliseconds 500
-      Check "Tutorial ${tid}: keine Sitzung mehr im Projekt Tutorial" (@(Tut-Sessions).Count -eq 0)
+      # Das gesperrte Projekt sieht list_sessions nicht; deshalb zaehlt der Status der Instanz alle Sitzungen.
+      $s = Tut-Wait { param($x) $x.sessions_total -eq $sessions0 }
+      Check "Tutorial ${tid}: keine Sitzung mehr im Projekt Tutorial" ($s -and $s.sessions_total -eq $sessions0 -and @(Tut-Sessions).Count -eq 0) "vorher $sessions0, jetzt $($s.sessions_total)"
     }
     $todos = Tool 'list_todos' @{ state = 'all'; limit = 200 }
     Check 'Tutorial: To-dos der Tour geloescht (list_todos)' (-not $todos.err -and -not ("$($todos.text)" -match 'Smoke-Tutorial-Todo')) "$($todos.text)"

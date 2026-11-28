@@ -183,7 +183,7 @@ fn seeded() -> (Connection, SeededDemo, DemoSpec) {
 #[test]
 fn random_valid_queries_agree_with_the_reference_evaluation() {
     let (c, d, spec) = seeded();
-    let ctx = Ctx { today: d.today.clone(), terminals: d.terminals.clone(), lang: Lang::En, timeout: std::time::Duration::from_secs(10), include_archived: false };
+    let ctx = Ctx { today: d.today.clone(), terminals: d.terminals.clone(), lang: Lang::En, timeout: std::time::Duration::from_secs(10), include_archived: false, agent_projects: None };
     let mut rng = Rng(0x2545_F491_4F6C_DD1D);
     let mut compared = 0;
     let mut skipped = 0;
@@ -232,7 +232,7 @@ const BITS: &[&str] = &[
 #[test]
 fn almost_valid_garbage_never_ends_in_a_database_or_internal_error() {
     let (c, d, _) = seeded();
-    let ctx = Ctx { today: d.today.clone(), terminals: d.terminals.clone(), lang: Lang::En, timeout: std::time::Duration::from_secs(10), include_archived: false };
+    let ctx = Ctx { today: d.today.clone(), terminals: d.terminals.clone(), lang: Lang::En, timeout: std::time::Duration::from_secs(10), include_archived: false, agent_projects: None };
     let mut rng = Rng(0x9E37_79B9_7F4A_7C15);
     let (mut ok, mut bad) = (0, Vec::new());
     for _ in 0..20_000 {

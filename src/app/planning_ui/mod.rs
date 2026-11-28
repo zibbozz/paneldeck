@@ -152,6 +152,10 @@ pub(super) struct PlanUi {
     loaded: bool,
     /// Expertenmodus an (Projektansicht) oder aus (einfache Liste).
     pub(super) expert: bool,
+    /// Seitenleisten-Projekte (Kennung, Name) für „Zugriff für Agenten“ eines Ticket-Projekts (#386), je Bild gesetzt.
+    pub(super) sidebar_projects: Vec<(u64, String)>,
+    /// Tickets, die zwischen Projekten verschoben wurden: (von, nach) – für den Hinweis der Anwendung (#386).
+    pub(super) moved: Vec<(i64, i64)>,
     dirty: bool,
     projects: Vec<Project>,
     /// Gewähltes Projekt.
@@ -201,6 +205,8 @@ impl Default for PlanUi {
         PlanUi {
             loaded: false,
             expert: false,
+            sidebar_projects: Vec::new(),
+            moved: Vec::new(),
             dirty: true,
             projects: Vec::new(),
             selected: 0,

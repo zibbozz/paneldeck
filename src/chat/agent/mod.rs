@@ -166,6 +166,9 @@ pub struct AgentEnv {
     pub root: Option<PathBuf>,
     /// Datenordner von Paneldeck (gesperrt).
     pub data_dir: Option<PathBuf>,
+    /// Ordner der Datenbank-Sicherungen (gesperrt wie der Datenordner, auch wenn er woanders liegt – die Sicherungen
+    /// enthalten Todo-Liste, Tickets, Kalender und Zeit-Reiter samt privater Einträge, #386/#164).
+    pub backup_dir: Option<PathBuf>,
     pub settings: AgentToolSettings,
     /// Platz für das Ergebnis in Bytes (0 = nur die Grenze des Werkzeugs).
     pub max_bytes: usize,
@@ -512,6 +515,11 @@ fn folder_has_sensitive(p: &str, dest: Option<&str>, env: &AgentEnv) -> bool {
     if !r.is_dir {
         return false;
     }
+    // WSL-Projektordner (Review 3.2.0): kein Durchlaufen über 9P (langsam, Verknüpfungen unzuverlässig) – ein Ordner gilt
+    // dort immer als sensibel, die Verschiebung fragt also immer.
+    if paths::is_wsl_root(&root) {
+        return true;
+    }
     let dest_rel = dest.and_then(|d| paths::resolve(&root, env, d, paths::Access::Read).ok()).map(|d| d.rel);
     let pats = &env.settings.sensitive;
     let mut hit = false;
@@ -557,6 +565,40 @@ pub fn asks(d: &AgentDef, call: &ToolCall, env: &AgentEnv) -> bool {
         Approval::Sensitive => sensitive_read(call, env),
         Approval::Ask => true,
     }
+}
+
+/// Wie [`asks`] mit einer schon ermittelten Antwort auf „berührt eine sensible Datei“ ([`file_check`]) – ohne Zugriff
+/// auf die Platte.
+pub fn asks_with(d: &AgentDef, call: &ToolCall, sensitive: bool) -> bool {
+    match d.approval {
+        Approval::Free => false,
+        Approval::Sensitive => call.name == "read_file" && sensitive,
+        Approval::Ask => true,
+    }
+}
+
+/// Braucht dieser Aufruf die Prüfung auf sensible Dateien ([`sensitive_call`]) bzw. eine Vorschau mit Plattenzugriff?
+/// Die läuft dann im Hintergrund ([`file_check`], Review 3.2.0: nie in der UI-Schleife – Kanonisieren, WSL über 9P,
+/// Ordner durchlaufen).
+pub fn needs_file_check(call: &ToolCall) -> bool {
+    is_local(call) && matches!(call.name.as_str(), "read_file" | "edit_file" | "write_file" | "move_file")
+}
+
+/// Ergebnis der Prüfung im Hintergrund: sensibel? und die Vorschau für die Freigabe-Zeile.
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct FileCheck {
+    pub sensitive: bool,
+    pub preview: Option<files::Preview>,
+}
+
+/// Prüfung eines Aufrufs mit Plattenzugriff (blockiert: im Hintergrund aufrufen). Für Aufrufe ohne
+/// [`needs_file_check`]: nichts sensibel, keine Vorschau.
+pub fn file_check(call: &ToolCall, env: &AgentEnv) -> FileCheck {
+    if !needs_file_check(call) {
+        return FileCheck::default();
+    }
+    let sensitive = sensitive_call(call, env);
+    FileCheck { sensitive, preview: files::preview_with(&call.name, &call.arguments, env, sensitive) }
 }
 
 /// Muss gefragt werden, auch wenn „Vor Schreib-Aktionen nachfragen“ aus ist und auch trotz einer dauerhaften

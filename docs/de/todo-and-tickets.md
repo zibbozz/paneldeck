@@ -118,6 +118,18 @@ Seit 2.6.0 hat der Reiter **Übersicht** jedes Experten-Projekts einen Knopf **W
 
 ![Kategorie Datenbank mit den Knöpfen der Datenbankpflege und der Statistik-Tabelle](../images/de/maint-database.png)
 
+## Private Einträge und Systemnotizen
+Seit 3.2.0 bestimmst du, was [Agenten](agent-interface.md#zugriff-je-projekt) von deiner Todo-Liste und deinen Tickets sehen:
+
+- **Projekt einer Karte:** Das Karten-Formular hat eine Auswahl **Projekt** – ein Seitenleisten-Projekt oder *Allgemein (ohne Projekt)*. Eine neue Karte beginnt im aktiven Projekt. Agenten erreichen eine Karte nur mit Zugriff auf ihr Projekt (siehe [Zugriff je Projekt](agent-interface.md#zugriff-je-projekt)); Karten von vor 3.2.0 liegen in *Allgemein*.
+- **Private Karten:** der Schalter **Privat** im Karten-Formular (Tooltip „Private Karten sieht nie ein Agent“). Die Einstellung **Neue Karten privat** in *Einstellungen → Agenten* (`todo_new_private`, standardmäßig aus) lässt jede neue Karte privat beginnen. Eine private Karte zeigt unten rechts *Privat*.
+- **Private Tags:** *Tags verwalten* hat je Tag einen Schalter **Privat** („Privat: Karten mit diesem Tag sieht nie ein Agent“) – jede Karte mit diesem Tag ist privat, ohne jede Karte einzeln umzustellen.
+- **Private Tickets:** *Weitere Aktionen* im Ticket hat **Privat (nie für Agenten)** und bei einem privaten Ticket **Nicht mehr privat**; die Ticket-Ansicht zeigt dann „Privat – für Agenten unsichtbar“, und die Änderung steht im Verlauf. Wird eine private Karte zum Ticket, bleibt es privat; Unter-Tickets erben nichts.
+- Agenten **sehen private Einträge nie**: nicht in Listen, Suchen, Zählungen, Boards oder im Kalender, und ein direkter Zugriff antwortet, als gäbe es den Eintrag nicht. *Privat* setzt und entfernt nur du.
+- **Systemnotizen:** Karten und Tickets, die ein Agent oder Paneldeck angelegt hat, tragen ein Kennzeichen mit ihrer Herkunft (z. B. „Agent · Claude 3“ unten rechts auf der Karte bzw. vor dem Stern in der Ticket-Liste; in der Ticket-Ansicht „Systemnotiz, angelegt von …“). Der Schalter **Systemnotizen: an / aus** im Kopf der Todo-Liste (Einstellung `show_system_notes`, standardmäßig an) zeigt sie in den Listen oder blendet sie aus; die Ticket-Suche kennt `systemNote = true` und `private = true`. Alles von vor 3.2.0 gilt als von dir angelegt. Projektsicherungen behalten *Privat* und die Herkunft.
+- **Ticket-Projekte:** Ein Ticket-Projekt, das ein Agent angelegt hat (nur mit dem Schalter *Agenten dürfen Projekte anlegen*), ist als „Von einem Agenten angelegt“ markiert. Im Formular eines Ticket-Projekts stellst du seinen **Zugriff für Agenten** ein (Stufe und *Für alle*) oder verknüpfst es mit einem Seitenleisten-Projekt – dann folgt es dessen Zugriff („folgt dem Projekt“; *Keine Verknüpfung* gibt ihm einen eigenen Zugriff). Neue und importierte Ticket-Projekte beginnen für Agenten gesperrt.
+- **Papierkorb:** Tickets und Kommentare, die Agenten löschen (nur mit dem Schalter *Agenten dürfen Tickets/Kommentare löschen*), sind nicht weg: Sie landen im **Papierkorb** (*Einstellungen → Agenten → Papierkorb*) und verschwinden aus allen Listen. Ein Ticket im Papierkorb zeigt „Im Papierkorb (von einem Agenten gelöscht).“ Dort kannst du jeden Eintrag **Wiederherstellen**, **Endgültig löschen** oder den **Papierkorb leeren**. Dein eigenes *Löschen …* eines Tickets bleibt wie bisher endgültig.
+
 ## Export und Import
 
 Projektsicherung als JSON, Tickets als CSV, Typ-/Feld-Vorlagen. Der Import akzeptiert nur das eigene Exportformat von Paneldeck, legt immer ein **neues** Projekt an (bei vergebenem Kürzel wird nach einem neuen gefragt) und verändert nie bestehende Daten. Dateien über 128 MB werden abgelehnt.
@@ -143,7 +155,7 @@ Im Terminal Hub (bei eingeschaltetem Expertenmodus und mindestens einem Projekt)
 Die Reiter-Kürzel lassen sich unter *Einstellungen → Tastenkürzel* ändern.
 
 ## Agenten
-KI-Agenten können Todo-Liste und Tickets über die [Agenten-Schnittstelle (MCP)](agent-interface.md) lesen und ändern – nur mit den Werkzeugen des aktuellen Modus, nach denselben Regeln wie im Fenster und ohne je etwas zu löschen. Jede Änderung eines Agenten steht mit seinem Sitzungsnamen im Verlauf des Tickets und erscheint als kurzer Hinweis.
+KI-Agenten können Todo-Liste und Tickets über die [Agenten-Schnittstelle (MCP)](agent-interface.md) lesen und ändern – nur mit den Werkzeugen des aktuellen Modus, nach denselben Regeln wie im Fenster und nur in den Projekten, die du ihnen freigibst (siehe [Zugriff je Projekt](agent-interface.md#zugriff-je-projekt)). [Private Einträge](#private-einträge-und-systemnotizen) sehen sie nie, und sie löschen nie etwas – außer, nur mit deinem Schalter, Tickets und eigene Kommentare, die in den [Papierkorb](#private-einträge-und-systemnotizen) wandern. Jede Änderung eines Agenten steht mit seinem Sitzungsnamen im Verlauf des Tickets und erscheint als kurzer Hinweis; was Agenten anlegen, ist als Systemnotiz markiert.
 
 ## Wo die Daten liegen
 Todo-Liste, Projekte und Tickets liegen in der lokalen Datenbank `paneldeck.db` im Datenordner, mit automatischen Sicherungen – siehe [Datenordner und Sicherungen](data-and-backups.md).

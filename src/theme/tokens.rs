@@ -20,11 +20,12 @@ pub enum Group {
     Chat,
     DiffSyntax,
     Code,
+    EditorDiff,
     Terminal,
 }
 
 impl Group {
-    pub const ALL: [Group; 11] = [Group::Base, Group::Text, Group::Surfaces, Group::Accent, Group::Status, Group::Sidebar, Group::Tickets, Group::Chat, Group::DiffSyntax, Group::Code, Group::Terminal];
+    pub const ALL: [Group; 12] = [Group::Base, Group::Text, Group::Surfaces, Group::Accent, Group::Status, Group::Sidebar, Group::Tickets, Group::Chat, Group::DiffSyntax, Group::Code, Group::EditorDiff, Group::Terminal];
 
     pub fn label(self, lang: crate::state::Lang) -> &'static str {
         match self {
@@ -38,6 +39,7 @@ impl Group {
             Group::Chat => lang.t("Chat", "Chat"),
             Group::DiffSyntax => lang.t("Diff und Syntax", "Diff and syntax"),
             Group::Code => lang.t("Editor: Syntaxfarben", "Editor: syntax colours"),
+            Group::EditorDiff => lang.t("Editor: Vergleich und Änderungsmarken", "Editor: comparison and change markers"),
             Group::Terminal => lang.t("Terminal", "Terminal"),
         }
     }
@@ -133,6 +135,17 @@ ui_tokens! {
     code_heading: Code, "Code: Überschrift, Abschnitt", "Code: heading, section";
     code_variable: Code, "Code: Variable, Parameter", "Code: variable, parameter";
     code_invalid: Code, "Code: ungültig", "Code: invalid";
+    diff_add_bg: EditorDiff, "Vergleich: Hintergrund hinzugefügter Zeilen", "Comparison: background of added lines";
+    diff_remove_bg: EditorDiff, "Vergleich: Hintergrund entfernter Zeilen", "Comparison: background of removed lines";
+    diff_add_word: EditorDiff, "Vergleich: hinzugefügte Wörter in der Zeile", "Comparison: added words within a line";
+    diff_remove_word: EditorDiff, "Vergleich: entfernte Wörter in der Zeile", "Comparison: removed words within a line";
+    diff_filler: EditorDiff, "Vergleich: Schraffur der Füllzeilen", "Comparison: hatching of filler lines";
+    marker_added: EditorDiff, "Änderungsmarke: hinzugefügt (nicht gestagt, ungespeichert)", "Change marker: added (unstaged, unsaved)";
+    marker_modified: EditorDiff, "Änderungsmarke: geändert (nicht gestagt, ungespeichert)", "Change marker: modified (unstaged, unsaved)";
+    marker_deleted: EditorDiff, "Änderungsmarke: entfernt (nicht gestagt, ungespeichert)", "Change marker: removed (unstaged, unsaved)";
+    marker_staged_added: EditorDiff, "Änderungsmarke: hinzugefügt (gestagt)", "Change marker: added (staged)";
+    marker_staged_modified: EditorDiff, "Änderungsmarke: geändert (gestagt)", "Change marker: modified (staged)";
+    marker_staged_deleted: EditorDiff, "Änderungsmarke: entfernt (gestagt)", "Change marker: removed (staged)";
 }
 
 /// Die Terminalfarben (Felder `fg`, `bg`, `cursor`, `selection` und `ansi` der Datei) als Namen für Verweise und Editor.
@@ -320,6 +333,19 @@ pub fn default_expr(name: &str, dark: bool) -> Expr {
         "code_heading" => R("code_function"),
         "code_variable" => R("code_tag"),
         "code_invalid" => R("error"),
+        // Vergleich und Änderungsmarken (#385): Zeilen- und Wort-Hintergründe aus den Diff-Farben; Marken nicht gestagt
+        // (bzw. ungespeichert) in Grün/Gelb/Rot, gestagt in Türkis/Blau/Violett – unterscheidbar, auch hell lesbar.
+        "diff_add_bg" => A("diff_add", 15),
+        "diff_remove_bg" => A("diff_remove", 15),
+        "diff_add_word" => A("diff_add", 40),
+        "diff_remove_word" => A("diff_remove", 40),
+        "diff_filler" => A("text_dim", 35),
+        "marker_added" => R("success"),
+        "marker_modified" => R("warning"),
+        "marker_deleted" => R("error"),
+        "marker_staged_added" => d(rgb(0x56b6c2), rgb(0x0b7285)),
+        "marker_staged_modified" => d(rgb(0x61afef), rgb(0x0969da)),
+        "marker_staged_deleted" => d(rgb(0xc678dd), rgb(0x8250df)),
         _ => C(Color32::from_rgb(0xff, 0x00, 0xff)),
     }
 }

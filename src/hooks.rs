@@ -72,6 +72,11 @@ pub struct HookMsg {
     pub trigger: Option<String>,
     /// `reason` bei SessionEnd (`clear`, `resume`, `logout`, `prompt_input_exit`, `other`).
     pub reason: Option<String>,
+    /// Kennung des Werkzeugaufrufs (`tool_use_id`) bei PreToolUse/PostToolUse (fehlt bei älteren Claude-Versionen).
+    pub tool_use_id: Option<String>,
+    /// Kurzfassung der Werkzeug-Eingabe bei PreToolUse (#390, [`tool_detail`]): Befehl, Pfad, Adresse … – fremder
+    /// Text, nur für die Freigabe-Karte, nie gespeichert.
+    pub tool_detail: Option<String>,
 }
 
 /// Meldet SessionEnd, dass Claude wirklich beendet ist? Bei `/clear` und `/resume` endet nur die Konversation –
@@ -324,6 +329,260 @@ pub fn permission_tool(message: &str) -> Option<&str> {
     (!tool.is_empty()).then_some(tool)
 }
 
+/// Höchstlänge (Zeichen) der Kurzfassung einer Werkzeug-Eingabe: Anfang und Ende je zur Hälfte (dazwischen ` … `).
+pub const DETAIL_MAX: usize = 2000;
+/// So viele offene Werkzeugaufrufe merkt sich [`ToolLog`] höchstens (die ältesten fallen heraus).
+const TOOL_LOG_MAX: usize = 32;
+/// Ein offener Aufruf zählt nur, wenn sein PreToolUse höchstens so lange vor der Benachrichtigung kam: Claude meldet
+/// die Frage erst nach einigen Sekunden, ältere Einträge sind meist liegen gebliebene (fehlgeschlagen, durch Regeln
+/// abgelehnt – dafür kommt kein PostToolUse).
+pub const ASK_WINDOW: Duration = Duration::from_secs(30);
+/// … und höchstens so lange danach (Meldungen kommen über getrennte Verbindungen, die Reihenfolge ist nicht sicher).
+pub const ASK_LATE: Duration = Duration::from_secs(3);
+/// Älter werden offene Einträge nie (aufräumen, falls Runde und Stop ausbleiben).
+const OPEN_MAX_AGE: Duration = Duration::from_secs(600);
+
+/// Zeichen, die Text anders aussehen lassen können, als er ist (#390): Format-Zeichen (Unicode-Kategorie Cf: Richtung,
+/// unsichtbare Trenner, weiche Trennung …), Zeilen-/Absatztrenner (Zl, Zp), Hangul-Füllzeichen, Varianten-Selektoren,
+/// Tag-Zeichen und die Zeichen für Interlinear-Anmerkungen.
+fn deceptive(c: char) -> bool {
+    matches!(c as u32,
+        0x00AD | 0x034F | 0x061C | 0x070F | 0x0890..=0x0891 | 0x08E2 | 0x0600..=0x0605 | 0x06DD | 0x115F | 0x1160
+        | 0x17B4..=0x17B5 | 0x180B..=0x180F | 0x200B..=0x200F | 0x2028..=0x202E | 0x2060..=0x206F | 0x3164
+        | 0xFE00..=0xFE0F | 0xFEFF | 0xFFA0 | 0xFFF9..=0xFFFB | 0x110BD | 0x110CD | 0x13430..=0x1343F | 0x1BCA0..=0x1BCA3
+        | 0x1D173..=0x1D17A | 0xE0000..=0xE007F | 0xE0100..=0xE01EF)
+}
+
+/// Fremden Text für die Anzeige entschärfen (#390): Zeilenumbrüche bleiben, Tabulatoren werden Leerzeichen, andere
+/// Steuerzeichen und täuschende Zeichen ([`deceptive`]) werden zu `�`. Länger als `max` Zeichen: Anfang und Ende je
+/// zur Hälfte mit ` … ` dazwischen – das Ende eines Befehls ist oft der gefährliche Teil. Leerraum außen fällt weg.
+pub fn untrusted_text(s: &str, max: usize) -> String {
+    let chars: Vec<char> = s
+        .trim()
+        .chars()
+        .filter(|c| *c != '\r')
+        .map(|ch| match ch {
+            '\n' => '\n',
+            '\t' => ' ',
+            c if c.is_control() || deceptive(c) => '\u{FFFD}',
+            c => c,
+        })
+        .collect();
+    if chars.len() <= max {
+        return chars.into_iter().collect();
+    }
+    let half = max / 2;
+    let mut out: String = chars[..half].iter().collect();
+    out.push_str(" … ");
+    out.extend(&chars[chars.len() - half..]);
+    out
+}
+
+/// Für die Karte: Folgen von Leerzeichen werden zu einem, Zeilenumbrüche zu ` ⏎ ` – so kann kein Polster aus
+/// Leerraum den gefährlichen Teil aus dem sichtbaren Bereich schieben.
+pub fn compact_text(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut space = false;
+    for c in s.chars() {
+        if c == '\n' {
+            while out.ends_with(' ') {
+                out.pop();
+            }
+            out.push_str(" ⏎ ");
+            space = true;
+        } else if c.is_whitespace() {
+            if !space {
+                out.push(' ');
+            }
+            space = true;
+        } else {
+            out.push(c);
+            space = false;
+        }
+    }
+    out.trim().to_string()
+}
+
+/// Werkzeuge von Claude Code, deren Freigabe sich an einem Feld festmachen lässt (#390); alle anderen (MCP-Werkzeuge
+/// `mcp__…`, Agenten, unbekannte, Chat-Werkzeuge) zeigen alle Argumente.
+fn key_field(tool: &str) -> Option<&'static str> {
+    Some(match tool {
+        "Bash" => "command",
+        "Read" | "Write" | "Edit" | "MultiEdit" => "file_path",
+        "NotebookEdit" => "notebook_path",
+        "WebFetch" => "url",
+        "WebSearch" => "query",
+        "Glob" | "Grep" => "pattern",
+        _ => return None,
+    })
+}
+
+/// Werkzeuge, deren Kurzfassung ein Pfad ist (der Dialog nennt oft nur den Dateinamen).
+pub fn path_tool(tool: &str) -> bool {
+    matches!(tool, "Read" | "Write" | "Edit" | "MultiEdit" | "NotebookEdit")
+}
+
+/// Kurzfassung einer Werkzeug-Eingabe (`tool_input` von Claude Code, Argumente eines Chat-Werkzeugs) für die
+/// Freigabe-Karte (#390): bei den eingebauten Werkzeugen von Claude Code das eine Feld, um das es geht (Befehl, Pfad,
+/// Adresse, Suche, Muster mit Ordner), sonst alle Argumente als kompaktes JSON. Entschärft und gekürzt
+/// ([`untrusted_text`], [`DETAIL_MAX`]); `None` ohne Inhalt.
+pub fn tool_detail(tool: &str, input: &Value) -> Option<String> {
+    let obj = input.as_object()?;
+    let get = |k: &str| obj.get(k).and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty());
+    let text = match key_field(tool).and_then(|k| get(k).map(|v| (k, v))) {
+        Some(("pattern", p)) => match get("path") {
+            Some(dir) => format!("{p} · {dir}"),
+            None => p.to_string(),
+        },
+        Some((_, v)) => v.to_string(),
+        None if obj.is_empty() => return None,
+        None => serde_json::to_string(input).ok()?,
+    };
+    let t = untrusted_text(&text, DETAIL_MAX);
+    (!t.is_empty()).then_some(t)
+}
+
+/// Text des Bildschirms, in dem eine Freigabe-Frage steht: die letzten Zeilen, ohne Leerraum und Rahmenzeichen
+/// (Claude zeichnet den Dialog mit `│`-Rändern und bricht lange Befehle um).
+fn dialog_text(screen: &str) -> String {
+    let lines: Vec<&str> = screen.lines().filter(|l| !l.trim().is_empty()).collect();
+    lines[lines.len().saturating_sub(DIALOG_LINES)..].iter().flat_map(|l| l.chars()).filter(|c| !c.is_whitespace() && !('\u{2500}'..='\u{257F}').contains(c)).collect()
+}
+
+/// So viele (nicht leere) Zeilen am unteren Rand gelten als Freigabe-Dialog.
+const DIALOG_LINES: usize = 25;
+
+/// Steht die Kurzfassung `detail` im Freigabe-Dialog am unteren Rand des Bildschirms (#390)? Verglichen wird ohne
+/// Leerraum und Rahmen; bei Pfad-Werkzeugen genügt der Dateiname (der Dialog zeigt oft einen relativen Pfad). Ohne
+/// sichtbaren Dialog nie. Text weiter oben (die Unterhaltung) zählt nicht.
+pub fn screen_confirms(tool: &str, detail: &str, screen: &str) -> bool {
+    if !screen_hints(screen).dialog {
+        return false;
+    }
+    let norm = |s: &str| -> String { s.chars().filter(|c| !c.is_whitespace() && !('\u{2500}'..='\u{257F}').contains(c)).collect() };
+    let want = if path_tool(tool) { norm(detail.rsplit(['\\', '/']).next().unwrap_or(detail)) } else { norm(detail) };
+    !want.is_empty() && !detail.contains('\u{FFFD}') && dialog_text(screen).contains(&want)
+}
+
+/// Ein möglicher Aufruf zu einer Freigabe-Frage.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ToolCall {
+    /// Laufende Nummer im [`ToolLog`] (0 bei Chats).
+    pub seq: u64,
+    /// `tool_use_id` (fehlt bei älteren Claude-Versionen) bzw. Kennung des Chat-Aufrufs.
+    pub id: Option<String>,
+    pub detail: String,
+}
+
+/// Was eine offene Freigabe-Frage verlangt (#390). `calls` = die Aufrufe, denen die Frage gelten kann, gleichrangig in
+/// der Reihenfolge ihres Beginns (Claude fragt der Reihe nach). Sicher ist es nur bei genau einem Aufruf, dessen
+/// Kurzfassung im Dialog auf dem Bildschirm steht (`confirmed`, setzt der Hub). Nur im Speicher, nie in `state.json`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ToolRequest {
+    pub tool: String,
+    pub calls: Vec<ToolCall>,
+    pub confirmed: bool,
+}
+
+impl ToolRequest {
+    /// Der eine Aufruf, falls es genau einen gibt.
+    pub fn single(&self) -> Option<&ToolCall> {
+        match self.calls.as_slice() {
+            [c] => Some(c),
+            _ => None,
+        }
+    }
+
+    /// Bestätigt der Bildschirm genau diese Anfrage ([`screen_confirms`])?
+    pub fn confirms(&self, screen: &str) -> bool {
+        self.single().is_some_and(|c| screen_confirms(&self.tool, &c.detail, screen))
+    }
+}
+
+#[derive(Debug, Clone)]
+struct OpenTool {
+    seq: u64,
+    at: std::time::Instant,
+    id: Option<String>,
+    tool: String,
+    detail: String,
+}
+
+/// Werkzeugaufrufe, die begonnen (PreToolUse), aber noch nicht beendet (PostToolUse) sind – daraus erfährt die
+/// Freigabe-Karte, was eine Frage „Claude needs your permission to use Bash“ verlangt (die Benachrichtigung selbst
+/// nennt nur das Werkzeug). Eine neue Runde, Stop und ein neuer Start räumen auf; eine beantwortete Frage
+/// ([`Self::answered`]) schließt alle bis dahin begonnenen Aufrufe aus.
+#[derive(Debug, Clone, Default)]
+pub struct ToolLog {
+    open: Vec<OpenTool>,
+    seq: u64,
+    answered: u64,
+}
+
+impl ToolLog {
+    /// Eine angenommene Hook-Meldung vermerken (`now` = Ankunft).
+    pub fn note(&mut self, m: &HookMsg, now: std::time::Instant) {
+        self.open.retain(|o| now.saturating_duration_since(o.at) < OPEN_MAX_AGE);
+        match m.event.as_str() {
+            "PreToolUse" | "PermissionRequest" => {
+                let Some(tool) = m.tool_name.as_deref().filter(|t| !t.is_empty()) else { return };
+                if m.tool_use_id.is_some() && self.open.iter().any(|o| o.id == m.tool_use_id) {
+                    return;
+                }
+                if self.open.len() >= TOOL_LOG_MAX {
+                    self.open.remove(0);
+                }
+                self.seq += 1;
+                let detail = m.tool_detail.as_deref().map(|d| untrusted_text(d, DETAIL_MAX)).unwrap_or_default();
+                self.open.push(OpenTool { seq: self.seq, at: now, id: m.tool_use_id.clone(), tool: tool.to_string(), detail });
+            }
+            "PostToolUse" => {
+                // Mit Kennung nur genau dieser Aufruf (eine unbekannte Kennung beendet keinen anderen); ohne Kennung
+                // (ältere Versionen) der älteste offene des Werkzeugs.
+                let i = match &m.tool_use_id {
+                    Some(id) => self.open.iter().position(|o| o.id.as_ref() == Some(id)),
+                    None => self.open.iter().position(|o| o.id.is_none() && Some(o.tool.as_str()) == m.tool_name.as_deref()),
+                };
+                if let Some(i) = i {
+                    self.open.remove(i);
+                }
+            }
+            "UserPromptSubmit" | "Stop" | "SessionStart" | "SessionEnd" => {
+                self.open.clear();
+                self.answered = self.seq;
+            }
+            _ => {}
+        }
+    }
+
+    /// Eine Freigabe-Frage ist beantwortet: Was bis jetzt begonnen hat, kommt für die nächste Frage nicht mehr in Frage.
+    pub fn answered(&mut self) {
+        self.answered = self.seq;
+    }
+
+    /// Was die Freigabe-Frage für `tool` (gestellt um `asked`) verlangen kann: offene Aufrufe dieses Werkzeugs, die nach
+    /// der letzten beantworteten Frage und kurz vor (bzw. knapp nach) der Frage begannen – gleichrangig, älteste zuerst.
+    /// Ist das Werkzeug unbekannt (leer), nichts – es wäre geraten. `None` ohne Kandidaten.
+    pub fn request_for(&self, tool: &str, asked: std::time::Instant) -> Option<ToolRequest> {
+        if tool.is_empty() {
+            return None;
+        }
+        let calls: Vec<ToolCall> = self
+            .open
+            .iter()
+            .filter(|o| o.tool == tool && o.seq > self.answered)
+            .filter(|o| asked.saturating_duration_since(o.at) <= ASK_WINDOW && o.at.saturating_duration_since(asked) <= ASK_LATE)
+            .map(|o| ToolCall { seq: o.seq, id: o.id.clone(), detail: o.detail.clone() })
+            .collect();
+        (!calls.is_empty()).then(|| ToolRequest { tool: tool.to_string(), calls, confirmed: false })
+    }
+
+    /// Den Aufruf vergessen (über die Karte abgelehnt: Claude meldet für ihn kein PostToolUse).
+    pub fn forget(&mut self, seq: u64) {
+        self.open.retain(|o| o.seq != seq);
+    }
+}
+
 /// Status nach einer Hook-Meldung; `turn` wird fortgeschrieben.
 ///
 /// Nicht jede Meldung heißt, was ihr Name nahelegt:
@@ -531,7 +790,8 @@ pub enum IpcCmd {
     /// Liegt eine Sitzung darin, erbt die neue Sitzung deren Agenten-Kette.
     Open { path: String, claude: bool, origin: Option<crate::platform::process::PeerChain> },
     /// `--edit <datei>` (#54): Datei im Editor-Reiter öffnen (schreibt in keine Sitzung, keine Agenten-Kette).
-    Edit { path: String },
+    /// `origin`: Absender (nur bei einem Linux-Pfad ermittelt, #392 – er wird nach dessen Sitzung aufgelöst).
+    Edit { path: String, origin: Option<crate::platform::process::PeerChain> },
 }
 
 pub struct HookServer {
@@ -642,6 +902,12 @@ fn handle_connection(mut s: TcpStream, token: &str, ipc_token: &str, tx: &std::s
         }
     }
     if let Some(mut cmd) = parse_cmd(&buf, ipc_token) {
+        if let IpcCmd::Edit { path, origin } = &mut cmd {
+            // Linux-Pfad (`paneldeck --edit /home/u/x` aus WSL): Absender bestimmen, um die Distribution zu kennen.
+            if crate::wsl::looks_linux(path.trim()) {
+                *origin = peer_chain(&s);
+            }
+        }
         if let IpcCmd::Open { origin, .. } = &mut cmd {
             // Absender sofort bestimmen; ist er nicht zu ermitteln (schon beendet …), wird nichts geöffnet (#152).
             match peer_chain(&s) {
@@ -674,7 +940,7 @@ fn parse_cmd(raw: &str, token: &str) -> Option<IpcCmd> {
     match v.get("cmd")?.as_str()? {
         "show" => Some(IpcCmd::Show),
         "open" => Some(IpcCmd::Open { path: v.get("path")?.as_str()?.to_string(), claude: v.get("claude").and_then(|c| c.as_bool()).unwrap_or(false), origin: None }),
-        "edit" => Some(IpcCmd::Edit { path: v.get("path")?.as_str()?.to_string() }),
+        "edit" => Some(IpcCmd::Edit { path: v.get("path")?.as_str()?.to_string(), origin: None }),
         _ => None,
     }
 }
@@ -695,7 +961,7 @@ pub fn forward_to_running(dir: &Path, cmd: &IpcCmd) -> bool {
     let body = match cmd {
         IpcCmd::Show => json!({"token": token, "cmd": "show"}),
         IpcCmd::Open { path, claude, .. } => json!({"token": token, "cmd": "open", "path": path, "claude": claude}),
-        IpcCmd::Edit { path } => json!({"token": token, "cmd": "edit", "path": path}),
+        IpcCmd::Edit { path, .. } => json!({"token": token, "cmd": "edit", "path": path}),
     };
     if stream.write_all(body.to_string().as_bytes()).is_err() {
         return false;
@@ -729,7 +995,8 @@ fn handle_mcp(s: &mut TcpStream, v: &Value, ipc_token: &str, mcp_tx: &std::sync:
     let level = mcp::current_level();
     let expert = mcp::expert_mode();
     if tool == "_level" {
-        return reply(json!({"ok": true, "result": {"level": level.as_u8(), "expert": expert}}));
+        // Ohne Aufrufer: die höchste erreichbare Stufe (#386); geprüft wird je Aufruf in der UI-Schleife.
+        return reply(json!({"ok": true, "result": {"level": mcp::reach_level().as_u8(), "expert": expert}}));
     }
     // Stufe und Modus (einfache Todo-Liste / Tickets) prüft der Hub selbst; die UI-Schleife prüft nach dem Warten noch einmal.
     if let Err((code, message)) = mcp::check_access(tool, level, expert) {
@@ -740,6 +1007,11 @@ fn handle_mcp(s: &mut TcpStream, v: &Value, ipc_token: &str, mcp_tx: &std::sync:
         return reply(mcp_err("busy", crate::state::t("Zu viele gleichzeitige Anfragen", "Too many concurrent requests")));
     }
     let args = v.get("args").cloned().unwrap_or_else(|| json!({}));
+    // Werkzeuge mit lesender und schreibender Form (`format_file`, #381): Stufe nach den Argumenten.
+    if let Err((code, message)) = mcp::check_call_level(tool, &args, level) {
+        mcp::ACTIVE.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        return reply(mcp_err(&code, &message));
+    }
     // Wartezeit: bei Werkzeugen mit eigener Frist deren Wert (+ Reserve), sonst kurz.
     let wait = args.get("timeout_secs").and_then(|t| t.as_u64()).map(|t| t.clamp(1, mcp::MAX_WAIT_SECS) + 10).unwrap_or(30);
     let caller = v.get("caller").and_then(|c| c.as_u64());
@@ -827,16 +1099,31 @@ fn parse_message(raw: &str, token: &str) -> Option<HookMsg> {
         agent_id: s("agent_id"),
         trigger: s("trigger"),
         reason: s("reason"),
+        tool_use_id: s("tool_use_id"),
+        // Kurzfassung vom Hook-Aufruf (`slim_payload`); kommt die volle Eingabe an, fasst der Hub sie selbst zusammen.
+        // Fremder Text: hier noch einmal entschärft und gekürzt.
+        tool_detail: s("tool_detail").map(|d| untrusted_text(&d, DETAIL_MAX)).filter(|d| !d.is_empty()).or_else(|| p.get("tool_input").and_then(|i| tool_detail(p.get("tool_name").and_then(Value::as_str).unwrap_or(""), i))),
     })
 }
 
 /// Felder des Ereignisses, die der Hub auswertet (kurze Texte; nie Prompts, Werkzeug-Eingaben oder -Ausgaben).
-const KEEP: [&str; 11] = ["hook_event_name", "notification_type", "message", "tool_name", "session_id", "transcript_path", "cwd", "source", "agent_id", "trigger", "reason"];
+const KEEP: [&str; 12] = ["hook_event_name", "notification_type", "message", "tool_name", "tool_use_id", "session_id", "transcript_path", "cwd", "source", "agent_id", "trigger", "reason"];
 
-/// Ereignis-JSON von Claude auf die Felder kürzen, die der Hub braucht.
+/// Ereignis-JSON von Claude auf die Felder kürzen, die der Hub braucht. Bei PreToolUse (und PermissionRequest) kommt
+/// statt der Werkzeug-Eingabe nur ihre Kurzfassung `tool_detail` mit (#390, [`tool_detail`]: Befehl, Pfad …,
+/// höchstens [`DETAIL_MAX`] Zeichen) – für die Freigabe-Karte; Inhalte (`content`, `new_string` …) nie.
 fn slim_payload(payload: Value) -> Value {
     match payload {
-        Value::Object(m) => Value::Object(m.into_iter().filter(|(k, v)| KEEP.contains(&k.as_str()) && v.is_string()).collect()),
+        Value::Object(mut m) => {
+            let asks = matches!(m.get("hook_event_name").and_then(Value::as_str), Some("PreToolUse" | "PermissionRequest"));
+            let tool = m.get("tool_name").and_then(Value::as_str).unwrap_or("").to_string();
+            let detail = if asks { m.get("tool_input").and_then(|i| tool_detail(&tool, i)) } else { None };
+            m.retain(|k, v| KEEP.contains(&k.as_str()) && v.is_string());
+            if let Some(d) = detail {
+                m.insert("tool_detail".into(), Value::String(d));
+            }
+            Value::Object(m)
+        }
         other => other,
     }
 }
@@ -906,14 +1193,34 @@ pub fn write_session_settings(dir: &Path, exe: &Path) -> Option<PathBuf> {
     Some(path)
 }
 
-/// Wie `write_session_settings`, aber mit WSL-Pfad zur .exe (Aufruf über WSL-Interop).
+/// Wie `write_session_settings`, aber mit WSL-Pfad zur .exe (Aufruf über WSL-Interop). Eine Datei je Distribution
+/// (#392: der Einhängepunkt der Laufwerke kann sich unterscheiden), der Pfad in POSIX-Quoting (`'…'`). Die frühere
+/// gemeinsame Datei `claude-hooks-wsl.json` wird weiter aktuell gehalten, solange es sie gibt (noch laufende
+/// Claude-Sitzungen eines älteren Starts lesen sie).
 pub fn write_session_settings_wsl(dir: &Path, exe: &Path, shell_id: &str) -> Option<PathBuf> {
-    let path = dir.join("claude-hooks-wsl.json");
-    let wsl_exe = crate::pathfmt::convert(shell_id, &exe.to_string_lossy());
-    let cmd = format!("\"{wsl_exe}\" --hook");
-    let v = json!({ "hooks": hooks_value(&cmd) });
+    let path = dir.join(wsl_hooks_file(shell_id));
+    let v = json!({ "hooks": hooks_value(&wsl_hook_command(&crate::pathfmt::convert(shell_id, &exe.to_string_lossy()))) });
     std::fs::write(&path, serde_json::to_string_pretty(&v).ok()?).ok()?;
+    let legacy = dir.join("claude-hooks-wsl.json");
+    if legacy.is_file() {
+        let old = json!({ "hooks": hooks_value(&wsl_hook_command(&crate::pathfmt::convert("wsl", &exe.to_string_lossy()))) });
+        let _ = std::fs::write(&legacy, serde_json::to_string_pretty(&old).unwrap_or_default());
+    }
     Some(path)
+}
+
+/// Hook-Befehl für WSL: der Linux-Pfad der .exe in POSIX-Quoting.
+fn wsl_hook_command(wsl_exe: &str) -> String {
+    format!("{} --hook", crate::quote::quote(crate::quote::Kind::Posix, wsl_exe))
+}
+
+/// Name der Hook-Datei einer WSL-Shell (`claude-hooks-wsl-<distro>.json`, Zeichen außerhalb von `[A-Za-z0-9._-]` als
+/// `_`; ohne Distribution `default`).
+pub fn wsl_hooks_file(shell_id: &str) -> String {
+    let d = shell_id.strip_prefix("wsl:").unwrap_or("").trim();
+    let safe: String = d.chars().map(|c| if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') { c } else { '_' }).collect();
+    let safe = safe.trim_matches('.');
+    format!("claude-hooks-wsl-{}.json", if safe.is_empty() { "default" } else { safe })
 }
 
 /// Benutzer-Einstellungen von Claude Code: `$CLAUDE_CONFIG_DIR/settings.json`, sonst `~/.claude/settings.json`. Mit
@@ -1106,6 +1413,30 @@ pub fn uninstall_global(path: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #392: eine Hook-Datei je Distribution, der Pfad der .exe in POSIX-Quoting; die alte gemeinsame Datei bleibt aktuell.
+    #[test]
+    fn wsl_hook_files_per_distro_with_quoted_exe() {
+        assert_eq!(wsl_hooks_file("wsl:Ubuntu-24.04"), "claude-hooks-wsl-Ubuntu-24.04.json");
+        assert_eq!(wsl_hooks_file("wsl:"), "claude-hooks-wsl-default.json");
+        assert_eq!(wsl_hooks_file("wsl:a/b\\c..x"), "claude-hooks-wsl-a_b_c..x.json");
+        assert_eq!(wsl_hooks_file("wsl:.."), "claude-hooks-wsl-default.json");
+        assert_eq!(wsl_hook_command("/mnt/c/Program Files/Paneldeck/paneldeck.exe"), "'/mnt/c/Program Files/Paneldeck/paneldeck.exe' --hook");
+        assert_eq!(wsl_hook_command("/mnt/c/a'b/p.exe"), "'/mnt/c/a'\\''b/p.exe' --hook");
+        let dir = std::env::temp_dir().join(format!("pd-wsl-hooks-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let legacy = dir.join("claude-hooks-wsl.json");
+        std::fs::write(&legacy, "{}").unwrap();
+        let exe = if cfg!(windows) { std::path::PathBuf::from(r"C:\Program Files\Paneldeck\paneldeck.exe") } else { std::path::PathBuf::from("/opt/p/paneldeck") };
+        let p = write_session_settings_wsl(&dir, &exe, "wsl:Hook-Distro").unwrap();
+        assert_eq!(p.file_name().unwrap().to_string_lossy(), "claude-hooks-wsl-Hook-Distro.json");
+        let text = std::fs::read_to_string(&p).unwrap();
+        if cfg!(windows) {
+            assert!(text.contains("'/mnt/c/Program Files/Paneldeck/paneldeck.exe' --hook"), "{text}");
+        }
+        assert!(std::fs::read_to_string(&legacy).unwrap().contains("--hook"), "alte Datei aktuell gehalten");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn server_roundtrip_and_status() {
@@ -1302,6 +1633,194 @@ mod tests {
         let m = parse_message(&raw, "t").unwrap();
         assert_eq!((m.tool_name.as_deref(), m.agent_id.as_deref(), m.trigger.as_deref()), (Some("Bash"), Some("a1"), Some("auto")));
         assert_eq!(slim_payload(Value::Null), Value::Null);
+    }
+
+    /// Hook-Aufruf → Hub für die Ereignisse einer Freigabe, so wie Claude Code sie schickt (#390).
+    fn through_hook(payload: Value) -> HookMsg {
+        let raw = json!({"token": "t", "session": 3, "key": "k", "payload": slim_payload(payload)}).to_string();
+        parse_message(&raw, "t").unwrap()
+    }
+
+    /// PreToolUse vor einer Freigabe: Statt der Eingabe geht nur die Kurzfassung (Befehl) mit, dazu die Aufruf-Kennung.
+    #[test]
+    fn pre_tool_use_forwards_a_short_summary_of_the_request() {
+        let pre = json!({
+            "session_id": "abc123", "transcript_path": "C:\\Users\\u\\.claude\\projects\\acme\\abc123.jsonl", "cwd": "C:\\Dev\\acme",
+            "permission_mode": "default", "hook_event_name": "PreToolUse", "tool_name": "Bash",
+            "tool_input": {"command": "cargo test --release", "description": "Run the tests", "timeout": 600000}, "tool_use_id": "toolu_01ABC"
+        });
+        let slim = slim_payload(pre.clone());
+        assert_eq!(slim["tool_detail"], json!("cargo test --release"));
+        assert!(slim.get("tool_input").is_none() && slim.get("permission_mode").is_none());
+        let m = through_hook(pre);
+        assert_eq!((m.event.as_str(), m.tool_name.as_deref(), m.tool_use_id.as_deref()), ("PreToolUse", Some("Bash"), Some("toolu_01ABC")));
+        assert_eq!(m.tool_detail.as_deref(), Some("cargo test --release"));
+        // Edit/Write: der Pfad, nie der Inhalt
+        let edit = json!({
+            "session_id": "abc123", "hook_event_name": "PreToolUse", "tool_name": "Write", "tool_use_id": "toolu_02",
+            "tool_input": {"file_path": "C:\\Dev\\acme\\.env", "content": "API_KEY=geheim"}
+        });
+        let slim = slim_payload(edit);
+        assert_eq!(slim["tool_detail"], json!("C:\\Dev\\acme\\.env"));
+        assert!(!slim.to_string().contains("geheim"));
+        // PermissionRequest (neuere Versionen; Paneldeck trägt sich nicht dafür ein, versteht es aber)
+        let req = json!({
+            "session_id": "abc123", "hook_event_name": "PermissionRequest", "tool_name": "WebFetch",
+            "tool_input": {"url": "https://example.com/docs", "prompt": "Summarize"}, "permission_suggestions": [{"type": "addRules"}]
+        });
+        assert_eq!(through_hook(req).tool_detail.as_deref(), Some("https://example.com/docs"));
+        // PostToolUse und die Benachrichtigung tragen keine Kurzfassung
+        let post = json!({"hook_event_name": "PostToolUse", "tool_name": "Bash", "tool_use_id": "toolu_01ABC", "tool_input": {"command": "x"}, "tool_response": {"stdout": "ok"}});
+        let m = through_hook(post);
+        assert_eq!((m.tool_detail, m.tool_use_id.as_deref()), (None, Some("toolu_01ABC")));
+        let note = json!({
+            "session_id": "abc123", "transcript_path": "C:\\t.jsonl", "cwd": "C:\\Dev\\acme", "hook_event_name": "Notification",
+            "message": "Claude needs your permission to use Bash", "notification_type": "permission_prompt"
+        });
+        let m = through_hook(note);
+        assert_eq!((m.kind.as_deref(), m.tool_detail.as_deref()), (Some("permission_prompt"), None));
+        assert_eq!(m.message.as_deref().and_then(permission_tool), Some("Bash"));
+    }
+
+    /// Die Kurzfassung ist fremder Text: Steuer-, Format- und täuschende Zeichen werden entschärft, lange Eingaben
+    /// behalten Anfang **und** Ende; ein gefälschtes `tool_detail` wird im Hub noch einmal entschärft.
+    #[test]
+    fn tool_details_are_sanitized_and_capped() {
+        let evil = json!({"command": "echo ok\u{1b}[2J\u{202e}txt.exe\r\nrm -rf /\tx"});
+        assert_eq!(tool_detail("Bash", &evil).as_deref(), Some("echo ok\u{FFFD}[2J\u{FFFD}txt.exe\nrm -rf / x"));
+        // Cf, Zl/Zp, Hangul-Füllzeichen, Varianten-Selektoren, Tags, Interlinear-Zeichen
+        for c in ['\u{00AD}', '\u{2028}', '\u{2029}', '\u{2066}', '\u{115F}', '\u{1160}', '\u{3164}', '\u{FFA0}', '\u{FE0F}', '\u{E0041}', '\u{E0100}', '\u{FFF9}', '\u{FFFB}', '\u{061C}', '\u{180E}'] {
+            assert_eq!(untrusted_text(&format!("a{c}b"), 100), "a\u{FFFD}b", "U+{:04X}", c as u32);
+        }
+        assert_eq!(untrusted_text("Grüße ✓ 中文", 100), "Grüße ✓ 中文", "normale Zeichen bleiben");
+        // Anfang und Ende bleiben: der gefährliche Schluss ist sichtbar
+        let long = tool_detail("Bash", &json!({"command": format!("{}; rm -rf C:\\", "a".repeat(10_000))})).unwrap();
+        assert_eq!(long.chars().count(), DETAIL_MAX + 3);
+        assert!(long.starts_with("aaa") && long.contains(" … ") && long.ends_with("; rm -rf C:\\"), "{}", &long[long.len() - 30..]);
+        // eingebaute Werkzeuge: das eine Feld (nie `description`)
+        let cases = [
+            ("Bash", json!({"command": "ls", "description": "List files"}), "ls"),
+            ("Edit", json!({"file_path": "C:\\a\\b.rs", "old_string": "x", "new_string": "y"}), "C:\\a\\b.rs"),
+            ("NotebookEdit", json!({"notebook_path": "n.ipynb", "new_source": "x"}), "n.ipynb"),
+            ("WebFetch", json!({"url": "https://example.com", "prompt": "p"}), "https://example.com"),
+            ("WebSearch", json!({"query": "rust egui"}), "rust egui"),
+            ("Grep", json!({"pattern": "TODO", "path": "src"}), "TODO · src"),
+            ("Glob", json!({"pattern": "**/*.rs"}), "**/*.rs"),
+        ];
+        for (tool, input, want) in cases {
+            assert_eq!(tool_detail(tool, &input).as_deref(), Some(want), "{tool}");
+        }
+        // MCP, Agenten, unbekannte Werkzeuge und Chat-Werkzeuge: alle Argumente als kompaktes JSON
+        for (tool, input) in [
+            ("mcp__paneldeck__send_text", json!({"session": 4, "text": "dir", "command": "harmless"})),
+            ("Task", json!({"description": "harmless", "prompt": "delete everything", "subagent_type": "x"})),
+            ("send_text", json!({"session": 4, "keys": "ctrl+c"})),
+            ("Bash", json!({"no_command": "x"})),
+        ] {
+            let d = tool_detail(tool, &input).unwrap();
+            assert_eq!(serde_json::from_str::<Value>(&d).unwrap(), input, "{tool}");
+            assert!(!d.contains('\n'), "kompakt");
+        }
+        assert_eq!(tool_detail("Bash", &json!({})), None);
+        assert_eq!(tool_detail("Bash", &json!("text")), None);
+        let raw = json!({"token": "t", "session": 1, "payload": {"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_detail": "a\u{7}b\u{2029}c"}}).to_string();
+        assert_eq!(parse_message(&raw, "t").unwrap().tool_detail.as_deref(), Some("a\u{FFFD}b\u{FFFD}c"));
+    }
+
+    /// Für die Karte: Leerraum-Polster schrumpft, Zeilenumbrüche werden sichtbar.
+    #[test]
+    fn compact_text_collapses_padding_and_shows_newlines() {
+        assert_eq!(compact_text(&format!("echo hi{}&& rm -rf /", " ".repeat(500))), "echo hi && rm -rf /");
+        assert_eq!(compact_text("a\n\n\nb\t\tc  \n d"), "a ⏎ ⏎ ⏎ b c ⏎ d");
+    }
+
+    fn tool_msg(event: &str, tool: &str, id: Option<&str>, detail: Option<&str>) -> HookMsg {
+        HookMsg { event: event.into(), tool_name: Some(tool.into()), tool_use_id: id.map(str::to_string), tool_detail: detail.map(str::to_string), ..HookMsg::default() }
+    }
+
+    fn details(r: &ToolRequest) -> Vec<&str> {
+        r.calls.iter().map(|c| c.detail.as_str()).collect()
+    }
+
+    /// Kandidaten einer Freigabe-Frage: offene Aufrufe des Werkzeugs aus einem kurzen Fenster vor der Frage, nach der
+    /// letzten beantworteten – gleichrangig in Startreihenfolge (Claude fragt der Reihe nach).
+    #[test]
+    fn the_tool_log_offers_only_plausible_calls_as_equals() {
+        let t0 = std::time::Instant::now();
+        let s = |n: u64| t0 + Duration::from_secs(n);
+        let mut log = ToolLog::default();
+        // (a) parallel: beide sind Kandidaten, der ältere zuerst – keiner wird als „der“ gewählt
+        log.note(&tool_msg("PreToolUse", "Bash", Some("b1"), Some("npm run dev")), s(100));
+        log.note(&tool_msg("PreToolUse", "Bash", Some("b2"), Some("rm -rf build")), s(101));
+        log.note(&tool_msg("PreToolUse", "Read", Some("r1"), Some("a.rs")), s(101));
+        let r = log.request_for("Bash", s(105)).unwrap();
+        assert_eq!(details(&r), ["npm run dev", "rm -rf build"]);
+        assert_eq!((r.single(), r.confirmed), (None, false));
+        // dieselbe Meldung doppelt zugestellt zählt einmal
+        log.note(&tool_msg("PreToolUse", "Bash", Some("b2"), Some("rm -rf build")), s(102));
+        assert_eq!(log.request_for("Bash", s(105)).unwrap().calls.len(), 2);
+        // (d) PostToolUse mit unbekannter Kennung beendet keinen anderen Aufruf
+        log.note(&tool_msg("PostToolUse", "Bash", Some("other"), None), s(103));
+        assert_eq!(log.request_for("Bash", s(105)).unwrap().calls.len(), 2);
+        log.note(&tool_msg("PostToolUse", "Bash", Some("b1"), None), s(103));
+        let r = log.request_for("Bash", s(105)).unwrap();
+        assert_eq!((details(&r), r.single().map(|c| c.id.as_deref())), (vec!["rm -rf build"], Some(Some("b2"))));
+        // (b) liegen gebliebene Einträge (kein PostToolUse) zählen nach dem Fenster nicht mehr
+        assert_eq!(log.request_for("Bash", s(101) + ASK_WINDOW + Duration::from_secs(1)), None);
+        // (c) ein PreToolUse knapp nach der Benachrichtigung zählt, deutlich später nicht
+        log.note(&tool_msg("PreToolUse", "Edit", Some("e1"), Some("b.rs")), s(106));
+        assert!(log.request_for("Edit", s(105)).is_some());
+        assert!(log.request_for("Edit", s(106) - ASK_LATE - Duration::from_secs(1)).is_none());
+        // unbekanntes Werkzeug: nichts (geraten)
+        assert_eq!(log.request_for("", s(105)), None);
+        assert_eq!(log.request_for("WebFetch", s(105)), None);
+        // eine beantwortete Frage schließt alle bis dahin begonnenen aus
+        log.answered();
+        assert_eq!(log.request_for("Bash", s(105)), None);
+        log.note(&tool_msg("PreToolUse", "Bash", Some("b3"), Some("ls")), s(107));
+        assert_eq!(details(&log.request_for("Bash", s(108)).unwrap()), ["ls"]);
+        log.forget(log.request_for("Bash", s(108)).unwrap().calls[0].seq);
+        assert_eq!(log.request_for("Bash", s(108)), None);
+        // ohne Kennung (ältere Versionen): PostToolUse beendet den ältesten offenen ohne Kennung
+        log.note(&tool_msg("PreToolUse", "Grep", None, Some("x")), s(110));
+        log.note(&tool_msg("PreToolUse", "Grep", None, Some("y")), s(111));
+        log.note(&tool_msg("PostToolUse", "Grep", None, None), s(112));
+        assert_eq!(details(&log.request_for("Grep", s(112)).unwrap()), ["y"]);
+        for ev in ["UserPromptSubmit", "Stop", "SessionStart", "SessionEnd"] {
+            log.note(&tool_msg("PreToolUse", "Bash", None, Some("x")), s(120));
+            log.note(&HookMsg { event: ev.into(), ..HookMsg::default() }, s(120));
+            assert_eq!(log.request_for("Bash", s(120)), None, "{ev}");
+        }
+        // begrenzt und gealtert
+        for i in 0..40 {
+            log.note(&tool_msg("PreToolUse", "Bash", Some(&format!("i{i}")), Some(&format!("c{i}"))), s(130));
+        }
+        assert_eq!(log.request_for("Bash", s(130)).unwrap().calls.len(), TOOL_LOG_MAX);
+        log.note(&HookMsg { event: "Notification".into(), ..HookMsg::default() }, s(130) + OPEN_MAX_AGE);
+        assert!(log.open.is_empty());
+    }
+
+    /// Bestätigung über den Bildschirm: die Kurzfassung steht im Dialog unten (auch umbrochen im Rahmen), bei
+    /// Pfad-Werkzeugen genügt der Dateiname. Ohne Dialog, nur weiter oben in der Unterhaltung oder mit entschärften
+    /// Zeichen nie.
+    #[test]
+    fn the_screen_confirms_the_request_only_in_the_dialog() {
+        let dialog = "╭──────────────────────────────╮\n│ Bash command                 │\n│                              │\n│   cargo test --release --wor │\n│   kspace                     │\n│   Run the tests              │\n│                              │\n│ Do you want to proceed?      │\n│ ❯ 1. Yes                     │\n│   2. No, and tell Claude what to do differently (esc) │\n╰──────────────────────────────╯";
+        assert!(screen_confirms("Bash", "cargo test --release --workspace", dialog));
+        assert!(!screen_confirms("Bash", "cargo test --release --workspace --all", dialog), "mehr als im Dialog steht");
+        assert!(!screen_confirms("Bash", "rm -rf /", dialog));
+        let history = format!("● Bash(rm -rf build)\n{}\n> \n  ? for shortcuts", "x\n".repeat(40));
+        assert!(!screen_confirms("Bash", "rm -rf build", &history), "ohne Dialog");
+        let above = format!("● Bash(rm -rf build)\n{}{dialog}", "line\n".repeat(30));
+        assert!(!screen_confirms("Bash", "rm -rf build", &above), "nur in der Unterhaltung darüber");
+        let edit = "Edit file\n src/app/main.rs\n Do you want to make this edit to main.rs?\n ❯ 1. Yes\n   3. No, and tell Claude what to do differently (esc)";
+        assert!(screen_confirms("Edit", "C:\\Dev\\acme\\src\\app\\main.rs", edit));
+        assert!(!screen_confirms("Edit", "C:\\Dev\\acme\\src\\lib.rs", edit));
+        assert!(!screen_confirms("Bash", "cargo\u{FFFD}test", &dialog.replace("cargo test", "cargo\u{FFFD}test")));
+        let r = ToolRequest { tool: "Bash".into(), calls: vec![ToolCall { seq: 1, id: None, detail: "cargo test --release --workspace".into() }], confirmed: false };
+        assert!(r.confirms(dialog));
+        let two = ToolRequest { calls: vec![r.calls[0].clone(), r.calls[0].clone()], ..r.clone() };
+        assert!(!two.confirms(dialog), "zwei Kandidaten: nie bestätigt");
     }
 
     /// Jedes Ereignis, für das sich Paneldeck einträgt, kennt Claude Code mindestens so lange wie SessionEnd – ein
@@ -1718,9 +2237,15 @@ mod tests {
             other => panic!("{other:?}"),
         }
         // `--edit` (#54) kommt als eigener Befehl an.
-        assert!(forward_to_running(&dir, &IpcCmd::Edit { path: "C:\\x\\a.txt".into() }));
-        assert_eq!(srv.cmd_rx.recv_timeout(Duration::from_secs(2)).unwrap(), IpcCmd::Edit { path: "C:\\x\\a.txt".into() });
-        assert_eq!(parse_cmd(r#"{"token":"t","cmd":"edit","path":"C:\\y"}"#, "t"), Some(IpcCmd::Edit { path: "C:\\y".into() }));
+        assert!(forward_to_running(&dir, &IpcCmd::Edit { path: "C:\\x\\a.txt".into(), origin: None }));
+        assert_eq!(srv.cmd_rx.recv_timeout(Duration::from_secs(2)).unwrap(), IpcCmd::Edit { path: "C:\\x\\a.txt".into(), origin: None });
+        assert_eq!(parse_cmd(r#"{"token":"t","cmd":"edit","path":"C:\\y"}"#, "t"), Some(IpcCmd::Edit { path: "C:\\y".into(), origin: None }));
+        // #392: ein Linux-Pfad bekommt den Absender (für die Distribution seiner Sitzung)
+        assert!(forward_to_running(&dir, &IpcCmd::Edit { path: "/home/u/a.txt".into(), origin: None }));
+        match srv.cmd_rx.recv_timeout(Duration::from_secs(2)).unwrap() {
+            IpcCmd::Edit { path, origin } => assert!(path == "/home/u/a.txt" && origin.is_some()),
+            other => panic!("{other:?}"),
+        }
         assert_eq!(parse_cmd(r#"{"token":"t","cmd":"edit"}"#, "t"), None, "ohne Pfad");
         assert_eq!(parse_cmd(r#"{"token":"u","cmd":"edit","path":"C:\\y"}"#, "t"), None, "falscher Token");
         // veraltete Datei (falscher Port) → keine Bestätigung

@@ -2,6 +2,11 @@
 //! ändern). Fehlt das Feld (ältere Dateien), gelten die Standards; ein falscher Typ eines einzelnen Werts ergibt nur für
 //! diesen Wert den Standard, unbekannte Werte werden ignoriert. Die drei Agenten-Schalter sind immer aus, wenn sie nicht
 //! ausdrücklich `true` sind. Ab 3.1.0 (#312, Syntax-Modus): `default_mode`, `language_modes`, `language_map`.
+//! Ab 3.2.0 (#381): `menu_bar` (Menüleiste je Teilung, Standard an – aus nur bei ausdrücklichem `false`),
+//! und der Agenten-Schalter `agent_format` (Standard aus). Formatiert wird nie von allein: nur auf Knopfdruck oder über
+//! eine Regel mit der Aktion *Formatieren* (Aktionen beim Speichern, #383); es gibt keine eigene Einstellung dafür.
+//! Ab 3.2.0 (#385, Vergleich und Änderungsmarken): `change_markers`, `marker_base`, `diff_context`,
+//! `diff_ignore_whitespace`, `diff_layout`.
 
 use crate::editor::syntax::{Mode, UserMap};
 use serde::{Deserialize, Serialize};
@@ -23,6 +28,50 @@ pub const MAX_EXCLUDE_LEN: usize = 260;
 pub const MAX_LANGUAGE_ENTRIES: usize = 500;
 pub const MAX_LANGUAGE_ID_LEN: usize = 100;
 pub const MAX_PATTERN_LEN: usize = 260;
+/// Standard und Grenzen der Kontextzeilen im Vergleich (#385).
+pub const DEFAULT_DIFF_CONTEXT: u32 = 3;
+pub const DIFF_CONTEXT_RANGE: (u32, u32) = (0, 50);
+
+/// Womit die Änderungsmarken vergleichen (#385): `git` = Index und HEAD zugleich (außerhalb eines Repositorys und für
+/// Dateien, die git nicht kennt, die Datei auf der Platte), `disk` = immer die gespeicherte Datei.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MarkerBase {
+    #[default]
+    Git,
+    Disk,
+}
+
+impl MarkerBase {
+    pub fn from_id(s: &str) -> Option<MarkerBase> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "git" => Some(MarkerBase::Git),
+            "disk" => Some(MarkerBase::Disk),
+            _ => None,
+        }
+    }
+}
+
+/// Darstellung des Vergleichs (#385): `auto` = nebeneinander, in schmalen Teilungen (unter ~700 px) untereinander.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DiffLayout {
+    #[default]
+    Auto,
+    Split,
+    Unified,
+}
+
+impl DiffLayout {
+    pub fn from_id(s: &str) -> Option<DiffLayout> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "auto" => Some(DiffLayout::Auto),
+            "split" => Some(DiffLayout::Split),
+            "unified" => Some(DiffLayout::Unified),
+            _ => None,
+        }
+    }
+}
 
 /// Einstellungen des Editors (`settings.json` → `editor`).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -53,6 +102,21 @@ pub struct EditorSettings {
     /// Eigene Zuordnungen (Muster → Sprach-Id), vor der eingebauten Erkennung: Dateiname (`Jenkinsfile`) oder Endung
     /// (`*.tpl`, `.tpl`).
     pub language_map: BTreeMap<String, String>,
+    /// Menüleiste (*Datei · Bearbeiten · Ansicht · Format*) über jeder Teilung (#381). Standard an.
+    pub menu_bar: bool,
+    /// Agenten dürfen offene JSON/XML-Dokumente formatieren (MCP `format_file` außer `validate`; ungespeichert, als
+    /// „vom Agenten“ markiert, rückgängig zu machen). Standard aus.
+    pub agent_format: bool,
+    /// Änderungsmarken am linken Rand (#385), Standard aus.
+    pub change_markers: bool,
+    /// Grundlage der Änderungsmarken.
+    pub marker_base: MarkerBase,
+    /// Kontextzeilen um Änderungen im Vergleich (Rest eingeklappt).
+    pub diff_context: u32,
+    /// Vorgabe für *Leerraum ignorieren* im Vergleich (Standard aus).
+    pub diff_ignore_whitespace: bool,
+    /// Vorgabe der Darstellung im Vergleich.
+    pub diff_layout: DiffLayout,
 }
 
 impl Default for EditorSettings {
@@ -70,18 +134,28 @@ impl Default for EditorSettings {
             default_mode: Mode::Text,
             language_modes: BTreeMap::new(),
             language_map: BTreeMap::new(),
+            menu_bar: true,
+            agent_format: false,
+            change_markers: false,
+            marker_base: MarkerBase::Git,
+            diff_context: DEFAULT_DIFF_CONTEXT,
+            diff_ignore_whitespace: false,
+            diff_layout: DiffLayout::Auto,
         }
     }
 }
 
-/// Stand der drei Agenten-Schalter für Stellen ohne Zugriff auf die Einstellungen (Werkzeugliste der Chats), wie
-/// `mcp::LEVEL`: Bit 0 öffnen, 1 bearbeiten, 2 speichern, dazu [`DOCS_OPEN`]. Die Oberfläche schreibt ihn jedes Bild
+/// Stand der Agenten-Schalter für Stellen ohne Zugriff auf die Einstellungen (Werkzeugliste der Chats), wie
+/// `mcp::LEVEL`: Bit 0 öffnen, 1 bearbeiten, 2 speichern, dazu [`DOCS_OPEN`] und [`FORMAT`] (formatieren, #381). Die Oberfläche schreibt ihn jedes Bild
 /// ([`publish`]); geprüft wird beim Ausführen trotzdem immer an den Einstellungen selbst.
 pub static AGENT_SWITCHES: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
 
 /// Bit in [`AGENT_SWITCHES`]: Im Editor ist mindestens ein Dokument offen (sonst gibt es für Chats nichts zu lesen,
 /// zu bearbeiten oder zu speichern, und die Werkzeuge kosteten nur Platz im Kontext kleiner Modelle).
 pub const DOCS_OPEN: u8 = 8;
+
+/// Bit in [`AGENT_SWITCHES`]: *Agenten dürfen formatieren* (`agent_format`, #381).
+pub const FORMAT: u8 = 16;
 
 /// Schalter und „Dokumente offen“ veröffentlichen (jedes Bild).
 pub fn publish(s: &EditorSettings, docs_open: bool) {
@@ -90,7 +164,7 @@ pub fn publish(s: &EditorSettings, docs_open: bool) {
 
 /// Schalter als Bits (siehe [`AGENT_SWITCHES`]).
 pub fn switch_bits(s: &EditorSettings) -> u8 {
-    (s.agent_open as u8) | ((s.agent_edit as u8) << 1) | ((s.agent_save as u8) << 2)
+    (s.agent_open as u8) | ((s.agent_edit as u8) << 1) | ((s.agent_save as u8) << 2) | if s.agent_format { FORMAT } else { 0 }
 }
 
 /// Was ein Agent im Editor tun will (je ein Schalter).
@@ -99,6 +173,8 @@ pub enum AgentRight {
     Open,
     Edit,
     Save,
+    /// JSON/XML formatieren (MCP `format_file`, #381).
+    Format,
 }
 
 impl EditorSettings {
@@ -134,6 +210,14 @@ impl EditorSettings {
                 .and_then(Value::as_object)
                 .map(|m| m.iter().filter_map(|(k, v)| Some((clean_pattern(k)?, clean_id(v.as_str()?)?))).take(MAX_LANGUAGE_ENTRIES).collect())
                 .unwrap_or_default(),
+            // Standard an: aus nur bei ausdrücklichem `false`.
+            menu_bar: o.get("menu_bar").and_then(Value::as_bool) != Some(false),
+            agent_format: flag("agent_format"),
+            change_markers: flag("change_markers"),
+            marker_base: o.get("marker_base").and_then(Value::as_str).and_then(MarkerBase::from_id).unwrap_or_default(),
+            diff_context: num("diff_context", d.diff_context, DIFF_CONTEXT_RANGE),
+            diff_ignore_whitespace: flag("diff_ignore_whitespace"),
+            diff_layout: o.get("diff_layout").and_then(Value::as_str).and_then(DiffLayout::from_id).unwrap_or_default(),
         }
     }
 
@@ -159,6 +243,7 @@ impl EditorSettings {
             AgentRight::Open => self.agent_open,
             AgentRight::Edit => self.agent_edit,
             AgentRight::Save => self.agent_save,
+            AgentRight::Format => self.agent_format,
         }
     }
 
@@ -212,16 +297,22 @@ mod tests {
         assert_eq!(d.font, "", "leer = Terminalschrift");
         assert_eq!(d.large_file_mb, 20);
         assert!(!d.autosave && !d.search_include_ignored);
-        assert!(!d.agent_open && !d.agent_edit && !d.agent_save, "Agenten-Schalter sind standardmäßig aus");
+        assert!(!d.agent_open && !d.agent_edit && !d.agent_save && !d.agent_format, "Agenten-Schalter sind standardmäßig aus");
+        assert!(d.menu_bar, "Menüleiste standardmäßig an (#381)");
         assert_eq!(d.large_file_bytes(), 20 * 1024 * 1024);
-        for r in [AgentRight::Open, AgentRight::Edit, AgentRight::Save] {
+        for r in [AgentRight::Open, AgentRight::Edit, AgentRight::Save, AgentRight::Format] {
             assert!(!d.allows(r));
         }
         // Serialisiert mit genau den dokumentierten Feldnamen (öffentliches Datenformat).
         let v = serde_json::to_value(&d).unwrap();
         let mut keys: Vec<&str> = v.as_object().unwrap().keys().map(String::as_str).collect();
         keys.sort();
-        assert_eq!(keys, ["agent_edit", "agent_open", "agent_save", "autosave", "autosave_delay_ms", "default_mode", "font", "language_map", "language_modes", "large_file_mb", "search_exclude", "search_include_ignored"]);
+        assert_eq!(
+            keys,
+            ["agent_edit", "agent_format", "agent_open", "agent_save", "autosave", "autosave_delay_ms", "change_markers", "default_mode", "diff_context", "diff_ignore_whitespace", "diff_layout", "font", "language_map", "language_modes", "large_file_mb", "marker_base", "menu_bar", "search_exclude", "search_include_ignored"]
+        );
+        assert!(!d.change_markers, "Änderungsmarken sind standardmäßig aus (#385)");
+        assert_eq!((v["marker_base"].as_str(), v["diff_layout"].as_str(), d.diff_context), (Some("git"), Some("auto"), 3));
         assert_eq!(v["default_mode"], "text", "neue Dateien: Text");
         assert!(d.language_modes.is_empty() && d.language_map.is_empty());
     }
@@ -254,6 +345,37 @@ mod tests {
         let v = serde_json::to_value(&s).unwrap();
         assert_eq!(v["language_modes"]["python"], "syntax");
         assert_eq!(v["language_map"]["*.tpl"], "html");
+    }
+
+    #[test]
+    fn format_settings_of_3_2_0_round_trip_and_old_files_load() {
+        // Datei von 3.1.0 ohne die neuen Felder: Menüleiste an, alles andere aus.
+        let old = EditorSettings::from_value(&json!({"font": "", "agent_edit": true}));
+        assert!(old.menu_bar && !old.agent_format);
+        assert_eq!(switch_bits(&old) & FORMAT, 0);
+        let s = EditorSettings::from_value(&json!({"menu_bar": false, "format_on_save_json": true, "format_on_save_xml": "yes", "agent_format": true}));
+        // Die Schlüssel `format_on_save_*` gab es nur in Vorabständen von 3.2.0: sie werden ignoriert.
+        assert!(!s.menu_bar && s.agent_format);
+        assert!(!serde_json::to_value(&s).unwrap().as_object().unwrap().keys().any(|k| k.starts_with("format_on_save")));
+        assert!(s.allows(AgentRight::Format) && !s.allows(AgentRight::Edit));
+        assert_eq!(switch_bits(&s), FORMAT);
+        // Falscher Typ: Menüleiste bleibt an (Standard).
+        assert!(EditorSettings::from_value(&json!({"menu_bar": 0})).menu_bar);
+        let back = EditorSettings::from_value(&serde_json::to_value(&s).unwrap());
+        assert_eq!(back, s);
+    }
+
+    #[test]
+    fn diff_settings_are_lenient_and_old_files_load() {
+        let old = EditorSettings::from_value(&json!({"font": "", "default_mode": "text"}));
+        assert!(!old.change_markers && !old.diff_ignore_whitespace);
+        assert_eq!((old.marker_base, old.diff_layout, old.diff_context), (MarkerBase::Git, DiffLayout::Auto, DEFAULT_DIFF_CONTEXT));
+        let s = EditorSettings::from_value(&json!({"change_markers": true, "marker_base": "DISK", "diff_context": 999, "diff_ignore_whitespace": true, "diff_layout": "unified"}));
+        assert!(s.change_markers && s.diff_ignore_whitespace);
+        assert_eq!((s.marker_base, s.diff_layout, s.diff_context), (MarkerBase::Disk, DiffLayout::Unified, DIFF_CONTEXT_RANGE.1));
+        let bad = EditorSettings::from_value(&json!({"change_markers": "yes", "marker_base": "head", "diff_context": "x", "diff_layout": 3}));
+        assert_eq!(bad, EditorSettings::default());
+        assert_eq!(EditorSettings::from_value(&serde_json::to_value(&s).unwrap()), s);
     }
 
     #[test]

@@ -704,6 +704,10 @@ fn tool_line(ui: &mut Ui, id: Id, name: &str, call: Option<(&str, &serde_json::V
     // Ein Aufruf ohne erkennbaren Namen (als Text geschrieben) heißt „?“.
     let name = if name.trim().is_empty() { "?" } else { name };
     job.append(name, 0.0, egui::TextFormat { font_id: FontId::monospace(12.5), color: ui.visuals().text_color(), ..Default::default() });
+    // `more_tools` (#393): was nachgeschlagen wird, dezent dahinter.
+    if let Some(what) = (name == crate::chat::more_tools::NAME).then(|| more_tools_label(args, lang)).flatten() {
+        job.append(&what, 6.0, egui::TextFormat { font_id: FontId::proportional(12.0), color: style::dim(ui), ..Default::default() });
+    }
     if let Some((mark, col)) = mark {
         job.append(mark, 6.0, egui::TextFormat { font_id: FontId::proportional(12.5), color: col, ..Default::default() });
     }
@@ -731,6 +735,14 @@ fn tool_line(ui: &mut Ui, id: Id, name: &str, call: Option<(&str, &serde_json::V
     if let (Some(CallState::Approval), Some((call_id, args))) = (state, call) {
         approval(ui, id, call_id, name, args, target, preview, lang, out);
     }
+}
+
+/// Zusatz zur Zeile eines `more_tools`-Aufrufs (#393): „weitere Werkzeuge auflisten“ bzw. „lädt <Werkzeug>“.
+fn more_tools_label(args: Option<&serde_json::Value>, lang: Lang) -> Option<String> {
+    Some(match args.and_then(crate::chat::more_tools::wanted) {
+        Some(tool) => format!("{} {}", lang.t("· lädt", "· loads"), crate::mcp::short(&tool, 60)),
+        None => lang.t("· weitere Werkzeuge auflisten", "· list more tools").to_string(),
+    })
 }
 
 /// Zeilen der Diff-Vorschau, die ohne Scrollen sichtbar sind.
@@ -837,8 +849,9 @@ fn approval(ui: &mut Ui, id: Id, call_id: &str, name: &str, args: &serde_json::V
             let more = if lang == Lang::De { format!("+{hidden} Zeichen – nach unten scrollen, um alles zu sehen") } else { format!("+{hidden} characters – scroll down to see everything") };
             ui.label(RichText::new(more).small().color(warn));
         }
+        // Die Antworten ohne eigene Farbe (#390): nichts lädt dazu ein, freizugeben, ohne den Aufruf oben zu lesen.
         ui.horizontal_wrapped(|ui| {
-            let allow = ui.add(egui::Button::new(RichText::new(lang.t("Erlauben", "Allow")).strong()).fill(crate::style::ui().chat_send));
+            let allow = ui.button(lang.t("Erlauben", "Allow"));
             // „Immer“ nur mit Ziel-Sitzung (Werkzeug + Sitzung); Tickets, Todos, create_session … fragen jedes Mal.
             // Agenten-Werkzeuge (#338): je Werkzeug für den Chat, Befehle nur für denselben Anfang (`cargo test`).
             // Sensible Dateien (#338): jedes Mal fragen.
@@ -1797,6 +1810,16 @@ mod tests {
                 h.frame(&mut c, lang, false, vec![]);
                 assert!(h.texts.iter().any(|t| t == hint), "{:?}", h.texts);
                 assert!(h.texts.iter().any(|t| t == "send_text"), "Werkzeug: {:?}", h.texts);
+                // #390: Erlauben ohne eigene Farbe – wie Ablehnen; den Fokus hat kein Knopf
+                let fill = |label: &str| {
+                    let p = h.pos_of(label).unwrap();
+                    h.shapes.iter().filter_map(|s| match &s.shape {
+                        egui::Shape::Rect(r) if r.rect.contains(p) && r.rect.width() < 300.0 => Some((r.rect.area(), r.fill)),
+                        _ => None,
+                    }).min_by(|a, b| a.0.total_cmp(&b.0)).map(|x| x.1)
+                };
+                assert_eq!(fill(allow), fill(deny), "{label}");
+                assert_ne!(fill(allow), Some(crate::style::ui().chat_send));
                 assert!(h.texts.iter().any(|t| t == if lang == Lang::De { "Stopp" } else { "Stop" }), "während der Frage: Stopp");
                 // Enter im (fokussierten) Eingabefeld gibt nicht frei
                 h.frame(&mut c, lang, false, vec![Event::Text("x".into())]);

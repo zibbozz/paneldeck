@@ -171,6 +171,11 @@ pub(super) struct TplForm {
     pub(super) legacy_rest: String,
     pub(super) error: Option<String>,
     focus: bool,
+    /// Reiter „Umgebung“ (#384).
+    pub(super) env: super::env_ui::EnvEditor,
+    /// Das Ordnerfeld lässt den Wert nicht übernehmen (#392: ungültiger/fehlender Linux-Ordner, andere Distribution,
+    /// Linux-Pfad für eine Windows-Shell) – Speichern gesperrt.
+    pub(super) folder_block: Option<String>,
 }
 
 impl TplForm {
@@ -191,9 +196,11 @@ impl TplForm {
             opts: item.opts(),
             legacy_rest: templates::legacy_rest(&item.claude_args),
             members: t.items.iter().map(|i| i.name.clone()).collect(),
+            env: super::env_ui::EnvEditor::of(&item.env),
             item,
             error: None,
             focus: true,
+            folder_block: None,
         }
     }
 
@@ -247,6 +254,11 @@ impl TplForm {
         if n.is_empty() {
             return Err(lang.t("Bitte einen Namen eingeben.", "Please enter a name.").to_string());
         }
+        if self.terminal {
+            if let Some((_, e)) = self.env.problems(lang).0.first() {
+                return Err(format!("{}: {e}", lang.t("Umgebung", "Environment")));
+            }
+        }
         let own = self.live_index(list);
         if list.iter().enumerate().any(|(i, t)| Some(i) != own && t.name.trim().eq_ignore_ascii_case(n)) {
             return Err(format!("{} {}", lang.t("Eine Vorlage heißt schon", "A template is already named"), lang.q(n)));
@@ -288,7 +300,7 @@ pub(super) fn tpl_form_ui(ctx: &egui::Context, f: &mut TplForm, shells: &[ShellS
         tabs::activate(ctx, SALT);
     }
     let enter = tabs::enter_confirms(ctx, SALT, win);
-    let tab_list = tabs::session_tabs(f.terminal && f.item.claude);
+    let tab_list = tabs::session_tabs_env(f.terminal && f.item.claude, f.terminal);
     tabs::handle_keys(ctx, SALT, win, &tab_list);
     let defaults = dialogs::user_defaults(ctx);
     let width = tabs::dialog_width(ctx);
@@ -328,7 +340,11 @@ pub(super) fn tpl_form_ui(ctx: &egui::Context, f: &mut TplForm, shells: &[ShellS
             let target = match shells.iter().find(|s| s.id == eff_shell) {
                 Some(s) => super::folder_picker::Target::for_shell(Some(s), false),
                 None if eff_shell.starts_with("wsl") => super::folder_picker::Target::Wsl { distro: eff_shell.strip_prefix("wsl:").filter(|d| !d.is_empty()).map(str::to_string), choose_distro: false },
-                None => super::folder_picker::Target::Windows,
+                // Eigenes Profil (z. B. Git Bash an anderem Ort): nach seinem Programm.
+                None => match custom_prof {
+                    Some(p) => super::folder_picker::Target::for_shell(Some(&ShellSpec { id: eff_shell.clone(), label: p.name.clone(), program: p.program.clone(), args: Vec::new() }), false),
+                    None => super::folder_picker::Target::Windows,
+                },
             };
             let claude_on = f.item.claude;
             // Wie die Standards: kein bypassPermissions in einer Vorlage (Datei kann weitergegeben werden).
@@ -337,11 +353,28 @@ pub(super) fn tpl_form_ui(ctx: &egui::Context, f: &mut TplForm, shells: &[ShellS
             if claude_on {
                 infos.extend(dialogs::claude_tab_infos(&f.opts, &defaults, &chk));
             }
+            infos.push(f.env.tab_info(lang));
             let tab = tabs::strip(ui, lang, SALT, &infos);
             invalid = tabs::invalid_hint(lang, &infos);
+            let prof_env = profiles.iter().find(|p| p.id == f.item.profile).map(|p| (crate::session_env::from_profile(&p.env).iter().map(|e| e.name.clone()).collect::<Vec<_>>().join(", "), p.name.clone()));
             tabs::body(ui, SALT, tab, body_h, |ui| {
                 if tab == Tab::General {
-                    tpl_general(ui, f, shells, profiles, folders, claude_mode, &eff_shell, custom_prof.is_some(), lang);
+                    tpl_general(ui, f, shells, profiles, folders, claude_mode, &eff_shell, &target, custom_prof.is_some(), lang);
+                    return;
+                }
+                if tab == Tab::Environment {
+                    let wsl = matches!(target, super::folder_picker::Target::Wsl { .. });
+                    let opts = super::env_ui::EnvUiOpts { lang, salt: SALT, wsl, claude: f.item.claude, profile: prof_env.as_ref().map(|(n, p)| (n.as_str(), p.as_str())) };
+                    super::env_ui::env_tab_ui(ui, &mut f.env, opts);
+                    ui.add_space(4.0);
+                    dialogs::hint_label(
+                        ui,
+                        lang.t(
+                            "Jede Sitzung aus der Vorlage bekommt beim Start eine Kopie der Variablen. Geheime Werte sind verschlüsselt und nur für dich auf diesem Rechner lesbar – auf einem anderen Rechner müssen sie neu eingegeben werden.",
+                            "Every session from the template gets a copy of the variables at start. Secret values are encrypted and only readable for you on this computer – on another computer they must be entered again.",
+                        ),
+                        style::dim(ui),
+                    );
                     return;
                 }
                 let TplForm { opts, conv, legacy_rest, item, .. } = &mut *f;
@@ -402,11 +435,13 @@ pub(super) fn tpl_form_ui(ctx: &egui::Context, f: &mut TplForm, shells: &[ShellS
         }
         ui.add_space(6.0);
         ui.horizontal(|ui| {
-            let b = ui.add_enabled(opts_ok, egui::Button::new(lang.t("Speichern", "Save")));
+            let blocked = f.terminal && f.folder_block.is_some();
+            let b = ui.add_enabled(opts_ok && !blocked, egui::Button::new(lang.t("Speichern", "Save")));
             mark(ui, "save", &b);
             if b.clicked() {
                 out = FormOut::Save;
             }
+            let invalid = if blocked { f.folder_block.clone() } else { invalid.clone() };
             tabs::show_invalid(ui, &invalid, &b);
             let c = ui.button(lang.t("Abbrechen", "Cancel"));
             mark(ui, "cancel", &c);
@@ -427,7 +462,8 @@ pub(super) fn tpl_form_ui(ctx: &egui::Context, f: &mut TplForm, shells: &[ShellS
 /// Reiter *Allgemein* einer Terminal-Vorlage: Sitzungsname, Claude starten, Profil, Shell, Startordner, Ordner im Baum,
 /// Farbe, Tags, Notizen.
 #[allow(clippy::too_many_arguments)]
-fn tpl_general(ui: &mut Ui, f: &mut TplForm, shells: &[ShellSpec], profiles: &[Profile], folders: &[String], claude_mode: bool, eff_shell: &str, custom: bool, lang: Lang) {
+#[allow(clippy::too_many_arguments)]
+fn tpl_general(ui: &mut Ui, f: &mut TplForm, shells: &[ShellSpec], profiles: &[Profile], folders: &[String], claude_mode: bool, eff_shell: &str, target: &super::folder_picker::Target, custom: bool, lang: Lang) {
     egui::Grid::new("tpl_editor_grid").num_columns(2).spacing([8.0, 8.0]).min_col_width(140.0).show(ui, |ui| {
         ui.label(lang.t("Sitzungsname", "Session name"));
         ui.add(egui::TextEdit::singleline(&mut f.item.name).desired_width(dialogs::FIELD_W).hint_text(lang.t("leer = Name der Vorlage", "empty = template name")));
@@ -472,7 +508,8 @@ fn tpl_general(ui: &mut Ui, f: &mut TplForm, shells: &[ShellSpec], profiles: &[P
         }
         ui.end_row();
         ui.label(lang.t("Startordner", "Start folder"));
-        session_settings::folder_field(ui, &mut f.item.cwd, eff_shell, false, lang);
+        // Ordnerfeld nach der Shell der Vorlage (#392): WSL-Pfade, Git Bash `/c/x`, `~`.
+        f.folder_block = session_settings::folder_field(ui, "tpl_cwd", &mut f.item.cwd, target, false, lang, &Default::default()).blocking;
         ui.end_row();
         if eff_shell.starts_with("wsl") {
             #[cfg(test)]
@@ -545,6 +582,9 @@ impl App {
             notes: e.meta.notes.clone(),
             claude_opts: if e.meta.claude { o } else { ClaudeOpts::default() },
             continue_last: false,
+            // Umgebungsvariablen (#384): geheime nur als Name (Gruppen-Vorlagen fragen nicht nach, siehe
+            // `TemplateFromSession` für die Terminal-Vorlage mit Rückfrage).
+            env: e.meta.env.iter().map(|v| if v.secret { crate::session_env::EnvVar { value_protected: None, ..v.clone() } } else { v.clone() }).collect(),
             ..TplItem::default()
         };
         // „Fortsetzen nach Neustart“ aus dem wirksamen Modus (samt `claude_continue` für ältere Versionen, #302).
@@ -627,6 +667,8 @@ impl App {
                 own = templates::strip_risky(&own);
             }
             let claude_opts = claude.then(|| own.or(&defaults));
+            // Die Sitzung kopiert die Variablen der Vorlage (#384).
+            let env = it.env.clone();
             let id = self.new_session(
                 ctx,
                 NewOpts {
@@ -642,6 +684,7 @@ impl App {
                     group: Some(group),
                     resume_mode: Some(it.resume_mode()),
                     quiet: pane.is_some(),
+                    env,
                     ..NewOpts::default()
                 },
             );
@@ -673,6 +716,16 @@ impl App {
         if let Err(e) = f.check(&self.templates, lang) {
             f.error = Some(e);
             return false;
+        }
+        // Umgebungsvariablen (#384): geheime Werte jetzt verschlüsseln (geht das nicht, bleibt der Editor offen).
+        if f.terminal {
+            match f.env.to_vars(lang) {
+                Ok(v) => f.item.env = v,
+                Err(e) => {
+                    f.error = Some(e);
+                    return false;
+                }
+            }
         }
         let idx = f.live_index(&self.templates);
         let t = f.to_template(idx.and_then(|i| self.templates.get(i)));

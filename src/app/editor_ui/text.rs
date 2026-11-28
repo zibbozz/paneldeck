@@ -76,6 +76,8 @@ pub(crate) struct View {
     minimap_drag: Option<f32>,
     scroll_drag: Option<f32>,
     blink_epoch: f64,
+    /// Waagerechte Bildlaufleiste (#389).
+    pub(super) hscroll: super::hscroll::HScroll,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -238,6 +240,10 @@ pub(super) struct TextCx<'a> {
     pub request_focus: bool,
     pub find: Option<&'a super::find::Highlight>,
     pub lang: Lang,
+    /// Änderungsmarken am Rand (#385; `None` = aus).
+    pub marks: Option<&'a crate::editor::linemarks::LineMarks>,
+    /// Zeile, unter der das Fenster einer Marke offen ist (liefert seinen Anker in [`TextOut::popup_anchor`]).
+    pub popup_line: Option<usize>,
 }
 
 /// Ergebnis eines Bildes.
@@ -247,6 +253,10 @@ pub(super) struct TextOut {
     pub clicked: bool,
     /// Der Text wurde über diese Ansicht geändert.
     pub edited: bool,
+    /// Klick auf eine Änderungsmarke in dieser Zeile (#385).
+    pub strip_click: Option<usize>,
+    /// Unterkante der Zeile [`TextCx::popup_line`] (links am Text) und Breite des Textfelds, wenn sie sichtbar ist.
+    pub popup_anchor: Option<(Pos2, f32)>,
 }
 
 /// Eine sichtbare Bildschirmzeile.
@@ -317,8 +327,9 @@ pub(super) fn show(ui: &mut Ui, rect: Rect, d: &mut DocEntry, view: &mut View, c
     let minimap = show_minimap.then(|| Rect::from_min_max(Pos2::new(scrollbar.left() - MINIMAP_W, rect.top()), Pos2::new(scrollbar.left(), rect.bottom())));
     let text_right = minimap.map(|m| m.left()).unwrap_or(scrollbar.left()) - 4.0;
     let gutter = Rect::from_min_max(rect.min, Pos2::new(rect.left() + gutter_w, rect.bottom()));
-    let text = Rect::from_min_max(Pos2::new(gutter.right() + 6.0, rect.top() + 2.0), Pos2::new(text_right.max(gutter.right() + 20.0), rect.bottom()));
+    let mut text = Rect::from_min_max(Pos2::new(gutter.right() + 6.0, rect.top() + 2.0), Pos2::new(text_right.max(gutter.right() + 20.0), rect.bottom()));
     let wrap_cols = (cx.wrap && !large).then(|| ((text.width() / cw).floor() as usize).max(8));
+    let mut hbar = hbar_prepare(ui, doc, &mut d.width, view, wrap_cols.is_none(), tab, cw, &mut text, gutter.right(), minimap.map(|m| m.left()).unwrap_or(scrollbar.left()), rect.bottom());
     let geo = Geo { text, gutter, scrollbar, row_h, cw, wrap_cols, tab };
 
     // ---- Eingaben ----
@@ -329,7 +340,9 @@ pub(super) fn show(ui: &mut Ui, rect: Rect, d: &mut DocEntry, view: &mut View, c
     // Mausrad
     if resp.hovered() || ui.rect_contains_pointer(rect) {
         let (dy, dx, shift) = ui.input(|i| (i.smooth_scroll_delta.y, i.smooth_scroll_delta.x, i.modifiers.shift));
-        let (dy, dx) = if shift && dx == 0.0 { (0.0, dy) } else { (dy, dx) };
+        // Umschalt+Rad und das Rad über der waagerechten Leiste rollen waagerecht.
+        let over_hbar = hbar.as_ref().and_then(|h| h.area).is_some_and(|a| ui.rect_contains_pointer(a));
+        let (dy, dx) = if (shift || over_hbar) && dx == 0.0 { (0.0, dy) } else { (dy, dx) };
         if dy != 0.0 {
             view.top_off -= dy;
             normalize_scroll(doc, view, &geo);
@@ -343,10 +356,14 @@ pub(super) fn show(ui: &mut Ui, rect: Rect, d: &mut DocEntry, view: &mut View, c
         reveal_cursor(doc, view, &geo);
     }
     normalize_scroll(doc, view, &geo);
+    hbar_clamp(doc, view, tab, hbar.as_mut());
 
     // ---- sichtbare Zeilen ----
     let rows = visible_rows(doc, view, &geo);
-    edited |= mouse(ui, &resp, doc, view, &geo, &rows, cx);
+    out.strip_click = strip_click(ui, &resp, &geo, &rows, cx);
+    if out.strip_click.is_none() {
+        edited |= mouse(ui, &resp, doc, view, &geo, &rows, cx);
+    }
     let rows = if edited { visible_rows(doc, view, &geo) } else { rows };
     // Syntaxfarben der sichtbaren Zeilen (gemeinsam für alle Ansichten des Dokuments).
     let mut hl = d.syntax.hl.as_mut();
@@ -355,12 +372,21 @@ pub(super) fn show(ui: &mut Ui, rect: Rect, d: &mut DocEntry, view: &mut View, c
     {
         ui.ctx().request_repaint_after(SYNTAX_POLL);
     }
+    hbar_clamp(doc, view, tab, hbar.as_mut()); // nach dem Rollen beim Ziehen
     paint(ui, rect, doc, view, &geo, &rows, cx, focused, hl.as_deref());
+    if let Some(line) = cx.popup_line
+        && let Some(r) = rows.iter().rfind(|r| r.line == line)
+    {
+        out.popup_anchor = Some((Pos2::new(geo.text.left(), r.y + geo.row_h + 2.0), geo.text.width()));
+    }
     if let Some(m) = minimap {
         minimap_ui(ui, m, doc, view, &geo, cx);
         crate::app::tutorial::spot_rect(ui, crate::app::tutorial::Spot::EditorMinimap, m);
     }
     scrollbar_ui(ui, &geo, doc, view, &rows, cx);
+    if let Some(h) = &hbar {
+        hbar_ui(ui, h, &geo, view, cx, rect.bottom());
+    }
     if focused {
         ime_output(ui, rect, doc, view, &geo, &rows, cx);
     }
@@ -985,11 +1011,54 @@ fn copy(ui: &Ui, doc: &mut Document, sels: &mut Selections, cut: bool) -> bool {
     edited
 }
 
+/// Streifen der Änderungsmarken (#385) zwischen Zeilennummer und Text: Balken für hinzugefügte/geänderte Zeilen,
+/// Dreieck an der Oberkante für entfernte Zeilen.
+fn paint_marks(p: &egui::Painter, g: &Geo, rows: &[Row], m: &crate::editor::linemarks::LineMarks, u: &crate::theme::tokens::UiColors, n_lines: usize) {
+    let x = g.gutter.right() + 1.0;
+    for r in rows {
+        let Some(k) = m.at(r.line) else { continue };
+        let hk = &m.hunks[k];
+        let col = super::marks::color(hk, u);
+        if hk.lines.is_empty() {
+            if r.first {
+                let y = r.y;
+                p.add(egui::Shape::convex_polygon(vec![Pos2::new(x - 1.0, y - 4.0), Pos2::new(x + 4.0, y), Pos2::new(x - 1.0, y + 4.0)], col, Stroke::NONE));
+            }
+        } else {
+            p.rect_filled(Rect::from_min_max(Pos2::new(x, r.y), Pos2::new(x + 3.0, r.y + g.row_h)), 0.0, col);
+        }
+    }
+    // Entfernt hinter der letzten Zeile: Dreieck an deren Unterkante.
+    if let (Some(last), Some(hk)) = (rows.last(), m.hunks.last())
+        && hk.lines.is_empty()
+        && hk.lines.start >= n_lines.saturating_sub(1)
+        && last.line + 1 >= n_lines
+        && m.at(last.line).is_none()
+    {
+        let y = last.y + g.row_h;
+        p.add(egui::Shape::convex_polygon(vec![Pos2::new(x - 1.0, y - 4.0), Pos2::new(x + 4.0, y), Pos2::new(x - 1.0, y + 4.0)], super::marks::color(hk, u), Stroke::NONE));
+    }
+}
+
+/// Klick auf den Streifen der Änderungsmarken: Zeile der Marke (das Fenster öffnet der Aufrufer).
+fn strip_click(ui: &Ui, resp: &egui::Response, g: &Geo, rows: &[Row], cx: &TextCx) -> Option<usize> {
+    let m = cx.marks?;
+    let (pressed, pos) = ui.input(|i| (i.pointer.primary_pressed(), i.pointer.interact_pos()));
+    let p = pos?;
+    if !pressed || !resp.hovered() || p.x < g.gutter.right() - 3.0 || p.x > g.text.left() - 1.0 {
+        return None;
+    }
+    let r = rows.iter().rev().find(|r| p.y >= r.y && p.y < r.y + g.row_h)?;
+    // Löschmarke an der Oberkante gehört zur Zeile darunter, auch wenn knapp darüber geklickt wird.
+    m.at(r.line).map(|_| r.line).or_else(|| (p.y - r.y > g.row_h * 0.7).then(|| r.line + 1).filter(|l| m.at(*l).is_some_and(|k| m.hunks[k].lines.is_empty())))
+}
+
 /// Alles zeichnen: Zeilennummern, aktuelle Zeile, Auswahlen, Treffer, Agenten-Markierungen, Text, Cursor.
 #[allow(clippy::too_many_arguments)]
 fn paint(ui: &Ui, rect: Rect, doc: &Document, view: &View, g: &Geo, rows: &[Row], cx: &TextCx, focused: bool, hl: Option<&DocHighlight>) {
     let u = style::ui();
-    let painter = ui.painter_at(rect);
+    // Nicht unter die waagerechte Leiste (#389) zeichnen: unten endet alles mit dem Textfeld.
+    let painter = ui.painter_at(Rect::from_min_max(rect.min, Pos2::new(rect.right(), g.text.bottom())));
     let fg = cx.theme.fg;
     let dim = style::dim(ui);
     let text_p = painter.with_clip_rect(g.text.expand2(Vec2::new(2.0, 0.0)).intersect(rect));
@@ -997,8 +1066,13 @@ fn paint(ui: &Ui, rect: Rect, doc: &Document, view: &View, g: &Geo, rows: &[Row]
     let primary_line = sels.map(|s| doc.char_to_line(s.primary().head));
     let sel_lines: Vec<usize> = sels.map(|s| s.iter().map(|x| doc.char_to_line(x.head)).collect()).unwrap_or_default();
     let scroll = if g.wrap_cols.is_some() { 0.0 } else { view.scroll_x };
-    // Gutter
-    painter.rect_filled(g.gutter, 0.0, cx.theme.bg);
+    // Gutter (mit eigenem Hintergrund des Themes deckt die Mitte schon in der Deckkraft des Editors, #387)
+    if !style::backdrop_on() {
+        painter.rect_filled(g.gutter, 0.0, cx.theme.bg);
+    }
+    if let Some(m) = cx.marks {
+        paint_marks(&painter, g, rows, m, &u, doc.len_lines());
+    }
     // Aktuelle Zeile(n)
     let only_cursors = sels.is_some_and(|s| s.iter().all(|x| x.is_empty()));
     for r in rows {
@@ -1186,7 +1260,9 @@ fn paint_row(p: &egui::Painter, doc: &Document, g: &Geo, r: &Row, scroll: f32, f
 fn minimap_ui(ui: &mut Ui, m: Rect, doc: &Document, view: &mut View, g: &Geo, cx: &TextCx) {
     let u = style::ui();
     let painter = ui.painter_at(m);
-    painter.rect_filled(m, 0.0, cx.theme.bg);
+    if !style::backdrop_on() {
+        painter.rect_filled(m, 0.0, cx.theme.bg);
+    }
     painter.line_segment([m.left_top(), m.left_bottom()], Stroke::new(1.0_f32, u.border.gamma_multiply(0.5)));
     let n = doc.len_lines();
     let fit = (m.height() / MINIMAP_ROW).floor() as usize;
@@ -1220,6 +1296,14 @@ fn minimap_ui(ui: &mut Ui, m: Rect, doc: &Document, view: &mut View, g: &Geo, cx
             painter.rect_filled(Rect::from_min_max(Pos2::new(m.left() + 4.0 + s as f32 * scale, y), Pos2::new(m.left() + 4.0 + v.min(MINIMAP_COLS) as f32 * scale, y + MINIMAP_ROW - 0.6)), 0.0, col);
         }
     }
+    // Änderungsmarken (#385) am linken Rand der Minimap
+    if let Some(mk) = cx.marks {
+        for hk in mk.hunks.iter().filter(|h| h.lines.end.max(h.lines.start + 1) > first && h.lines.start < first + fit) {
+            let y0 = m.top() + hk.lines.start.saturating_sub(first) as f32 * MINIMAP_ROW;
+            let hh = (hk.lines.len().max(1) as f32 * MINIMAP_ROW).max(2.0);
+            painter.rect_filled(Rect::from_min_size(Pos2::new(m.left() + 1.0, y0), Vec2::new(2.5, hh)), 0.0, super::marks::color(hk, &u));
+        }
+    }
     // Sichtbarer Ausschnitt
     let vy = m.top() + (view.top_line.saturating_sub(first)) as f32 * MINIMAP_ROW;
     let vr = Rect::from_min_size(Pos2::new(m.left() + 1.0, vy), Vec2::new(m.width() - 1.0, vis_lines as f32 * MINIMAP_ROW));
@@ -1250,10 +1334,17 @@ fn scrollbar_ui(ui: &mut Ui, g: &Geo, doc: &Document, view: &mut View, rows: &[R
     let u = style::ui();
     let n = doc.len_lines().max(1) as f32;
     let vis = rows.iter().map(|r| r.line).collect::<std::collections::BTreeSet<_>>().len().max(1) as f32;
-    if vis >= n && view.top_line == 0 {
+    if vis >= n && view.top_line == 0 && cx.marks.is_none_or(|m| m.hunks.is_empty()) {
         return;
     }
     let track = g.scrollbar.shrink2(Vec2::new(2.0, 2.0));
+    if let Some(m) = cx.marks {
+        for hk in &m.hunks {
+            let y = track.top() + hk.lines.start as f32 / n * track.height();
+            let hh = (hk.lines.len() as f32 / n * track.height()).max(2.0);
+            ui.painter().rect_filled(Rect::from_min_size(Pos2::new(g.scrollbar.left() + 1.0, y), Vec2::new(3.0, hh)), 0.0, super::marks::color(hk, &u));
+        }
+    }
     let h = (track.height() * (vis / n)).clamp(24.0, track.height());
     let frac = view.top_line as f32 / (n - 1.0).max(1.0);
     let y = track.top() + (track.height() - h) * frac.clamp(0.0, 1.0);
@@ -1284,4 +1375,39 @@ fn ime_output(ui: &Ui, rect: Rect, doc: &Document, view: &View, g: &Geo, rows: &
     let cursor_rect = Rect::from_min_size(p, Vec2::new(1.0, g.row_h));
     let to_global = ui.ctx().layer_transform_to_global(ui.layer_id()).unwrap_or_default();
     ui.ctx().output_mut(|o| o.ime = Some(egui::output::IMEOutput { rect: to_global * rect, cursor_rect: to_global * cursor_rect }));
+}
+
+// ---- waagerechte Bildlaufleiste (#389, Zeichnen und Messen in `hscroll`) ----
+
+/// Ohne Umbruch: längste Zeile messen und, wenn sie nicht passt, die Leiste unter den Text legen (`text` wird kürzer).
+#[allow(clippy::too_many_arguments)]
+fn hbar_prepare(ui: &Ui, doc: &Document, width: &mut super::hscroll::DocWidth, view: &mut View, no_wrap: bool, tab: usize, cw: f32, text: &mut Rect, left: f32, right: f32, bottom: f32) -> Option<super::hscroll::Layout> {
+    if !no_wrap {
+        view.hscroll.last_bar = None;
+        return None;
+    }
+    // Die Zeilen der Cursor zählen sofort (Tippen am Ende der längsten Zeile, während im Hintergrund gemessen wird).
+    let cur = match &view.sels {
+        Some(s) => view.hscroll.head_cols(doc, s, tab),
+        None => 0,
+    };
+    Some(super::hscroll::prepare(width, &mut view.hscroll, ui.ctx(), doc, tab, cw, cur, text, left, right, bottom))
+}
+
+/// Waagerechten Bildlauf auf die längste Zeile begrenzen (ohne Umbruch). Die Zeilen der Cursor zählen nach Eingaben
+/// in diesem Bild schon mit (Einfügen am Ende der längsten Zeile, auch mit mehreren Cursorn: sie bleiben sichtbar).
+fn hbar_clamp(doc: &Document, view: &mut View, tab: usize, h: Option<&mut super::hscroll::Layout>) {
+    let Some(h) = h else { return };
+    if let Some(s) = &view.sels {
+        h.include(view.hscroll.head_cols(doc, s, tab));
+    }
+    view.scroll_x = view.scroll_x.clamp(0.0, h.max);
+}
+
+/// Leiste zeichnen und bedienen; der Rand der Zeilennummern reicht weiter bis unten.
+fn hbar_ui(ui: &mut Ui, h: &super::hscroll::Layout, g: &Geo, view: &mut View, cx: &TextCx, bottom: f32) {
+    let Some(area) = h.area else { return };
+    ui.painter().rect_filled(Rect::from_min_max(Pos2::new(g.gutter.left(), area.top()), Pos2::new(g.gutter.right(), bottom)), 0.0, cx.theme.bg);
+    let View { scroll_x, hscroll, .. } = view;
+    super::hscroll::bar(ui, area, cx.id.with("hscroll"), scroll_x, &mut hscroll.drag, h.content, g.text.width());
 }

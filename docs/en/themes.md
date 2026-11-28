@@ -42,8 +42,8 @@ A theme file that cannot be loaded is listed under the theme choice with the rea
 4. *Reset to derived* removes the link again.
 
 ## How to share a theme
-- **Export:** choose the theme, then **⋯ → Export …** and pick where to save the JSON file.
-- **Import:** **⋯ → Import …** and choose a JSON file. An invalid file is refused with the reason; a name that is taken gets a number.
+- **Export:** choose the theme, then **⋯ → Export …** and pick where to save the JSON file. A theme with background images is saved as a **ZIP file** (`theme.json` plus the images).
+- **Import:** **⋯ → Import …** and choose a JSON or ZIP file. An invalid file is refused with the reason; a name that is taken gets a number. A ZIP may only contain `theme.json` and the images the theme refers to (bare names, no folders – anything else is refused), within size limits, and every image must be readable.
 
 ## How to fix a theme file that does not load
 1. Read the reason under the theme choice, e.g. `⚠ themes/my.json: Invalid colour in "fg": "white"`.
@@ -82,6 +82,23 @@ The design check below the preview shows **hints that never block saving**, with
 | Status colours and colour blindness | success/warning/error/info and the diff colours at least ΔE 12 apart, and at least ΔE 6 apart in the simulations of red, green and blue-yellow deficiencies (Machado 2009) |
 | Terminal palette | text on background 4.5:1, text in the selection 4.5:1, cursor 3:1, every ANSI colour 3:1 on the background (except black in dark and white in light themes), bright variants brighter than normal, selection visible |
 | Harmony and consistency | accent distinct from text (ΔE 15), not three or more strongly saturated areas, even steps background → surface → border |
+| Background | only with an own [background](#background): per area that lets it show through, the text (terminals and editor: the terminal font) against the surface over the image at least 4.5:1 against the average and 3:1 against the brightest 10 % (dark text: the darkest 10 %). The suggestion sets the brightness (or the overlay opacity, if there is an overlay) |
+
+## Background
+
+Since 3.2.0 a theme can have its **own background** behind the whole window: an **image** (PNG, JPEG, WebP or BMP; of an animated file only the first frame), a **gradient**, a **colour** or a **pattern**. Set it up in the theme editor: switch the column on the left from *Colours* to **Background** and tick *Own background*. A small preview shows the background with a sample of each area; like everything else in the editor, the app only changes on *Save*.
+
+- **Image:** *Choose image …* copies the file into a folder next to the theme file (`themes/<file>/`), scaled down to at most 3840 px on the longer side (PNG if it has transparency, otherwise JPEG at quality 90) – the original is never changed. Input limits as for chat images: 64 MB, 12 000 px per side, 50 megapixels. **Scaling:** *Fill* (default; keeps the aspect ratio and crops what sticks out), *Fit* (keeps the aspect ratio, the rest shows the base colour), *Stretch*, *Original* (1:1). **Anchor:** one of 9 points (corners, edge centres, centre), like `backgroundImageAlignment` in Windows Terminal.
+- **Gradient:** linear (angle 0–359°, 0 = top to bottom) or radial (centre x/y in %, radius), 2–4 stops with free positions on a bar where you drag the stops. Colours are hex values or links such as `@bg` or `@accent/40`. A light dithering prevents banding.
+- **Colour:** one colour (hex or link) over the base colour.
+- **Pattern:** built-in patterns drawn in theme colours – dots, lines, grid, checks, diagonal lines, noise – with a colour (default `@text/12`), or your own tile image (*Own tile …*); size 25–400 % and an offset. No image files are bundled and nothing is downloaded.
+- **For every kind:** a **margin** per side (top, right, bottom, left, in points; outside it the base colour), **opacity** of the whole background (below 100 % the desktop shows through; otherwise the background covers it), **brightness** −100 … +100 % (mixes towards black or white), **blur** 0–40 pt and an **overlay** (colour and opacity above the image, below all surfaces).
+- **Areas:** *Terminals*, *Editor*, *To-do and planning*, *Chat* and *Sidebar* (title bar and tabs follow the sidebar) each have a switch and an opacity: on = the surface lets the background show through at this opacity (multiplied with *Opacity* under *Settings → Appearance*), off = the surface stays opaque. Dialogs, menus, tooltips and input fields always stay opaque. In terminals only the default background is see-through – colours set by programs, the selection and the cursor stay opaque, and the minimum contrast of the text is computed against the surface over the image.
+- **Take background from …** copies the background of another theme (its images are copied on *Save*). The theme of a profile only colours its terminals; the background always comes from the selected theme.
+
+The background is one continuous picture across the whole window – each area shows its part, nothing jumps when panes are split. Every window renders it for its own size. It is computed once in the background (in physical pixels) and cached; after resizing a window Paneldeck waits a quarter of a second and meanwhile stretches the old picture. There are no extra redraws. **Reduce transparency** under *Settings → Appearance* (off by default) makes every surface opaque and hides the background.
+
+If the image file is missing or not valid (for example a path instead of a bare file name), the base colour is shown and the theme stays valid. Renaming a theme keeps its folder; *Duplicate* copies it and *Delete* removes it.
 
 ## File format
 
@@ -109,6 +126,30 @@ Themes are JSON files in `themes/` in the [data folder](data-and-backups.md) (at
 
 - `name`, `fg`, `bg` and `ansi` (16 colours) are required; `dark` is guessed from the background if missing; `cursor` (default: `fg`) and `selection` (default: background mixed with 20 % text) are optional (an invalid value there also falls back to the default). Terminal colours are `#RRGGBB` (or `#RRGGBBAA`; the transparency is ignored – the window opacity comes from the settings).
 - `ui` (optional, since 2.6.0): interface colours by name. A value is a colour `#RRGGBB` / `#RRGGBBAA`, or a link `@name` or `@name/NN` (NN = opacity 0–100 %). A link can point to any interface colour and to `fg`, `bg`, `cursor`, `selection`, `ansi0` … `ansi15`. A missing name is derived.
+- `background` (optional, since 3.2.0): the theme's own [background](#background). Example:
+
+  ```json
+  "background": {
+    "kind": "image",
+    "image": "forest.jpg",
+    "mode": "fill",
+    "anchor": "center",
+    "margin": [0, 0, 0, 0],
+    "opacity": 100,
+    "brightness": -20,
+    "blur": 0,
+    "overlay": { "color": "@bg", "opacity": 30 },
+    "areas": {
+      "terminals": { "on": true, "opacity": 80 },
+      "editor": { "on": true, "opacity": 85 },
+      "todo": { "on": true, "opacity": 85 },
+      "chat": { "on": true, "opacity": 85 },
+      "sidebar": { "on": true, "opacity": 75 }
+    }
+  }
+  ```
+
+  `kind`: `image`, `gradient`, `color` or `pattern`. `image`: a **bare file name** in `themes/<file>/` (no folders, no `..`, no drive or UNC path; extension `png`, `jpg`, `jpeg`, `webp`, `bmp`; symlinks are never followed). `mode`: `fill`, `fit`, `stretch`, `original`. `anchor`: `top_left`, `top`, `top_right`, `left`, `center`, `right`, `bottom_left`, `bottom`, `bottom_right`. `margin`: top, right, bottom, left in points. `opacity` 0–100, `brightness` −100–100, `blur` 0–40. `color` (kind `color`): a colour or link. `gradient`: `{"type": "linear" | "radial", "angle": 0–359, "center": [x, y] in %, "radius": 1–200, "stops": [{"pos": 0–100, "color": "…"}, …]}` with 2–4 stops. `pattern`: `{"name": "dots" | "lines" | "grid" | "checks" | "diagonal" | "noise", "image": "tile.png", "color": "@text/12", "scale": 25–400, "offset": [x, y]}`. `overlay`: `{"color": "…", "opacity": 0–100}`. `areas`: per area `on` and `opacity` (0–100). Every value is optional; an **invalid value falls back to its default** (for the image: the base colour) and the theme stays valid. Invalid and unknown values are kept and written back unchanged.
 - **Compatibility:** unknown fields and unknown names in `ui` are ignored, and so is a link to a colour this version does not know (that value counts as derived). Such content is kept: saving, renaming, duplicating or importing a theme writes it back unchanged. So older versions read newer theme files (they just ignore the new colours), and newer versions read older ones.
 - **Invalid files** (not JSON, missing or malformed required field, fewer than 16 ANSI colours, a `ui` value that is neither a colour nor a link, opacity above 100, links in a loop, larger than 1 MB, a name that is already taken exactly – names that differ only in case stay selectable) are listed with the reason and cannot be selected. Import refuses them with the same message.
 
@@ -177,6 +218,17 @@ The names are part of the public interface (they are only ever added, never rena
 | `code_heading` | Editor: syntax colours | Code: heading, section | `@code_function` |
 | `code_variable` | Editor: syntax colours | Code: variable, parameter | `@code_tag` |
 | `code_invalid` | Editor: syntax colours | Code: invalid | `@error` |
+| `diff_add_bg` | Editor: comparison and change markers | Comparison: background of added lines | `@diff_add/15` |
+| `diff_remove_bg` | Editor: comparison and change markers | Comparison: background of removed lines | `@diff_remove/15` |
+| `diff_add_word` | Editor: comparison and change markers | Comparison: added words within a line | `@diff_add/40` |
+| `diff_remove_word` | Editor: comparison and change markers | Comparison: removed words within a line | `@diff_remove/40` |
+| `diff_filler` | Editor: comparison and change markers | Comparison: hatching of filler lines | `@text_dim/35` |
+| `marker_added` | Editor: comparison and change markers | Change marker: added (unstaged, unsaved) | `@success` |
+| `marker_modified` | Editor: comparison and change markers | Change marker: modified (unstaged, unsaved) | `@warning` |
+| `marker_deleted` | Editor: comparison and change markers | Change marker: removed (unstaged, unsaved) | `@error` |
+| `marker_staged_added` | Editor: comparison and change markers | Change marker: added (staged) | `#56b6c2` (dark) / `#0b7285` (light) |
+| `marker_staged_modified` | Editor: comparison and change markers | Change marker: modified (staged) | `#61afef` (dark) / `#0969da` (light) |
+| `marker_staged_deleted` | Editor: comparison and change markers | Change marker: removed (staged) | `#c678dd` (dark) / `#8250df` (light) |
 
 Terminal colours for links: `fg`, `bg`, `cursor`, `selection`, `ansi0` … `ansi15` (in the file: the fields `fg`, `bg`, `cursor`, `selection` and the list `ansi`).
 

@@ -200,6 +200,7 @@ pub fn op_label(op: &TicketOp, lang: Lang) -> String {
         TicketOp::Parent { .. } => s("Eltern-Ticket geändert", "parent changed"),
         TicketOp::Mark { kind: MarkKind::Flag, .. } => s("Markierung geändert", "flag changed"),
         TicketOp::Mark { kind: MarkKind::Star, .. } => s("Stern geändert", "star changed"),
+        TicketOp::Mark { kind: MarkKind::Private, .. } => s("Privat geändert", "private changed"),
         TicketOp::Rank { .. } => s("Reihenfolge geändert", "order changed"),
         TicketOp::Link { .. } => s("Verknüpfung geändert", "link changed"),
         TicketOp::Comment { .. } | TicketOp::CommentEdit { .. } => s("Kommentar geändert", "comment changed"),
@@ -494,6 +495,10 @@ mod tests {
             created_at: String::new(),
             updated_at: String::new(),
             archived: false,
+            private: false,
+            origin: Default::default(),
+            origin_detail: None,
+            trashed: false,
         }
     }
 

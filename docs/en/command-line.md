@@ -35,7 +35,7 @@ Options with a value can also be written as `--option=value` (`--profile=work`).
 ## Options in detail
 
 ### --open \<folder\>
-Opens a new terminal session in `<folder>` in the running Paneldeck (or starts it). If `<folder>` is a file, its folder is used. The Explorer context menu uses this; drive roots such as `"C:\"` work too. A relative path is resolved against the caller's current folder; Linux paths (`/…`, `~`) are passed on unchanged for WSL.
+Opens a new terminal session in `<folder>` in the running Paneldeck (or starts it). If `<folder>` is a file, its folder is used. The Explorer context menu uses this; drive roots such as `"C:\"` work too. A relative path is resolved against the caller's current folder; Linux paths (`/…`, `~`) are resolved in the session the command was typed in (its WSL distribution, or Git Bash), otherwise in the default WSL distribution; a WSL folder gets a WSL session of that distribution.
 
     paneldeck.exe --open "C:\Dev\my-app"
 
@@ -47,7 +47,7 @@ Together with `--open`: the new session starts Claude Code (needs Claude mode).
 The session uses your default [Claude start options](claude-code.md#start-options). Typed in a Paneldeck terminal, `--open … --claude` never applies your defaults for extra folders, allowed tools, an MCP config or `--safe-mode`, and the new session is marked with an [agent chain](agent-interface.md#security) only if that terminal has one.
 
 ### --edit \<file\>
-*(Since 3.0.0.)* Opens `<file>` in a new tab of the [Editor tab](editor.md) of the running Paneldeck (or starts it); a file that is already open is brought to the front instead of being opened twice. A relative path is resolved against the caller's current folder. `--edit` cannot be combined with `--open`, `--claude` or a folder without an option (exit code 2), only with the instance options (`--profile`, `--data-dir`, `--lang` …). The Explorer entry *Open in Paneldeck editor* uses this (off by default, see [Windows integration](windows-integration.md#open-in-paneldeck-editor)). Opening a file this way is no agent action, even when it is typed in a Paneldeck terminal.
+*(Since 3.0.0.)* Opens `<file>` in a new tab of the [Editor tab](editor.md) of the running Paneldeck (or starts it); a file that is already open is brought to the front instead of being opened twice. A relative path is resolved against the caller's current folder; a Linux path (`/home/me/x`) from a WSL session opens that distribution's file (otherwise the default distribution's). `--edit` cannot be combined with `--open`, `--claude` or a folder without an option (exit code 2), only with the instance options (`--profile`, `--data-dir`, `--lang` …). The Explorer entry *Open in Paneldeck editor* uses this (off by default, see [Windows integration](windows-integration.md#open-in-paneldeck-editor)). Opening a file this way is no agent action, even when it is typed in a Paneldeck terminal.
 
     paneldeck.exe --edit "C:\Dev\my-app\README.md"
 

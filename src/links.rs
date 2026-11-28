@@ -1,5 +1,6 @@
 //! Klickbare Links und Pfade im Terminal (Strg+Klick).
 
+use crate::targetpath::PathKind;
 use std::path::{Path, PathBuf};
 
 #[derive(Clone, Debug, PartialEq)]
@@ -9,6 +10,11 @@ pub struct Link {
     pub end: usize,
     /// Was geöffnet wird: URL oder Dateipfad (Windows-Schreibweise).
     pub target: String,
+    /// Zeile aus `datei:12[:5]` (ab 1), wenn angegeben.
+    pub line: Option<usize>,
+    /// Stand der Pfad im Terminal in Linux-Schreibweise (`/…`, `~`, Git Bash `/c/…`, #392)? Dann öffnet eine Textdatei
+    /// im Editor von Paneldeck an der Zeile.
+    pub linux: bool,
 }
 
 fn is_sep(c: char) -> bool {
@@ -38,11 +44,20 @@ fn strip_line_col(s: &str) -> &str {
     cur
 }
 
+/// Zeile aus `datei:12` bzw. `datei:12:5` (ab 1).
+fn line_of(s: &str) -> Option<usize> {
+    let stripped = strip_line_col(s);
+    let tail = s.get(stripped.len()..)?.strip_prefix(':')?;
+    tail.split(':').next()?.parse().ok().filter(|n| *n > 0)
+}
+
 fn home() -> Option<PathBuf> {
     (if cfg!(windows) { std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")) } else { std::env::var_os("HOME") }).map(PathBuf::from)
 }
 
-fn resolve(token: &str, cwd: &str, shell_id: &str) -> Option<String> {
+/// Pfad im Terminaltext → (Windows-Pfad, in Linux-Schreibweise geschrieben). Linux-Pfade, `~`, `/mnt/c` und Git Bash
+/// `/c/` werden nach der Pfadart der Sitzung aufgelöst (#392, `targetpath`); `~` in WSL über das bekannte Home.
+fn resolve(token: &str, cwd: &str, kind: &PathKind) -> Option<(String, bool)> {
     let t = strip_line_col(token);
     let b = t.as_bytes();
     let is_drive = b.len() >= 3 && b[1] == b':' && b[0].is_ascii_alphabetic() && (b[2] == b'\\' || b[2] == b'/');
@@ -51,19 +66,27 @@ fn resolve(token: &str, cwd: &str, shell_id: &str) -> Option<String> {
     if crate::pathfmt::is_remote_unc(t) {
         return None;
     }
+    let home_form = t.starts_with("~/") || t.starts_with("~\\");
+    let mut linux = false;
     let path: PathBuf = if is_drive || t.starts_with("\\\\") {
         PathBuf::from(t)
-    } else if shell_id.starts_with("wsl") && t.starts_with('/') {
-        PathBuf::from(crate::pathfmt::from_wsl(shell_id, t))
-    } else if t.starts_with('/') && t.len() > 1 {
-        PathBuf::from(t)
-    } else if let Some(rest) = t.strip_prefix("~/").or_else(|| t.strip_prefix("~\\")) {
-        if shell_id.starts_with("wsl") {
-            return None;
+    } else if (t.starts_with('/') && t.len() > 1) || home_form {
+        match kind {
+            PathKind::Native if home_form => home()?.join(&t[2..]),
+            PathKind::Native => PathBuf::from(t),
+            _ => match kind.to_windows(t) {
+                Ok(w) => {
+                    linux = kind.is_posix() || !w.eq_ignore_ascii_case(t);
+                    PathBuf::from(w)
+                }
+                // Windows-Shell: `/x` wie bisher (Laufwerk des Programms).
+                Err(_) if !kind.is_posix() && t.starts_with('/') => PathBuf::from(t),
+                Err(_) => return None,
+            },
         }
-        home()?.join(rest)
     } else if t.contains('/') || t.contains('\\') || t.contains('.') {
-        let base = if shell_id.starts_with("wsl") && cwd.starts_with('/') { crate::pathfmt::from_wsl(shell_id, cwd) } else { cwd.to_string() };
+        let base = if kind.is_posix() && !matches!(kind, PathKind::Native) && (cwd.starts_with('/') || cwd.starts_with('~')) { kind.to_windows(cwd).ok()? } else { cwd.to_string() };
+        linux = kind.is_posix() && !matches!(kind, PathKind::Native) && !t.contains('\\');
         Path::new(&base).join(t)
     } else {
         return None;
@@ -76,12 +99,35 @@ fn resolve(token: &str, cwd: &str, shell_id: &str) -> Option<String> {
     // Netzlaufwerke und `\\wsl$` nie im aufrufenden (UI-)Thread prüfen: das läuft bei jedem Bild mit Strg über dem Text
     // und kann dort hängen (#251). Bis die Antwort aus dem Hilfsthread da ist, gibt es keinen Link.
     let exists = if crate::pathfmt::is_remote(&p) || crate::wsl::is_wsl_unc(&p) { exists_cached(&p) == Some(true) } else { path.exists() };
-    exists.then_some(p)
+    exists.then_some((p, linux))
+}
+
+/// Wünsche „im Editor öffnen“ aus dem Terminal (Pfad, Zeile ab 1); holt die App je Bild ab.
+static EDITOR_REQUESTS: std::sync::Mutex<Vec<(String, Option<usize>)>> = std::sync::Mutex::new(Vec::new());
+
+/// Wünsche „im Editor öffnen“ abholen (App, je Bild).
+pub fn take_editor_requests() -> Vec<(String, Option<usize>)> {
+    std::mem::take(&mut *EDITOR_REQUESTS.lock().unwrap_or_else(|e| e.into_inner()))
+}
+
+/// Strg+Klick auf einen Link (#392): Ein in Linux-Schreibweise genannter Pfad öffnet als Textdatei im Editor von
+/// Paneldeck an der Zeile (Ausführbares nie, Ordner im Explorer); sonst wie bisher mit dem Standardprogramm.
+pub fn activate(link: &Link) {
+    // WSL-/Netzwerkpfade nie im UI-Thread prüfen (#392): Ordner oder Datei aus der Prüfung, die den Link gefunden hat.
+    let slow = crate::wsl::is_wsl_unc(&link.target) || crate::pathfmt::is_remote(&link.target);
+    let is_dir = if slow { dir_cached(&link.target) } else { Some(Path::new(&link.target).is_dir()) };
+    if link.linux && !link.target.starts_with("http") && !is_executable_like(&link.target) && is_dir == Some(false) {
+        EDITOR_REQUESTS.lock().unwrap_or_else(|e| e.into_inner()).push((link.target.clone(), link.line));
+        return;
+    }
+    open(&link.target);
 }
 
 /// Prüfungen langsamer Pfade (Netzlaufwerk, `\\wsl$`), die gerade laufen oder kürzlich liefen (#251).
 struct SlowCheck {
     result: Option<bool>,
+    /// Ist es ein Ordner (mit dem Ergebnis gemessen)?
+    dir: bool,
     at: std::time::Instant,
 }
 
@@ -111,13 +157,15 @@ fn exists_cached(path: &str) -> Option<bool> {
     if map.len() >= SLOW_MAX {
         map.retain(|_, c| c.result.is_none());
     }
-    map.insert(path.to_string(), SlowCheck { result: None, at: now });
+    map.insert(path.to_string(), SlowCheck { result: None, dir: false, at: now });
     let p = path.to_string();
     let spawned = std::thread::Builder::new().name("link-check".into()).spawn(move || {
-        let r = Path::new(&p).exists();
+        let m = std::fs::metadata(&p);
+        let (r, dir) = (m.is_ok(), m.is_ok_and(|m| m.is_dir()));
         let mut g = SLOW_CHECKS.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(c) = g.get_or_insert_with(Default::default).get_mut(&p) {
             c.result = Some(r);
+            c.dir = dir;
             c.at = std::time::Instant::now();
         }
     });
@@ -127,13 +175,25 @@ fn exists_cached(path: &str) -> Option<bool> {
     None
 }
 
+/// Ordner laut der letzten Prüfung im Hilfsthread (`None`: nicht geprüft oder läuft noch). Fragt nie selbst.
+fn dir_cached(path: &str) -> Option<bool> {
+    let g = SLOW_CHECKS.lock().unwrap_or_else(|e| e.into_inner());
+    g.as_ref().and_then(|m| m.get(path)).and_then(|c| c.result.map(|_| c.dir))
+}
+
 /// Läuft gerade eine Pfadprüfung im Hilfsthread? Dann zeichnet das Terminal bald noch einmal, damit der Link erscheint.
 pub fn checks_pending() -> bool {
     SLOW_CHECKS.lock().unwrap_or_else(|e| e.into_inner()).as_ref().is_some_and(|m| m.values().any(|c| c.result.is_none()))
 }
 
-/// Link unter Spalte `col` der Zeile `chars` finden (URL oder existierender Pfad).
+/// Link unter Spalte `col` der Zeile `chars` finden (URL oder existierender Pfad); Pfadart nach der Kennung der Shell.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn find(chars: &[char], col: usize, cwd: &str, shell_id: &str) -> Option<Link> {
+    find_kind(chars, col, cwd, &PathKind::of_id(shell_id))
+}
+
+/// Wie [`find`] mit der Pfadart der Sitzung (`targetpath::PathKind::of`, auch eigene Profile).
+pub fn find_kind(chars: &[char], col: usize, cwd: &str, kind: &PathKind) -> Option<Link> {
     if col >= chars.len() || is_sep(chars[col]) {
         return None;
     }
@@ -152,13 +212,19 @@ pub fn find(chars: &[char], col: usize, cwd: &str, shell_id: &str) -> Option<Lin
     let token: String = chars[start..end].iter().collect();
     let lower = token.to_lowercase();
     if lower.starts_with("http://") || lower.starts_with("https://") {
-        return Some(Link { start, end, target: token });
+        return Some(Link { start, end, target: token, line: None, linux: false });
     }
     if lower.starts_with("www.") && token.len() > 6 {
-        return Some(Link { start, end, target: format!("https://{token}") });
+        return Some(Link { start, end, target: format!("https://{token}"), line: None, linux: false });
     }
-    let token = token.strip_prefix("file:///").map(|t| t.to_string()).unwrap_or(token);
-    resolve(&token, cwd, shell_id).map(|target| Link { start, end, target })
+    // `file:///home/u/x` (Linux) bzw. `file:///C:/x` (Windows)
+    let token = match token.strip_prefix("file:///") {
+        Some(t) if kind.is_posix() && !t.as_bytes().get(1).is_some_and(|c| *c == b':') => format!("/{t}"),
+        Some(t) => t.to_string(),
+        None => token,
+    };
+    let line = line_of(&token);
+    resolve(&token, cwd, kind).map(|(target, linux)| Link { start, end, target, line, linux })
 }
 
 /// Dateiendungen, die ausgeführt werden könnten: sie werden NIE per Klick gestartet, nur im Ordner angezeigt.
@@ -321,6 +387,42 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
         assert_eq!(exists_cached(&missing), Some(false));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// #392: Linux-Pfade aus WSL und Git Bash werden zu Windows-Pfaden (`/mnt/c`, `/c/`, `~`), mit Zeile.
+    #[test]
+    fn linux_paths_resolve_for_the_sessions_path_kind() {
+        let dir = std::env::temp_dir().join(format!("links-lin-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(dir.join("src").join("main.rs"), "x").unwrap();
+        let win = dir.to_string_lossy().to_string();
+        if let Some((d, parts)) = crate::wsl::drive_parts(&win) {
+            let rest = parts.join("/");
+            // WSL: /mnt/<lw>/… (Standard-Einhängepunkt) – Linux-Schreibweise, Zeile 12
+            let tok = format!("/mnt/{d}/{rest}/src/main.rs:12:3");
+            let k = find_kind(&chars(&tok), 3, "", &PathKind::Wsl { distro: Some("Links-Test-Distro".into()) }).unwrap();
+            assert!(k.target.to_lowercase().ends_with("src\\main.rs") && k.linux && k.line == Some(12), "{k:?}");
+            // Git Bash: /<lw>/…
+            let tok = format!("/{d}/{rest}/src/main.rs:7");
+            let k = find_kind(&chars(&tok), 3, "", &PathKind::Msys { root: None }).unwrap();
+            assert!(k.linux && k.line == Some(7), "{k:?}");
+            // relativ zu einem Linux-Arbeitsordner (WSL) und file:///
+            let cwd = format!("/mnt/{d}/{rest}");
+            let k = find_kind(&chars("src/main.rs:5"), 2, &cwd, &PathKind::Wsl { distro: Some("Links-Test-Distro".into()) }).unwrap();
+            assert!(k.linux && k.line == Some(5), "{k:?}");
+            let tok = format!("file:///mnt/{d}/{rest}/src/main.rs");
+            assert!(find_kind(&chars(&tok), 10, "", &PathKind::Wsl { distro: Some("Links-Test-Distro".into()) }).is_some_and(|k| k.linux));
+            // Windows-Pfad in einer Windows-Sitzung: wie bisher, nicht im Editor
+            let abs = dir.join("src").join("main.rs").to_string_lossy().to_string();
+            let k = find(&chars(&abs), 3, "", "powershell").unwrap();
+            assert!(!k.linux && k.line.is_none());
+        }
+        // ~ in WSL ohne bekanntes Home: kein Link (und keine Prüfung)
+        assert!(find_kind(&chars("~/x.txt"), 2, "", &PathKind::Wsl { distro: Some("Unbekannt-Distro".into()) }).is_none());
+        assert_eq!(line_of("a.rs:10:3"), Some(10));
+        assert_eq!(line_of("a.rs"), None);
+        assert_eq!(line_of(r"C:\x\a.rs:0"), None);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
