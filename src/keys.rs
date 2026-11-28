@@ -55,7 +55,21 @@ pub const DEFAULTS: &[(&str, &str)] = &[
     // Editor (#385): nächste/vorige Änderung im Vergleich und bei den Änderungsmarken – nur im Editor-Reiter.
     ("ed_next_change", "F7"),
     ("ed_prev_change", "Shift+F7"),
+    // Editor: mehrere Cursor (#394, 3.3.0) – wie Sublime Text; wirken nur mit dem Schalter *Mehrere Cursor*
+    // (Einstellungen → Editor, Standard aus). Strg+Umschalt+D teilt im Terminal Hub weiter rechts (`split_r`), im Editor
+    // markiert es mit dem Schalter alle Vorkommen.
+    ("ed_next_occurrence", "Ctrl+D"),
+    ("ed_all_occurrences", "Ctrl+Shift+D"),
+    ("ed_soft_undo", "Ctrl+U"),
+    // Kommentar umschalten (#394) mit jedem Cursor; auf deutschen Tastaturen liegt „/“ auf Umschalt+7 (zweite Belegung
+    // frei, z. B. Strg+#).
+    ("ed_toggle_comment", "Ctrl+Slash"),
+    ("ed_toggle_comment_alt", ""),
 ];
+
+/// Kürzel, die im Editor eine andere Belegung des Terminal Hub überdecken dürfen (#394: Strg+Umschalt+D markiert im
+/// Editor alle Vorkommen, im Terminal Hub teilt es rechts).
+pub const EDITOR_OVERRIDES: &[(&str, &str)] = &[("ed_all_occurrences", "split_r")];
 
 /// Kürzel, die in jedem Bereich gelten (Reiterwechsel) – die übrigen nur im Terminal-Bereich.
 pub fn is_global(id: &str) -> bool {
@@ -109,6 +123,11 @@ pub fn label(id: &str, de: bool) -> &'static str {
         "save_no_actions" => ("Editor: Ohne Aktionen speichern", "Editor: Save without actions"),
         "ed_next_change" => ("Editor: nächste Änderung", "Editor: next change"),
         "ed_prev_change" => ("Editor: vorige Änderung", "Editor: previous change"),
+        "ed_next_occurrence" => ("Editor: nächstes Vorkommen dazu (mehrere Cursor)", "Editor: add next occurrence (multiple cursors)"),
+        "ed_all_occurrences" => ("Editor: alle Vorkommen markieren (mehrere Cursor)", "Editor: select all occurrences (multiple cursors)"),
+        "ed_soft_undo" => ("Editor: Cursor/Auswahl zurücknehmen", "Editor: undo cursor/selection change"),
+        "ed_toggle_comment" => ("Editor: Kommentar umschalten", "Editor: toggle comment"),
+        "ed_toggle_comment_alt" => ("Editor: Kommentar umschalten (zweite Belegung)", "Editor: toggle comment (alternative)"),
         _ => ("?", "?"),
     };
     if de { d } else { e }
@@ -201,6 +220,10 @@ mod tests {
     fn defaults_are_unique_and_labelled() {
         let mut seen = std::collections::HashSet::new();
         for (id, d) in DEFAULTS {
+            // Erlaubte Überdeckung im Editor (#394): Strg+Umschalt+D.
+            if EDITOR_OVERRIDES.iter().any(|(e, _)| e == id) {
+                continue;
+            }
             assert!(d.is_empty() || seen.insert(*d), "Kürzel {d} doppelt");
             assert_ne!(label(id, true), "?", "{id} ohne Beschriftung");
             assert_ne!(label(id, true), label(id, false), "{id}: Texte gleich in beiden Sprachen");
@@ -212,7 +235,8 @@ mod tests {
     /// #381: Die Editor-Kürzel kollidieren nicht mit festen Kürzeln des Editors und nicht mit AltGr (Strg+Alt).
     #[test]
     fn editor_format_keys_avoid_altgr_and_fixed_editor_keys() {
-        let fixed = ["Ctrl+N", "Ctrl+O", "Ctrl+Shift+O", "Ctrl+S", "Ctrl+Shift+S", "Ctrl+W", "Ctrl+F4", "Ctrl+B", "Alt+Z", "Ctrl+F", "Ctrl+H", "Ctrl+G", "Ctrl+Shift+F", "Ctrl+Z", "Ctrl+Y", "Ctrl+A", "Ctrl+D", "Ctrl+L", "Ctrl+Shift+L", "Ctrl+Shift+K", "Alt+Up", "Alt+Down", "Alt+Shift+Up", "Alt+Shift+Down"];
+        // Strg+D und Strg+Umschalt+L sind seit #394 keine festen Kürzel mehr (Strg+D ist `ed_next_occurrence`).
+        let fixed = ["Ctrl+N", "Ctrl+O", "Ctrl+Shift+O", "Ctrl+S", "Ctrl+Shift+S", "Ctrl+W", "Ctrl+F4", "Ctrl+B", "Alt+Z", "Ctrl+F", "Ctrl+H", "Ctrl+G", "Ctrl+Shift+F", "Ctrl+Z", "Ctrl+Y", "Ctrl+A", "Ctrl+L", "Ctrl+Shift+K", "Alt+Up", "Alt+Down"];
         for (id, d) in DEFAULTS.iter().filter(|(id, d)| is_editor(id) && !d.is_empty()) {
             let (m, _) = parse(d).unwrap();
             assert!(!(m.ctrl && m.alt), "{id}: Strg+Alt ist AltGr");
@@ -256,6 +280,18 @@ mod tests {
             let (m, k) = parse(d).unwrap();
             assert!(!may_need_shift(m, k), "Standard {d} ohne Hinweis");
         }
+    }
+
+    /// #394: die Kürzel der mehreren Cursor sind belegbar, Strg+Umschalt+D überdeckt im Editor nur `split_r`.
+    #[test]
+    fn multi_cursor_keys_are_rebindable_editor_keys() {
+        for id in ["ed_next_occurrence", "ed_all_occurrences", "ed_soft_undo", "ed_toggle_comment", "ed_toggle_comment_alt"] {
+            assert!(is_editor(id) && DEFAULTS.iter().any(|(i, _)| *i == id), "{id}");
+        }
+        let get = |id: &str| DEFAULTS.iter().find(|(i, _)| *i == id).map(|(_, d)| *d).unwrap();
+        assert_eq!(get("ed_all_occurrences"), get("split_r"));
+        assert_eq!(parse(get("ed_toggle_comment")), Some((Modifiers::CTRL, Key::Slash)));
+        assert!(DEFAULTS.iter().all(|(_, d)| !d.contains("Alt+Shift+Up") && !d.contains("Alt+Shift+Down")), "kein Cursor darüber/darunter");
     }
 
     #[test]

@@ -276,9 +276,31 @@ impl App {
                 self.settings.editor.autosave_delay_ms = ((secs * 1000.0).round() as u32).clamp(lo, hi);
             }
         });
-        row(ui, lang.t("Menüleiste", "Menu bar"), lang.t("Datei · Bearbeiten · Ansicht · Format über jeder Teilung", "File · Edit · View · Format above every split"), |ui| {
+        row(ui, lang.t("Menüleiste", "Menu bar"), lang.t("Datei · Bearbeiten · Auswahl · Ansicht · Format über jeder Teilung", "File · Edit · Selection · View · Format above every split"), |ui| {
             style::toggle(ui, &mut self.settings.editor.menu_bar);
         });
+        // Mehrere Cursor (#394): alles standardmäßig aus, Mausgesten mit eigenen Schaltern.
+        let (next, all, soft) = (self.binding_text("ed_next_occurrence"), self.binding_text("ed_all_occurrences"), self.binding_text("ed_soft_undo"));
+        let k = |s: &str| if s.is_empty() { lang.t("(kein Kürzel)", "(no shortcut)").to_string() } else { crate::keys::pretty(s, lang == crate::state::Lang::De) };
+        let hint = if lang == crate::state::Lang::De {
+            format!("Nächstes Vorkommen ({}), alle Vorkommen ({}), Cursor/Auswahl zurücknehmen ({}); Menü Auswahl und Palette", k(&next), k(&all), k(&soft))
+        } else {
+            format!("Next occurrence ({}), all occurrences ({}), undo cursor/selection change ({}); Selection menu and palette", k(&next), k(&all), k(&soft))
+        };
+        row(ui, lang.t("Mehrere Cursor", "Multiple cursors"), &hint, |ui| {
+            style::toggle(ui, &mut self.settings.editor.multi_cursor);
+        });
+        row(ui, lang.t("Alt+Klick", "Alt+click"), lang.t("Setzt einen weiteren Cursor; auf einem Cursor nimmt es ihn weg", "Adds a cursor; on a cursor it removes it"), |ui| {
+            style::toggle(ui, &mut self.settings.editor.multi_cursor_alt_click);
+        });
+        row(
+            ui,
+            lang.t("Mittlere Maustaste", "Middle mouse button"),
+            lang.t("Ziehen: Spaltenauswahl, mit Strg dazu; Klick: Cursor setzen, mit Strg einen dazu", "Drag: column selection, with Ctrl added; click: place the cursor, with Ctrl add one"),
+            |ui| {
+                style::toggle(ui, &mut self.settings.editor.multi_cursor_middle);
+            },
+        );
         ui.add_space(S2);
         self.editor_format_settings_ui(ui);
         ui.add_space(S2);
@@ -539,6 +561,10 @@ impl App {
         row(ui, lang.t("Agenten dürfen formatieren", "Agents may format"), lang.t("format_file: offene JSON/XML-Dateien; Prüfen geht ab „Nur lesen“ ohne Schalter", "format_file: open JSON/XML files; validating works from “Read only” without a switch"), |ui| {
             style::toggle(ui, &mut ed.agent_format);
         });
+        // #394: ab Stufe „Nur lesen“ (editor_read), Standard aus.
+        row(ui, lang.t("Agenten sehen die Auswahlen", "Agents see the selections"), lang.t("editor_read nennt deine Cursor und Auswahlen (ab „Nur lesen“)", "editor_read reports your cursors and selections (from “Read only”)"), |ui| {
+            style::toggle(ui, &mut ed.agent_selections);
+        });
         super::tutorial::spot_since(ui, Spot::EditorAgentSwitches, top);
     }
 
@@ -618,6 +644,7 @@ impl App {
             diff_context: e.diff_context as usize,
             diff_layout: e.diff_layout,
             diff_ignore_ws: e.diff_ignore_whitespace,
+            multi: super::editor_ui::MultiPrefs { on: e.multi_cursor, alt_click: e.multi_cursor_alt_click, middle: e.multi_cursor_middle },
         }
     }
 
@@ -794,6 +821,10 @@ impl EditorHost for BridgeHost<'_> {
 
     fn show(&mut self, doc: u64) {
         self.app.editor_focus(doc);
+    }
+
+    fn selections(&mut self, doc: u64) -> Option<Vec<((usize, usize), (usize, usize))>> {
+        self.app.editor_selections(doc)
     }
 
     fn base_text(&mut self, doc: u64, base: &str) -> Result<Option<String>, String> {

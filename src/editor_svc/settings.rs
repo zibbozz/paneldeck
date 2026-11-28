@@ -7,6 +7,9 @@
 //! eine Regel mit der Aktion *Formatieren* (Aktionen beim Speichern, #383); es gibt keine eigene Einstellung dafür.
 //! Ab 3.2.0 (#385, Vergleich und Änderungsmarken): `change_markers`, `marker_base`, `diff_context`,
 //! `diff_ignore_whitespace`, `diff_layout`.
+//! Ab 3.3.0 (#394, mehrere Cursor; alle standardmäßig aus): `multi_cursor` (Kürzel und Befehle), `multi_cursor_alt_click`
+//! (Alt+Klick), `multi_cursor_middle` (mittlere Maustaste: Spaltenauswahl und Cursor), `agent_selections`
+//! (`editor_read` nennt die Auswahlen).
 
 use crate::editor::syntax::{Mode, UserMap};
 use serde::{Deserialize, Serialize};
@@ -117,6 +120,14 @@ pub struct EditorSettings {
     pub diff_ignore_whitespace: bool,
     /// Vorgabe der Darstellung im Vergleich.
     pub diff_layout: DiffLayout,
+    /// Mehrere Cursor (#394): Kürzel und Befehle (nächstes/alle Vorkommen, Cursor/Auswahl zurücknehmen). Standard aus.
+    pub multi_cursor: bool,
+    /// Alt+Klick setzt einen weiteren Cursor bzw. nimmt einen weg (#394). Standard aus.
+    pub multi_cursor_alt_click: bool,
+    /// Mittlere Maustaste im Text (#394): Ziehen = Spaltenauswahl, Strg dazu = hinzufügen, Klick = Cursor. Standard aus.
+    pub multi_cursor_middle: bool,
+    /// `editor_read` liefert zusätzlich die Auswahlen des Nutzers (#394, Feld `selections`). Standard aus.
+    pub agent_selections: bool,
 }
 
 impl Default for EditorSettings {
@@ -141,6 +152,10 @@ impl Default for EditorSettings {
             diff_context: DEFAULT_DIFF_CONTEXT,
             diff_ignore_whitespace: false,
             diff_layout: DiffLayout::Auto,
+            multi_cursor: false,
+            multi_cursor_alt_click: false,
+            multi_cursor_middle: false,
+            agent_selections: false,
         }
     }
 }
@@ -218,6 +233,10 @@ impl EditorSettings {
             diff_context: num("diff_context", d.diff_context, DIFF_CONTEXT_RANGE),
             diff_ignore_whitespace: flag("diff_ignore_whitespace"),
             diff_layout: o.get("diff_layout").and_then(Value::as_str).and_then(DiffLayout::from_id).unwrap_or_default(),
+            multi_cursor: flag("multi_cursor"),
+            multi_cursor_alt_click: flag("multi_cursor_alt_click"),
+            multi_cursor_middle: flag("multi_cursor_middle"),
+            agent_selections: flag("agent_selections"),
         }
     }
 
@@ -309,8 +328,35 @@ mod tests {
         keys.sort();
         assert_eq!(
             keys,
-            ["agent_edit", "agent_format", "agent_open", "agent_save", "autosave", "autosave_delay_ms", "change_markers", "default_mode", "diff_context", "diff_ignore_whitespace", "diff_layout", "font", "language_map", "language_modes", "large_file_mb", "marker_base", "menu_bar", "search_exclude", "search_include_ignored"]
+            [
+                "agent_edit",
+                "agent_format",
+                "agent_open",
+                "agent_save",
+                "agent_selections",
+                "autosave",
+                "autosave_delay_ms",
+                "change_markers",
+                "default_mode",
+                "diff_context",
+                "diff_ignore_whitespace",
+                "diff_layout",
+                "font",
+                "language_map",
+                "language_modes",
+                "large_file_mb",
+                "marker_base",
+                "menu_bar",
+                "multi_cursor",
+                "multi_cursor_alt_click",
+                "multi_cursor_middle",
+                "search_exclude",
+                "search_include_ignored"
+            ]
         );
+        assert!(!d.multi_cursor && !d.multi_cursor_alt_click && !d.multi_cursor_middle && !d.agent_selections, "mehrere Cursor standardmäßig aus (#394)");
+        let on = EditorSettings::from_value(&json!({"multi_cursor": true, "multi_cursor_alt_click": true, "multi_cursor_middle": "yes", "agent_selections": 1}));
+        assert!(on.multi_cursor && on.multi_cursor_alt_click && !on.multi_cursor_middle && !on.agent_selections);
         assert!(!d.change_markers, "Änderungsmarken sind standardmäßig aus (#385)");
         assert_eq!((v["marker_base"].as_str(), v["diff_layout"].as_str(), d.diff_context), (Some("git"), Some("auto"), 3));
         assert_eq!(v["default_mode"], "text", "neue Dateien: Text");

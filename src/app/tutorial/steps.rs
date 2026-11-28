@@ -630,11 +630,24 @@ const EDITOR: &[Step] = &[
         spot: Some(Spot::EditorText),
         title: tx("Mehrere Cursor", "Multiple cursors"),
         body: tx(
-            "Alt+Klick setzt einen weiteren Cursor, Alt+Umschalt+↑/↓ einen darüber oder darunter, Strg+D markiert das nächste gleiche Wort, Alt+Ziehen eine Spalte – alles, was du tippst, geht an alle. Esc lässt nur einen übrig. Setz einen zweiten Cursor, um weiterzumachen.",
-            "Alt+click adds a cursor, Alt+Shift+Up/Down adds one above or below, Ctrl+D selects the next match of the word, Alt+drag selects a column – everything you type goes to all of them. Esc keeps only one. Add a second cursor to continue.",
+            "Mehrere Cursor sind standardmäßig aus: Einstellungen → Editor schaltet die Kürzel ({key:ed_next_occurrence} nächstes Vorkommen, {key:ed_all_occurrences} alle), Alt+Klick und die mittlere Maustaste (Spalte ziehen) einzeln ein. Alles, was du tippst, geht dann an alle Cursor; Esc lässt nur einen übrig. Mit eingeschaltetem Alt+Klick: setz einen zweiten Cursor, um weiterzumachen – oder klick auf „Weiter“.",
+            "Multiple cursors are off by default: Settings → Editor switches on the shortcuts ({key:ed_next_occurrence} next occurrence, {key:ed_all_occurrences} all of them), Alt+click and the middle mouse button (drag a column) one by one. Everything you type then goes to all cursors; Esc keeps only one. With Alt+click on: add a second cursor to continue – or click “Next”.",
         ),
         prep: EDITOR_FILE,
         done: Some(editor_cursor_added),
+        need: None,
+    },
+    Step {
+        id: "editor.selection_menu",
+        since: "3.3.0",
+        spot: Some(Spot::EditorMenuBar),
+        title: tx("Menü Auswahl, Kommentar umschalten", "Selection menu, toggle comment"),
+        body: tx(
+            "Das Menü Auswahl sammelt die Befehle der mehreren Cursor wie in Sublime Text: nächstes Vorkommen dazu, alle Vorkommen markieren, Cursor/Auswahl zurücknehmen ({key:ed_soft_undo}, der Text bleibt), nur ein Cursor. Die mittlere Maustaste zieht eine Spalte (mit Strg dazu), Alt+Klick auf einen Cursor nimmt ihn weg. {key:ed_toggle_comment} schaltet in Bearbeiten den Kommentar der Zeilen jedes Cursors um, mit dem Zeilenkommentar der Sprache.",
+            "The Selection menu gathers the multi-cursor commands like Sublime Text: add next occurrence, select all occurrences, undo cursor/selection change ({key:ed_soft_undo}, the text stays), single cursor. The middle mouse button drags a column (with Ctrl added), Alt+click on a cursor removes it. {key:ed_toggle_comment} in Edit toggles the comment of the lines of every cursor, with the language's line comment.",
+        ),
+        prep: EDITOR_FILE,
+        done: None,
         need: None,
     },
     Step {

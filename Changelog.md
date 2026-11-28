@@ -12,6 +12,20 @@ Deviation: instead of `[Unreleased]`, changes that are not yet released are list
 ### Added
 
 - Editor: **type directly in the comparison tab** – click into an editable side (a document, not the saved file, a git state or the clipboard) and type, delete, paste, cut and copy a selection, press Enter or Tab, move with the arrow keys, Home/End and Page Up/Down (Shift selects), Ctrl+A selects the side. The text appears at once; the differences are recomputed about 300 ms after the last key. The cursor skips filler lines (a click on one puts it at the end of the line above), typing in a collapsed region expands it. Typing shares the undo history of the document with the block arrows and the normal tab (Ctrl+Z/Y on the focused side); Alt+←/→, Ctrl+S and double-click to open the line in the normal tab work as before. Without a cursor the arrow keys scroll as before; typing into a read-only side shows a hint. One cursor only – multiple cursors in the comparison come later (#391).
+- Editor: **multiple cursors like Sublime Text**, each part with its own switch in *Settings → Editor* (all off by default): *Multiple cursors* turns on the shortcuts and commands – **Ctrl+D** adds the next occurrence, **Ctrl+Shift+D** selects all occurrences (in the Editor tab; in the Terminal Hub it still splits right), **Ctrl+U** takes back the last cursor or selection change without touching the text. *Middle mouse button*: dragging selects a column (with word wrap by screen rows; short and empty lines get a cursor at their end) and replaces the cursors, **Ctrl+drag** adds the column, a click places the cursor, **Ctrl+click** adds one. *Alt+click* adds a cursor, Alt+click on a cursor removes it (the last one stays). At most 10 000 cursors ("Only the first 10 000 cursors."). The status bar shows "3 cursors" or "3 selections" instead of line and column (#394).
+- Editor: new menu **Selection** in the menu bar (add next occurrence, select all occurrences, undo cursor/selection change, single cursor, select line); all of it also in the command palette. The multi-cursor shortcuts are in *Settings → Shortcuts* and can be changed or removed (#394).
+- Editor: **Toggle comment** (**Ctrl+/**, *Edit* menu, command palette) on the lines of every cursor, with the line comment of the file's language (`//`, `#`, `--`, `;`, `%`, `'`, `REM`); greyed out for languages without line comments. A second binding can be set in *Settings → Shortcuts* (on German keyboards `/` is Shift+7) (#394).
+- Agent interface: `editor_read` additionally returns the user's cursors and selections (`selections`, 1-based line/column, at most 1000) – only with the new switch *Agents see the selections* (*Settings → Editor → Agents*, off by default); `editor_list` reports the switch in `agents.selections` (#394).
+
+### Changed
+
+- Editor: the existing multi-cursor features are **off by default** after the update – Alt+click, Ctrl+D and selecting all occurrences only work after switching on *Multiple cursors* or *Alt+click* in *Settings → Editor* (#394).
+- Editor: pasting with several cursors always pastes the whole clipboard at every cursor (before, a clipboard with as many lines as cursors was distributed line by line) (#394).
+- Editor: Ctrl+D (next occurrence) matches the selected text everywhere, no longer only whole words (#394).
+
+### Removed
+
+- Editor: Alt+Shift+Up/Down (cursor above/below) and column selection with Alt+Shift+drag or Alt+drag – column selection is now done with the middle mouse button; Ctrl+Shift+L (all occurrences) is now Ctrl+Shift+D. Ctrl+Alt+arrow keys still move the focus between splits (#394).
 
 ## [3.2.0] - 2026-11-28
 

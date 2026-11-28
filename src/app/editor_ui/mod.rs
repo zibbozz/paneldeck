@@ -36,6 +36,8 @@ mod view;
 #[cfg(test)]
 mod diff_tests;
 #[cfg(test)]
+mod multi_tests;
+#[cfg(test)]
 mod tests;
 
 pub(crate) use doc::DocInfo;
@@ -70,10 +72,36 @@ pub(crate) struct EditorPrefs {
     pub diff_context: usize,
     pub diff_layout: crate::editor_svc::settings::DiffLayout,
     pub diff_ignore_ws: bool,
+    /// Mehrere Cursor (#394; alles standardmäßig aus).
+    pub multi: MultiPrefs,
+}
+
+/// Schalter der mehreren Cursor (#394, *Einstellungen → Editor*): Kürzel und Befehle, Alt+Klick, mittlere Maustaste.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct MultiPrefs {
+    pub on: bool,
+    pub alt_click: bool,
+    pub middle: bool,
 }
 
 /// Kennungen der Kürzel, die die Menüleiste anzeigt.
-pub(crate) const MENU_KEYS: [&str; 10] = ["split_r", "split_d", "palette", "ed_format", "ed_minify", "ed_validate", "ed_sort_keys", "save_no_actions", "ed_next_change", "ed_prev_change"];
+pub(crate) const MENU_KEYS: [&str; 15] = [
+    "split_r",
+    "split_d",
+    "palette",
+    "ed_format",
+    "ed_minify",
+    "ed_validate",
+    "ed_sort_keys",
+    "save_no_actions",
+    "ed_next_change",
+    "ed_prev_change",
+    "ed_next_occurrence",
+    "ed_all_occurrences",
+    "ed_soft_undo",
+    "ed_toggle_comment",
+    "ed_toggle_comment_alt",
+];
 
 impl Default for EditorPrefs {
     fn default() -> Self {
@@ -90,6 +118,7 @@ impl Default for EditorPrefs {
             diff_context: crate::editor_svc::settings::DEFAULT_DIFF_CONTEXT as usize,
             diff_layout: Default::default(),
             diff_ignore_ws: false,
+            multi: MultiPrefs::default(),
         }
     }
 }
@@ -1009,6 +1038,32 @@ impl super::App {
     }
 
     /// Text eines offenen Dokuments (lädt es bei Bedarf). `None`, wenn es die Id nicht gibt oder die Datei nicht lesbar ist.
+    /// Cursor und Auswahlen des Nutzers in einem Dokument (#394, `editor_read`): die Ansicht der fokussierten Teilung,
+    /// sonst die erste, die es zeigt; Hauptcursor zuerst. (Zeile, Spalte) ab 0.
+    pub(crate) fn editor_selections(&mut self, id: u64) -> Option<Vec<((usize, usize), (usize, usize))>> {
+        let doc = self.ed.docs.get(&id)?.doc.as_ref()?;
+        let focused = self.ed.panes.focused;
+        let mut views: Vec<(bool, &text::View)> = Vec::new();
+        for (g, grp) in &self.ed.panes.groups {
+            for (i, t) in grp.tabs.iter().enumerate() {
+                if t.doc == id && t.diff.is_none() {
+                    views.push((*g == focused && grp.active == i, &t.view));
+                }
+            }
+        }
+        views.sort_by_key(|(f, _)| !*f);
+        let mut sels = views.first()?.1.sels.clone()?;
+        doc.sync(&mut sels);
+        let lc = |p: usize| {
+            let l = crate::editor::text::pos_to_linecol(doc.rope(), p.min(doc.len_chars()));
+            (l.line, l.col)
+        };
+        let p = sels.primary_index();
+        let mut v: Vec<((usize, usize), (usize, usize))> = vec![(lc(sels.primary().anchor), lc(sels.primary().head))];
+        v.extend(sels.iter().enumerate().filter(|(i, _)| *i != p).map(|(_, s)| (lc(s.anchor), lc(s.head))));
+        Some(v)
+    }
+
     pub(crate) fn editor_text(&mut self, id: u64) -> Option<String> {
         let prefs = self.editor_prefs();
         let d = self.ed.docs.get_mut(&id)?;
@@ -1119,7 +1174,10 @@ impl super::App {
     pub(crate) fn editor_palette_items(&self) -> Vec<(String, String, EditorAction)> {
         let prefs = self.editor_prefs();
         let (next, prev) = (self.binding_text("ed_next_change"), self.binding_text("ed_prev_change"));
-        diff_menu::palette_entries(&self.ed, &prefs, self.settings.language, &next, &prev).into_iter().map(|(l, h, c)| (l, h, EditorAction(c))).collect()
+        let mut v = diff_menu::palette_entries(&self.ed, &prefs, self.settings.language, &next, &prev);
+        // Auswahl und Kommentar (#394)
+        v.extend(menu::palette_entries(&self.ed, &prefs, self.settings.language));
+        v.into_iter().map(|(l, h, c)| (l, h, EditorAction(c))).collect()
     }
 
     /// Befehl der Palette ausführen.

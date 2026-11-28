@@ -18,17 +18,26 @@ Der Reiter **Editor** ist ein einfacher Texteditor in Paneldeck, unabhängig von
 - **Rechts teilen** / **Unten teilen** wie im Reiter Terminals, Größen per Ziehen; **Strg+Alt+Pfeiltasten** wechseln den Fokus zwischen Teilungen.
 - **Dieselbe Datei in zwei Teilungen** ist ein Dokument: Änderungen erscheinen sofort in beiden, jede Teilung behält ihre eigene Scrollposition und ihre Cursor.
 
+## Mehrere Cursor
+*(Seit 3.3.0; vorher waren Alt+Klick und Strg+D immer an.)* Wie in Sublime Text – alles ist **standardmäßig aus** und wird unter *Einstellungen → Editor* eingeschaltet:
+- **Mehrere Cursor** (Kürzel und Befehle): **Strg+D** nimmt das nächste Vorkommen der Auswahl dazu (mit leerem Cursor zuerst das Wort dort; reiner Text, nicht nur ganze Wörter), **Strg+Umschalt+D** markiert alle Vorkommen (nur im Editor-Reiter – im Terminal Hub teilt Strg+Umschalt+D weiter rechts), **Strg+U** nimmt die letzte Änderung der Cursor oder Auswahl zurück, ohne den Text zu ändern. Alle drei stehen im Menü *Auswahl* und in der Befehls-Palette und lassen sich unter *Einstellungen → Tastenkürzel* ändern oder entfernen.
+- **Mittlere Maustaste**: Ziehen markiert eine Spalte und ersetzt alle Cursor; mit **Strg** kommt die Spalte zu den vorhandenen Cursorn dazu. Mit Zeilenumbruch zählt die Spalte Bildschirmzeilen. Zu kurze Zeilen – auch leere – bekommen einen Cursor an ihrem Ende. Ein Klick ohne Ziehen setzt den Cursor (wie die linke Taste), **Strg+Klick** setzt einen weiteren. Ein Mittelklick auf einen Reiter schließt ihn weiterhin.
+- **Alt+Klick** setzt einen weiteren Cursor; Alt+Klick auf einen vorhandenen Cursor nimmt ihn weg (der letzte bleibt immer). Strg+Klick bleibt frei.
+- Alles, was du tippst, löschst oder einfügst, geht an jeden Cursor; **Einfügen** fügt immer die ganze Zwischenablage an jedem Cursor ein. **Esc** lässt nur den Hauptcursor übrig. Alle Cursor sehen gleich aus und blinken gemeinsam; die Statusleiste zeigt *3 Cursor* bzw. *3 Auswahlen* statt Zeile und Spalte. Höchstens **10 000** Cursor (*Nur die ersten 10 000 Cursor.*). Eine Spaltenauswahl per Tastatur und einen Cursor darüber/darunter gibt es nicht (Alt+Umschalt+Hoch/Runter und Alt+Umschalt+Ziehen sind mit 3.3.0 entfallen); **Strg+Alt+Pfeiltasten** wechseln die Teilung. Hot Exit merkt sich nur den Hauptcursor. Der Vergleichs-Reiter hat einen Cursor.
+
 ## Menüleiste
-*(Seit 3.2.0.)* Jede Teilung hat über ihrer Tableiste eine schmale **Menüleiste**: **Datei · Bearbeiten · Ansicht · Format**. Die Befehle wirken auf den aktiven Tab dieser Teilung, die Tastenkürzel stehen rechts neben jedem Eintrag:
+*(Seit 3.2.0.)* Jede Teilung hat über ihrer Tableiste eine schmale **Menüleiste**: **Datei · Bearbeiten · Auswahl · Ansicht · Format** (*Auswahl* seit 3.3.0). Die Befehle wirken auf den aktiven Tab dieser Teilung, die Tastenkürzel stehen rechts neben jedem Eintrag:
 - **Datei:** Neue Datei, Datei öffnen …, Ordner öffnen …, Speichern, Speichern unter …, Alle speichern (alle ungespeicherten Dateien mit Namen; unbenannte Tabs brauchen *Speichern unter*), die [Aktionen beim Speichern](#aktionen-beim-speichern) (*Aktionen beim Speichern …*, *Ohne Aktionen speichern*, *Pausieren*), [Vergleichen mit …](#vergleich-und-änderungsmarken) (Datei, gespeicherte Datei, HEAD, Index, Revision, Zwischenablage), Reiter schließen.
-- **Bearbeiten:** Rückgängig, Wiederholen, Ausschneiden, Kopieren, Einfügen, Alles markieren, Suchen …, Ersetzen …, In Dateien suchen …, Gehe zu Zeile …, Nächstes Vorkommen dazu, Alle Vorkommen markieren, Zeile markieren, Zeile löschen, Zeile nach oben/unten.
+- **Bearbeiten:** Rückgängig, Wiederholen, Ausschneiden, Kopieren, Einfügen, Alles markieren, Suchen …, Ersetzen …, In Dateien suchen …, Gehe zu Zeile …, Kommentar umschalten, Zeile löschen, Zeile nach oben/unten.
+- **Auswahl** *(seit 3.3.0)*: Nächstes Vorkommen dazu, Alle Vorkommen markieren, Cursor/Auswahl zurücknehmen (diese drei brauchen [*Mehrere Cursor*](#mehrere-cursor)), Nur ein Cursor, Zeile markieren.
 - **Ansicht:** Zeilenumbruch, Minimap, Ordnerbaum, Rechts teilen, Unten teilen, Modus *Text* / *Syntax*, Sprache (eingebaute Sprachen; alle Sprachen in der Statusleiste), [Änderungsmarken](#vergleich-und-änderungsmarken) und ihre Grundlage, Nächste/Vorige Änderung (**F7** / **Umschalt+F7**), Befehle (Palette). Im Vergleichs-Reiter gilt *Datei* der fokussierten Seite; *Bearbeiten* und *Format* sind ausgegraut.
 - **Format:** die [Befehle zum Formatieren](#json-und-xml-formatieren) und *Beim Speichern formatieren …* (öffnet den Regel-Dialog, siehe [Aktionen beim Speichern](#aktionen-beim-speichern)).
 
-Einträge, die gerade nicht passen, sind **ausgegraut**; beim Überfahren steht, warum (z. B. *Weder JSON noch XML* bei einer Textdatei, *Nichts rückgängig zu machen*). In einer schmalen Teilung klappen die vier Menüs zu einem **Menü ▾** zusammen. Die Menüleiste lässt sich unter *Einstellungen → Editor → Menüleiste* abschalten (standardmäßig an). Die Befehls-Palette (**Strg+Umschalt+P**) geht auch im Reiter Editor und listet die Format-Befehle als *Format: …*.
+Einträge, die gerade nicht passen, sind **ausgegraut**; beim Überfahren steht, warum (z. B. *Weder JSON noch XML* bei einer Textdatei, *Nichts rückgängig zu machen*). In einer schmalen Teilung klappen die Menüs zu einem **Menü ▾** zusammen. Die Menüleiste lässt sich unter *Einstellungen → Editor → Menüleiste* abschalten (standardmäßig an). Die Befehls-Palette (**Strg+Umschalt+P**) geht auch im Reiter Editor und listet die Format-Befehle als *Format: …*.
 
 ## Bearbeiten
-- **Mehrere Cursor:** Strg+Alt+Hoch/Runter setzt einen Cursor darüber/darunter, **Strg+D** wählt das nächste Vorkommen, **Strg+Umschalt+L** alle Vorkommen, **Alt+Ziehen** wählt eine Spalte; Esc kehrt zu einem Cursor zurück.
+- **Mehrere Cursor:** siehe [Mehrere Cursor](#mehrere-cursor) (seit 3.3.0 standardmäßig aus). Esc kehrt zu einem Cursor zurück.
+- **Kommentar umschalten** *(seit 3.3.0)*: **Strg+/** (auch Menü *Bearbeiten* und Befehls-Palette) kommentiert die Zeilen jedes Cursors mit dem Zeilenkommentar der Sprache der Datei aus (`//` für Rust, C, JavaScript …, `#` für Python, Shell, PowerShell, YAML, TOML …, `--` für Lua und SQL, `;` für INI, AutoIt, Inno Setup, NSIS, `%` für LaTeX, `'` für Visual Basic, `REM` für Batch-Dateien), an der kleinsten Einrückung – oder entfernt ihn, wenn schon jede Zeile kommentiert ist. Leere Zeilen bleiben, wie sie sind; ein Rückgängig-Schritt. Bei Sprachen ohne Zeilenkommentar (HTML, XML, CSS, JSON, Markdown) ist es ausgegraut. Auf deutschen Tastaturen liegt `/` auf Umschalt+7: unter *Einstellungen → Tastenkürzel* eine zweite Belegung setzen (*Editor: Kommentar umschalten (zweite Belegung)*, z. B. Strg+#).
 - **Strg+L** wählt die Zeile; Zeilen verschieben, verdoppeln und löschen; Tab/Umschalt+Tab rücken ein und aus.
 - **Gehe zu Zeile** (*Zeile[:Spalte]*).
 - **Suchen und Ersetzen** in der offenen Datei: *Groß-/Kleinschreibung beachten*, *Nur ganze Wörter*, *Regulärer Ausdruck* (Syntax der Rust-Crate `regex`; im Ersatztext `$1`, `${name}`), *Ersetzen*, *Alle ersetzen*; Enter / Umschalt+Enter springen zum nächsten / vorigen Treffer.
@@ -186,6 +195,9 @@ Dateien ab **20 MB** (*Einstellungen → Editor → Große Dateien ab*) öffnen 
 | Modus je Sprache | Standard | Text oder Syntax für alle Dateien einer Sprache |
 | Eigene Zuordnungen | – | Dateiname oder Endung → Sprache, vor der eingebauten Erkennung |
 | Menüleiste | an | die [Menüleiste](#menüleiste) über jeder Teilung |
+| Mehrere Cursor | aus | Kürzel und Befehle der [mehreren Cursor](#mehrere-cursor) |
+| Alt+Klick | aus | setzt einen Cursor bzw. nimmt einen weg |
+| Mittlere Maustaste | aus | Spaltenauswahl und Cursor mit der mittleren Taste |
 | Änderungsmarken am Rand | aus | [Änderungsmarken](#vergleich-und-änderungsmarken) |
 | Grundlage der Marken | git (Index und HEAD) | oder die gespeicherte Datei |
 | Darstellung im Vergleich | Automatisch | nebeneinander, unter ~700 px untereinander |
@@ -193,7 +205,7 @@ Dateien ab **20 MB** (*Einstellungen → Editor → Große Dateien ab*) öffnen 
 | Leerraum ignorieren | aus | Vorgabe für neue Vergleiche |
 | **Agenten** | alle aus | siehe [Agenten](#agenten) |
 
-Gespeichert in `settings.json` als `editor` ([Datenformat](data-and-backups.md#neue-felder-in-300), [neu in 3.1.0](data-and-backups.md#neue-felder-in-310), [neu in 3.2.0](data-and-backups.md#neue-felder-in-320); für Vergleich und Änderungsmarken: `change_markers`, `marker_base`, `diff_context`, `diff_ignore_whitespace`, `diff_layout`).
+Gespeichert in `settings.json` als `editor` ([Datenformat](data-and-backups.md#neue-felder-in-300), [neu in 3.1.0](data-and-backups.md#neue-felder-in-310), [neu in 3.2.0](data-and-backups.md#neue-felder-in-320); für Vergleich und Änderungsmarken: `change_markers`, `marker_base`, `diff_context`, `diff_ignore_whitespace`, `diff_layout`; seit 3.3.0 `multi_cursor`, `multi_cursor_alt_click`, `multi_cursor_middle`, `agent_selections`).
 
 ![Einstellungen, Reiter Editor](../images/de/editor-settings.png)
 
@@ -205,6 +217,7 @@ Agenten (Claude Code und andere über die [Agenten-Schnittstelle](agent-interfac
   - **Agenten dürfen offene Dateien bearbeiten** – die Änderung bleibt **ungespeichert**, ist als Änderung des Agenten markiert (*Von einem Agenten geöffnet oder geändert*) und lässt sich rückgängig machen.
   - **Agenten dürfen speichern** – nur Dateien, die offen sind und schon existieren; unbenannte Tabs speicherst nur du.
   - **Agenten dürfen formatieren** *(seit 3.2.0)* – `format_file` formatiert, minifiziert oder sortiert die Schlüssel eines offenen JSON/XML-Dokuments mit dem eingebauten Formatierer; wie bei einer Bearbeitung bleibt die Änderung ungespeichert, ist als Änderung des Agenten markiert und lässt sich rückgängig machen.
+  - **Agenten sehen die Auswahlen** *(seit 3.3.0)* – `editor_read` liefert auch deine Cursor und Auswahlen (`selections`); ab Stufe *Nur lesen*.
 - Agenten nehmen nie den Tastaturfokus: Eine Datei, die ein Agent öffnet oder zeigt, wird nicht fokussiert – was du gerade tippst, landet nie aus Versehen darin.
 - Diese Regeln gelten für den Textmodus und den späteren Hex-Modus gleichermaßen.
 

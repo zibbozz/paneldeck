@@ -289,6 +289,11 @@ See [Environment variables](terminals.md#environment-variables).
 - `mcp-log.jsonl` → optional field `project` per entry: the sidebar project name of the target session or the ticket project key (missing when a call concerns no project).
 - `paneldeck.db` → **schema version 13**: ticket projects get `agent_level` (`global`/`off`/`read`/`control`), `agent_for_all`, `sidebar_project` (link to a sidebar project), `origin` and `origin_detail`; tickets get `private`, `origin`, `origin_detail` and the trash columns `trashed_at`, `trashed_by`, `trashed_was_archived`; comments get `origin`, `origin_detail`, `trashed_at`, `trashed_by`; to-do cards get `project` (sidebar project id), `private`, `origin`, `origin_detail`; tags get `private`. Existing data becomes *As global* + *For all*, origin `user`, not private. As with every migration, Paneldeck backs up the database first; older versions refuse a database with schema version 13 (go back via the backup, as described under 2.3.0).
 
+## New fields in 3.3.0
+All fields are optional; older versions ignore them, and missing fields mean the defaults (everything off).
+- `settings.json` → `editor` ([Multiple cursors](editor.md#multiple-cursors)): `multi_cursor` (shortcuts and commands), `multi_cursor_alt_click` (Alt+click), `multi_cursor_middle` (middle mouse button), `agent_selections` (`editor_read` returns the selections) – all `false` by default; only `true` switches one on.
+- Shortcut ids `ed_next_occurrence` (Ctrl+D), `ed_all_occurrences` (Ctrl+Shift+D), `ed_soft_undo` (Ctrl+U), `ed_toggle_comment` (Ctrl+/), `ed_toggle_comment_alt` (none) in the shortcut settings, Editor tab only.
+
 ## Backups
 *Settings → Data & backup* controls the automatic backups of `paneldeck.db`: by default one copy every 24 hours, keeping two (plus the database itself). If the computer was off when a backup was due, it is made at the next start; several missed ones result in just one. You can choose another backup folder, open it, press **Back up now** (manual copies are never deleted automatically) and **Restore** any copy from the list – the current state is backed up first, Paneldeck then quits and applies the restore at the next start. Before every database update (migration) Paneldeck makes a copy as well, and it never touches a database created by a newer version.
 

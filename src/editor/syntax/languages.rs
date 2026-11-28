@@ -148,7 +148,39 @@ pub fn language_name(id: &str) -> Option<&'static str> {
     all_languages().iter().find(|l| l.id == id).map(|l| l.name.as_str())
 }
 
+/// Line comment of a built-in language for *Toggle comment* (#394); `None` = the language has no line comments
+/// (HTML, XML, CSS, JSON, Markdown …) or is not in the table – then the command is greyed out.
+pub fn line_comment(id: &str) -> Option<&'static str> {
+    Some(match id {
+        "c" | "cpp" | "csharp" | "go" | "java" | "javascript" | "kotlin" | "less" | "pascal" | "php" | "rust" | "scss" | "swift" | "typescript" | "tsx" => "//",
+        "cmake" | "dockerfile" | "makefile" | "perl" | "powershell" | "python" | "ruby" | "shell" | "toml" | "yaml" => "#",
+        "autoit" | "ini" | "innosetup" | "nsis" => ";",
+        "lua" | "sql" => "--",
+        "bibtex" | "latex" | "tex" => "%",
+        "vb" => "'",
+        "batch" => "REM",
+        _ => return None,
+    })
+}
+
 /// Is this a known language id (table or another bundled grammar)?
 pub fn is_known(id: &str) -> bool {
     language(id).is_some() || all_languages().iter().any(|l| l.id == id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// #394: jede eingebaute Sprache hat einen Zeilenkommentar oder steht ausdrücklich ohne da.
+    #[test]
+    fn every_builtin_language_has_a_line_comment_or_none_on_purpose() {
+        let without = ["css", "diff", "html", "json", "markdown", "plaintext", "xml"];
+        for l in LANGUAGES {
+            assert_eq!(line_comment(l.id).is_none(), without.contains(&l.id), "{}", l.id);
+        }
+        assert_eq!(line_comment("rust"), Some("//"));
+        assert_eq!(line_comment("python"), Some("#"));
+        assert_eq!(line_comment("source.haskell"), None);
+    }
 }

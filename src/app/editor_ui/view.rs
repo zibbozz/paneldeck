@@ -163,6 +163,29 @@ impl super::super::App {
             ("palette", self.binding("palette")),
         ];
         let mut palette = false;
+        // Mehrere Cursor und Kommentar (#394): nur in Text-Reitern; die Cursor-Befehle nur mit dem Schalter. Sie kommen vor
+        // `split_r` dran (Strg+Umschalt+D markiert im Editor alle Vorkommen, im Terminal Hub teilt es rechts).
+        let prefs = self.editor_prefs();
+        let text_tab = doc.is_some() && diff.is_none();
+        let comment = match (text_tab, doc) {
+            (true, Some(d)) => self.ed.docs.get_mut(&d).and_then(|e| e.language(&prefs)).as_deref().and_then(crate::editor::syntax::languages::line_comment),
+            _ => None,
+        };
+        let mut multi_binds: Vec<(super::doc::Op, Option<(Modifiers, Key)>)> = Vec::new();
+        if text_tab && prefs.multi.on {
+            multi_binds.push((super::doc::Op::SelectNextOccurrence, self.binding("ed_next_occurrence")));
+            multi_binds.push((super::doc::Op::SelectAllOccurrences, self.binding("ed_all_occurrences")));
+            multi_binds.push((super::doc::Op::SoftUndo, self.binding("ed_soft_undo")));
+        }
+        if text_tab {
+            for id in ["ed_toggle_comment", "ed_toggle_comment_alt"] {
+                match comment {
+                    Some(c) => multi_binds.push((super::doc::Op::ToggleComment(c), self.binding(id))),
+                    // Ohne Zeilenkommentar: die Taste verschlucken und einen Hinweis zeigen (sonst käme „/“ als Text an).
+                    None => multi_binds.push((super::doc::Op::ToggleComment(""), self.binding(id))),
+                }
+            }
+        }
         // Formatieren (#381) und die Befehls-Palette: Belegung aus Einstellungen → Tastenkürzel.
         use crate::editor::format::Op as FmtOp;
         let fmt_binds: Vec<(FmtOp, Option<(Modifiers, Key)>)> =
@@ -186,7 +209,19 @@ impl super::super::App {
         let cs = Modifiers::CTRL | Modifiers::SHIFT;
         let ca = Modifiers::CTRL | Modifiers::ALT;
         let mut nav = None;
+        let mut no_comment = false;
         ctx.input_mut(|i| {
+            for (op, b) in &multi_binds {
+                if let Some((m, k)) = b
+                    && super::super::consume_key_exact(i, *m, *k, false)
+                {
+                    if *op == super::doc::Op::ToggleComment("") {
+                        no_comment = true;
+                    } else {
+                        cmds.push(Cmd::EditOp(g, op.clone()));
+                    }
+                }
+            }
             for (id, b) in &binds {
                 if let Some((m, k)) = b
                     && super::super::consume_key_exact(i, *m, *k, false)
@@ -277,6 +312,10 @@ impl super::super::App {
                 }
             }
         });
+        if no_comment {
+            let lang = self.settings.language;
+            self.ed.set_hint(lang.t("Die Sprache hat keinen Zeilenkommentar (Sprache in der Statusleiste wählen).", "The language has no line comment (choose the language in the status bar).").to_string());
+        }
         if save_plain && let Some(d) = doc {
             self.sa_save_without(d);
         }
@@ -1201,6 +1240,9 @@ fn show_group(ui: &mut Ui, g: u64, rect: Rect, ed: &mut EditorUi, cx: &GroupCx, 
     let Some(view) = ed.panes.groups.get_mut(&g).and_then(|grp| grp.tabs.get_mut(idx)).map(|t| &mut t.view) else { return };
     let tcx = TextCx { id: text_id(g), font: editor_font(ui.ctx(), cx.prefs.font_size), theme: cx.theme, prefs: cx.prefs, wrap, minimap, request_focus: want, find: find_hl.as_ref(), lang: cx.lang, marks: marks.as_deref(), popup_line };
     let out = text::show(ui, body, d, view, &tcx);
+    if let Some(h) = out.hint.clone() {
+        cmds.push(Cmd::Hint(h));
+    }
     if let Some(line) = out.strip_click {
         let same = ed.mark_popup.as_ref().is_some_and(|p| p.group == g && p.doc == doc_id && p.line == line);
         ed.mark_popup = (!same).then_some(super::marks::MarkPopup { group: g, doc: doc_id, line });

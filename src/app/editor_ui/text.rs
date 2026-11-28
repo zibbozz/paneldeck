@@ -1,6 +1,11 @@
 //! Textfeld des Editors (#54): zeichnet nur die sichtbaren Zeilen (bleibt bei mehreren 100 MB flüssig), Cursor und
-//! Auswahlen (mehrere), Zeilennummern, aktuelle Zeile, Minimap, weicher Umbruch; Maus (Klick, Ziehen, Doppel-/Dreifachklick,
-//! Alt+Klick für weitere Cursor, Alt+Ziehen für Spaltenauswahl), Tastatur, Bildlauf, IME und Zwischenablage.
+//! Auswahlen (mehrere), Zeilennummern, aktuelle Zeile, Minimap, weicher Umbruch; Maus (Klick, Ziehen, Doppel-/Dreifachklick),
+//! Tastatur, Bildlauf, IME und Zwischenablage.
+//!
+//! Mehrere Cursor (#394, 3.3.0, alles mit eigenen Schaltern, Standard aus): Alt+Klick setzt einen weiteren Cursor bzw.
+//! nimmt einen vorhandenen weg; die mittlere Maustaste zieht eine Spaltenauswahl über Bildschirmzeilen (Strg dazu =
+//! hinzufügen), ein Klick setzt den Cursor (Strg dazu = einen weiteren). Höchstens [`crate::editor::MAX_CURSORS`].
+//! Jede Änderung der Cursor/Auswahlen ohne Textänderung merkt sich die Ansicht für *Cursor/Auswahl zurücknehmen*.
 //!
 //! Im Syntax-Modus (#312) färbt es die sichtbaren Zeilen mit den Syntaxfarben des Dokuments (`crate::editor::syntax`,
 //! Farben `code_*` des Themes); berechnet werden sie in einem Hilfsthread je Dokument, das Zeichnen wartet nie darauf.
@@ -78,7 +83,12 @@ pub(crate) struct View {
     blink_epoch: f64,
     /// Waagerechte Bildlaufleiste (#389).
     pub(super) hscroll: super::hscroll::HScroll,
+    /// Frühere Cursor/Auswahlen für *Cursor/Auswahl zurücknehmen* (#394, Strg+U), neueste zuletzt.
+    sel_undo: Vec<Selections>,
 }
+
+/// So viele Stände merkt sich *Cursor/Auswahl zurücknehmen*.
+const SEL_UNDO_MAX: usize = 200;
 
 #[derive(Clone, Debug, PartialEq)]
 enum DragMode {
@@ -88,11 +98,11 @@ enum DragMode {
     Words(usize, usize),
     /// Zeilenweise ab den Zeilen `start..end` (Positionen).
     Lines(usize, usize),
-    /// Spaltenauswahl (Alt+Ziehen) ab Zeile/visueller Spalte.
-    Column(usize, usize),
-    /// Alt+Klick: weiterer Cursor an `pos` (Zeile, visuelle Spalte, Zeigerposition beim Drücken); Ziehen wird zur
-    /// Spaltenauswahl ab dort.
-    AddCursor(usize, usize, usize, Pos2),
+    /// Alt+Klick: weiterer Cursor an `pos`; Ziehen markiert ab dort (eine Auswahl, keine Spalte – #394).
+    AddCursor(usize),
+    /// Mittlere Maustaste (#394): Druckpunkt (Zeile, Bildschirmzeile darin, visuelle Spalte in ihr, Zeigerposition),
+    /// mit Strg die Auswahlen davor (hinzufügen), gezogen?
+    Middle { line: usize, row: usize, v: usize, press: Pos2, base: Option<Selections>, moved: bool },
 }
 
 impl View {
@@ -139,6 +149,34 @@ impl View {
         self.sels.as_ref().map(|s| s.len()).unwrap_or(1)
     }
 
+    /// Änderung der Cursor/Auswahlen (ohne Textänderung) merken: `before` war der Stand davor (#394).
+    pub fn note_selection_change(&mut self, before: Selections) {
+        if self.sels.as_ref().is_some_and(|s| s.as_slice() == before.as_slice()) {
+            return;
+        }
+        if self.sel_undo.last().is_some_and(|l| l.as_slice() == before.as_slice()) {
+            return;
+        }
+        if self.sel_undo.len() >= SEL_UNDO_MAX {
+            self.sel_undo.remove(0);
+        }
+        self.sel_undo.push(before);
+    }
+
+    /// *Cursor/Auswahl zurücknehmen* (#394): den vorigen Stand der Cursor/Auswahlen, der Text bleibt. Liefert, ob es
+    /// einen gab.
+    pub fn soft_undo(&mut self, doc: &Document) -> bool {
+        while let Some(mut s) = self.sel_undo.pop() {
+            doc.sync(&mut s);
+            if self.sels.as_ref().is_some_and(|c| c.as_slice() == s.as_slice()) {
+                continue;
+            }
+            self.sels = Some(s);
+            return true;
+        }
+        false
+    }
+
     /// Text der Auswahlen (mehrere durch Zeilenumbruch getrennt); `None`, wenn nichts markiert ist.
     pub fn selected_text(&self, d: &DocEntry) -> Option<String> {
         let (s, doc) = (self.sels.as_ref()?, d.doc.as_ref()?);
@@ -146,8 +184,20 @@ impl View {
         (!parts.is_empty()).then(|| parts.join("\n"))
     }
 
-    /// „Z. 3, Sp. 5“ (1-basiert; Spalte visuell).
+    /// „Z. 3, Sp. 5“ (1-basiert; Spalte visuell); mit mehreren Cursorn „3 Cursor“ bzw. „3 Auswahlen“ (#394).
     pub fn position_text(&self, d: &DocEntry, lang: Lang) -> String {
+        if let (Some(s), Some(_)) = (&self.sels, d.doc.as_ref())
+            && s.is_multi()
+        {
+            let n = s.len();
+            let any = s.iter().any(|x| !x.is_empty());
+            return match (lang, any) {
+                (Lang::De, false) => format!("{n} Cursor"),
+                (Lang::De, true) => format!("{n} Auswahlen"),
+                (_, false) => format!("{n} cursors"),
+                (_, true) => format!("{n} selections"),
+            };
+        }
         let (line, col) = match (&self.sels, d.doc.as_ref()) {
             (Some(s), Some(doc)) => {
                 let lc = et::pos_to_linecol(doc.rope(), s.primary().head);
@@ -257,6 +307,8 @@ pub(super) struct TextOut {
     pub strip_click: Option<usize>,
     /// Unterkante der Zeile [`TextCx::popup_line`] (links am Text) und Breite des Textfelds, wenn sie sichtbar ist.
     pub popup_anchor: Option<(Pos2, f32)>,
+    /// Hinweis für die Statuszeile (z. B. „Nur die ersten 10 000 Cursor.“, #394).
+    pub hint: Option<String>,
 }
 
 /// Eine sichtbare Bildschirmzeile.
@@ -273,7 +325,7 @@ struct Row {
 }
 
 /// Maße des Textfelds.
-struct Geo {
+pub(super) struct Geo {
     text: Rect,
     gutter: Rect,
     scrollbar: Rect,
@@ -316,6 +368,9 @@ pub(super) fn show(ui: &mut Ui, rect: Rect, d: &mut DocEntry, view: &mut View, c
         return out;
     };
     view.sync(doc);
+    // Für *Cursor/Auswahl zurücknehmen* (#394): Stand vor diesem Bild; Ziehen zählt nur beim Drücken.
+    let sel_before = view.sels.clone();
+    let was_dragging = view.drag.is_some();
     let tab = doc.tab_width().max(1);
     let (row_h, cw) = ui.fonts_mut(|f| (f.row_height(&cx.font), f.glyph_width(&cx.font, 'M')));
     let cw = cw.max(1.0);
@@ -362,7 +417,14 @@ pub(super) fn show(ui: &mut Ui, rect: Rect, d: &mut DocEntry, view: &mut View, c
     let rows = visible_rows(doc, view, &geo);
     out.strip_click = strip_click(ui, &resp, &geo, &rows, cx);
     if out.strip_click.is_none() {
-        edited |= mouse(ui, &resp, doc, view, &geo, &rows, cx);
+        let full;
+        (edited, full) = {
+            let (e, f) = mouse(ui, &resp, doc, view, &geo, &rows, cx);
+            (edited | e, f)
+        };
+        if full {
+            out.hint = Some(cx.lang.t("Nur die ersten 10 000 Cursor.", "Only the first 10 000 cursors.").to_string());
+        }
     }
     let rows = if edited { visible_rows(doc, view, &geo) } else { rows };
     // Syntaxfarben der sichtbaren Zeilen (gemeinsam für alle Ansichten des Dokuments).
@@ -436,6 +498,8 @@ pub(super) fn show(ui: &mut Ui, rect: Rect, d: &mut DocEntry, view: &mut View, c
     if edited {
         d.on_user_edit();
         view.blink_epoch = ui.input(|i| i.time);
+    } else if !was_dragging && let Some(b) = sel_before {
+        view.note_selection_change(b);
     }
     out.edited = edited;
     if resp.hovered() && view.drag.is_none() && !ui.rect_contains_pointer(gutter) && !ui.rect_contains_pointer(scrollbar) && minimap.is_none_or(|m| !ui.rect_contains_pointer(m)) {
@@ -589,17 +653,72 @@ fn pos_at(doc: &Document, view: &View, g: &Geo, rows: &[Row], p: Pos2) -> (usize
 }
 
 /// Mausbedienung: Klick setzt den Cursor, Ziehen markiert, Doppel-/Dreifachklick markiert Wort/Zeile, Umschalt+Klick
-/// dehnt, Alt+Klick fügt einen Cursor hinzu, Alt+Ziehen markiert eine Spalte. Ziehen über den Rand rollt.
-fn mouse(ui: &mut Ui, resp: &egui::Response, doc: &mut Document, view: &mut View, g: &Geo, rows: &[Row], cx: &TextCx) -> bool {
+/// dehnt. Mehrere Cursor (#394, je mit eigenem Schalter): Alt+Klick fügt einen Cursor hinzu bzw. nimmt einen vorhandenen
+/// weg; die mittlere Maustaste markiert eine Spalte bzw. setzt Cursor. Ziehen über den Rand rollt. Liefert (Text
+/// geändert, Grenze der Cursor erreicht).
+fn mouse(ui: &mut Ui, resp: &egui::Response, doc: &mut Document, view: &mut View, g: &Geo, rows: &[Row], cx: &TextCx) -> (bool, bool) {
+    use egui::PointerButton::Middle;
     let (pressed, down, pos, time, mods) = ui.input(|i| (i.pointer.primary_pressed(), i.pointer.primary_down(), i.pointer.interact_pos(), i.time, i.modifiers));
-    let Some(p) = pos else { return false };
+    let (m_pressed, m_down) = ui.input(|i| (i.pointer.button_pressed(Middle), i.pointer.button_down(Middle)));
+    let Some(p) = pos else { return (false, false) };
     let inside_text = Rect::from_min_max(Pos2::new(g.gutter.left(), g.text.top()), Pos2::new(g.text.right() + 4.0, g.text.bottom())).contains(p);
     if view.sels.is_none() {
-        return false;
+        return (false, false);
+    }
+    let multi = cx.prefs.multi;
+    // ---- Mittlere Maustaste (#394)
+    if multi.middle && m_pressed && resp.contains_pointer() && inside_text && p.x >= g.text.left() - 2.0 {
+        resp.request_focus();
+        let (_, line, v) = pos_at(doc, view, g, rows, p);
+        let r = rows.iter().rev().find(|r| p.y >= r.y && r.line == line).copied().or_else(|| rows.iter().find(|r| r.line == line).copied());
+        let (row, rv) = r.map(|r| (rows_of(doc, r.line, g.wrap_cols, g.tab).iter().position(|s| *s == r.start).unwrap_or(0), r.vstart)).unwrap_or((0, 0));
+        doc.break_undo_group();
+        view.drag = Some(DragMode::Middle { line, row, v: v.saturating_sub(rv), press: p, base: mods.ctrl.then(|| view.sels.clone()).flatten(), moved: false });
+        view.blink_epoch = time;
+        return (false, false);
+    }
+    if let Some(DragMode::Middle { line, row, v, press, base, moved }) = view.drag.clone() {
+        if !m_down {
+            view.drag = None;
+            if !moved {
+                // Klick ohne Ziehen: Cursor setzen (mit Strg einen dazu).
+                let (pos, _, _) = pos_at(doc, view, g, rows, press);
+                let Some(sels) = view.sels.as_mut() else { return (false, false) };
+                match base {
+                    Some(b) if b.len() >= crate::editor::MAX_CURSORS => return (false, true),
+                    Some(mut b) => {
+                        b.push(Selection::cursor(pos));
+                        *sels = b;
+                    }
+                    None => sels.replace(vec![Selection::cursor(pos)], 0),
+                }
+            }
+            return (false, false);
+        }
+        let moved = moved || (p - press).length() > 4.0;
+        let mut full = false;
+        if moved {
+            let (_, l1, v1) = pos_at(doc, view, g, rows, p);
+            let r1 = rows.iter().rev().find(|r| p.y >= r.y && r.line == l1).copied().or_else(|| rows.iter().find(|r| r.line == l1).copied());
+            let (row1, rv1) = r1.map(|r| (rows_of(doc, r.line, g.wrap_cols, g.tab).iter().position(|s| *s == r.start).unwrap_or(0), r.vstart)).unwrap_or((0, 0));
+            if let Some(sels) = view.sels.as_mut() {
+                full = column_rows(doc, sels, (line, row, v), (l1, row1, v1.saturating_sub(rv1)), g, base.as_ref());
+            }
+            // Ziehen über den Rand: rollen
+            if p.y < g.text.top() {
+                view.top_off -= ((g.text.top() - p.y) * 0.3).clamp(1.0, g.row_h * 3.0);
+                ui.ctx().request_repaint();
+            } else if p.y > g.text.bottom() {
+                view.top_off += ((p.y - g.text.bottom()) * 0.3).clamp(1.0, g.row_h * 3.0);
+                ui.ctx().request_repaint();
+            }
+        }
+        view.drag = Some(DragMode::Middle { line, row, v, press, base, moved });
+        return (false, full);
     }
     if pressed && resp.hovered() && inside_text {
         let (pos, line, v) = pos_at(doc, view, g, rows, p);
-        let Some(sels) = view.sels.as_mut() else { return false };
+        let Some(sels) = view.sels.as_mut() else { return (false, false) };
         // Klickzähler (Doppel-/Dreifachklick)
         let count = match view.last_press {
             Some((t, lp, c)) if time - t < 0.45 && (lp - p).length() < 6.0 => (c % 3) + 1,
@@ -614,12 +733,26 @@ fn mouse(ui: &mut Ui, resp: &egui::Response, doc: &mut Document, view: &mut View
             let e = if line + 1 < doc.len_lines() { doc.line_to_char(line + 1) } else { doc.len_chars() };
             sels.replace(vec![Selection::new(s, e)], 0);
             view.drag = Some(DragMode::Lines(s, e));
-        } else if mods.alt && mods.shift {
-            view.drag = Some(DragMode::Column(line, v));
-            sels.replace(vec![Selection::cursor(pos)], 0);
-        } else if mods.alt {
-            sels.push(Selection::cursor(pos));
-            view.drag = Some(DragMode::AddCursor(pos, line, v, p));
+        } else if mods.alt && !mods.shift && multi.alt_click {
+            // Alt+Klick (#394): auf einem Cursor nimmt es ihn weg (der letzte bleibt), sonst ein weiterer.
+            let hit = sels.iter().position(|s| s.is_empty() && s.head == pos);
+            if let Some(i) = hit {
+                if sels.len() > 1 {
+                    let mut v: Vec<Selection> = sels.as_slice().to_vec();
+                    v.remove(i);
+                    let pi = sels.primary_index();
+                    let primary = if pi == i { v.len() - 1 } else if pi > i { pi - 1 } else { pi };
+                    sels.replace(v, primary);
+                }
+                view.drag = None;
+            } else if sels.len() >= crate::editor::MAX_CURSORS {
+                view.blink_epoch = time;
+                return (false, true);
+            } else {
+                sels.push(Selection::cursor(pos));
+                view.drag = Some(DragMode::AddCursor(pos));
+            }
+            let _ = (line, v);
         } else if mods.shift {
             let mut prim = sels.primary();
             prim.head = pos;
@@ -646,13 +779,13 @@ fn mouse(ui: &mut Ui, resp: &egui::Response, doc: &mut Document, view: &mut View
             }
         }
         view.blink_epoch = time;
-        return false;
+        return (false, false);
     }
     if !down {
         view.drag = None;
-        return false;
+        return (false, false);
     }
-    let Some(mode) = view.drag.clone() else { return false };
+    let Some(mode) = view.drag.clone() else { return (false, false) };
     // Ziehen über den Rand: rollen
     if p.y < g.text.top() {
         view.top_off -= ((g.text.top() - p.y) * 0.3).clamp(1.0, g.row_h * 3.0);
@@ -670,8 +803,8 @@ fn mouse(ui: &mut Ui, resp: &egui::Response, doc: &mut Document, view: &mut View
             ui.ctx().request_repaint();
         }
     }
-    let (pos, line, v) = pos_at(doc, view, g, rows, p);
-    let Some(sels) = view.sels.as_mut() else { return false };
+    let (pos, line, _v) = pos_at(doc, view, g, rows, p);
+    let Some(sels) = view.sels.as_mut() else { return (false, false) };
     match mode {
         DragMode::Chars(a) => {
             let i = sels.primary_index();
@@ -681,19 +814,13 @@ fn mouse(ui: &mut Ui, resp: &egui::Response, doc: &mut Document, view: &mut View
             }
             sels.replace(v2, i);
         }
-        DragMode::AddCursor(a, l0, v0, press) => {
-            if (p - press).length() > 4.0 && line != doc.char_to_line(a) {
-                // Alt+Ziehen über Zeilen: Spaltenauswahl ab dem Druckpunkt
-                view.drag = Some(DragMode::Column(l0, v0));
-                column(doc, sels, l0, v0, line, v, g.tab);
-            } else {
-                let i = sels.primary_index();
-                let mut v2: Vec<Selection> = sels.as_slice().to_vec();
-                if let Some(s) = v2.get_mut(i) {
-                    *s = Selection::new(a, pos);
-                }
-                sels.replace(v2, i);
+        DragMode::AddCursor(a) => {
+            let i = sels.primary_index();
+            let mut v2: Vec<Selection> = sels.as_slice().to_vec();
+            if let Some(s) = v2.get_mut(i) {
+                *s = Selection::new(a, pos);
             }
+            sels.replace(v2, i);
         }
         DragMode::Words(s0, e0) => {
             let w = et::word_range_at(doc.rope(), pos);
@@ -706,22 +833,56 @@ fn mouse(ui: &mut Ui, resp: &egui::Response, doc: &mut Document, view: &mut View
             let sel = if s < s0 { Selection::new(e0, s) } else { Selection::new(s0, e) };
             sels.replace(vec![sel], 0);
         }
-        DragMode::Column(l0, v0) => column(doc, sels, l0, v0, line, v, g.tab),
+        DragMode::Middle { .. } => {}
     }
-    let _ = cx;
-    false
+    let _ = (cx, line);
+    (false, false)
 }
 
-/// Spaltenauswahl von (Zeile `l0`, visuelle Spalte `v0`) bis (`l1`, `v1`): eine Auswahl je Zeile (höchstens 10 000).
-fn column(doc: &Document, sels: &mut Selections, l0: usize, v0: usize, l1: usize, v1: usize, tab: usize) {
-    let (a, b) = (l0.min(l1), l0.max(l1));
-    let mut list = Vec::new();
-    for l in a..=b.min(a + 10_000) {
-        let base = doc.line_to_char(l);
-        list.push(Selection::new(base + col_at(doc, l, v0, tab), base + col_at(doc, l, v1, tab)));
+/// Spaltenauswahl über **Bildschirmzeilen** (#394; mit Umbruch zählen die Bildschirmzeilen) von (Zeile, Bildschirmzeile
+/// darin, visuelle Spalte in ihr) `a` bis `b`: eine Auswahl je Bildschirmzeile, zu kurze und leere Zeilen bekommen einen
+/// Cursor an ihrem Ende. `base` = Auswahlen davor (mit Strg: hinzufügen). Höchstens [`crate::editor::MAX_CURSORS`];
+/// liefert, ob die Grenze erreicht wurde.
+pub(super) fn column_rows(doc: &Document, sels: &mut Selections, a: (usize, usize, usize), b: (usize, usize, usize), g: &Geo, base: Option<&Selections>) -> bool {
+    let last = doc.len_lines().saturating_sub(1);
+    let (a, b) = ((a.0.min(last), a.1, a.2), (b.0.min(last), b.1, b.2));
+    let forward = (b.0, b.1) >= (a.0, a.1);
+    let (lo, hi) = if forward { (a, b) } else { (b, a) };
+    let max = crate::editor::MAX_CURSORS.saturating_sub(base.map_or(0, |s| s.len()));
+    let mut list: Vec<Selection> = Vec::new();
+    let mut full = false;
+    'outer: for line in lo.0..=hi.0 {
+        let starts = rows_of(doc, line, g.wrap_cols, g.tab);
+        let len = doc.line_len(line);
+        let r0 = if line == lo.0 { lo.1.min(starts.len() - 1) } else { 0 };
+        let r1 = if line == hi.0 { hi.1.min(starts.len() - 1) } else { starts.len() - 1 };
+        for r in r0..=r1 {
+            if list.len() >= max {
+                full = true;
+                break 'outer;
+            }
+            let rs = starts[r];
+            let re = starts.get(r + 1).map(|n| n - 1).unwrap_or(len).max(rs);
+            let rv = if rs == 0 { 0 } else { vcol(doc, line, rs, g.tab) };
+            let base_pos = doc.line_to_char(line);
+            let at = |v: usize| base_pos + col_at(doc, line, rv + v, g.tab).clamp(rs, re);
+            list.push(Selection { anchor: at(a.2), head: at(b.2), goal: Some(b.2) });
+        }
     }
-    let primary = if l1 >= l0 { list.len() - 1 } else { 0 };
-    sels.replace(list, primary);
+    if list.is_empty() {
+        return full;
+    }
+    let primary = if forward { list.len() - 1 } else { 0 };
+    match base {
+        Some(bs) => {
+            let mut all: Vec<Selection> = bs.as_slice().to_vec();
+            let p = all.len() + primary;
+            all.extend(list);
+            sels.replace(all, p);
+        }
+        None => sels.replace(list, primary),
+    }
+    full
 }
 
 /// Tastatur: Bewegen, Markieren, Bearbeiten, Zwischenablage, IME. Liefert, ob der Text geändert wurde.
@@ -764,7 +925,6 @@ fn keyboard(ui: &mut Ui, doc: &mut Document, view: &mut View, g: &Geo, cx: &Text
                         view.top_off += n as f32 * g.row_h;
                         moved = false;
                     }
-                    Some(KeyAct::AddCursor(down)) => add_cursor_vertical(doc, sels, down, g),
                     Some(KeyAct::Escape) => {
                         if sels.is_multi() {
                             sels.collapse_to_primary();
@@ -808,7 +968,6 @@ pub(super) enum KeyAct {
     Op(Op),
     Move(Move, bool),
     ScrollLines(i32),
-    AddCursor(bool),
     Escape,
 }
 
@@ -821,8 +980,8 @@ pub(super) fn key_op(key: Key, m: Modifiers, page: usize) -> Option<KeyAct> {
     Some(match key {
         Key::ArrowLeft => KeyAct::Move(if ctrl { Move::WordLeft } else { Move::Left }, shift),
         Key::ArrowRight => KeyAct::Move(if ctrl { Move::WordRight } else { Move::Right }, shift),
-        Key::ArrowUp if alt && shift => KeyAct::AddCursor(false),
-        Key::ArrowDown if alt && shift => KeyAct::AddCursor(true),
+        // Alt+Umschalt+↑/↓ hat seit #394 keine Belegung mehr (kein Cursor darüber/darunter).
+        Key::ArrowUp | Key::ArrowDown if alt && shift => return None,
         Key::ArrowUp if alt => KeyAct::Op(Op::MoveLines(false)),
         Key::ArrowDown if alt => KeyAct::Op(Op::MoveLines(true)),
         Key::ArrowUp if ctrl => KeyAct::ScrollLines(-1),
@@ -846,9 +1005,9 @@ pub(super) fn key_op(key: Key, m: Modifiers, page: usize) -> Option<KeyAct> {
         Key::Z if ctrl && shift => KeyAct::Op(Op::Redo),
         Key::Z if ctrl => KeyAct::Op(Op::Undo),
         Key::Y if ctrl => KeyAct::Op(Op::Redo),
-        Key::D if ctrl && !shift => KeyAct::Op(Op::SelectNextOccurrence),
+        // Strg+D / Strg+Umschalt+D (mehrere Cursor) sind belegbare Kürzel des Editors (#394, `editor_keys`); Strg+Umschalt+L
+        // hat keine Bedeutung mehr.
         Key::L if ctrl && !shift => KeyAct::Op(Op::SelectLine),
-        Key::L if ctrl && shift => KeyAct::Op(Op::SelectAllOccurrences),
         Key::K if ctrl && shift => KeyAct::Op(Op::DeleteLine),
         _ => return None,
     })
@@ -911,6 +1070,12 @@ fn move_cursors(doc: &Document, sels: &mut Selections, mv: Move, extend: bool, g
             Selection { anchor: head, head, goal }
         }
     });
+}
+
+/// Maße ohne Textfeld (Tests der Spaltenauswahl, #394).
+#[cfg(test)]
+pub(super) fn test_geo(wrap_cols: Option<usize>, tab: usize) -> Geo {
+    Geo { text: Rect::NOTHING, gutter: Rect::NOTHING, scrollbar: Rect::NOTHING, row_h: 1.0, cw: 1.0, wrap_cols, tab }
 }
 
 /// Cursor ohne Textfeld bewegen (Vergleichs-Reiter, #391): senkrecht in Textzeilen (ohne Umbruch).
@@ -994,16 +1159,6 @@ fn word_right(doc: &Document, pos: usize) -> usize {
         p += 1;
     }
     p
-}
-
-/// Weiteren Cursor über bzw. unter dem obersten/untersten hinzufügen (Umschalt+Alt+Pfeil).
-fn add_cursor_vertical(doc: &Document, sels: &mut Selections, down: bool, g: &Geo) {
-    let edge = if down { *sels.as_slice().last().expect("nie leer") } else { sels.as_slice()[0] };
-    let (pos, goal) = vertical(doc, edge.head, edge.goal, 1, down, g);
-    if pos == edge.head {
-        return;
-    }
-    sels.push(Selection { anchor: pos, head: pos, goal: Some(goal) });
 }
 
 /// Auswahl kopieren bzw. ausschneiden (ohne Auswahl: die ganzen Zeilen, wie in vielen Editoren). Liefert, ob der Text

@@ -43,7 +43,7 @@ pub mod text;
 #[allow(unused_imports)]
 pub use change::{Assoc, Change, ChangeSet, EditError};
 #[allow(unused_imports)]
-pub use commands::{ClipboardText, parse_goto};
+pub use commands::{ClipboardText, MAX_CURSORS, parse_goto};
 #[allow(unused_imports)]
 pub use diff::{DiffKind, DiffLine, DiffSummary, diff_lines, diff_summary, unified_diff};
 #[allow(unused_imports)]

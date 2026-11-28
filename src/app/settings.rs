@@ -654,7 +654,9 @@ impl App {
                         let current: Vec<(&str, String)> = keys::DEFAULTS.iter().map(|(id, d)| (*id, self.settings.keys.get(*id).cloned().unwrap_or_else(|| d.to_string()))).collect();
                         for (id, cur) in &current {
                             // Leer = kein Kürzel (z. B. „Alle Sitzungen schließen“): nie „doppelt“.
-                            let dup = !cur.is_empty() && current.iter().filter(|(_, c)| c == cur).count() > 1;
+                            // Erlaubte Überdeckung (#394): Strg+Umschalt+D im Editor (alle Vorkommen) und im Terminal Hub (rechts teilen).
+                            let allowed = |a: &str, b: &str| keys::EDITOR_OVERRIDES.iter().any(|(e, t)| (*e == a && *t == b) || (*e == b && *t == a));
+                            let dup = !cur.is_empty() && current.iter().any(|(other, c)| other != id && c == cur && !allowed(id, other));
                             // Alte Belegung ohne Strg/Alt (vor #256 aufnehmbar): wirkt nicht mehr, darum der Hinweis.
                             let plain = keys::parse(cur).is_some_and(|(m, k)| !keys::usable(m, k));
                             // Von Hand eingetragenes Zeichen ohne Umschalt (z. B. `Ctrl+?`): löste bis 2.3.1 auch mit Umschalt

@@ -18,17 +18,26 @@ The **Editor** tab is a plain text editor inside Paneldeck, independent of the t
 - **Split right** / **Split down** like in the Terminals tab, sizes by dragging; **Ctrl+Alt+arrow keys** move the focus between splits.
 - The **same file in two splits** is one document: edits appear in both at once, each split keeps its own scroll position and cursors.
 
+## Multiple cursors
+*(Since 3.3.0; before, Alt+click and Ctrl+D were always on.)* Like Sublime Text – everything is **off by default** and switched on in *Settings → Editor*:
+- **Multiple cursors** (the shortcuts and commands): **Ctrl+D** adds the next occurrence of the selection (with an empty cursor first the word there; plain text, not only whole words), **Ctrl+Shift+D** selects all occurrences (only in the Editor tab – in the Terminal Hub Ctrl+Shift+D still splits right), **Ctrl+U** takes back the last cursor or selection change without touching the text. All three are in the *Selection* menu and in the command palette and can be changed or removed under *Settings → Shortcuts*.
+- **Middle mouse button**: dragging selects a column and replaces all cursors; with **Ctrl** the column is added to the existing cursors. With word wrap the column counts screen rows. Lines that are too short – empty ones too – get a cursor at their end. A click without dragging places the cursor (like the left button), **Ctrl+click** adds a single cursor. A middle-click on a tab still closes it.
+- **Alt+click** adds a cursor; Alt+click on an existing cursor removes it (the last one always stays). Ctrl+click stays free.
+- Everything you type, delete or paste goes to every cursor; **paste** always inserts the whole clipboard at every cursor. **Esc** keeps only the main cursor. All cursors look the same and blink together; the status bar shows *3 cursors* or *3 selections* instead of line and column. At most **10 000** cursors (*Only the first 10 000 cursors.*). There is no column selection from the keyboard and no cursor above/below (Alt+Shift+Up/Down and Alt+Shift+drag were removed in 3.3.0); **Ctrl+Alt+arrow keys** move the focus between splits. Hot exit keeps only the main cursor. The comparison tab has one cursor.
+
 ## Menu bar
-*(Since 3.2.0.)* Every split has a slim **menu bar** above its tab bar: **File · Edit · View · Format**. The commands act on the active tab of that split, and the shortcuts are shown on the right of each entry:
+*(Since 3.2.0.)* Every split has a slim **menu bar** above its tab bar: **File · Edit · Selection · View · Format** (*Selection* since 3.3.0). The commands act on the active tab of that split, and the shortcuts are shown on the right of each entry:
 - **File:** New file, Open file …, Open folder …, Save, Save as …, Save all (all unsaved files with a name; untitled tabs need *Save as*), the [actions on save](#actions-on-save) (*Actions on save …*, *Save without actions*, *Pause*), [Compare with …](#comparison-and-change-markers) (file, saved file, HEAD, index, revision, clipboard), Close tab.
-- **Edit:** Undo, Redo, Cut, Copy, Paste, Select all, Find …, Replace …, Find in files …, Go to line …, Add next occurrence, Select all occurrences, Select line, Delete line, Move line up/down.
+- **Edit:** Undo, Redo, Cut, Copy, Paste, Select all, Find …, Replace …, Find in files …, Go to line …, Toggle comment, Delete line, Move line up/down.
+- **Selection** *(since 3.3.0)*: Add next occurrence, Select all occurrences, Undo cursor/selection change (these three need [*Multiple cursors*](#multiple-cursors)), Single cursor, Select line.
 - **View:** Word wrap, Minimap, Folder tree, Split right, Split down, mode *Text* / *Syntax*, Language (built-in languages; all languages in the status bar), [Change markers](#comparison-and-change-markers) and what they compare with, Next/Previous change (**F7** / **Shift+F7**), Commands (palette). In a comparison tab *File* applies to the focused side; *Edit* and *Format* are greyed out.
 - **Format:** the [formatting commands](#formatting-json-and-xml) and *Format on save …* (opens the rule dialog, see [Actions on save](#actions-on-save)).
 
-Entries that do not apply right now are **greyed out**, and hovering says why (e.g. *Not JSON or XML* for a text file, *Nothing to undo*). In a narrow split the four menus fold into one **Menu ▾**. The menu bar can be switched off under *Settings → Editor → Menu bar* (on by default). The command palette (**Ctrl+Shift+P**) also works in the Editor tab and lists the format commands as *Format: …*.
+Entries that do not apply right now are **greyed out**, and hovering says why (e.g. *Not JSON or XML* for a text file, *Nothing to undo*). In a narrow split the menus fold into one **Menu ▾**. The menu bar can be switched off under *Settings → Editor → Menu bar* (on by default). The command palette (**Ctrl+Shift+P**) also works in the Editor tab and lists the format commands as *Format: …*.
 
 ## Editing
-- **Multiple cursors:** Ctrl+Alt+Up/Down adds a cursor above/below, **Ctrl+D** selects the next occurrence, **Ctrl+Shift+L** all occurrences, **Alt+drag** selects a column; Esc goes back to one cursor.
+- **Multiple cursors:** see [Multiple cursors](#multiple-cursors) (off by default since 3.3.0). Esc goes back to one cursor.
+- **Toggle comment** *(since 3.3.0)*: **Ctrl+/** (also *Edit* menu and command palette) comments out the lines of every cursor with the line comment of the file's language (`//` for Rust, C, JavaScript …, `#` for Python, shell, PowerShell, YAML, TOML …, `--` for Lua and SQL, `;` for INI, AutoIt, Inno Setup, NSIS, `%` for LaTeX, `'` for Visual Basic, `REM` for batch files) at the smallest indentation – or removes it if every line is already commented. Blank lines stay as they are; one undo step. Languages without line comments (HTML, XML, CSS, JSON, Markdown) grey it out. On a German keyboard `/` is Shift+7: set a second binding (*Editor: toggle comment (alternative)*, e.g. Ctrl+#) under *Settings → Shortcuts*.
 - **Ctrl+L** selects the line; moving, duplicating and deleting lines; Tab/Shift+Tab indent and outdent.
 - **Go to line** (*line[:column]*).
 - **Find and replace** in the open file: *Match case*, *Whole word*, *Regular expression* (Rust `regex` syntax; in the replacement `$1`, `${name}`), *Replace*, *Replace all*; Enter / Shift+Enter jump to the next / previous match.
@@ -186,6 +195,9 @@ Files from **20 MB** (*Settings → Editor → Large files from*) open in large-
 | Mode per language | Default | Text or Syntax for all files of one language |
 | Own mappings | – | file name or extension → language, before the built-in detection |
 | Menu bar | on | the [menu bar](#menu-bar) above every split |
+| Multiple cursors | off | shortcuts and commands of [multiple cursors](#multiple-cursors) |
+| Alt+click | off | adds or removes a cursor |
+| Middle mouse button | off | column selection and cursors with the middle button |
 | Change markers in the gutter | off | [change markers](#comparison-and-change-markers) |
 | Markers compare with | git (index and HEAD) | or the saved file |
 | Comparison layout | Automatic | side by side, unified below ~700 px |
@@ -193,7 +205,7 @@ Files from **20 MB** (*Settings → Editor → Large files from*) open in large-
 | Ignore whitespace | off | default for new comparisons |
 | **Agents** | all off | see [Agents](#agents) |
 
-Stored in `settings.json` as `editor` ([data format](data-and-backups.md#new-fields-in-300), [new in 3.1.0](data-and-backups.md#new-fields-in-310), [new in 3.2.0](data-and-backups.md#new-fields-in-320); for comparison and change markers: `change_markers`, `marker_base`, `diff_context`, `diff_ignore_whitespace`, `diff_layout`).
+Stored in `settings.json` as `editor` ([data format](data-and-backups.md#new-fields-in-300), [new in 3.1.0](data-and-backups.md#new-fields-in-310), [new in 3.2.0](data-and-backups.md#new-fields-in-320); for comparison and change markers: `change_markers`, `marker_base`, `diff_context`, `diff_ignore_whitespace`, `diff_layout`; since 3.3.0 `multi_cursor`, `multi_cursor_alt_click`, `multi_cursor_middle`, `agent_selections`).
 
 ![Settings, Editor tab](../images/editor-settings.png)
 
@@ -205,6 +217,7 @@ Agents (Claude Code and others via the [agent interface](agent-interface.md#edit
   - **Agents may edit open files** – the change stays **unsaved**, is marked as made by the agent (*Opened or changed by an agent*) and can be undone.
   - **Agents may save** – only files that are open and already exist; untitled tabs are saved by you only.
   - **Agents may format** *(since 3.2.0)* – `format_file` formats, minifies or sorts the keys of an open JSON/XML document with the built-in formatter; like an edit the change stays unsaved, is marked as made by the agent and can be undone.
+  - **Agents see the selections** *(since 3.3.0)* – `editor_read` also returns your cursors and selections (`selections`); from level *Read only*.
 - Agents never take the keyboard focus: a file an agent opens or shows is not focused, so what you are typing never lands in it by accident.
 - These rules apply to text mode and to the later hex mode alike.
 

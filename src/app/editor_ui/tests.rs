@@ -123,11 +123,11 @@ fn keyboard_moves_selects_and_undoes() {
     assert_eq!(ed.focused_view_and_doc().and_then(|(v, d)| v.selected_text(d)).as_deref(), Some("two"));
     frame(&ctx, &mut ed, vec![Event::Text("2".into())], &mut t);
     assert_eq!(active_text(&ed), "one 2\nthree\n");
-    // Weitere Zeile darunter, Umschalt+Alt+Pfeil: zweiter Cursor
+    // Umschalt+Alt+Pfeil hat seit #394 keine Belegung: kein zweiter Cursor, keine verschobene Zeile.
     frame(&ctx, &mut ed, vec![key(Key::Home, Modifiers::NONE), key(Key::ArrowDown, Modifiers::ALT | Modifiers::SHIFT)], &mut t);
-    assert_eq!(ed.focused_view_and_doc().unwrap().0.selection_count(), 2);
+    assert_eq!(ed.focused_view_and_doc().unwrap().0.selection_count(), 1);
     frame(&ctx, &mut ed, vec![Event::Text(">".into())], &mut t);
-    assert_eq!(active_text(&ed), ">one 2\n>three\n");
+    assert_eq!(active_text(&ed), ">one 2\nthree\n");
     frame(&ctx, &mut ed, vec![key(Key::Z, Modifiers::CTRL)], &mut t);
     assert_eq!(active_text(&ed), "one 2\nthree\n");
     frame(&ctx, &mut ed, vec![key(Key::Z, Modifiers::CTRL)], &mut t);
@@ -253,7 +253,10 @@ fn key_mapping_leaves_ctrl_alt_arrows_to_the_area() {
     assert_eq!(key_op(Key::ArrowLeft, Modifiers::CTRL | Modifiers::ALT, 10), None);
     assert_eq!(key_op(Key::ArrowLeft, Modifiers::SHIFT, 10), Some(KeyAct::Move(Move::Left, true)));
     assert_eq!(key_op(Key::PageDown, Modifiers::NONE, 30), Some(KeyAct::Move(Move::Down(30), false)));
-    assert_eq!(key_op(Key::ArrowDown, Modifiers::ALT | Modifiers::SHIFT, 10), Some(KeyAct::AddCursor(true)));
+    // #394: kein Cursor darüber/darunter, Strg+D und Strg+Umschalt+L sind keine festen Tasten mehr.
+    assert_eq!(key_op(Key::ArrowDown, Modifiers::ALT | Modifiers::SHIFT, 10), None);
+    assert_eq!(key_op(Key::D, Modifiers::CTRL, 10), None);
+    assert_eq!(key_op(Key::L, Modifiers::CTRL | Modifiers::SHIFT, 10), None);
     assert!(matches!(key_op(Key::Z, Modifiers::CTRL, 10), Some(KeyAct::Op(super::doc::Op::Undo))));
 }
 
@@ -698,10 +701,10 @@ fn menu_bar_opens_menus_greys_entries_and_folds_in_narrow_splits() {
     let (mr, narrow) = ed.menu_rects[&g];
     assert!(!narrow && (mr.height() - super::menu::MENU_H).abs() < 0.1, "Menüleiste über der Teilung");
     assert!(ed.bar_rects[&g].0.top() >= mr.bottom() - 0.5, "Reiterleiste darunter");
-    // Modell: vier Menüs, Kürzel rechts, Ausgegrautes mit Grund
+    // Modell: fünf Menüs (Auswahl seit #394), Kürzel rechts, Ausgegrautes mit Grund
     let m = menus(&mut ed, g, &prefs, en);
-    assert_eq!(m.iter().map(|m| m.title).collect::<Vec<_>>(), ["File", "Edit", "View", "Format"]);
-    let fmt = &m[3];
+    assert_eq!(m.iter().map(|m| m.title).collect::<Vec<_>>(), ["File", "Edit", "Selection", "View", "Format"]);
+    let fmt = &m[4];
     let f = fmt.item("format").unwrap();
     assert!(!f.enabled && f.tip.as_deref().is_some_and(|t| t.starts_with("Not JSON or XML")), "{f:?}");
     assert_eq!(f.shortcut, "Alt+Shift+F");
@@ -710,36 +713,36 @@ fn menu_bar_opens_menus_greys_entries_and_folds_in_narrow_splits() {
     assert!(!undo.enabled && undo.tip.as_deref() == Some("Nothing to undo"));
     assert!(m[0].item("save").unwrap().enabled && m[0].item("save").unwrap().shortcut == "Ctrl+S");
     assert!(!m[0].item("save_all").unwrap().enabled, "nichts Ungespeichertes");
-    assert_eq!(m[2].item("split_right").unwrap().shortcut, "Ctrl+Shift+D");
-    assert_eq!(m[2].item("wrap").unwrap().checked, Some(false));
-    assert!(m[2].entries.iter().any(|e| matches!(e, Entry::Languages { .. })));
+    assert_eq!(m[3].item("split_right").unwrap().shortcut, "Ctrl+Shift+D");
+    assert_eq!(m[3].item("wrap").unwrap().checked, Some(false));
+    assert!(m[3].entries.iter().any(|e| matches!(e, Entry::Languages { .. })));
     let de = menus(&mut ed, g, &prefs, crate::state::Lang::De);
-    assert_eq!(de.iter().map(|m| m.title).collect::<Vec<_>>(), ["Datei", "Bearbeiten", "Ansicht", "Format"]);
-    assert_eq!(de[3].item("format").unwrap().shortcut, "Alt+Umschalt+F");
+    assert_eq!(de.iter().map(|m| m.title).collect::<Vec<_>>(), ["Datei", "Bearbeiten", "Auswahl", "Ansicht", "Format"]);
+    assert_eq!(de[4].item("format").unwrap().shortcut, "Alt+Umschalt+F");
     // JSON: alles aktiv, Kürzel aus den Einstellungen; XML: Schlüssel sortieren ausgegraut
     let json_id = ed.open_path(&json, false);
     frame(&ctx, &mut ed, vec![], &mut t);
     let m = menus(&mut ed, g, &prefs, en);
     for id in ["format", "minify", "validate", "sort_keys", "format_on_save"] {
-        assert!(m[3].item(id).unwrap().enabled, "{id}");
+        assert!(m[4].item(id).unwrap().enabled, "{id}");
     }
-    assert_eq!(m[3].item("format").unwrap().label, "Format JSON");
+    assert_eq!(m[4].item("format").unwrap().label, "Format JSON");
     // Kein Schalter mehr: der Eintrag öffnet den Regel-Dialog für die Datei (Formatieren nie von allein).
-    let fos = m[3].item("format_on_save").unwrap();
+    let fos = m[4].item("format_on_save").unwrap();
     assert_eq!(fos.label, "Format on save …");
     assert_eq!(fos.checked, None, "kein Haken");
     assert_eq!(fos.cmds, vec![Cmd::FocusGroup(g), Cmd::OnSaveMenu(crate::app::save_actions_dialog::OnSaveMenu::FormatRule(Some(json_id)))]);
-    assert_eq!(menus(&mut ed, g, &prefs, crate::state::Lang::De)[3].item("format_on_save").unwrap().label, "Beim Speichern formatieren …");
+    assert_eq!(menus(&mut ed, g, &prefs, crate::state::Lang::De)[4].item("format_on_save").unwrap().label, "Beim Speichern formatieren …");
     let mut p2 = prefs.clone();
     p2.keys.insert("ed_format".into(), "Ctrl+Shift+J".into());
     let m2 = menus(&mut ed, g, &p2, en);
-    assert_eq!(m2[3].item("format").unwrap().shortcut, "Ctrl+Shift+J");
+    assert_eq!(m2[4].item("format").unwrap().shortcut, "Ctrl+Shift+J");
     ed.open_path(&xml, false);
     frame(&ctx, &mut ed, vec![], &mut t);
     let m = menus(&mut ed, g, &prefs, en);
-    let s = m[3].item("sort_keys").unwrap();
+    let s = m[4].item("sort_keys").unwrap();
     assert!(!s.enabled && s.tip.as_deref() == Some("Only for JSON"));
-    assert!(m[3].item("format").unwrap().enabled && m[3].item("format").unwrap().label == "Format XML");
+    assert!(m[4].item("format").unwrap().enabled && m[4].item("format").unwrap().label == "Format XML");
 
     // Menü „Format“ per Klick öffnen und „Validate XML“ anklicken
     clear_seen();

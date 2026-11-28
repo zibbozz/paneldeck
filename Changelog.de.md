@@ -12,6 +12,20 @@ Abweichung: Statt `[Unreleased]` stehen noch nicht veröffentlichte Änderungen 
 ### Added
 
 - Editor: **direkt im Vergleichs-Reiter tippen** – in eine bearbeitbare Seite klicken (ein Dokument, nicht die gespeicherte Datei, ein git-Stand oder die Zwischenablage) und tippen, löschen, einfügen, eine Auswahl ausschneiden und kopieren, Eingabe oder Tab drücken, mit den Pfeiltasten, Pos1/Ende und Bild auf/ab bewegen (mit Umschalt markieren), Strg+A markiert die Seite. Der Text erscheint sofort, die Unterschiede werden etwa 300 ms nach der letzten Taste neu berechnet. Der Cursor überspringt Füllzeilen (ein Klick darauf setzt ihn ans Ende der Zeile darüber), Tippen in einem eingeklappten Bereich klappt ihn auf. Tippen teilt sich das Rückgängig des Dokuments mit den Blockpfeilen und dem normalen Reiter (Strg+Z/Y auf der fokussierten Seite); Alt+←/→, Strg+S und Doppelklick zum Öffnen der Zeile im normalen Reiter bleiben wie bisher. Ohne Cursor rollen die Pfeiltasten wie bisher; Tippen in einer schreibgeschützten Seite zeigt einen Hinweis. Nur ein Cursor – mehrere Cursor im Vergleich kommen später (#391).
+- Editor: **mehrere Cursor wie in Sublime Text**, jeder Teil mit eigenem Schalter unter *Einstellungen → Editor* (alles standardmäßig aus): *Mehrere Cursor* schaltet die Kürzel und Befehle ein – **Strg+D** nimmt das nächste Vorkommen dazu, **Strg+Umschalt+D** markiert alle Vorkommen (im Editor-Reiter; im Terminal Hub teilt es weiter rechts), **Strg+U** nimmt die letzte Änderung der Cursor oder Auswahl zurück, ohne den Text zu ändern. *Mittlere Maustaste*: Ziehen markiert eine Spalte (mit Zeilenumbruch nach Bildschirmzeilen; kurze und leere Zeilen bekommen einen Cursor an ihrem Ende) und ersetzt die Cursor, **Strg+Ziehen** nimmt die Spalte dazu, ein Klick setzt den Cursor, **Strg+Klick** einen weiteren. *Alt+Klick* setzt einen weiteren Cursor, Alt+Klick auf einen Cursor nimmt ihn weg (der letzte bleibt). Höchstens 10 000 Cursor („Nur die ersten 10 000 Cursor.“). Die Statusleiste zeigt „3 Cursor“ bzw. „3 Auswahlen“ statt Zeile und Spalte (#394).
+- Editor: neues Menü **Auswahl** in der Menüleiste (nächstes Vorkommen dazu, alle Vorkommen markieren, Cursor/Auswahl zurücknehmen, nur ein Cursor, Zeile markieren); alles auch in der Befehlspalette. Die Kürzel der mehreren Cursor stehen unter *Einstellungen → Tastenkürzel* und lassen sich ändern oder entfernen (#394).
+- Editor: **Kommentar umschalten** (**Strg+/**, Menü *Bearbeiten*, Befehlspalette) in den Zeilen jedes Cursors, mit dem Zeilenkommentar der Sprache der Datei (`//`, `#`, `--`, `;`, `%`, `'`, `REM`); bei Sprachen ohne Zeilenkommentar ausgegraut. Eine zweite Belegung lässt sich unter *Einstellungen → Tastenkürzel* setzen (auf deutschen Tastaturen liegt `/` auf Umschalt+7) (#394).
+- Agenten-Schnittstelle: `editor_read` liefert zusätzlich die Cursor und Auswahlen des Nutzers (`selections`, Zeile/Spalte ab 1, höchstens 1000) – nur mit dem neuen Schalter *Agenten sehen die Auswahlen* (*Einstellungen → Editor → Agenten*, standardmäßig aus); `editor_list` meldet den Schalter in `agents.selections` (#394).
+
+### Changed
+
+- Editor: die vorhandenen Funktionen der mehreren Cursor sind nach dem Update **standardmäßig aus** – Alt+Klick, Strg+D und „alle Vorkommen markieren“ gehen erst, wenn *Mehrere Cursor* bzw. *Alt+Klick* unter *Einstellungen → Editor* eingeschaltet ist (#394).
+- Editor: Einfügen mit mehreren Cursorn fügt immer die ganze Zwischenablage an jedem Cursor ein (bisher wurde eine Zwischenablage mit so vielen Zeilen wie Cursorn zeilenweise verteilt) (#394).
+- Editor: Strg+D (nächstes Vorkommen) findet den markierten Text überall, nicht mehr nur ganze Wörter (#394).
+
+### Removed
+
+- Editor: Alt+Umschalt+↑/↓ (Cursor darüber/darunter) und die Spaltenauswahl mit Alt+Umschalt+Ziehen bzw. Alt+Ziehen – Spalten markiert jetzt die mittlere Maustaste; Strg+Umschalt+L (alle Vorkommen) ist jetzt Strg+Umschalt+D. Strg+Alt+Pfeiltasten wechseln weiter die Teilung (#394).
 
 ## [3.2.0] - 2026-11-28
 

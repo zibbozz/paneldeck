@@ -119,6 +119,12 @@ pub(super) enum Op {
     SelectLine,
     DeleteLine,
     MoveLines(bool),
+    /// Kommentar umschalten mit diesem Zeilenkommentar (#394).
+    ToggleComment(&'static str),
+    /// Letzte Änderung der Cursor/Auswahlen zurücknehmen (#394, Strg+U) – führt die Ansicht aus, nicht [`run`].
+    SoftUndo,
+    /// Nur den Hauptcursor behalten (Esc).
+    SingleCursor,
 }
 
 pub(crate) struct DocEntry {
@@ -571,6 +577,11 @@ impl DocEntry {
         let l = syntax::detect(self.path.as_deref(), &head, &tail, &prefs.syntax.user_map);
         self.syntax.detected = Some((key, l.clone()));
         l
+    }
+
+    /// Sprache ohne neue Erkennung (gewählt oder zuletzt erkannt) – für Stellen ohne `&mut` (Befehlspalette, #394).
+    pub fn language_cached(&self) -> Option<String> {
+        self.syntax.lang.clone().or_else(|| self.syntax.detected.as_ref().and_then(|(_, l)| l.clone()))
     }
 
     /// Modus: gewählt, sonst die Einstellung der Sprache, sonst der Standard (Text).
@@ -1074,7 +1085,12 @@ pub(super) fn run(doc: &mut Document, sels: &mut Selections, op: Op, _tab: usize
             false
         }
         Op::SelectAllOccurrences => {
-            doc.select_all_occurrences(sels, 10_000);
+            // Eins mehr suchen: dann weiß die Ansicht, dass es mehr gibt („Nur die ersten 10 000“).
+            if doc.select_all_occurrences(sels, core::MAX_CURSORS + 1) > core::MAX_CURSORS {
+                let p = sels.primary_index().min(core::MAX_CURSORS - 1);
+                let v: Vec<core::Selection> = sels.iter().take(core::MAX_CURSORS).copied().collect();
+                sels.replace(v, p);
+            }
             false
         }
         Op::SelectLine => {
@@ -1083,6 +1099,12 @@ pub(super) fn run(doc: &mut Document, sels: &mut Selections, op: Op, _tab: usize
         }
         Op::DeleteLine => doc.delete_lines(sels, u),
         Op::MoveLines(down) => doc.move_lines(sels, down, u),
+        Op::ToggleComment(prefix) => doc.toggle_comment(sels, prefix, u),
+        Op::SoftUndo => false,
+        Op::SingleCursor => {
+            sels.collapse_to_primary();
+            false
+        }
     }
 }
 

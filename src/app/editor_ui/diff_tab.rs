@@ -2217,7 +2217,7 @@ fn edit_keys(ui: &mut Ui, dt: &mut DiffTab, docs: &mut BTreeMap<u64, DocEntry>, 
                     None
                 } else {
                     match key_op(key, m, page) {
-                        Some(KeyAct::Op(Op::SelectNextOccurrence | Op::SelectAllOccurrences)) | Some(KeyAct::AddCursor(_)) | None => {
+                        Some(KeyAct::Op(Op::SelectNextOccurrence | Op::SelectAllOccurrences | Op::SoftUndo)) | None => {
                             moved = false;
                             None
                         }
